@@ -1,5 +1,11 @@
 ---
-status: pending
+status: done
+sprint: '010'
+tickets:
+- '001'
+- '002'
+- '003'
+- '004'
 ---
 
 # Plan: Split client vs. daemon dependencies

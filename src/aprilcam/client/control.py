@@ -15,8 +15,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
-import cv2
 import grpc
+
+from aprilcam.client._imaging import require_cv2
 
 from aprilcam.proto import aprilcam_pb2, aprilcam_pb2_grpc
 from aprilcam.client.models import (
@@ -237,6 +238,7 @@ class DaemonControl:
             aprilcam_pb2.CameraRequest(cam_name=cam_name)
         )
         buf = np.frombuffer(resp.jpeg, dtype=np.uint8)
+        cv2 = require_cv2()
         frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
         if frame is None:
             raise RuntimeError(

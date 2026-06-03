@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("aprilcam.daemon.grpc_server", reason="requires aprilcam[daemon]")
+
 from aprilcam.client.control import DaemonControl
 from aprilcam.config import Config
 from aprilcam.daemon.server import DaemonServer

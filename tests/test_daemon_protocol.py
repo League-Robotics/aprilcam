@@ -7,6 +7,8 @@ import threading
 
 import pytest
 
+pytest.importorskip("aprilcam.daemon.grpc_server", reason="requires aprilcam[daemon]")
+
 from aprilcam.daemon.protocol import (
     SCHEMA_VERSION,
     FrameMessage,

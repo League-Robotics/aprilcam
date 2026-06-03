@@ -10,6 +10,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+pytest.importorskip("cv2", reason="requires aprilcam[imaging]")
+
 from aprilcam.ui.display import PlayfieldDisplay
 from aprilcam.core.playfield import PlayfieldBoundary
 

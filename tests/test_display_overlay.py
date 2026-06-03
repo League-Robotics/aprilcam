@@ -2,6 +2,9 @@ import time
 import numpy as np
 import pytest
 from unittest.mock import MagicMock
+
+pytest.importorskip("cv2", reason="requires aprilcam[imaging]")
+
 from aprilcam.ui.display import PlayfieldDisplay
 from aprilcam.proto import aprilcam_pb2
 

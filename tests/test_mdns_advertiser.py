@@ -5,6 +5,8 @@ from __future__ import annotations
 import socket
 from unittest.mock import MagicMock, call, patch
 
+import pytest
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -191,6 +193,7 @@ def _make_short_tmp_cfg():
     return cfg, base
 
 
+@pytest.mark.needs_daemon
 def test_daemon_server_starts_mdns_when_tcp_enabled():
     """DaemonServer creates and starts MDNSAdvertiser when tcp_enabled=True."""
     import shutil
@@ -231,6 +234,7 @@ def test_daemon_server_starts_mdns_when_tcp_enabled():
         shutil.rmtree(base, ignore_errors=True)
 
 
+@pytest.mark.needs_daemon
 def test_daemon_server_skips_mdns_when_tcp_disabled():
     """DaemonServer does NOT start MDNSAdvertiser when tcp_enabled=False."""
     import shutil

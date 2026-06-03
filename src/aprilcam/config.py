@@ -6,13 +6,6 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 from dotenv import dotenv_values
-import cv2 as cv
-
-from .camera.camutil import (
-    list_cameras,
-    default_backends,
-    select_camera_by_pattern,
-)
 import json
 import numpy as np
 
@@ -81,7 +74,7 @@ class AppConfig:
         backend: Optional[str] = None,
         max_cams: int = 10,
         quiet: bool = False,
-    ) -> Optional[cv.VideoCapture]:
+    ):
         """
         Resolve a camera from --camera arg (int or pattern) or .env CAMERA, open and return cv.VideoCapture.
 
@@ -90,6 +83,12 @@ class AppConfig:
         - Falls back to the first available camera if none specified.
         Returns an opened VideoCapture or None on failure.
         """
+        import cv2 as cv  # noqa: PLC0415
+        from .camera.camutil import (  # noqa: PLC0415
+            list_cameras,
+            default_backends,
+            select_camera_by_pattern,
+        )
         # Decode backend string to API preference
         be_map = {
             None: None,

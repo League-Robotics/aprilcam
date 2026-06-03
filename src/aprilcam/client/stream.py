@@ -12,9 +12,9 @@ import socket
 import struct
 from typing import Iterator, Union
 
-import cv2
 import numpy as np
 
+from aprilcam.client._imaging import require_cv2
 from aprilcam.client.models import ImageFrame, StreamEndpoint, TagFrame
 from aprilcam.proto import aprilcam_pb2
 
@@ -114,6 +114,7 @@ class ImageStreamConsumer:
         """Read one frame and return a BGR ``np.ndarray``."""
         _, jpeg = self.read_raw()
         buf = np.frombuffer(jpeg, dtype=np.uint8)
+        cv2 = require_cv2()
         frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
         if frame is None:
             raise RuntimeError("Failed to decode JPEG frame from stream")

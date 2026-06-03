@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.needs_cv2
 
 MOVIES_DIR = Path(__file__).parent.parent / "movies"
 

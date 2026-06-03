@@ -8,22 +8,39 @@ features without performing their own vision processing.
 
 ## Installation
 
+AprilCam is split into install tiers so you only pull in what you need.
+
+| Tier | Command | What you get |
+|------|---------|--------------|
+| **Client** (default) | `pip install aprilcam` | Lightweight gRPC client — connect to a running daemon. No OpenCV required. |
+| **Imaging** | `pip install 'aprilcam[imaging]'` | Client + frame-decode support (adds OpenCV). |
+| **Daemon / MCP server** | `pip install 'aprilcam[daemon]'` | Full server stack — run the daemon and MCP server locally. |
+| **Dev** | `pip install 'aprilcam[dev]'` | Development tools (jupyter, ipython, anthropic SDK). |
+
+To run the daemon or MCP server, install the `daemon` extra:
+
 ```
-pipx install aprilcam
+pip install 'aprilcam[daemon]'
 ```
 
-Or with uv:
+With pipx (for isolated global install of the full server):
 
 ```
-uv pip install aprilcam
+pipx install 'aprilcam[daemon]'
+```
+
+With uv:
+
+```
+uv pip install 'aprilcam[daemon]'
 ```
 
 ## Requirements
 
 - Python >= 3.9
-- opencv-contrib-python >= 4.8
-- numpy >= 1.23
-- mcp >= 1.0
+- Base client: grpcio, protobuf
+- `[imaging]` extra adds: opencv-contrib-python >= 4.8, numpy >= 1.23
+- `[daemon]` extra adds: mcp >= 1.0, numpy >= 1.23, opencv-contrib-python >= 4.8, and all daemon dependencies
 
 ## MCP Server
 

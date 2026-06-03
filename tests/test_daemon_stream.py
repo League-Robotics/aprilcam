@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("aprilcam.daemon.grpc_server", reason="requires aprilcam[daemon]")
+
 from aprilcam.config import Config
 from aprilcam.daemon.stream import ImageStreamProducer, TagStreamProducer
 from aprilcam.proto import aprilcam_pb2

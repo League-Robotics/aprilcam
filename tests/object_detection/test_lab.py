@@ -5,6 +5,10 @@ Usage (from project root):
 """
 import sys
 import pathlib
+import pytest
+
+pytest.importorskip("cv2", reason="requires aprilcam[imaging]")
+
 import cv2 as cv
 import numpy as np
 
