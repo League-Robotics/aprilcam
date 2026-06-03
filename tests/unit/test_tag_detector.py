@@ -2,6 +2,9 @@
 
 import numpy as np
 import pytest
+
+pytest.importorskip("cv2", reason="requires aprilcam[imaging]")
+
 from aprilcam.core import TagDetector, DetectorConfig, Detection
 
 

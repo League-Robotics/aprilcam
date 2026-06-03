@@ -12,6 +12,9 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import grpc
+import pytest
+
+pytest.importorskip("cv2", reason="requires aprilcam[imaging]")
 
 from aprilcam.core import playfield_query as pq
 

@@ -3,6 +3,9 @@
 import time
 import pytest
 from unittest.mock import MagicMock
+
+pytest.importorskip("cv2", reason="requires aprilcam[imaging]")
+
 from aprilcam.core.tag import Tag
 from aprilcam.core.detection import TagRecord, FrameRecord, RingBuffer
 

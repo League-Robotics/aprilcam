@@ -1,5 +1,9 @@
 """Smoke tests: verify all new classes import cleanly."""
 
+import pytest
+
+pytestmark = pytest.mark.needs_cv2
+
 
 def test_import_camera():
     from aprilcam import Camera

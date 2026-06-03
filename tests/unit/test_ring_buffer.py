@@ -2,6 +2,9 @@
 
 import time
 import pytest
+
+pytest.importorskip("cv2", reason="requires aprilcam[imaging]")
+
 from aprilcam.core import RingBuffer, TagRecord
 from aprilcam.core.detection import FrameRecord
 

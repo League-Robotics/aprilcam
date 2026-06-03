@@ -18,6 +18,8 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
+pytest.importorskip("cv2", reason="requires aprilcam[imaging]")
+
 from aprilcam.calibration.calibration import (
     CameraCalibration,
     CameraPosition,

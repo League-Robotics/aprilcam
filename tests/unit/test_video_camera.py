@@ -2,6 +2,9 @@
 
 from pathlib import Path
 import pytest
+
+pytest.importorskip("cv2", reason="requires aprilcam[imaging]")
+
 from aprilcam.camera import VideoCamera
 
 

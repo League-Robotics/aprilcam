@@ -2,6 +2,9 @@
 
 import math
 import pytest
+
+pytest.importorskip("cv2", reason="requires aprilcam[imaging]")
+
 from aprilcam.core import VelocityEstimator
 
 

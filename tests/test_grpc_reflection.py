@@ -12,6 +12,9 @@ from pathlib import Path
 
 import grpc
 import pytest
+
+pytest.importorskip("aprilcam.daemon.grpc_server", reason="requires aprilcam[daemon]")
+
 from grpc_reflection.v1alpha.reflection_pb2_grpc import ServerReflectionStub
 from grpc_reflection.v1alpha import reflection_pb2
 

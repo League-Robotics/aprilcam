@@ -13,6 +13,8 @@ from unittest.mock import MagicMock, patch
 import grpc
 import pytest
 
+pytest.importorskip("aprilcam.daemon.grpc_server", reason="requires aprilcam[daemon]")
+
 from aprilcam.daemon.grpc_server import AprilCamServicer, make_grpc_server
 from aprilcam.proto import aprilcam_pb2
 

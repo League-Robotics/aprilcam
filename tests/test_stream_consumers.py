@@ -118,9 +118,10 @@ class TestImageStreamConsumer:
         assert jpeg == fake_jpeg
         consumer.close()
 
+    @pytest.mark.needs_cv2
     def test_read_returns_ndarray(self):
         """read() decodes JPEG and returns a numpy array."""
-        import cv2
+        cv2 = pytest.importorskip("cv2", reason="requires aprilcam[imaging]")
         import numpy as np
 
         # Build a tiny valid JPEG
@@ -140,9 +141,10 @@ class TestImageStreamConsumer:
         assert isinstance(frame, np.ndarray)
         consumer.close()
 
+    @pytest.mark.needs_cv2
     def test_iter_stops_on_eof(self):
         """__iter__ stops cleanly when the connection closes."""
-        import cv2
+        cv2 = pytest.importorskip("cv2", reason="requires aprilcam[imaging]")
         import numpy as np
 
         img = np.zeros((8, 8, 3), dtype=np.uint8)
