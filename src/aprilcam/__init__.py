@@ -16,19 +16,25 @@ Primary API::
 
 from pathlib import Path as _Path
 
-# New OOP API
-from aprilcam.camera import Camera, VideoCamera
-from aprilcam.core.playfield import Playfield
-from aprilcam.core.tag import Tag
-from aprilcam.core.detection import TagRecord
-from aprilcam.calibration import calibrate, CameraCalibration, FieldSpec
-from aprilcam.vision.objects import ObjectRecord
-from aprilcam.errors import (
-    CameraError,
-    CameraInUseError,
-    CameraNotFoundError,
-    CameraPermissionError,
-)
+# New OOP API — these require OpenCV (available in the [daemon] extra).
+# Guard the import so that client-only installs (base or [imaging]) can still
+# import ``aprilcam.client`` without OpenCV installed.
+try:
+    from aprilcam.camera import Camera, VideoCamera
+    from aprilcam.core.playfield import Playfield
+    from aprilcam.core.tag import Tag
+    from aprilcam.core.detection import TagRecord
+    from aprilcam.calibration import calibrate, CameraCalibration, FieldSpec
+    from aprilcam.vision.objects import ObjectRecord
+    from aprilcam.errors import (
+        CameraError,
+        CameraInUseError,
+        CameraNotFoundError,
+        CameraPermissionError,
+    )
+except ImportError:
+    # OpenCV not installed — only the client subpackage is available.
+    pass
 
 __all__ = [
     "__version__",
