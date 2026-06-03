@@ -19,6 +19,9 @@ service AprilCam {
   rpc CaptureFrame      (CameraRequest)       returns (CaptureFrameResponse);
   rpc GetTags           (CameraRequest)       returns (TagFrameResponse);
 
+  // Natural-language playfield feature lookup ("where is the blue dot")
+  rpc WhereIs           (WhereRequest)        returns (WhereResponse);
+
   // Stream discovery — allocates a socket/port pair on demand
   rpc GetImageStream    (StreamRequest)       returns (StreamEndpoint);
   rpc GetTagStream      (StreamRequest)       returns (StreamEndpoint);
@@ -99,6 +102,42 @@ message TagFrameResponse {
   repeated float playfield_corners = 4;
   float          field_width_cm    = 5;
   float          field_height_cm   = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Natural-language "where is X" lookup messages
+// ---------------------------------------------------------------------------
+
+message WhereRequest {
+  string query    = 1;  // natural-language question, e.g. "where is the blue dot"
+  string cam_name = 2;  // optional; when set, live detections for that camera
+                        // are merged into matched tag features
+}
+
+// WhereMatch — one playfield feature that matched the query.
+message WhereMatch {
+  string slug         = 1;
+  string type         = 2;  // "april_tag" | "aruco_tag" | "rectangle" | "dot"
+  string category     = 3;  // source list in playfield.json
+  bool   has_location = 4;
+  float  x            = 5;   // static world X (cm, A1-centred)
+  float  y            = 6;   // static world Y (cm, A1-centred)
+  string record_json  = 7;   // full feature record from playfield.json, as JSON
+  // Live detection (present only when cam_name was given and the tag id is
+  // currently detected):
+  bool   has_live     = 8;
+  float  live_x       = 9;   // live detected world X (cm)
+  float  live_y       = 10;  // live detected world Y (cm)
+  bool   in_playfield = 11;
+}
+
+message WhereResponse {
+  string status                = 1;  // "ok" | "ambiguous" | "not_found"
+  repeated WhereMatch matches  = 2;
+  // Populated only when status == "not_found": the full playfield.json text,
+  // so the caller can hand it to an LLM to resolve the reference.
+  string playfield_json        = 3;
+  repeated string tokens       = 4;  // normalised search tokens (for debugging)
 }
 
 // ---------------------------------------------------------------------------

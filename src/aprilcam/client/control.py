@@ -24,6 +24,7 @@ from aprilcam.client.models import (
     ImageFrame,
     StreamEndpoint,
     TagFrame,
+    TagRecord,
 )
 from aprilcam.client.stream import ImageStreamConsumer, TagStreamConsumer
 
@@ -250,6 +251,74 @@ class DaemonControl:
             aprilcam_pb2.CameraRequest(cam_name=cam_name)
         )
         return _tag_frame_response_to_pydantic(resp)
+
+    def get_tag(self, cam_name: str, tag_id: int) -> "TagRecord | None":
+        """Return a single tag by marker id, or ``None`` if not currently seen.
+
+        Thin convenience wrapper over :meth:`get_tags`: the daemon has no
+        per-tag RPC, so this still fetches the latest full frame and selects
+        the matching tag. For repeated lookups against the same frame, call
+        :meth:`get_tags` once and use :meth:`TagFrame.by_id` instead.
+        """
+        return self.get_tags(cam_name).by_id(tag_id)
+
+    def where_is(self, query: str, cam_name: str = "") -> dict:
+        """Resolve a natural-language "where is X" question via the daemon.
+
+        Runs a keyword search over the static playfield map (playfield.json).
+        When *cam_name* is given, live detections for that camera are merged
+        into matched tag features.
+
+        Args:
+            query: Natural-language question, e.g. ``"where is the blue dot"``.
+            cam_name: Optional open camera to merge live tag positions from.
+
+        Returns:
+            A dict with ``status`` (``"ok"`` | ``"ambiguous"`` | ``"not_found"``),
+            ``tokens`` (the normalised search tokens) and ``matches`` (a list of
+            resolved features, each with ``slug``, ``type``, ``location`` and the
+            full ``record``).  On ``"not_found"`` a ``playfield`` key holds the
+            parsed playfield.json so the caller can resolve the reference itself.
+        """
+        import json as _json
+
+        stub = self._stub_or_raise()
+        resp: aprilcam_pb2.WhereResponse = stub.WhereIs(
+            aprilcam_pb2.WhereRequest(query=query, cam_name=cam_name)
+        )
+
+        matches = []
+        for m in resp.matches:
+            entry: dict = {
+                "slug": m.slug,
+                "type": m.type,
+                "category": m.category,
+                "location": (
+                    {"x": m.x, "y": m.y, "units": "cm", "frame": "a1-centred"}
+                    if m.has_location
+                    else None
+                ),
+                "record": _json.loads(m.record_json) if m.record_json else {},
+            }
+            if m.has_live:
+                entry["live_detection"] = {
+                    "world_xy": [m.live_x, m.live_y],
+                    "in_playfield": m.in_playfield,
+                }
+            matches.append(entry)
+
+        result: dict = {
+            "status": resp.status,
+            "query": query,
+            "tokens": list(resp.tokens),
+            "matches": matches,
+        }
+        if resp.status == "not_found" and resp.playfield_json:
+            try:
+                result["playfield"] = _json.loads(resp.playfield_json)
+            except _json.JSONDecodeError:
+                pass
+        return result
 
     def get_image_stream(
         self, cam_name: str, max_hz: int = 20

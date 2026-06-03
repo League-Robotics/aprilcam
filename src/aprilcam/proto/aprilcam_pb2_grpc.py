@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from aprilcam.proto import aprilcam_pb2 as aprilcam__pb2
+from . import aprilcam_pb2 as aprilcam__pb2
 
 GRPC_GENERATED_VERSION = '1.80.0'
 GRPC_VERSION = grpc.__version__
@@ -77,6 +77,11 @@ class AprilCamStub(object):
                 '/aprilcam.AprilCam/GetTags',
                 request_serializer=aprilcam__pb2.CameraRequest.SerializeToString,
                 response_deserializer=aprilcam__pb2.TagFrameResponse.FromString,
+                _registered_method=True)
+        self.WhereIs = channel.unary_unary(
+                '/aprilcam.AprilCam/WhereIs',
+                request_serializer=aprilcam__pb2.WhereRequest.SerializeToString,
+                response_deserializer=aprilcam__pb2.WhereResponse.FromString,
                 _registered_method=True)
         self.GetImageStream = channel.unary_unary(
                 '/aprilcam.AprilCam/GetImageStream',
@@ -152,6 +157,13 @@ class AprilCamServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def WhereIs(self, request, context):
+        """Natural-language playfield feature lookup ("where is the blue dot")
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def GetImageStream(self, request, context):
         """Stream discovery — allocates a socket/port pair on demand
         """
@@ -214,6 +226,11 @@ def add_AprilCamServicer_to_server(servicer, server):
                     servicer.GetTags,
                     request_deserializer=aprilcam__pb2.CameraRequest.FromString,
                     response_serializer=aprilcam__pb2.TagFrameResponse.SerializeToString,
+            ),
+            'WhereIs': grpc.unary_unary_rpc_method_handler(
+                    servicer.WhereIs,
+                    request_deserializer=aprilcam__pb2.WhereRequest.FromString,
+                    response_serializer=aprilcam__pb2.WhereResponse.SerializeToString,
             ),
             'GetImageStream': grpc.unary_unary_rpc_method_handler(
                     servicer.GetImageStream,
@@ -451,6 +468,33 @@ class AprilCam(object):
             '/aprilcam.AprilCam/GetTags',
             aprilcam__pb2.CameraRequest.SerializeToString,
             aprilcam__pb2.TagFrameResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def WhereIs(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.AprilCam/WhereIs',
+            aprilcam__pb2.WhereRequest.SerializeToString,
+            aprilcam__pb2.WhereResponse.FromString,
             options,
             channel_credentials,
             insecure,

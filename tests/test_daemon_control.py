@@ -223,3 +223,32 @@ class TestDaemonControlConnectDefault:
             dc.close()
         finally:
             server.stop(grace=0)
+
+
+class TestDaemonControlGetTag:
+    """get_tag() selects a single tag by id from the latest frame."""
+
+    def _dc_with_tag_ids(self, ids):
+        from aprilcam.proto import aprilcam_pb2
+
+        dc = DaemonControl(host="localhost", port=1)
+        resp = aprilcam_pb2.TagFrameResponse(
+            frame_id=7,
+            tags=[aprilcam_pb2.TagMsg(id=i) for i in ids],
+        )
+        dc._stub = MagicMock()
+        dc._stub.GetTags.return_value = resp
+        return dc
+
+    def test_get_tag_found(self):
+        dc = self._dc_with_tag_ids([1, 2, 3])
+        tag = dc.get_tag("cam-0", 2)
+        assert tag is not None and tag.id == 2
+
+    def test_get_tag_missing_returns_none(self):
+        dc = self._dc_with_tag_ids([1, 2])
+        assert dc.get_tag("cam-0", 99) is None
+
+    def test_get_tag_empty_frame_returns_none(self):
+        dc = self._dc_with_tag_ids([])
+        assert dc.get_tag("cam-0", 1) is None

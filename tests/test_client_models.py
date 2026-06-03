@@ -144,6 +144,24 @@ class TestTagFrame:
         frame = make_tag_frame(tags=[])
         assert frame.tags == []
 
+    def test_by_id_found(self):
+        frame = make_tag_frame()
+        tag = frame.by_id(2)
+        assert tag is not None and tag.id == 2
+
+    def test_by_id_missing_returns_none(self):
+        frame = make_tag_frame()
+        assert frame.by_id(99) is None
+
+    def test_by_id_empty_frame_returns_none(self):
+        assert make_tag_frame(tags=[]).by_id(1) is None
+
+    def test_by_id_returns_first_on_duplicate(self):
+        a = make_tag_record(id=1, center_px=(10.0, 10.0))
+        b = make_tag_record(id=1, center_px=(20.0, 20.0))
+        frame = make_tag_frame(tags=[a, b])
+        assert frame.by_id(1).center_px == (10.0, 10.0)
+
 
 # ---------------------------------------------------------------------------
 # ImageFrame

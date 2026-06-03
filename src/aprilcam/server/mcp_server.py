@@ -1213,6 +1213,57 @@ def _handle_get_objects(source_id: str) -> dict:
         return {"error": f"Unexpected error: {exc}"}
 
 
+def _handle_where(query: str, source_id: str = "") -> dict:
+    """Core logic for the ``where`` tool — natural-language feature lookup.
+
+    Stage 1 runs a keyword search over the static playfield map
+    (``playfield.json``).  When *source_id* names a running detection loop,
+    live tag positions are merged into matched tag features.  Stage 2 (the
+    LLM fallback) is signalled by ``status == "needs_resolution"``, in which
+    case the full playfield map is returned for the agent to resolve.
+    """
+    try:
+        from aprilcam.core import playfield_query as pq
+
+        config = Config.load()
+        pf_path = pq.default_playfield_path(config.data_dir)
+        try:
+            playfield = pq.load_playfield(pf_path)
+        except (FileNotFoundError, ValueError) as exc:
+            return {"error": str(exc)}
+
+        # Merge live detections when a detection source is supplied.
+        live_tags: Optional[dict[int, dict]] = None
+        if source_id:
+            tags_result = _handle_get_tags(source_id)
+            if "error" not in tags_result:
+                live_tags = {}
+                for t in tags_result.get("tags", []) or []:
+                    tid = t.get("id")
+                    if tid is None:
+                        continue
+                    live_tags[int(tid)] = {
+                        "world_xy": t.get("world_xy"),
+                        "in_playfield": t.get("in_playfield"),
+                    }
+                live_tags = live_tags or None
+
+        result = pq.where(query, pq.iter_features(playfield), live_tags=live_tags)
+
+        if result["status"] == "not_found":
+            # Stage 2: hand the whole map back to the agent for LLM resolution.
+            result["status"] = "needs_resolution"
+            result["playfield"] = playfield
+            result["hint"] = (
+                "Keyword search found no match. Identify which feature the query "
+                "refers to from the 'playfield' map, then call where() again with a "
+                "more specific phrase (exact slug, or type + color + cardinal)."
+            )
+        return result
+    except Exception as exc:
+        return {"error": f"Unexpected error: {exc}"}
+
+
 def _warp_points(points: list, homography: np.ndarray) -> list:
     """Transform a list of [x, y] points through a homography matrix."""
     import cv2
@@ -2690,6 +2741,52 @@ async def get_objects(source_id: str) -> list[TextContent]:
         On error: ``{"error": "<message>"}``.
     """
     result = _handle_get_objects(source_id)
+    return [TextContent(type="text", text=json.dumps(result))]
+
+
+@server.tool()
+async def where(query: str, source_id: str = "") -> list[TextContent]:
+    """Find a playfield feature by asking in natural language.
+
+    Answers questions like *"where is the northwest orange dot"*, *"where is
+    the eastern red square"*, *"where is the blue dot"*, or *"where is april
+    tag one"*.  Features come from the static playfield map
+    (``data/aprilcam/playfield.json``): AprilTags, ArUco tags, colored
+    rectangles, and colored dots — each with a world position in cm
+    (A1-centred: origin at AprilTag 1, +x east, +y north).
+
+    Resolution is two-stage:
+
+    1. **Keyword search.** The query is matched against each feature's
+       ``type`` (you can say "april tag" or "aruco tag"), ``color``,
+       ``cardinal`` direction, tag name/``id`` and dot ``size``. A handful of
+       synonyms are understood (e.g. *square*→rectangle, *eastern*→east,
+       *one*→1).
+    2. **LLM fallback.** If nothing matches, the tool returns
+       ``status="needs_resolution"`` together with the whole ``playfield``
+       map. Read it, decide which feature the user meant, and call ``where``
+       again with a more specific phrase (an exact ``slug`` works too).
+
+    Args:
+        query: The natural-language question, e.g. ``"where is the blue dot"``.
+        source_id: Optional playfield/camera id of a running detection loop
+            (from ``stream_tags``/``start_detection``). When supplied, the
+            live detected position of any matched tag is merged into the
+            result as ``live_detection``.
+
+    Returns:
+        ``{"status": ..., "query": ..., "tokens": [...], "matches": [...]}``.
+
+          - ``status``: ``"ok"`` (one match), ``"ambiguous"`` (several — pick
+            from ``matches`` or refine the query), or ``"needs_resolution"``
+            (no keyword match; resolve from the returned ``playfield`` map).
+          - Each entry in ``matches`` has ``slug``, ``type``, ``category``,
+            ``location`` (``{x, y, units, frame}`` from playfield.json), the
+            full ``record``, and — for currently-detected tags —
+            ``live_detection`` (``world_xy`` + ``in_playfield``).
+        On error: ``{"error": "<message>"}``.
+    """
+    result = _handle_where(query, source_id)
     return [TextContent(type="text", text=json.dumps(result))]
 
 

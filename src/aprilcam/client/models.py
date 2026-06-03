@@ -110,6 +110,15 @@ class TagFrame(BaseModel):
     field_width_cm: float = 0.0
     field_height_cm: float = 0.0
 
+    def by_id(self, tag_id: int) -> "TagRecord | None":
+        """Return the tag with marker id *tag_id*, or ``None`` if not present.
+
+        Convenience accessor so callers don't have to scan ``tags`` by hand.
+        If the same id appears more than once (e.g. an AprilTag and an ArUco
+        marker sharing a number), the first match in frame order is returned.
+        """
+        return next((t for t in self.tags if t.id == tag_id), None)
+
     @classmethod
     def from_proto(cls, msg: "aprilcam_pb2.TagFrame") -> "TagFrame":
         """Construct a TagFrame from a protobuf TagFrame message."""

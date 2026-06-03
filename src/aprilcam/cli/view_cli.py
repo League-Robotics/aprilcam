@@ -42,6 +42,7 @@ class CollapsibleFrame(tk.Frame):
         on_expand=None,
         on_collapse=None,
         expandable: bool = True,
+        start_collapsed: bool = False,
         **kwargs,
     ):
         super().__init__(parent, bg=bg, **kwargs)
@@ -75,6 +76,13 @@ class CollapsibleFrame(tk.Frame):
         # Bind click on both header widgets
         for w in (self._header, self._toggle_lbl, self._title_lbl):
             w.bind("<Button-1>", lambda _e: self.toggle())
+
+        # Optionally start in the collapsed state (content hidden). Callbacks
+        # are not fired here — the caller owns the initial side effects.
+        if start_collapsed:
+            self.content.grid_remove()
+            self._toggle_lbl.config(text="▶")
+            self._expanded = False
 
     def toggle(self):
         """Toggle expanded/collapsed state."""
@@ -627,9 +635,11 @@ def main(argv: list[str] | None = None) -> int:
         right_frame, title="Objects", bg=PANEL_BG, header_fg=OBJ_FG,
         on_collapse=_on_obj_collapse,
         on_expand=_lazy_start_objects,
+        start_collapsed=True,
     )
-    cf_obj.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 2))
-    _lazy_start_objects()  # detection starts on since section starts expanded
+    # Object detection is OFF by default: the panel starts collapsed and the
+    # detection thread only runs once the user expands it (on_expand handler).
+    cf_obj.pack(fill=tk.X, expand=False, padx=8, pady=(4, 2))
     obj_outer = cf_obj.content
 
     obj_text = tk.Text(

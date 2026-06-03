@@ -311,6 +311,80 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
 
         return pipeline.get_current_tags()
 
+    def WhereIs(
+        self,
+        request: aprilcam_pb2.WhereRequest,
+        context: grpc.ServicerContext,
+    ) -> aprilcam_pb2.WhereResponse:
+        """Resolve a natural-language "where is X" query against playfield.json.
+
+        Runs a full-text keyword search over the static playfield map.  When
+        *cam_name* is given and that camera is open, live detections are
+        merged into matched tag features.  On a keyword miss the full
+        playfield.json text is returned so the caller can fall back to an LLM.
+        """
+        import json as _json
+        from ..core import playfield_query as pq
+
+        pf_path = pq.default_playfield_path(self._config.data_dir)
+        try:
+            playfield = pq.load_playfield(pf_path)
+        except (FileNotFoundError, ValueError) as exc:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(str(exc))
+            return aprilcam_pb2.WhereResponse(status="not_found")
+
+        # Gather live tag positions for the named camera, if any.
+        live_tags: dict[int, dict] = {}
+        if request.cam_name:
+            with self._cam_lock:
+                pipeline = self._cameras.get(request.cam_name)
+            if pipeline is not None:
+                try:
+                    tag_frame = pipeline.get_current_tags()
+                    for t in tag_frame.tags:
+                        live_tags[int(t.id)] = {
+                            "world_xy": [float(t.wx), float(t.wy)],
+                            "in_playfield": bool(t.in_playfield),
+                        }
+                except Exception:
+                    log.exception("WhereIs: failed to read live tags for %s", request.cam_name)
+
+        result = pq.where(
+            request.query, pq.iter_features(playfield), live_tags=live_tags or None
+        )
+
+        resp = aprilcam_pb2.WhereResponse(
+            status=result["status"], tokens=list(result.get("tokens", []))
+        )
+        for m in result["matches"]:
+            loc = m.get("location")
+            live = m.get("live_detection")
+            live_xy = (live or {}).get("world_xy") if live else None
+            resp.matches.append(
+                aprilcam_pb2.WhereMatch(
+                    slug=str(m.get("slug") or ""),
+                    type=str(m.get("type") or ""),
+                    category=str(m.get("category") or ""),
+                    has_location=loc is not None,
+                    x=float(loc["x"]) if loc else 0.0,
+                    y=float(loc["y"]) if loc else 0.0,
+                    record_json=_json.dumps(m.get("record", {})),
+                    has_live=live is not None,
+                    live_x=float(live_xy[0]) if live_xy else 0.0,
+                    live_y=float(live_xy[1]) if live_xy else 0.0,
+                    in_playfield=bool((live or {}).get("in_playfield", False)),
+                )
+            )
+
+        if result["status"] == "not_found":
+            try:
+                resp.playfield_json = pf_path.read_text(encoding="utf-8")
+            except OSError:
+                pass
+
+        return resp
+
     # ------------------------------------------------------------------
     # Stream discovery
     # ------------------------------------------------------------------
