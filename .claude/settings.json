@@ -26,7 +26,8 @@
       "Bash(which dotconfig *)",
       "Read(//Volumes/Proj/proj/code-projects/dotconfig/**)",
       "Bash(wait)",
-      "Bash(rm /Volumes/Proj/proj/RobotProjects/AprilTags/tests/system/test_video_pipeline.py && git -C /Volumes/Proj/proj/RobotProjects/AprilTags commit -m \"chore: remove video pipeline tests missing test assets *)"
+      "Bash(rm /Volumes/Proj/proj/RobotProjects/AprilTags/tests/system/test_video_pipeline.py && git -C /Volumes/Proj/proj/RobotProjects/AprilTags commit -m \"chore: remove video pipeline tests missing test assets *)",
+      "Bash(python3 -m venv /tmp/test-base-010)"
     ],
     "additionalDirectories": [
       "/private/tmp/aprilcam",
