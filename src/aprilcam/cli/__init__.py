@@ -47,6 +47,15 @@ SUBCOMMANDS = {
 }
 
 
+# Subcommands that depend on the optional `aprilcam[daemon]` stack (OpenCV,
+# mcp, mss, websockets, fpdf2, ...). The base install is the lightweight
+# client only, so importing these — or their lazily-loaded heavy deps — can
+# raise ModuleNotFoundError. `init` and `tool` are pure-client and omitted.
+DAEMON_COMMANDS = frozenset(
+    {"daemon", "mcp", "web", "taggen", "calibrate", "cameras", "tags", "view"}
+)
+
+
 def _get_version():
     try:
         from importlib.metadata import version
@@ -92,6 +101,25 @@ def main(argv=None):
     # Lazy import: only load the target module when actually dispatching.
     import importlib
 
-    mod = importlib.import_module(SUBCOMMANDS[command]["module"])
-    rc = mod.main(remaining) or 0
+    try:
+        mod = importlib.import_module(SUBCOMMANDS[command]["module"])
+        rc = mod.main(remaining) or 0
+    except ModuleNotFoundError as exc:
+        # The base install ships only the lightweight gRPC client. The
+        # daemon/server subcommands — and the heavy libraries they import,
+        # eagerly or lazily — live in the `aprilcam[daemon]` extra. Translate
+        # the missing-module error into an actionable install hint instead of
+        # dumping a raw traceback.
+        if command in DAEMON_COMMANDS:
+            print(
+                f"aprilcam: the '{command}' command requires the daemon/server "
+                f"dependencies, which are not installed "
+                f"(missing module '{exc.name}').\n\n"
+                f"Install the full stack with one of:\n"
+                f"    pipx install 'aprilcam[daemon]'\n"
+                f"    pip install 'aprilcam[daemon]'",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        raise
     sys.exit(rc)
