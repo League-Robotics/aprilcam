@@ -1,0 +1,4 @@
+name: aprilcam
+title: AprilCam
+blurb: MCP server and gRPC daemon for AprilTag/ArUco perception on robotics playfields — tag positions, orientation, velocity, and homography for AI agents and robot control loops.
+order: 100

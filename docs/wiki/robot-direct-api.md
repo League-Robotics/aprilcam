@@ -1,3 +1,10 @@
+---
+title: Robot Direct API
+blurb: High-frequency Python API for robot control loops — read tag positions and push live overlays directly over gRPC, bypassing the MCP layer.
+order: 20
+tags: [api, grpc, robot, python]
+---
+
 # AprilCam Robot Direct API
 
 **This guide is for robot programs that need high-frequency access to tag
