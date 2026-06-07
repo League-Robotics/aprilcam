@@ -12488,3 +12488,45 @@ I0603 14:07:02.695519  382045 ev_poll_posix.cc:593] FD from fork parent still in
 2026-06-03 14:07:02,709 INFO aprilcam.daemon.camera_pipeline: CameraPipeline(arducam-ov9782-usb-camera): started (index=2)
 2026-06-03 14:07:02,757 INFO aprilcam.daemon.grpc_server: AprilCamServicer: image stream started for arducam-ov9782-usb-camera (unix=/tmp/aprilcam/arducam-ov9782-usb-camera/images-4d8411b0.sock, tcp=53614)
 2026-06-03 14:07:02,758 INFO aprilcam.daemon.grpc_server: AprilCamServicer: tag stream started for arducam-ov9782-usb-camera (unix=/tmp/aprilcam/arducam-ov9782-usb-camera/tags-2f911e9e.sock, tcp=53615)
+2026-06-05 20:43:05,892 INFO aprilcam.daemon.server: aprilcamd started (pid=1553, transports=unix:/tmp/aprilcam/control.sock, tcp://[::]:5280)
+2026-06-05 20:43:07,236 WARNING zeroconf: Error with socket 15 (('0.0.0.0', 5353))): [Errno 49] Can't assign requested address
+Traceback (most recent call last):
+  File "/Users/eric/.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/selector_events.py", line 1269, in sendto
+    self._sock.sendto(data, addr)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+OSError: [Errno 49] Can't assign requested address
+2026-06-05 20:43:07,687 INFO aprilcam.daemon.mdns: mDNS: registered aprilcam-gala._aprilcam._tcp.local. on port 5280
+2026-06-05 20:43:12,840 INFO aprilcam.daemon.grpc_server: AprilCamServicer: Shutdown RPC received
+2026-06-05 20:43:12,840 INFO aprilcam.daemon.server: aprilcamd: shutting down
+2026-06-05 20:43:13,093 INFO aprilcam.daemon.mdns: mDNS: service unregistered
+2026-06-05 20:43:13,093 INFO aprilcam.daemon.server: aprilcamd: goodbye
+2026-06-05 20:43:13,386 INFO aprilcam.daemon.server: aprilcamd started (pid=1766, transports=unix:/tmp/aprilcam/control.sock, tcp://[::]:5280)
+2026-06-05 20:43:14,744 WARNING zeroconf: Error with socket 15 (('0.0.0.0', 5353))): [Errno 49] Can't assign requested address
+Traceback (most recent call last):
+  File "/Users/eric/.local/share/uv/python/cpython-3.13.7-macos-aarch64-none/lib/python3.13/asyncio/selector_events.py", line 1269, in sendto
+    self._sock.sendto(data, addr)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+OSError: [Errno 49] Can't assign requested address
+2026-06-05 20:43:15,195 INFO aprilcam.daemon.mdns: mDNS: registered aprilcam-gala._aprilcam._tcp.local. on port 5280
+2026-06-05 20:43:15,932 INFO aprilcam.daemon.camera_pipeline: Applying uvc-util settings to Arducam OV9782 USB Camera
+I0605 20:43:15.933918 10096318 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0605 20:43:15.940238 10096698 ev_poll_posix.cc:593] FD from fork parent still in poll list: fd(25, generation: 1)
+I0605 20:43:15.940667 10096698 ev_poll_posix.cc:593] FD from fork parent still in poll list: fd(7, generation: 1)
+I0605 20:43:15.941117 10096698 ev_poll_posix.cc:593] FD from fork parent still in poll list: fd(6, generation: 1)
+2026-06-05 20:43:16,124 WARNING aprilcam.daemon.camera_pipeline: uvc-util auto-exposure-mode=0 returned 13: ERROR:  unable to write new value to control auto-exposure-mode
+I0605 20:43:16.131870 10096318 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0605 20:43:16.137064 10096717 ev_poll_posix.cc:593] FD from fork parent still in poll list: fd(25, generation: 1)
+I0605 20:43:16.137181 10096717 ev_poll_posix.cc:593] FD from fork parent still in poll list: fd(7, generation: 1)
+I0605 20:43:16.137195 10096717 ev_poll_posix.cc:593] FD from fork parent still in poll list: fd(6, generation: 1)
+I0605 20:43:16.329301 10096318 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0605 20:43:16.334471 10096749 ev_poll_posix.cc:593] FD from fork parent still in poll list: fd(25, generation: 1)
+I0605 20:43:16.334595 10096749 ev_poll_posix.cc:593] FD from fork parent still in poll list: fd(7, generation: 1)
+I0605 20:43:16.334663 10096749 ev_poll_posix.cc:593] FD from fork parent still in poll list: fd(6, generation: 1)
+I0605 20:43:16.375892 10096318 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0605 20:43:16.474453 10096318 fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers
+I0605 20:43:16.479715 10096806 ev_poll_posix.cc:593] FD from fork parent still in poll list: fd(25, generation: 1)
+I0605 20:43:16.479788 10096806 ev_poll_posix.cc:593] FD from fork parent still in poll list: fd(7, generation: 1)
+I0605 20:43:16.479794 10096806 ev_poll_posix.cc:593] FD from fork parent still in poll list: fd(6, generation: 1)
+2026-06-05 20:43:16,567 INFO aprilcam.daemon.camera_pipeline: CameraPipeline(arducam-ov9782-usb-camera): started (index=1)
+2026-06-05 20:43:16,921 INFO aprilcam.daemon.grpc_server: AprilCamServicer: image stream started for arducam-ov9782-usb-camera (unix=/tmp/aprilcam/arducam-ov9782-usb-camera/images-e5e2a735.sock, tcp=54244)
+2026-06-05 20:43:16,964 INFO aprilcam.daemon.grpc_server: AprilCamServicer: tag stream started for arducam-ov9782-usb-camera (unix=/tmp/aprilcam/arducam-ov9782-usb-camera/tags-83b7863c.sock, tcp=54245)
