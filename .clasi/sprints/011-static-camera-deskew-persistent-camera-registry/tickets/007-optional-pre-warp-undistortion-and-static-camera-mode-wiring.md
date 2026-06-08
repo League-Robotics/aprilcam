@@ -1,7 +1,7 @@
 ---
 id: '007'
 title: Optional pre-warp undistortion and static-camera mode wiring
-status: in-progress
+status: done
 use-cases:
 - SUC-004
 depends-on:
