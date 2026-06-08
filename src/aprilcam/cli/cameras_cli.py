@@ -42,10 +42,13 @@ def _render_registry(
 ) -> None:
     """Print every registered camera with its enumeration number.
 
-    Connected cameras (those whose ``unique_id`` is in ``live_by_uid``) show
-    their current OS index; previously-seen-but-disconnected cameras are
-    rendered grayed-out (ANSI dim, via ``rich``) and marked offline. Records
-    are ordered by enumeration number so numbers stay stable in the listing.
+    ``records`` only ever contains cameras that have actually connected at
+    least once (the registry no longer fabricates entries for never-connected
+    on-disk dirs — ticket 011-003). Connected cameras (those whose
+    ``unique_id`` is in ``live_by_uid``) show their current OS index;
+    previously-connected-but-now-disconnected cameras are rendered grayed-out
+    (ANSI dim, via ``rich``) and marked offline. Records are ordered by
+    enumeration number so numbers stay stable in the listing.
     """
     from rich.console import Console
     from rich.text import Text
@@ -132,8 +135,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     cams = list_cameras(max_probe, backends=backends, stop_after_failures=int(args.stop_after_failures), quiet=bool(args.quiet), detailed_names=bool(args.details))
     live_by_uid = _live_identity_by_uid(cams)
 
-    # Merge the live device list with the persistent registry so disconnected
-    # cameras still appear (grayed out) with their stable enumeration numbers.
+    # Merge the live device list with the persistent registry so previously-
+    # connected cameras still appear (grayed out) with their stable enumeration
+    # numbers. The registry holds only cameras that have connected at least
+    # once; it does not fabricate entries for never-connected on-disk dirs.
     records: List[CameraRecord] = []
     try:
         config = Config.load()

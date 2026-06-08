@@ -11,8 +11,8 @@ This module provides:
 * :class:`CameraRecord` — the on-disk record schema (ticket 011-001).
 * :class:`CameraRegistry` — atomic load/save of the
   ``data/aprilcam/cameras/registry.json`` index plus an ``upsert(record)`` API
-  (ticket 011-001), and the enumeration / reconnect-reuse / data-dir adoption
-  logic (ticket 011-002).
+  (ticket 011-001), and the enumeration / reconnect-reuse / connect-time
+  dir-adoption logic (tickets 011-002, 011-003).
 
 Enumeration and reconnect reuse (ticket 011-002)
 ------------------------------------------------
@@ -24,16 +24,21 @@ reuses its existing enumeration number *and* its per-camera dir, so an
 unplug/replug presents the same record with no renumber and no new dir; a
 genuinely new ``unique_id`` gets a fresh number and record.
 
-Data-dir adoption policy (ticket 011-002)
------------------------------------------
-On first registry load, existing per-camera ``data/aprilcam/cameras/<slug>/``
-directories are adopted into records, matched by slug. **Directories are never
-renamed**: the record's ``dir`` key keeps the existing slug dir so the
-``calibration.json``, ``paths.json``, and ``info.json`` paths inside it stay
-valid. The registry index is the source of truth mapping ``unique_id →
-existing dir``. When two distinct cameras would collide on the same slug dir
-(the identical-model case), the newcomer's dir is disambiguated with an enum
-suffix (``<slug>-<enum>``) while the already-populated dir is left untouched.
+Connect-time data-dir adoption policy (ticket 011-003)
+------------------------------------------------------
+**The registry only ever holds records for cameras that have actually been
+resolved** (connected at least once in this registry's life). It does *not*
+fabricate placeholder records for arbitrary on-disk
+``data/aprilcam/cameras/<slug>/`` directories. A bare on-disk dir with no
+matching record is simply not listed until its camera connects.
+
+When a camera is resolved for the **first time**, :meth:`resolve` adopts the
+existing slug dir if one is present and unowned: the record's ``dir`` is set to
+the bare ``<slug>`` so the camera reuses its existing ``calibration.json`` /
+``paths.json`` / ``info.json`` in place. **Directories are never renamed.**
+Only when that slug dir is already owned by another *live* record — the genuine
+two-identical-model-cameras case — does the newcomer fall back to a
+disambiguated dir (``<slug>-<enum>``), leaving the already-owned dir untouched.
 
 Known limitation — USB-port moves: a serial-less camera moved to a different
 USB port may resolve to a new ``unique_id`` (see
@@ -153,15 +158,17 @@ class CameraRegistry:
     """
 
     def __init__(
-        self, cameras_dir: str | os.PathLike, *, adopt: bool = True
+        self, cameras_dir: str | os.PathLike, *, adopt: bool = False
     ) -> None:
+        # ``adopt`` is retained for call-site compatibility but defaults to
+        # ``False`` and does nothing: the registry no longer fabricates
+        # placeholder records for on-disk dirs. Per-camera dirs are adopted at
+        # connect time by :meth:`resolve` instead (ticket 011-003).
         self.cameras_dir = Path(cameras_dir)
         self.path = self.cameras_dir / REGISTRY_FILENAME
         self._records: Dict[str, CameraRecord] = {}
         self._next_enum: int = FIRST_ENUM
         self.load()
-        if adopt:
-            self.adopt_existing_dirs()
 
     # -- persistence --------------------------------------------------------
 
@@ -277,13 +284,14 @@ class CameraRegistry:
         }
 
     def _allocate_dir(self, slug: str, enum: int) -> str:
-        """Pick an unused per-camera dir for a brand-new record.
+        """Pick a per-camera dir for a record, adopting an existing slug dir.
 
-        Prefers the bare ``slug`` (so a single camera keeps the historical dir
-        name). On collision with a dir another record already owns — the
-        identical-model case — disambiguates with the camera's enumeration
-        number (``<slug>-<enum>``), leaving the colliding record's dir
-        untouched.
+        Prefers the bare ``slug`` so a first-seen camera **adopts** any existing
+        ``cameras_dir/<slug>/`` directory (reusing its ``calibration.json`` and
+        siblings) and a single camera keeps the historical dir name. Only when
+        the bare ``slug`` is already owned by another live record — the genuine
+        identical-model case — does it disambiguate with the camera's
+        enumeration number (``<slug>-<enum>``), leaving the owned dir untouched.
         """
         used = self._used_dirs()
         if slug not in used:
@@ -303,7 +311,10 @@ class CameraRegistry:
         fields and ``last_seen`` are refreshed in place) — an unplug/replug
         therefore resolves to the same record with no renumber and no new dir.
         A **new** ``unique_id`` is assigned the next monotonic enumeration
-        number and a fresh, collision-disambiguated dir.
+        number and a per-camera dir: it **adopts** an existing matching-slug
+        dir if one is present and unowned (reusing its calibration), otherwise
+        it disambiguates (``<slug>-<enum>``) only against dirs already owned by
+        another live record.
 
         Parameters
         ----------
@@ -355,56 +366,21 @@ class CameraRegistry:
             self.save()
         return record
 
-    # -- data-dir adoption / migration (ticket 011-002) ---------------------
+    # -- data-dir adoption (ticket 011-003) ---------------------------------
 
     def adopt_existing_dirs(self, *, save: bool = True) -> int:
-        """Adopt pre-existing per-camera dirs into records without renaming.
+        """Deprecated no-op — kept only for call-site compatibility.
 
-        Scans ``cameras_dir`` for legacy ``<slug>/`` directories that no record
-        already claims and creates a record for each, keyed by a placeholder
-        ``unique_id`` derived from the slug. The directory is **not renamed** —
-        the record's ``dir`` keeps the existing slug so the
-        ``calibration.json`` / ``paths.json`` / ``info.json`` inside it stay at
-        their original paths. Adopted records get an enumeration number so they
-        appear in listings; when the device later reconnects, :meth:`resolve`
-        keys on the real hardware ``unique_id`` (a distinct record) — adoption
-        only guarantees no existing data is orphaned.
-
-        Returns the number of directories newly adopted. Idempotent: dirs
-        already owned by a record (including on a second call) are skipped.
+        The registry no longer fabricates placeholder records for on-disk
+        ``cameras_dir/<slug>/`` directories: doing so produced phantom/duplicate
+        entries (an offline ``dir:<slug>`` placeholder plus a separate live
+        ``<slug>-<enum>`` record once the real camera connected, orphaning the
+        camera's existing calibration). Per-camera dirs are now adopted at
+        **connect time** by :meth:`resolve`, which sets a first-seen camera's
+        ``dir`` to its existing matching-slug dir when one is present and
+        unowned. This method does nothing and always returns ``0``.
         """
-        try:
-            entries = sorted(p for p in self.cameras_dir.iterdir() if p.is_dir())
-        except (FileNotFoundError, NotADirectoryError, OSError):
-            return 0
-
-        owned = self._used_dirs()
-        owned_uids = set(self._records.keys())
-        adopted = 0
-        for entry in entries:
-            slug = entry.name
-            if slug in owned:
-                continue
-            placeholder_uid = f"dir:{slug}"
-            if placeholder_uid in owned_uids:
-                continue
-            enum = self._next_enum
-            self._next_enum = enum + 1
-            record = CameraRecord(
-                unique_id=placeholder_uid,
-                enum=enum,
-                dir=slug,
-                name=_name_from_slug(slug),
-                last_seen=None,
-            )
-            self._records[record.unique_id] = record
-            owned.add(slug)
-            owned_uids.add(placeholder_uid)
-            adopted += 1
-
-        if adopted and save:
-            self.save()
-        return adopted
+        return 0
 
 
 def _now_iso() -> str:
@@ -412,8 +388,3 @@ def _now_iso() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).isoformat()
-
-
-def _name_from_slug(slug: str) -> str:
-    """Best-effort human-ish name from a dir slug (``a-b-c`` → ``A B C``)."""
-    return " ".join(part for part in slug.split("-") if part).title() or slug

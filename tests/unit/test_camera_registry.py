@@ -208,28 +208,30 @@ def test_two_identical_model_cameras_get_distinct_dirs(tmp_path):
 
 
 def test_identical_model_preserves_first_dir_data(tmp_path):
-    # First camera already has a populated slug dir.
+    # A populated slug dir already exists on disk.
     slug = "arducam-ov9782-usb-camera"
     (tmp_path / slug).mkdir()
     (tmp_path / slug / "calibration.json").write_text('{"keep": true}')
 
     reg = CameraRegistry(tmp_path)
-    # Adoption created a placeholder record owning the legacy slug dir; the two
-    # real cameras that resolve to that slug each get fresh, distinct dirs and
-    # never steal or rename the populated legacy dir.
+    # The first camera to resolve to that slug ADOPTS the existing dir (reusing
+    # its calibration). The second identical-model camera, finding the slug now
+    # owned by a live record, is disambiguated and never steals or renames the
+    # populated dir.
     a = reg.resolve(_identity("avf:0xA", name="Arducam OV9782 USB Camera"))
     b = reg.resolve(_identity("avf:0xB", name="Arducam OV9782 USB Camera"))
 
-    assert a.dir != b.dir
-    assert a.dir != slug and b.dir != slug  # legacy dir untouched
+    assert a.dir == slug  # first camera adopts the existing calibrated dir
+    assert b.dir != slug and b.dir != a.dir  # second disambiguated
     # The pre-existing data dir is still there with its original contents.
     assert (tmp_path / slug / "calibration.json").read_text() == '{"keep": true}'
 
 
-# -- data-dir adoption / migration (ticket 011-002) -------------------------
+# -- connect-time dir adoption (ticket 011-003) -----------------------------
 
 
-def test_adopts_legacy_dir_without_renaming(tmp_path):
+def test_first_seen_camera_adopts_existing_matching_slug_dir(tmp_path):
+    # A camera's calibrated dir already exists on disk from a previous life.
     slug = "hd-usb-camera"
     legacy = tmp_path / slug
     legacy.mkdir()
@@ -238,48 +240,72 @@ def test_adopts_legacy_dir_without_renaming(tmp_path):
     (legacy / "info.json").write_text('{"name": "HD USB Camera"}')
 
     reg = CameraRegistry(tmp_path)
+    # No phantom record exists merely because the dir is on disk.
+    assert len(reg) == 0
 
-    # A record now owns the slug dir, and nothing was renamed.
-    dirs = {r.dir for r in reg.records()}
-    assert slug in dirs
+    # On first connect the camera adopts the bare slug dir, not <slug>-<enum>.
+    rec = reg.resolve(_identity("avf:0xA", name="HD USB Camera"))
+    assert rec.dir == slug
+    # Nothing was renamed and the calibration is preserved in place.
     assert legacy.is_dir()
     assert (legacy / "calibration.json").read_text() == '{"homography": [1, 2, 3]}'
     assert (legacy / "paths.json").exists()
     assert (legacy / "info.json").exists()
 
 
-def test_adoption_is_idempotent(tmp_path):
-    slug = "hd-usb-camera"
-    (tmp_path / slug).mkdir()
-    (tmp_path / slug / "calibration.json").write_text("{}")
+def test_no_records_fabricated_for_never_connected_dirs(tmp_path):
+    # Two on-disk dirs that no camera has ever connected for.
+    (tmp_path / "hd-usb-camera").mkdir()
+    (tmp_path / "hd-usb-camera" / "calibration.json").write_text("{}")
+    (tmp_path / "other-camera").mkdir()
 
     reg = CameraRegistry(tmp_path)
-    n_first = len(reg)
+    assert len(reg) == 0
+    assert list(reg.records()) == []
+
+    # Reload from disk: still empty, no phantom dir:<slug> records persisted.
+    reg2 = CameraRegistry(tmp_path)
+    assert len(reg2) == 0
+
+
+def test_adopt_existing_dirs_is_noop(tmp_path):
+    (tmp_path / "hd-usb-camera").mkdir()
+    (tmp_path / "hd-usb-camera" / "calibration.json").write_text("{}")
+
+    reg = CameraRegistry(tmp_path)
     added = reg.adopt_existing_dirs()
     assert added == 0
-    assert len(reg) == n_first
-
-    # Reload from disk: still no duplicate record for the slug.
-    reg2 = CameraRegistry(tmp_path)
-    assert len([r for r in reg2.records() if r.dir == slug]) == 1
+    assert len(reg) == 0
 
 
-def test_adoption_skips_dirs_already_owned_by_records(tmp_path):
-    # A resolved camera owns its slug dir; adoption must not create a second
-    # record for the same dir.
+def test_adopt_flag_does_not_fabricate_records(tmp_path):
+    # Even with the legacy ``adopt=True`` flag, no records are fabricated.
+    (tmp_path / "hd-usb-camera").mkdir()
+    reg = CameraRegistry(tmp_path, adopt=True)
+    assert len(reg) == 0
+
+
+def test_resolve_disambiguates_only_against_live_records(tmp_path):
+    # No on-disk dir for this slug: first camera takes the bare slug, the
+    # identical-model second is disambiguated against the live record.
     reg = CameraRegistry(tmp_path)
-    rec = reg.resolve(_identity("avf:0xA", name="HD USB Camera"))
-    (tmp_path / rec.dir).mkdir(exist_ok=True)
-
-    reg2 = CameraRegistry(tmp_path)
-    matching = [r for r in reg2.records() if r.dir == rec.dir]
-    assert len(matching) == 1
-    assert matching[0].unique_id == "avf:0xA"
+    a = reg.resolve(_identity("avf:0xA", name="HD USB Camera"))
+    b = reg.resolve(_identity("avf:0xB", name="HD USB Camera"))
+    assert a.dir == "hd-usb-camera"
+    assert b.dir == f"hd-usb-camera-{b.enum}"
 
 
-def test_registry_json_skipped_during_adoption(tmp_path):
-    # The registry.json file is not a dir, so it is never adopted as a camera.
+def test_reconnect_reuses_enum_and_dir_after_adoption(tmp_path):
+    # First connect adopts an existing slug dir; a later reconnect (fresh
+    # registry from disk) reuses the same enum and dir.
+    slug = "hd-usb-camera"
+    (tmp_path / slug).mkdir()
     reg = CameraRegistry(tmp_path)
-    reg.resolve(_identity("avf:0xA", name="Cam A"))
+    first = reg.resolve(_identity("avf:0xA", name="HD USB Camera"))
+    assert first.dir == slug
+
     reg2 = CameraRegistry(tmp_path)
-    assert all(not (r.dir or "").endswith(".json") for r in reg2.records())
+    again = reg2.resolve(_identity("avf:0xA", name="HD USB Camera"))
+    assert again.enum == first.enum
+    assert again.dir == slug
+    assert len(reg2) == 1
