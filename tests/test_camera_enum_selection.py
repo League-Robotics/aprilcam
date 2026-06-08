@@ -108,6 +108,49 @@ def test_view_unknown_enum_number_errors(tmp_path, monkeypatch, capsys):
     assert fake_dc.closed is True
 
 
+# -- view status: enumeration number, not OS index (011-003) -----------------
+
+
+class _FakeRegistry:
+    """Registry stand-in exposing only ``records()`` for ``_display_enum``."""
+
+    def __init__(self, records):
+        self._records = list(records)
+
+    def records(self):
+        return list(self._records)
+
+
+def _record(dir_name, enum):
+    return type("Rec", (), {"dir": dir_name, "enum": enum})()
+
+
+def test_display_enum_numeric_selection_returns_that_enum():
+    # When the user selected by number, that number is shown directly — the
+    # registry is never consulted.
+    reg = _FakeRegistry([_record("arducam-ov9782", 3)])
+    assert view_cli._display_enum(reg, "arducam-ov9782", 3) == 3
+
+
+def test_display_enum_name_selection_looks_up_by_dir():
+    # Name selection: enum_no is None, so look up the record whose dir matches
+    # the daemon-returned cam_name and return its enum.
+    reg = _FakeRegistry(
+        [_record("brio-501", 1), _record("arducam-ov9782", 3)]
+    )
+    assert view_cli._display_enum(reg, "arducam-ov9782", None) == 3
+
+
+def test_display_enum_unknown_dir_returns_none():
+    reg = _FakeRegistry([_record("brio-501", 1)])
+    assert view_cli._display_enum(reg, "no-such-dir", None) is None
+
+
+def test_display_enum_missing_cam_name_returns_none():
+    reg = _FakeRegistry([_record("brio-501", 1)])
+    assert view_cli._display_enum(reg, None, None) is None
+
+
 # -- calibrate ---------------------------------------------------------------
 
 
