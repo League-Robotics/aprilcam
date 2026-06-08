@@ -1,9 +1,11 @@
 ---
 id: '002'
 title: Enumeration numbers, reconnect reuse, and data-dir migration
-status: open
-use-cases: [SUC-006]
-depends-on: ['001']
+status: in-progress
+use-cases:
+- SUC-006
+depends-on:
+- '001'
 github-issue: ''
 issue: persistent-camera-registry-with-stable-identity-and-enumeration.md
 completes_issue: false
@@ -41,20 +43,20 @@ plus migration, fully unit-testable against a temp data dir.
 
 ## Acceptance Criteria
 
-- [ ] First sight of a camera assigns the next monotonic enumeration number;
+- [x] First sight of a camera assigns the next monotonic enumeration number;
   `next_enum` persists across reloads.
-- [ ] `resolve` looks up by `unique_id` and returns the existing record (same
+- [x] `resolve` looks up by `unique_id` and returns the existing record (same
   enum number, same dir) for a known camera; a new `unique_id` yields a new
   record with the next number.
-- [ ] Unplug + replug (simulated by resolving the same `unique_id` after a
+- [x] Unplug + replug (simulated by resolving the same `unique_id` after a
   reload) reuses the enumeration number and dir — no new record, no renumber.
-- [ ] Two identical-model cameras (same slug, distinct `unique_id`) get two
+- [x] Two identical-model cameras (same slug, distinct `unique_id`) get two
   records with distinct numbers; the second's dir is disambiguated and the
   first dir's existing data is untouched.
-- [ ] Existing `data/aprilcam/cameras/<slug>/` dirs are adopted into records,
+- [x] Existing `data/aprilcam/cameras/<slug>/` dirs are adopted into records,
   not renamed or orphaned; their `calibration.json`/`paths.json`/`info.json`
   remain at their original paths.
-- [ ] `uv run pytest` passes.
+- [x] `uv run pytest` passes.
 
 ## Implementation Plan
 
