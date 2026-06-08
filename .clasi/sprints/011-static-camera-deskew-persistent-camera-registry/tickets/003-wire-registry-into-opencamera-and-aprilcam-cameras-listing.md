@@ -1,9 +1,12 @@
 ---
 id: '003'
 title: Wire registry into OpenCamera and aprilcam cameras listing
-status: open
-use-cases: [SUC-006, SUC-007]
-depends-on: ['002']
+status: in-progress
+use-cases:
+- SUC-006
+- SUC-007
+depends-on:
+- '002'
 github-issue: ''
 issue: persistent-camera-registry-with-stable-identity-and-enumeration.md
 completes_issue: true
@@ -34,17 +37,17 @@ visible end-to-end. This ticket completes the persistent-camera-registry issue.
 
 ## Acceptance Criteria
 
-- [ ] `OpenCamera` resolves the camera through the registry; reconnect of a
+- [x] `OpenCamera` resolves the camera through the registry; reconnect of a
   known camera (same `unique_id`) reuses its `cam_name`/dir with no daemon
   restart and no manual reindex.
-- [ ] A genuinely new camera receives a new monotonic enumeration number and a
+- [x] A genuinely new camera receives a new monotonic enumeration number and a
   fresh dir; existing cameras are unaffected.
-- [ ] `aprilcam cameras` lists connected and previously-seen-disconnected
+- [x] `aprilcam cameras` lists connected and previously-seen-disconnected
   cameras; disconnected ones are grayed out and marked offline; all retain
   their enumeration numbers.
-- [ ] Connected cameras display their current OS index in the listing.
-- [ ] The proto/wire contract is unchanged; existing clients still work.
-- [ ] `uv run pytest` passes.
+- [x] Connected cameras display their current OS index in the listing.
+- [x] The proto/wire contract is unchanged; existing clients still work.
+- [x] `uv run pytest` passes.
 
 ## Implementation Plan
 
