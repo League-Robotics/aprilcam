@@ -1,8 +1,9 @@
 ---
 id: '001'
 title: 'Persistent camera registry: hardware identity + record schema'
-status: open
-use-cases: [SUC-005]
+status: in-progress
+use-cases:
+- SUC-005
 depends-on: []
 github-issue: ''
 issue: persistent-camera-registry-with-stable-identity-and-enumeration.md
