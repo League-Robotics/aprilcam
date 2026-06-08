@@ -1,8 +1,10 @@
 ---
 id: '004'
 title: Persist reference geometry into the calibration record
-status: open
-use-cases: [SUC-001, SUC-002]
+status: in-progress
+use-cases:
+- SUC-001
+- SUC-002
 depends-on: []
 github-issue: ''
 issue: static-camera-deskew-from-homography.md
@@ -45,18 +47,18 @@ without the new fields must still load (fields default to empty/None).
 
 ## Acceptance Criteria
 
-- [ ] `to_dict`/`from_dict` round-trip `playfield` (width/height),
+- [x] `to_dict`/`from_dict` round-trip `playfield` (width/height),
   `corner_pixels`, `static_markers`, and `static_marker_ids`.
-- [ ] `calibrate_single` populates `corner_pixels` and `static_markers` (for
+- [x] `calibrate_single` populates `corner_pixels` and `static_markers` (for
   ArUco corners + AprilTag 1) from the data it already computes.
-- [ ] A pre-existing `calibration.json` lacking the new fields loads without
+- [x] A pre-existing `calibration.json` lacking the new fields loads without
   error; the new fields default to empty/None.
-- [ ] The existing `playfield` block in
+- [x] The existing `playfield` block in
   `global-shutter-camera/calibration.json` is read back into
   `playfield_width_cm`/`playfield_height_cm` on load.
-- [ ] The static-marker set defaults to `aruco_corners + apriltag:1` and is
+- [x] The static-marker set defaults to `aruco_corners + apriltag:1` and is
   stored per-camera.
-- [ ] `uv run pytest` passes.
+- [x] `uv run pytest` passes.
 
 ## Implementation Plan
 
