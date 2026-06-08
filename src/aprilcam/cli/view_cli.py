@@ -353,11 +353,27 @@ def main(argv: list[str] | None = None) -> int:
 
     _DISPLAY_W = 1000  # canvas is always this wide; height scales proportionally
 
-    boundary = PlayfieldBoundary()
+    boundary = PlayfieldBoundary(
+        px_per_cm=config.deskew_px_per_cm,
+        movement_threshold_px=config.movement_threshold_px,
+        static_mode=None if config.static_deskew else False,
+    )
+    # Load the camera's calibration so optional pre-warp undistortion
+    # (APRILCAM_UNDISTORT) can flatten residual barrel curvature in the
+    # deskewed view; a no-op when intrinsics are absent.
+    _view_cal = None
+    try:
+        from aprilcam.calibration.calibration import load_calibration_from_camera_dir
+        _cam_dir = Path(_camera_dir) if _camera_dir else (config.cameras_dir / cam_name)
+        _view_cal = load_calibration_from_camera_dir(_cam_dir)
+    except Exception:
+        _view_cal = None
     display = PlayfieldDisplay(
         playfield=boundary,
         window_name="aprilcam view",
         deskew_overlay=True,
+        calibration=_view_cal,
+        undistort=config.undistort,
     )
 
     from aprilcam.client.models import TagFrame

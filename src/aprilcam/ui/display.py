@@ -25,6 +25,8 @@ class PlayfieldDisplay:
         deskew_overlay: bool = False,
         robot_tag_id: Optional[int] = None,
         gripper_offset_cm: float = 14.0,
+        calibration: object = None,
+        undistort: bool = False,
     ) -> None:
         # references and flags
         self.playfield = playfield
@@ -33,6 +35,15 @@ class PlayfieldDisplay:
         self.deskew_overlay = bool(deskew_overlay)
         self.robot_tag_id = robot_tag_id
         self.gripper_offset_cm = float(gripper_offset_cm)
+
+        # Optional pre-warp undistortion (sprint 011, ticket 007).  When
+        # ``undistort`` is enabled AND *calibration* carries
+        # camera_matrix + dist_coeffs, the frame is undistorted before the
+        # metric deskew warp for a flatter top-down view.  A no-op when
+        # disabled or when the calibration lacks intrinsics
+        # (``CameraCalibration.undistort`` passes the frame through).
+        self.calibration = calibration
+        self.undistort_enabled = bool(undistort)
 
         # perspective (deskew) cache
         self.M_deskew = None
@@ -71,6 +82,21 @@ class PlayfieldDisplay:
             return
         self.M_deskew, self.deskew_size = transform
 
+    def _maybe_undistort(self, frame: np.ndarray) -> np.ndarray:
+        """Undistort *frame* before the deskew warp when enabled + possible.
+
+        Applies :meth:`CameraCalibration.undistort` only when undistortion is
+        enabled (config) AND a calibration with ``camera_matrix`` +
+        ``dist_coeffs`` is available.  When disabled, or when the calibration
+        lacks intrinsics, the frame is returned unchanged — deskew still works.
+        """
+        if not self.undistort_enabled or self.calibration is None:
+            return frame
+        try:
+            return self.calibration.undistort(frame)
+        except Exception:
+            return frame
+
     def prepare_display(self, frame: np.ndarray) -> np.ndarray:
         # Reset mode by default
         self._mode = "full"
@@ -86,6 +112,9 @@ class PlayfieldDisplay:
                 self._mode = "deskew"
                 self._crop_xy = (0, 0)
                 self._crop_wh = (w, h)
+                # Optional pre-warp undistortion for a flatter metric top-down
+                # view (no-op when disabled or intrinsics absent).
+                frame = self._maybe_undistort(frame)
                 return cv.warpPerspective(frame, self.M_deskew, (w, h))
             # Cropped view
             PAD = 8

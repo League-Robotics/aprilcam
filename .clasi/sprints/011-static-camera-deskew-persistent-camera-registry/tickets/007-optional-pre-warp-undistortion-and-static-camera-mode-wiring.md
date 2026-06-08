@@ -1,9 +1,12 @@
 ---
 id: '007'
 title: Optional pre-warp undistortion and static-camera mode wiring
-status: open
-use-cases: [SUC-004]
-depends-on: ['005', '006']
+status: in-progress
+use-cases:
+- SUC-004
+depends-on:
+- '005'
+- '006'
 github-issue: ''
 issue: static-camera-deskew-from-homography.md
 completes_issue: true
@@ -38,20 +41,20 @@ This ticket assumes tickets 005 (seeded geometry + shared warp helper) and 006
 
 ## Acceptance Criteria
 
-- [ ] When saved intrinsics exist and static-camera mode is on, undistortion is
+- [x] When saved intrinsics exist and static-camera mode is on, undistortion is
   applied before the warp and visibly flattens residual barrel curvature.
-- [ ] When intrinsics are absent, the undistortion step is a no-op and deskew
+- [x] When intrinsics are absent, the undistortion step is a no-op and deskew
   still produces a warped view.
-- [ ] Static-camera mode is auto-on when a saved homography exists and can be
+- [x] Static-camera mode is auto-on when a saved homography exists and can be
   overridden (disabled) by config.
-- [ ] `px_per_cm` is wired from config into the metric deskew path with the
+- [x] `px_per_cm` is wired from config into the metric deskew path with the
   ticket-005 default; overriding it changes the deskewed output resolution.
-- [ ] The full issue acceptance criteria hold end-to-end: a fixed camera with a
+- [x] The full issue acceptance criteria hold end-to-end: a fixed camera with a
   saved calibration deskews with no live corner; the extreme-angle global-
   shutter camera produces a flat metric top-down view (output sized by `W×H` and
   `px_per_cm`); dynamic tags stay live; a moved camera is detected and surfaced;
   optional undistortion flattens curvature.
-- [ ] `uv run pytest` passes.
+- [x] `uv run pytest` passes.
 
 ## Implementation Plan
 

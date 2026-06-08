@@ -59,6 +59,12 @@ class PlayfieldBoundary:
     # module default (DEFAULT_MOVEMENT_THRESHOLD_PX).
     movement_threshold_px: float = 0.0
 
+    # Static-camera mode override (ticket 007).  ``None`` → AUTO: static mode is
+    # on whenever stored static markers are present (the default).  ``True`` →
+    # force static mode on; ``False`` → force the legacy live-corner path even
+    # when static markers are stored.  Wired from ``APRILCAM_STATIC_DESKEW``.
+    static_mode: Optional[bool] = None
+
     _poly: Optional[np.ndarray] = field(default=None, init=False, repr=False)
     _flows: Dict[int, AprilTagFlow] = field(default_factory=dict, init=False, repr=False)
     _vel_ema: Dict[int, float] = field(default_factory=dict, init=False, repr=False)
@@ -108,7 +114,16 @@ class PlayfieldBoundary:
 
     @property
     def is_static_mode(self) -> bool:
-        """True when stored static markers are present (static-camera path)."""
+        """Whether the static-camera path is active for this boundary.
+
+        AUTO (``static_mode is None``, the default): on whenever stored static
+        markers are present.  An explicit ``static_mode`` overrides that: ``True``
+        forces it on, ``False`` forces the legacy live-corner path even when
+        static markers are stored.  The override is wired from the
+        ``APRILCAM_STATIC_DESKEW`` config flag.
+        """
+        if self.static_mode is not None:
+            return bool(self.static_mode) and bool(self.static_markers)
         return bool(self.static_markers)
 
     def _effective_static_marker_ids(self) -> List[str]:
@@ -518,6 +533,8 @@ class Playfield:
         detect_interval: int = 3,
         data_dir: str = "data",
         px_per_cm: float = 0.0,
+        static_mode: Optional[bool] = None,
+        movement_threshold_px: float = 0.0,
     ) -> None:
         from .detector import TagDetector, DetectorConfig
         from .tracker import OpticalFlowTracker
@@ -530,6 +547,10 @@ class Playfield:
         self._calibration = calibration
         self._data_dir = data_dir
         self._px_per_cm = px_per_cm
+        # Static-camera mode override (ticket 007): None=auto-on when a saved
+        # homography exists; False forces the live-corner path.
+        self._static_mode = static_mode
+        self._movement_threshold_px = movement_threshold_px
 
         # Homography is loaded eagerly only when an explicit path is provided.
         # When calibration=="auto", discovery is deferred to start() so that
@@ -885,6 +906,14 @@ class Playfield:
         homography is available (the live-corner path remains the fallback).
         """
         b = self._boundary
+        # Static-camera mode override (ticket 007): propagate the flag and the
+        # config-driven movement threshold.  When the operator disabled static
+        # mode (static_mode is False), skip all geometry seeding so the boundary
+        # falls back to live-corner detection even if a calibration exists.
+        b.static_mode = self._static_mode
+        b.movement_threshold_px = self._movement_threshold_px
+        if self._static_mode is False:
+            return
         b.homography = self._homography
         b.width_cm = self._width_cm
         b.height_cm = self._height_cm

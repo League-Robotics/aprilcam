@@ -386,16 +386,44 @@ class CameraPipeline:
     def _seed_static_geometry(self) -> None:
         """Seed the AprilCam playfield boundary for static-camera mode.
 
-        Copies the calibration record's ``corner_pixels`` / ``static_markers`` /
-        ``static_marker_ids`` and physical dimensions into the boundary so its
-        polygon is non-``None`` before any live frame and static-marker fill-in
-        / movement-invalidation (ticket 006) activate.  A no-op when the
-        calibration carries no static markers (live-corner path is preserved).
+        Static-camera deskew is **auto-on**: whenever the saved calibration
+        carries a homography, this seeds the boundary's ``corner_pixels`` /
+        ``static_markers`` / ``static_marker_ids`` and physical dimensions so the
+        deskew polygon is non-``None`` before any live frame and static-marker
+        fill-in / movement-invalidation (ticket 006) activate without live ArUco
+        corner detection.  The metric output resolution (``px_per_cm``) and the
+        movement-invalidation threshold are read from config.
+
+        The ``APRILCAM_STATIC_DESKEW`` config flag overrides this: when it is
+        disabled, this is a no-op and the legacy live-corner path is preserved
+        even when a calibration exists.  Also a no-op when there is no
+        calibration / no homography.
         """
         if self._april_cam is None or self._calibration is None:
             return
         cal = self._calibration
         boundary = self._april_cam.playfield
+
+        # Wire optional pre-warp undistortion into the display deskew path.
+        # No-op unless APRILCAM_UNDISTORT is on and the calibration carries
+        # camera_matrix + dist_coeffs.
+        display = getattr(self._april_cam, "display", None)
+        if display is not None:
+            display.calibration = cal
+            display.undistort_enabled = bool(self.config.undistort)
+
+        # Config-gated knobs (sprint 011, ticket 007).
+        boundary.px_per_cm = self.config.deskew_px_per_cm
+        boundary.movement_threshold_px = self.config.movement_threshold_px
+        # Static-camera mode override: False forces the live-corner path even
+        # when static markers exist; True/None keep the auto-on behaviour.
+        boundary.static_mode = True if self.config.static_deskew else False
+
+        # Operator opted out of static-camera deskew: leave the boundary in
+        # live-corner mode (no seeding) so it detects ArUco corners per frame.
+        if not self.config.static_deskew:
+            return
+
         boundary.homography = cal.homography
         boundary.width_cm = cal.playfield_width_cm
         boundary.height_cm = cal.playfield_height_cm
@@ -415,6 +443,23 @@ class CameraPipeline:
                 boundary._poly = np.asarray(
                     cal.corner_pixels, dtype=np.float32
                 ).reshape(4, 2)
+            except Exception:
+                pass
+        elif (
+            boundary._poly is None
+            and cal.homography is not None
+            and cal.playfield_width_cm > 0
+            and cal.playfield_height_cm > 0
+        ):
+            # No persisted corner pixels: derive the deskew polygon from H⁻¹ so
+            # a fixed camera deskews with zero recalibration (the floor path).
+            try:
+                from ..calibration.geometry import corner_pixels_from_homography
+                boundary._poly = corner_pixels_from_homography(
+                    cal.homography,
+                    cal.playfield_width_cm,
+                    cal.playfield_height_cm,
+                )
             except Exception:
                 pass
 
