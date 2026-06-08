@@ -11,6 +11,8 @@ from aprilcam.camera.registry import (
     REGISTRY_FILENAME,
     CameraRecord,
     CameraRegistry,
+    CameraSelectError,
+    resolve_enum_to_index,
 )
 
 
@@ -309,3 +311,35 @@ def test_reconnect_reuses_enum_and_dir_after_adoption(tmp_path):
     assert again.enum == first.enum
     assert again.dir == slug
     assert len(reg2) == 1
+
+
+# -- resolve_enum_to_index (enumeration number → live OS index) -------------
+
+
+def test_resolve_enum_to_index_returns_live_index(tmp_path):
+    # A camera registered with enum #1 is currently connected at OS index 3.
+    reg = CameraRegistry(tmp_path)
+    rec = reg.resolve(_identity("avf:0xA", name="Brio 501"))
+    assert rec.enum == 1
+    live = {3: _identity("avf:0xA", name="Brio 501")}
+    assert resolve_enum_to_index(1, reg, live) == 3
+
+
+def test_resolve_enum_to_index_unknown_enum_errors(tmp_path):
+    reg = CameraRegistry(tmp_path)
+    reg.resolve(_identity("avf:0xA", name="Brio 501"))  # enum #1
+    live = {0: _identity("avf:0xA", name="Brio 501")}
+    with pytest.raises(CameraSelectError) as exc:
+        resolve_enum_to_index(5, reg, live)
+    assert "no camera #5" in str(exc.value)
+
+
+def test_resolve_enum_to_index_disconnected_errors(tmp_path):
+    # Known enum, but the camera is not in the live identity table.
+    reg = CameraRegistry(tmp_path)
+    reg.resolve(_identity("avf:0xA", name="Brio 501"))  # enum #1
+    live = {}  # nothing connected
+    with pytest.raises(CameraSelectError) as exc:
+        resolve_enum_to_index(1, reg, live)
+    assert "not connected" in str(exc.value)
+    assert "#1" in str(exc.value)

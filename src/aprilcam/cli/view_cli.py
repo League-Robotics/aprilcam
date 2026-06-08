@@ -271,7 +271,11 @@ def main(argv: list[str] | None = None) -> int:
         prog="aprilcam view",
         description="Open a live view window fed by the AprilCam daemon",
     )
-    parser.add_argument("camera", metavar="CAMERA", help="Camera name or integer index")
+    parser.add_argument(
+        "camera",
+        metavar="CAMERA",
+        help="Camera name or number (the # shown by `aprilcam cameras`)",
+    )
     parser.add_argument(
         "--unix-path",
         default=None,
@@ -294,6 +298,12 @@ def main(argv: list[str] | None = None) -> int:
     from aprilcam.client.control import DaemonControl
     from aprilcam.core.playfield import PlayfieldBoundary
     from aprilcam.ui.display import PlayfieldDisplay
+    from aprilcam.camera.identity import resolve_all
+    from aprilcam.camera.registry import (
+        CameraRegistry,
+        CameraSelectError,
+        resolve_enum_to_index,
+    )
 
     config = Config.load()
     dc = DaemonControl.connect_default(
@@ -306,7 +316,17 @@ def main(argv: list[str] | None = None) -> int:
     try:
         camera_arg = args.camera
         try:
-            cam_index = int(camera_arg)
+            # An integer CAMERA is the stable enumeration number shown by
+            # `aprilcam cameras` — resolve it to the live OS index before
+            # opening, so the number the user types matches the listing.
+            enum_no = int(camera_arg)
+            registry = CameraRegistry(config.cameras_dir)
+            try:
+                cam_index = resolve_enum_to_index(enum_no, registry, resolve_all())
+            except CameraSelectError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                dc.close()
+                return 1
             cam_name, _camera_dir = dc.open_camera(cam_index)
         except ValueError:
             # camera_arg is a name, not an index — verify it is open

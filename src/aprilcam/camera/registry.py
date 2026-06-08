@@ -388,3 +388,70 @@ def _now_iso() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Enumeration-number → live OS index resolution (user-facing camera selector)
+# ---------------------------------------------------------------------------
+
+
+class CameraSelectError(Exception):
+    """Raised when an enumeration number cannot be resolved to a live camera.
+
+    Carries a human-readable message suitable for printing to the CLI user
+    (e.g. ``"no camera #5"`` or ``"camera #5 is not connected"``).
+    """
+
+
+def resolve_enum_to_index(
+    enum_no: int,
+    registry: "CameraRegistry",
+    live_identities: Dict[int, CameraIdentity],
+) -> int:
+    """Resolve a user-facing enumeration number to a live OS camera index.
+
+    The enumeration number is the stable, user-facing handle printed by
+    ``aprilcam cameras`` (the ``enum`` field on a :class:`CameraRecord`). This
+    maps it to the OS index the camera is *currently* connected at:
+
+    1. Find the :class:`CameraRecord` whose ``enum`` equals ``enum_no``.
+    2. Take that record's ``unique_id`` and match it against ``live_identities``
+       (the ``{os_index: CameraIdentity}`` table for currently-connected
+       cameras, as returned by
+       :func:`aprilcam.camera.identity.resolve_all`).
+    3. Return the live OS ``index`` for that ``unique_id``.
+
+    Parameters
+    ----------
+    enum_no:
+        The enumeration number the user typed (the ``#`` shown by
+        ``aprilcam cameras``).
+    registry:
+        The :class:`CameraRegistry` to look the enumeration number up in.
+    live_identities:
+        ``{os_index: CameraIdentity}`` for currently-connected cameras.
+
+    Returns
+    -------
+    int
+        The live OS index for the camera with that enumeration number.
+
+    Raises
+    ------
+    CameraSelectError
+        If no record carries that enumeration number (``"no camera #N"``), or
+        the camera is known but not currently connected
+        (``"camera #N is not connected"``).
+    """
+    record: Optional[CameraRecord] = next(
+        (r for r in registry.records() if r.enum == enum_no), None
+    )
+    if record is None:
+        raise CameraSelectError(f"no camera #{enum_no}")
+
+    for index, identity in live_identities.items():
+        if identity.unique_id == record.unique_id:
+            return index
+
+    name = record.name or record.dir or record.unique_id
+    raise CameraSelectError(f"camera #{enum_no} ({name}) is not connected")

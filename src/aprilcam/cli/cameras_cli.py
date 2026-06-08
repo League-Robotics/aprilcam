@@ -38,17 +38,25 @@ def _live_identity_by_uid(cams: List[CameraInfo]) -> Dict[str, CameraInfo]:
 
 
 def _render_registry(
-    records: List[CameraRecord], live_by_uid: Dict[str, CameraInfo]
+    records: List[CameraRecord],
+    live_by_uid: Dict[str, CameraInfo],
+    *,
+    details: bool = False,
 ) -> None:
     """Print every registered camera with its enumeration number.
 
+    Exactly ONE number is printed per camera: its **enumeration number** — the
+    stable, user-facing handle a user types into ``aprilcam view`` /
+    ``aprilcam calibrate`` to select that camera. The volatile OS index is no
+    longer shown by default; it appears (in brackets) only under ``--details``
+    for debugging.
+
     ``records`` only ever contains cameras that have actually connected at
     least once (the registry no longer fabricates entries for never-connected
-    on-disk dirs — ticket 011-003). Connected cameras (those whose
-    ``unique_id`` is in ``live_by_uid``) show their current OS index;
-    previously-connected-but-now-disconnected cameras are rendered grayed-out
-    (ANSI dim, via ``rich``) and marked offline. Records are ordered by
-    enumeration number so numbers stay stable in the listing.
+    on-disk dirs — ticket 011-003). Previously-connected-but-now-disconnected
+    cameras are rendered grayed-out (ANSI dim, via ``rich``) and marked
+    offline. Records are ordered by enumeration number so the numbers stay
+    stable in the listing.
     """
     from rich.console import Console
     from rich.text import Text
@@ -58,18 +66,27 @@ def _render_registry(
     def _sort_key(rec: CameraRecord):
         return (rec.enum is None, rec.enum if rec.enum is not None else 0)
 
-    for rec in sorted(records, key=_sort_key):
+    sorted_records = sorted(records, key=_sort_key)
+    # Right-align the enumeration number column based on the widest number.
+    width = max(
+        (len(str(r.enum)) for r in sorted_records if r.enum is not None),
+        default=1,
+    )
+
+    for rec in sorted_records:
         live = live_by_uid.get(rec.unique_id)
         enum = rec.enum if rec.enum is not None else "?"
         name = rec.name or rec.dir or rec.unique_id
+        num = f"{enum!s:>{width}}"
         if live is not None:
             line = Text()
-            line.append(f"  #{enum} ")
-            line.append(f"[{live.index}] ", style="bold")
+            line.append(f"  {num}  ", style="bold")
             line.append(str(name))
+            if details:
+                line.append(f"  [os index {live.index}]", style="dim")
             console.print(line)
         else:
-            line = Text(f"  #{enum} [offline] {name}", style="dim")
+            line = Text(f"  {num}  {name} (offline)", style="dim")
             console.print(line)
 
 
@@ -77,10 +94,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="cameras",
         description=(
-            "List cameras from the persistent registry. Connected cameras show "
-            "their current OS index and enumeration number; previously-seen "
-            "cameras that are now disconnected are shown grayed-out as offline "
-            "while retaining their enumeration number. Identity is keyed on a "
+            "List cameras from the persistent registry. Each camera shows ONE "
+            "number — its stable enumeration number, which is the number you "
+            "type into `aprilcam view` / `aprilcam calibrate` to select it. "
+            "Previously-seen cameras that are now disconnected are shown "
+            "grayed-out as offline while retaining their enumeration number. "
+            "Use --details to also show the volatile OS index. Identity is "
+            "keyed on a "
             "stable hardware id; for cameras without a serial/UUID the id is "
             "derived from the USB location path, so moving such a camera to a "
             "different USB port may make it appear as a new camera. On macOS, "
@@ -93,7 +113,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--pattern", type=str, help="Pattern to match camera name (overrides .env CAMERA)")
     parser.add_argument("--quiet", action="store_true", default=True, help="Reduce OpenCV logging noise (default: on)")
     parser.add_argument("--verbose", action="store_true", help="Show OpenCV warnings during camera probing")
-    parser.add_argument("--details", action="store_true", help="On macOS, use ffmpeg avfoundation names if available")
+    parser.add_argument("--details", action="store_true", help="Show the volatile OS index alongside each camera; on macOS also use ffmpeg avfoundation names if available")
     parser.add_argument("--stop-after-failures", type=int, default=4, help="Per-backend consecutive failure cutoff to reduce noise (default 4)")
     args = parser.parse_args(argv)
 
@@ -170,7 +190,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     print("Cameras:")
     if records:
-        _render_registry(records, live_by_uid)
+        _render_registry(records, live_by_uid, details=bool(args.details))
     else:
         # Fallback: no registry available — list the live devices directly.
         av_names = macos_avfoundation_device_names() if args.details else {}

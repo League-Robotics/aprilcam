@@ -2,7 +2,7 @@
 
 Usage:
     aprilcam calibrate                     # re-calibrate all cameras in calibration.json
-    aprilcam calibrate 0 2                 # calibrate cameras at index 0 and 2
+    aprilcam calibrate 1 3                 # calibrate camera #1 and #3 (the numbers shown by `aprilcam cameras`)
     aprilcam calibrate "Global Shutter"    # calibrate by name pattern
     aprilcam calibrate --width 101 --height 89   # override field dimensions
 """
@@ -100,8 +100,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "cameras",
         nargs="*",
-        help="Camera indices or name patterns to calibrate. "
-        "If omitted, re-calibrates all cameras in calibration.json.",
+        help="Camera numbers (the # shown by `aprilcam cameras`) or name "
+        "patterns to calibrate. If omitted, re-calibrates all cameras in "
+        "calibration.json.",
     )
     parser.add_argument(
         "--width",
@@ -166,13 +167,35 @@ def main(argv: Optional[List[str]] = None) -> int:
     available = list_cameras()
 
     if args.cameras:
+        from ..camera.identity import resolve_all
+        from ..camera.registry import (
+            CameraRegistry,
+            CameraSelectError,
+            resolve_enum_to_index,
+        )
+
+        registry = CameraRegistry(cameras_dir)
+        live_identities = resolve_all()
+
         for spec in args.cameras:
             if spec.lstrip("-").isdigit():
-                print(
-                    f"  WARNING: '{spec}' is a numeric index — camera indices change when "
-                    f"devices are plugged/unplugged. Use a name pattern instead "
-                    f"(e.g. 'Global Shutter', 'Arducam')."
+                # A numeric spec is the stable enumeration number shown by
+                # `aprilcam cameras` — resolve it to the live OS index. (The
+                # old volatile-OS-index warning no longer applies: the
+                # enumeration number is stable across plug/unplug.)
+                try:
+                    idx = resolve_enum_to_index(
+                        int(spec), registry, live_identities
+                    )
+                except CameraSelectError as exc:
+                    print(f"  {exc}, skipping.")
+                    continue
+                label = next(
+                    (c.device_name or c.name for c in available if c.index == idx),
+                    f"Camera {idx}",
                 )
+                camera_indices.append((idx, label))
+                continue
             idx = select_camera_by_pattern(spec, available)
             if idx is not None:
                 label = next((c.device_name or c.name for c in available if c.index == idx), f"Camera {idx}")
