@@ -21,6 +21,10 @@ dist/
 build/
 .pytest_cache/
 
+# Daemon runtime log (not source — should never be tracked)
+data/aprilcam/aprilcamd.log
+*.log
+
 
 *.mov
 .env
