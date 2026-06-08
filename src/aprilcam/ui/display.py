@@ -61,17 +61,15 @@ class PlayfieldDisplay:
         poly = self.playfield.get_polygon()
         if not self.deskew_overlay or poly is None or self.M_deskew is not None:
             return
-        UL, UR, LR, LL = poly.astype(np.float32)
-        w_top = float(np.linalg.norm(UR - UL))
-        w_bottom = float(np.linalg.norm(LR - LL))
-        h_left = float(np.linalg.norm(LL - UL))
-        h_right = float(np.linalg.norm(LR - UR))
-        out_w = max(10, int(round(max(w_top, w_bottom))))
-        out_h = max(10, int(round(max(h_left, h_right))))
-        src = np.array([UL, UR, LR, LL], dtype=np.float32)
-        dst = np.array([[0, 0], [out_w - 1, 0], [out_w - 1, out_h - 1], [0, out_h - 1]], dtype=np.float32)
-        self.M_deskew = cv.getPerspectiveTransform(src, dst)
-        self.deskew_size = (out_w, out_h)
+        # Single-source the warp math: the playfield builds the metric
+        # top-down transform (W×H × px_per_cm) via calibration.geometry, or
+        # falls back to the legacy edge-length pixel rectangle when no saved
+        # dimensions exist. Because get_polygon() may be seeded from saved
+        # geometry, this engages without live ArUco corners.
+        transform = self.playfield.deskew_transform()
+        if transform is None:
+            return
+        self.M_deskew, self.deskew_size = transform
 
     def prepare_display(self, frame: np.ndarray) -> np.ndarray:
         # Reset mode by default

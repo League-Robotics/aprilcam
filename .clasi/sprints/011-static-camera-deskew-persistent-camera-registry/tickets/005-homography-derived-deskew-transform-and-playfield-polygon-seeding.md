@@ -1,9 +1,11 @@
 ---
 id: '005'
 title: Homography-derived deskew transform and Playfield polygon seeding
-status: open
-use-cases: [SUC-001]
-depends-on: ['004']
+status: in-progress
+use-cases:
+- SUC-001
+depends-on:
+- '004'
 github-issue: ''
 issue: static-camera-deskew-from-homography.md
 completes_issue: false
@@ -61,26 +63,26 @@ build on this.
 
 ## Acceptance Criteria
 
-- [ ] `corner_pixels_from_homography` returns the four playfield-corner pixels
+- [x] `corner_pixels_from_homography` returns the four playfield-corner pixels
   for a known homography; verified against a synthetic `H` round-trip.
-- [ ] `metric_deskew_matrix` maps the source polygon to a metric top-down
+- [x] `metric_deskew_matrix` maps the source polygon to a metric top-down
   rectangle: a polygon whose source maps to a known `W×H` warps so that world
   corners land at `(0,0),(W·px_per_cm,0),(W·px_per_cm,H·px_per_cm),
   (0,H·px_per_cm)` within tolerance.
-- [ ] The deskewed output dimensions are a deterministic function of `W×H` and
+- [x] The deskewed output dimensions are a deterministic function of `W×H` and
   `px_per_cm`, i.e. `(round(W·px_per_cm), round(H·px_per_cm))`, independent of
   the source polygon edge lengths.
-- [ ] `px_per_cm` has a sensible default (chosen so the deskewed output is
+- [x] `px_per_cm` has a sensible default (chosen so the deskewed output is
   roughly the source resolution) and is overridable.
-- [ ] With a saved calibration (homography + dimensions), `PlayfieldBoundary`
+- [x] With a saved calibration (homography + dimensions), `PlayfieldBoundary`
   reports a non-`None` polygon before any live frame is processed.
-- [ ] `_update_deskew`/`deskew`/`get_deskew_matrix` use the shared metric-warp
+- [x] `_update_deskew`/`deskew`/`get_deskew_matrix` use the shared metric-warp
   helper; no duplicated warp math remains.
-- [ ] A fixed camera with a saved calibration deskews with **no** ArUco corner
+- [x] A fixed camera with a saved calibration deskews with **no** ArUco corner
   in the live stream (simulated: seeded polygon, no live corners fed).
-- [ ] Deskew falls back to the live-corner polygon path when no saved
+- [x] Deskew falls back to the live-corner polygon path when no saved
   homography exists.
-- [ ] `uv run pytest` passes.
+- [x] `uv run pytest` passes.
 
 ## Implementation Plan
 

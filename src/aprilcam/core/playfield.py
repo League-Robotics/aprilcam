@@ -28,6 +28,15 @@ class PlayfieldBoundary:
     deadband_threshold: float = 50.0
     corner_detect_interval: int = 30
 
+    # Saved-geometry (static-camera) seeding inputs. When a homography and
+    # physical dimensions are supplied, the polygon is seeded up front from
+    # H⁻¹-derived corners (no live ArUco detection required) and the metric
+    # deskew rectangle is sized from W×H × px_per_cm.
+    homography: Optional[np.ndarray] = None
+    width_cm: float = 0.0
+    height_cm: float = 0.0
+    px_per_cm: float = 0.0  # 0 → use geometry.DEFAULT_PX_PER_CM
+
     _poly: Optional[np.ndarray] = field(default=None, init=False, repr=False)
     _flows: Dict[int, AprilTagFlow] = field(default_factory=dict, init=False, repr=False)
     _vel_ema: Dict[int, float] = field(default_factory=dict, init=False, repr=False)
@@ -38,7 +47,21 @@ class PlayfieldBoundary:
     def __post_init__(self):
         if self.polygon is not None:
             self._poly = np.asarray(self.polygon, dtype=np.float32).reshape(4, 2)
+        elif self.homography is not None and self.width_cm > 0 and self.height_cm > 0:
+            # Static-camera path: seed the polygon from saved geometry so
+            # get_polygon() is non-None before any live frame is processed.
+            from ..calibration.geometry import corner_pixels_from_homography
+            try:
+                self._poly = corner_pixels_from_homography(
+                    self.homography, self.width_cm, self.height_cm
+                )
+            except Exception:
+                self._poly = None
         self._aruco_detector = self._build_aruco4_detector()
+
+    def _effective_px_per_cm(self) -> float:
+        from ..calibration.geometry import DEFAULT_PX_PER_CM
+        return self.px_per_cm if self.px_per_cm > 0 else DEFAULT_PX_PER_CM
 
     def _build_aruco4_detector(self):
         d = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_4X4_50)
@@ -146,9 +169,27 @@ class PlayfieldBoundary:
         except Exception:
             pass
 
-    def deskew(self, frame_bgr: np.ndarray) -> np.ndarray:
+    def deskew_transform(self) -> Optional[Tuple[np.ndarray, Tuple[int, int]]]:
+        """Return ``(M, (out_w, out_h))`` for the current playfield polygon.
+
+        When physical dimensions are known (saved-geometry / static-camera
+        path), this produces a **metric** top-down rectangle of size
+        ``(round(W·px_per_cm), round(H·px_per_cm))`` via the shared
+        :func:`calibration.geometry.metric_deskew_matrix` helper. When only a
+        live-corner polygon is available (no saved W×H), it falls back to the
+        legacy polygon-edge-length pixel rectangle.
+
+        Returns ``None`` when no polygon is available.
+        """
         if self._poly is None:
-            return frame_bgr
+            return None
+        if self.width_cm > 0 and self.height_cm > 0:
+            from ..calibration.geometry import metric_deskew_matrix
+            return metric_deskew_matrix(
+                self._poly, self.width_cm, self.height_cm, self._effective_px_per_cm()
+            )
+        # Fallback: size the rectangle from polygon edge lengths (live-corner
+        # path with no saved dimensions).
         UL, UR, LR, LL = self._poly.astype(np.float32)
         w_top = float(np.linalg.norm(UR - UL))
         w_bottom = float(np.linalg.norm(LR - LL))
@@ -157,8 +198,19 @@ class PlayfieldBoundary:
         out_w = max(10, int(round(max(w_top, w_bottom))))
         out_h = max(10, int(round(max(h_left, h_right))))
         src = np.array([UL, UR, LR, LL], dtype=np.float32)
-        dst = np.array([[0, 0], [out_w - 1, 0], [out_w - 1, out_h - 1], [0, out_h - 1]], dtype=np.float32)
+        dst = np.array(
+            [[0, 0], [out_w, 0], [out_w, out_h], [0, out_h]], dtype=np.float32
+        )
         M = cv.getPerspectiveTransform(src, dst)
+        return M, (out_w, out_h)
+
+    def deskew(self, frame_bgr: np.ndarray) -> np.ndarray:
+        if self._poly is None:
+            return frame_bgr
+        transform = self.deskew_transform()
+        if transform is None:
+            return frame_bgr
+        M, (out_w, out_h) = transform
         # Mask source to playfield polygon so outside pixels don't bleed in
         mask = np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
         cv.fillConvexPoly(mask, self._poly.astype(np.int32), 255)
@@ -167,18 +219,8 @@ class PlayfieldBoundary:
 
     def get_deskew_matrix(self) -> np.ndarray | None:
         """Return the 3x3 perspective transform used by :meth:`deskew`, or ``None``."""
-        if self._poly is None:
-            return None
-        UL, UR, LR, LL = self._poly.astype(np.float32)
-        w_top = float(np.linalg.norm(UR - UL))
-        w_bottom = float(np.linalg.norm(LR - LL))
-        h_left = float(np.linalg.norm(LL - UL))
-        h_right = float(np.linalg.norm(LR - UR))
-        out_w = max(10, int(round(max(w_top, w_bottom))))
-        out_h = max(10, int(round(max(h_left, h_right))))
-        src = np.array([UL, UR, LR, LL], dtype=np.float32)
-        dst = np.array([[0, 0], [out_w - 1, 0], [out_w - 1, out_h - 1], [0, out_h - 1]], dtype=np.float32)
-        return cv.getPerspectiveTransform(src, dst)
+        transform = self.deskew_transform()
+        return None if transform is None else transform[0]
 
     # --- tag flow integration ---
     def add_tag(self, tag: AprilTag, homography: Optional[np.ndarray] = None) -> None:
@@ -289,6 +331,7 @@ class Playfield:
         proc_width: int = 960,
         detect_interval: int = 3,
         data_dir: str = "data",
+        px_per_cm: float = 0.0,
     ) -> None:
         from .detector import TagDetector, DetectorConfig
         from .tracker import OpticalFlowTracker
@@ -300,16 +343,21 @@ class Playfield:
         self._height_cm = height_cm
         self._calibration = calibration
         self._data_dir = data_dir
+        self._px_per_cm = px_per_cm
 
         # Homography is loaded eagerly only when an explicit path is provided.
         # When calibration=="auto", discovery is deferred to start() so that
         # the camera is already open and device_name/resolution are available.
         self._homography: Optional[np.ndarray] = None
+        self._corner_pixels: Optional[np.ndarray] = None
         if calibration not in ("auto", None):
             self._homography = self._load_homography(calibration)
+            self._corner_pixels = self._load_corner_pixels(calibration)
 
-        # Internal components
+        # Internal components. When a homography is known up front, seed the
+        # boundary geometry so its polygon is non-None before any live frame.
         self._boundary = PlayfieldBoundary(proc_width=proc_width)
+        self._seed_boundary_geometry()
         self._detector = TagDetector(DetectorConfig(family=family, proc_width=proc_width))
         self._tracker = OpticalFlowTracker(detect_interval=detect_interval)
         self._ring_buffer = RingBuffer()
@@ -438,6 +486,9 @@ class Playfield:
             if self._homography is not None:
                 # Propagate the discovered homography into the running pipeline.
                 self._pipeline._homography = self._homography
+                # Seed boundary geometry so deskew engages from saved corners
+                # (or H⁻¹-derived corners) without live ArUco detection.
+                self._seed_boundary_geometry()
         self._pipeline.start()
 
     def stop(self) -> None:
@@ -502,10 +553,34 @@ class Playfield:
             from ..calibration.homography import discover_homography
             found = discover_homography(device_name, width, height, self._data_dir)
             if found is not None:
-                return self._load_homography(str(found))
+                H = self._load_homography(str(found))
+                if H is not None:
+                    # Also capture saved geometry (corner pixels + dimensions)
+                    # for boundary seeding. Dimensions fall back to the
+                    # constructor values when absent from the record.
+                    self._corner_pixels = self._load_corner_pixels(str(found))
+                    self._load_dimensions_into_self(str(found))
+                return H
         except Exception:
             pass
         return None
+
+    def _load_dimensions_into_self(self, path: str) -> None:
+        """Update ``self._width_cm`` / ``self._height_cm`` from a record's
+        ``playfield: {width, height}`` block when present."""
+        import json
+        from pathlib import Path
+        try:
+            data = json.loads(Path(path).read_text())
+            pf = data.get("playfield", {}) or {}
+            w = pf.get("width") or data.get("field_width_cm")
+            h = pf.get("height") or data.get("field_height_cm")
+            if w:
+                self._width_cm = float(w)
+            if h:
+                self._height_cm = float(h)
+        except Exception:
+            pass
 
     def _auto_discover_homography_from_camera(self) -> Optional[np.ndarray]:
         """Open the camera (if not already open), read device_name and resolution,
@@ -545,4 +620,51 @@ class Playfield:
         except Exception:
             pass
         return None
+
+    def _load_corner_pixels(self, path: str) -> Optional[np.ndarray]:
+        """Load saved ``corner_pixels`` (UL/UR/LR/LL) from a calibration file.
+
+        Returns a ``(4, 2)`` float32 array, or ``None`` when absent. When the
+        record only carries a homography + dimensions, the boundary derives the
+        corners from ``H⁻¹`` instead (see :meth:`_seed_boundary_geometry`).
+        """
+        import json
+        from pathlib import Path
+        try:
+            data = json.loads(Path(path).read_text())
+            cp = data.get("corner_pixels")
+            if cp is not None:
+                arr = np.asarray(cp, dtype=np.float32).reshape(4, 2)
+                return arr
+        except Exception:
+            pass
+        return None
+
+    def _seed_boundary_geometry(self) -> None:
+        """Seed the boundary's deskew geometry from saved calibration.
+
+        Propagates the homography, physical dimensions, and (when present) the
+        saved corner pixels into the :class:`PlayfieldBoundary` so its polygon
+        is non-``None`` before any live frame. When only a homography exists,
+        the boundary derives the four corners via ``H⁻¹``. A no-op when no
+        homography is available (the live-corner path remains the fallback).
+        """
+        b = self._boundary
+        b.homography = self._homography
+        b.width_cm = self._width_cm
+        b.height_cm = self._height_cm
+        b.px_per_cm = self._px_per_cm
+        if self._homography is None:
+            return
+        if self._corner_pixels is not None:
+            b.polygon = self._corner_pixels
+            b._poly = np.asarray(self._corner_pixels, dtype=np.float32).reshape(4, 2)
+        elif self._width_cm > 0 and self._height_cm > 0:
+            from ..calibration.geometry import corner_pixels_from_homography
+            try:
+                b._poly = corner_pixels_from_homography(
+                    self._homography, self._width_cm, self._height_cm
+                )
+            except Exception:
+                pass
 
