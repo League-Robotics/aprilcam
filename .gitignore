@@ -25,6 +25,9 @@ build/
 data/aprilcam/aprilcamd.log
 *.log
 
+# Camera registry — machine-specific (hardware unique IDs); runtime state
+data/aprilcam/cameras/registry.json
+
 
 *.mov
 .env
