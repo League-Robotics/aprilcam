@@ -1,9 +1,12 @@
 ---
 id: '006'
 title: Static-marker fill-in and movement-invalidation
-status: open
-use-cases: [SUC-002, SUC-003]
-depends-on: ['005']
+status: in-progress
+use-cases:
+- SUC-002
+- SUC-003
+depends-on:
+- '005'
 github-issue: ''
 issue: static-camera-deskew-from-homography.md
 completes_issue: false
@@ -40,17 +43,17 @@ are excluded from the static hold set.
 
 ## Acceptance Criteria
 
-- [ ] A static marker missing from a frame retains its stored pixel position;
+- [x] A static marker missing from a frame retains its stored pixel position;
   the polygon/static set remains stable across the gap.
-- [ ] Dynamic (robot-mounted) AprilTags (ID ≠ 1) are tracked frame-by-frame and
+- [x] Dynamic (robot-mounted) AprilTags (ID ≠ 1) are tracked frame-by-frame and
   are never held at a stored position.
-- [ ] When a live static-marker position disagrees with its stored position
+- [x] When a live static-marker position disagrees with its stored position
   beyond the threshold, the static assumption is dropped and a warning is
   surfaced (log + a queryable flag).
-- [ ] AprilTag 1 triggers invalidation even when corner markers are occluded.
-- [ ] The static set and threshold are configurable; the static set defaults to
+- [x] AprilTag 1 triggers invalidation even when corner markers are occluded.
+- [x] The static set and threshold are configurable; the static set defaults to
   `aruco_corners + apriltag:1`.
-- [ ] `uv run pytest` passes.
+- [x] `uv run pytest` passes.
 
 ## Implementation Plan
 

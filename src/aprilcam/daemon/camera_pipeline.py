@@ -247,12 +247,24 @@ class CameraPipeline:
             **pipeline_cfg,
         )
 
+        # Seed static-camera geometry (corner pixels + static markers) into the
+        # AprilCam playfield boundary so static-mode fill-in / movement
+        # invalidation activate when the saved calibration carries them.
+        self._seed_static_geometry()
+
         # Determine frame size
         frame_w = int(cap.get(cv.CAP_PROP_FRAME_WIDTH))
         frame_h = int(cap.get(cv.CAP_PROP_FRAME_HEIGHT))
 
+        # Track the stale-calibration flag last written to info.json so the
+        # capture loop only rewrites the file when it flips.
+        self._last_stale_written: bool = False
+
         # Write info.json
         self._write_info_json(frame_w, frame_h, homography, device_name)
+        self._info_frame_size = (frame_w, frame_h)
+        self._info_device_name = device_name
+        self._info_homography = homography
 
         # Start capture thread
         self._stop_event.clear()
@@ -371,6 +383,58 @@ class CameraPipeline:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _seed_static_geometry(self) -> None:
+        """Seed the AprilCam playfield boundary for static-camera mode.
+
+        Copies the calibration record's ``corner_pixels`` / ``static_markers`` /
+        ``static_marker_ids`` and physical dimensions into the boundary so its
+        polygon is non-``None`` before any live frame and static-marker fill-in
+        / movement-invalidation (ticket 006) activate.  A no-op when the
+        calibration carries no static markers (live-corner path is preserved).
+        """
+        if self._april_cam is None or self._calibration is None:
+            return
+        cal = self._calibration
+        boundary = self._april_cam.playfield
+        boundary.homography = cal.homography
+        boundary.width_cm = cal.playfield_width_cm
+        boundary.height_cm = cal.playfield_height_cm
+        if cal.static_marker_ids is not None:
+            boundary.static_marker_ids = list(cal.static_marker_ids)
+        if cal.static_markers:
+            seeded = {
+                str(key): (float(rec["pixel"][0]), float(rec["pixel"][1]))
+                for key, rec in cal.static_markers.items()
+                if rec.get("pixel") and len(rec["pixel"]) >= 2
+            }
+            if seeded:
+                boundary.static_markers = seeded
+                boundary._held_static = dict(seeded)
+        if cal.corner_pixels is not None:
+            try:
+                boundary._poly = np.asarray(
+                    cal.corner_pixels, dtype=np.float32
+                ).reshape(4, 2)
+            except Exception:
+                pass
+
+    def _maybe_update_stale_flag(self) -> None:
+        """Rewrite info.json if the boundary's stale-calibration flag flipped.
+
+        The movement-invalidation flag lives on the playfield boundary; the
+        daemon surfaces it to clients through the per-camera ``info.json``.  Only
+        rewrites when the flag changes to avoid per-frame disk churn.
+        """
+        if self._april_cam is None:
+            return
+        boundary = self._april_cam.playfield
+        stale = bool(getattr(boundary, "calibration_stale", False))
+        if stale == self._last_stale_written:
+            return
+        self._last_stale_written = stale
+        fw, fh = self._info_frame_size
+        self._write_info_json(fw, fh, self._info_homography, self._info_device_name)
+
     def _write_info_json(
         self,
         frame_w: int,
@@ -382,8 +446,15 @@ class CameraPipeline:
         cam_dir = self.config.cameras_dir / self.cam_name
         cam_dir.mkdir(parents=True, exist_ok=True)
 
+        # Surface the movement-invalidation flag from the playfield boundary so
+        # clients can tell when the static deskew transform has gone stale.
+        stale = False
+        if self._april_cam is not None:
+            stale = bool(getattr(self._april_cam.playfield, "calibration_stale", False))
+
         info = {
             "paths_file": str(cam_dir / "paths.json"),
+            "calibration_stale": stale,
         }
         dest = cam_dir / "info.json"
         tmp = cam_dir / "info.json.tmp"
@@ -518,6 +589,10 @@ class CameraPipeline:
                     "CameraPipeline(%s): process_frame error", self.cam_name
                 )
                 tag_records = []
+
+            # Surface movement-invalidation: if the boundary flagged the static
+            # calibration stale this frame, reflect it in info.json.
+            self._maybe_update_stale_flag()
 
             # Translate world_xy to A1-centred coords and apply parallax correction.
             if self._calibration and (

@@ -46,6 +46,16 @@ except Exception:  # pragma: no cover - exercised only when cv2 is absent
 # down-sampling aggressively. Override per call (or via config) as needed.
 DEFAULT_PX_PER_CM: float = 10.0
 
+# Default movement-invalidation threshold, in source pixels.
+#
+# When a static reference marker (ArUco corner or AprilTag 1) is detected live
+# but its pixel position has drifted from the stored calibration-time position
+# by more than this many pixels, the camera is assumed to have moved and the
+# static-deskew assumption is invalidated.  Chosen large enough to absorb
+# per-frame detection jitter / sub-pixel wobble, small enough to catch a real
+# bump.  Override per :class:`PlayfieldBoundary` (or via config) as needed.
+DEFAULT_MOVEMENT_THRESHOLD_PX: float = 25.0
+
 
 def _world_corners(width_cm: float, height_cm: float) -> np.ndarray:
     """Return the four world corners (cm) in UL, UR, LR, LL order."""
