@@ -1,7 +1,7 @@
 ---
 id: '002'
 title: Enumeration numbers, reconnect reuse, and data-dir migration
-status: in-progress
+status: done
 use-cases:
 - SUC-006
 depends-on:
