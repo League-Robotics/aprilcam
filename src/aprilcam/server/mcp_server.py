@@ -26,7 +26,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
 from typing import Any, Optional
 
@@ -142,6 +142,35 @@ class PlayfieldEntry:
     playfield: Playfield
     field_spec: Optional[FieldSpec] = None
     homography: Optional[np.ndarray] = None
+    tag1_origin_cm: Optional[tuple] = None  # (x, y) raw world position of tag 1
+
+
+def _get_playfield_origin(entry: "PlayfieldEntry") -> tuple:
+    """Return (origin_x, origin_y) for A1-centred coordinate conversion.
+
+    Uses tag 1's calibrated world position when available (from stored
+    static_markers), otherwise falls back to the field-centre.
+    """
+    if entry.tag1_origin_cm is not None:
+        return entry.tag1_origin_cm
+    if entry.field_spec is not None:
+        return (entry.field_spec.width_cm / 2.0, entry.field_spec.height_cm / 2.0)
+    return (0.0, 0.0)
+
+
+def _a1_coord_transform(origin_x: float, origin_y: float):
+    """Return a tag-record transform that applies A1-centred coordinate conversion."""
+    def _transform(tag_records):
+        result = []
+        for tr in tag_records:
+            if tr.world_xy is None:
+                result.append(tr)
+            else:
+                wx = tr.world_xy[0] - origin_x
+                wy = origin_y - tr.world_xy[1]
+                result.append(_dc_replace(tr, world_xy=(wx, wy)))
+        return result
+    return _transform
 
 
 class DaemonCapture:
@@ -700,12 +729,18 @@ def _handle_create_playfield(
         if existing:
             playfield_registry.remove(existing)
 
+        tag1_origin_cm = None
+        if stored_cal is not None and stored_cal.static_markers:
+            m = stored_cal.static_markers.get("apriltag:1")
+            if m and m.get("world") and len(m["world"]) >= 2:
+                tag1_origin_cm = (float(m["world"][0]), float(m["world"][1]))
         entry = PlayfieldEntry(
             playfield_id=playfield_id,
             camera_id=camera_id,
             playfield=pf,
             homography=stored_H,
             field_spec=FieldSpec(stored_field_w, stored_field_h, "cm") if stored_field_w else None,
+            tag1_origin_cm=tag1_origin_cm,
         )
         # Inject the polygon from calibration if tag detection failed
         if stored_cal is not None:
@@ -941,7 +976,16 @@ def _handle_start_detection(
         )
 
         buf = RingBuffer(maxlen=300)
-        loop = DetectionLoop(source=cap, aprilcam=cam, ring_buffer=buf)
+        coord_transform = None
+        try:
+            _pf = playfield_registry.get(source_id)
+            ox, oy = _get_playfield_origin(_pf)
+            if ox != 0.0 or oy != 0.0:
+                coord_transform = _a1_coord_transform(ox, oy)
+        except KeyError:
+            pass
+        loop = DetectionLoop(source=cap, aprilcam=cam, ring_buffer=buf,
+                             coord_transform=coord_transform)
         loop.start()
 
         detection_registry[source_id] = DetectionEntry(
@@ -1057,9 +1101,7 @@ def _handle_get_tags(source_id: str) -> dict:
             try:
                 pf_entry = playfield_registry.get(source_id)
                 homography = pf_entry.homography
-                if pf_entry.field_spec is not None:
-                    origin_x = pf_entry.field_spec.width_cm / 2.0
-                    origin_y = pf_entry.field_spec.height_cm / 2.0
+                origin_x, origin_y = _get_playfield_origin(pf_entry)
             except KeyError:
                 pass
             for tag in result.get("tags", []):
@@ -1086,9 +1128,7 @@ def _handle_pixel_to_world(
         try:
             pf_entry = playfield_registry.get(source_id)
             homography = pf_entry.homography
-            if pf_entry.field_spec is not None:
-                origin_x = pf_entry.field_spec.width_cm / 2.0
-                origin_y = pf_entry.field_spec.height_cm / 2.0
+            origin_x, origin_y = _get_playfield_origin(pf_entry)
         except KeyError:
             pass
 
@@ -1156,9 +1196,7 @@ def _handle_get_objects(source_id: str) -> dict:
             if pf_entry.homography is not None:
                 homography = pf_entry.homography
             pf_poly = pf_entry.playfield.get_polygon()
-            if pf_entry.field_spec is not None:
-                origin_x = pf_entry.field_spec.width_cm / 2.0
-                origin_y = pf_entry.field_spec.height_cm / 2.0
+            origin_x, origin_y = _get_playfield_origin(pf_entry)
         except (KeyError, AttributeError):
             pass
 
@@ -2292,8 +2330,7 @@ async def get_composite_tags(
             try:
                 pf_entry = playfield_registry.get(comp.playfield_id)
                 if pf_entry.homography is not None:
-                    ox = pf_entry.field_spec.width_cm / 2.0 if pf_entry.field_spec else 0.0
-                    oy = pf_entry.field_spec.height_cm / 2.0 if pf_entry.field_spec else 0.0
+                    ox, oy = _get_playfield_origin(pf_entry)
                     for tag in mapped:
                         cx, cy = tag["center_px"]
                         vec = np.array([cx, cy, 1.0], dtype=np.float64)
@@ -2518,7 +2555,16 @@ async def stream_tags(
         )
 
         buf = RingBuffer(maxlen=300)
-        loop = DetectionLoop(source=cap, aprilcam=cam, ring_buffer=buf)
+        coord_transform = None
+        try:
+            _pf = playfield_registry.get(source_id)
+            ox, oy = _get_playfield_origin(_pf)
+            if ox != 0.0 or oy != 0.0:
+                coord_transform = _a1_coord_transform(ox, oy)
+        except KeyError:
+            pass
+        loop = DetectionLoop(source=cap, aprilcam=cam, ring_buffer=buf,
+                             coord_transform=coord_transform)
         loop.start()
 
         detection_registry[source_id] = DetectionEntry(

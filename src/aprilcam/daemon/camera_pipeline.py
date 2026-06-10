@@ -647,6 +647,11 @@ class CameraPipeline:
                 import dataclasses as _dc
                 origin_x = self._calibration.playfield_width_cm / 2.0
                 origin_y = self._calibration.playfield_height_cm / 2.0
+                if self._calibration.static_markers:
+                    _m = self._calibration.static_markers.get("apriltag:1")
+                    if _m and _m.get("world") and len(_m["world"]) >= 2:
+                        origin_x = float(_m["world"][0])
+                        origin_y = float(_m["world"][1])
                 corrected = []
                 for tr in tag_records:
                     if tr.world_xy is None:

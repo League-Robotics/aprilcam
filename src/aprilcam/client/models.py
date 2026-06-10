@@ -60,7 +60,7 @@ class TagRecord(BaseModel):
 
         world_xy: tuple[float, float] | None = (
             (float(msg.wx), float(msg.wy))
-            if (msg.wx != 0.0 or msg.wy != 0.0)
+            if (msg.in_playfield or msg.wx != 0.0 or msg.wy != 0.0)
             else None
         )
 
