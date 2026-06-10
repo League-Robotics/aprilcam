@@ -1,7 +1,7 @@
 ---
 id: '004'
 title: Persist reference geometry into the calibration record
-status: in-progress
+status: done
 use-cases:
 - SUC-001
 - SUC-002

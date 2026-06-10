@@ -1,7 +1,7 @@
 ---
 id: '006'
 title: Static-marker fill-in and movement-invalidation
-status: in-progress
+status: done
 use-cases:
 - SUC-002
 - SUC-003

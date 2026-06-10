@@ -1,7 +1,7 @@
 ---
 id: '005'
 title: Homography-derived deskew transform and Playfield polygon seeding
-status: in-progress
+status: done
 use-cases:
 - SUC-001
 depends-on:

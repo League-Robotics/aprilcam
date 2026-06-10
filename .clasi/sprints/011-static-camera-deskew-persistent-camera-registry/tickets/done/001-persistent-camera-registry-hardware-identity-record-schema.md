@@ -1,7 +1,7 @@
 ---
 id: '001'
 title: 'Persistent camera registry: hardware identity + record schema'
-status: in-progress
+status: done
 use-cases:
 - SUC-005
 depends-on: []
