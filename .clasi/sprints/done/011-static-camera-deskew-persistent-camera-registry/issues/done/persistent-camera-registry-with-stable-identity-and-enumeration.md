@@ -1,10 +1,10 @@
 ---
-status: in-progress
+status: done
 sprint: '011'
 tickets:
-- 011-001
-- 011-002
-- 011-003
+- '001'
+- '002'
+- '003'
 ---
 
 # Persistent camera registry with stable identity and enumeration numbers

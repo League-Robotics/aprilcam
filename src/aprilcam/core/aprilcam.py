@@ -499,13 +499,30 @@ class AprilCam:
             self.cap.set(cv.CAP_PROP_FRAME_HEIGHT, int(self.cap_height))
         return self.cap
 
-    def _update_playfield(self, frame: np.ndarray, gray: Optional[np.ndarray] = None) -> None:
+    def _update_playfield(
+        self,
+        frame: np.ndarray,
+        gray: Optional[np.ndarray] = None,
+        detections: Optional[List[Tuple[np.ndarray, np.ndarray, int, str]]] = None,
+    ) -> None:
         """Update cached playfield polygon via Playfield.
 
         Deskew is handled by PlayfieldDisplay; this only updates geometry.
+
+        In static-camera mode the boundary also needs this frame's AprilTag
+        centers (so AprilTag 1 can serve as a fill-in / movement sentinel), so
+        the current *detections* are summarised to ``{id: (cx, cy)}`` and passed
+        through.  In live-corner mode the boundary ignores them.
         """
         try:
-            self.playfield.update(frame, gray=gray)
+            apriltags: Optional[dict] = None
+            if detections:
+                apriltags = {}
+                for pts, _raw, tid, _fam in detections:
+                    if tid > 0:  # AprilTags have positive ids
+                        c = np.asarray(pts, dtype=np.float32).reshape(-1, 2).mean(axis=0)
+                        apriltags[int(tid)] = (float(c[0]), float(c[1]))
+            self.playfield.update(frame, gray=gray, apriltags=apriltags)
             poly = self.playfield.get_polygon()
             if poly is not None:
                 self.play_poly = poly.astype(np.float32)
@@ -558,8 +575,10 @@ class AprilCam:
                 self._tracks = {tid: pts for (pts, _raw, tid, _fam) in detections}
                 self._track_families = {tid: fam for (_pts, _raw, tid, fam) in detections}
 
-        # 3) Update Playfield cache (polygon) for cropping/deskew
-        self._update_playfield(frame_bgr, gray=gray)
+        # 3) Update Playfield cache (polygon) for cropping/deskew.  Pass the
+        # pre-filter detections so static-camera mode sees AprilTag sentinels
+        # (e.g. AprilTag 1) even if they would later fall outside the polygon.
+        self._update_playfield(frame_bgr, gray=gray, detections=detections)
 
         # 4) Keep only detections inside the current playfield polygon
         if detections:

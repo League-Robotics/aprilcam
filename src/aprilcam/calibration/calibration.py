@@ -16,6 +16,14 @@ import cv2 as cv
 import numpy as np
 
 
+# The default set of static (fixed) reference markers for a playfield.
+# Stakeholder-defined rule: static = all ArUco corner markers + AprilTag 1;
+# every other AprilTag is dynamic.  ``aruco_corners`` is a sentinel meaning
+# "all detected ArUco corners"; ``apriltag:N`` names a specific AprilTag id.
+# Recorded per-camera so each playfield can override the set.
+DEFAULT_STATIC_MARKER_IDS: List[str] = ["aruco_corners", "apriltag:1"]
+
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -83,6 +91,33 @@ class CameraCalibration:
     playfield_width_cm: float = 0.0
     playfield_height_cm: float = 0.0
     camera_position: Optional[CameraPosition] = None
+    corner_pixels: Optional[List[List[float]]] = None
+    """The four calibration-time ArUco corner pixel positions.
+
+    Ordered ``[UL, UR, LR, LL]`` as ``[[u, v], ...]``.  Captured at
+    calibration time and consumed by the static-camera deskew path
+    (sprint 011, ticket 005) to seed the deskew source polygon without
+    live corner detection.  ``None`` for records written before this
+    field existed.
+    """
+    static_markers: Optional[Dict[str, Dict[str, List[float]]]] = None
+    """Per-id pixel + world positions of the fixed reference markers.
+
+    Maps a string tag id to ``{"pixel": [u, v], "world": [x, y]}``.  The
+    static set is the ArUco corner markers plus AprilTag 1 (see
+    ``static_marker_ids``).  World positions are in real-world cm.  These
+    feed static-marker fill-in / movement-invalidation (sprint 011,
+    ticket 006).  ``None`` for legacy records.
+    """
+    static_marker_ids: Optional[List[str]] = None
+    """The configurable static-marker set recorded with this camera.
+
+    Defaults to ``aruco_corners + apriltag:1`` (see
+    :data:`DEFAULT_STATIC_MARKER_IDS`).  ``aruco_corners`` is a sentinel
+    meaning "all detected ArUco corner markers"; ``apriltag:N`` names a
+    specific AprilTag id.  ``None`` for legacy records.
+    """
+
     def correct_world_for_height(
         self, wx: float, wy: float, tag_height_cm: float
     ) -> tuple:
@@ -139,13 +174,66 @@ class CameraCalibration:
             d["settings"] = self.settings
         if self.pipeline is not None:
             d["pipeline"] = self.pipeline
+        # Playfield real-world dimensions (cm).  These are the metric W×H the
+        # static-camera deskew warp consumes, so they must round-trip as cm.
+        if self.playfield_width_cm or self.playfield_height_cm:
+            d["playfield"] = {
+                "width": self.playfield_width_cm,
+                "height": self.playfield_height_cm,
+            }
+        if self.corner_pixels is not None:
+            d["corner_pixels"] = [list(p) for p in self.corner_pixels]
+        if self.static_markers is not None:
+            d["static_markers"] = {
+                str(tid): {
+                    "pixel": list(m["pixel"]),
+                    "world": list(m["world"]),
+                }
+                for tid, m in self.static_markers.items()
+            }
+        if self.static_marker_ids is not None:
+            d["static_marker_ids"] = list(self.static_marker_ids)
         return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "CameraCalibration":
-        """Deserialize from a JSON-compatible dict."""
+        """Deserialize from a JSON-compatible dict.
+
+        New geometry fields (``playfield``, ``corner_pixels``,
+        ``static_markers``, ``static_marker_ids``) are optional; records
+        written before they existed load with these fields defaulting to
+        ``0.0`` / ``None``.
+        """
         cm = np.array(d["camera_matrix"], dtype=float) if "camera_matrix" in d else None
         dc = np.array(d["dist_coeffs"], dtype=float) if "dist_coeffs" in d else None
+
+        # Playfield block round-trips as real-world centimetres.  Fall back to
+        # legacy top-level field_*_cm keys when the playfield block is absent.
+        pf = d.get("playfield", {}) or {}
+        pw = float(pf.get("width") if pf.get("width") is not None
+                   else d.get("field_width_cm") or 0.0)
+        ph = float(pf.get("height") if pf.get("height") is not None
+                   else d.get("field_height_cm") or 0.0)
+
+        corner_pixels = d.get("corner_pixels")
+        if corner_pixels is not None:
+            corner_pixels = [[float(c) for c in p] for p in corner_pixels]
+
+        static_markers_raw = d.get("static_markers")
+        static_markers = None
+        if static_markers_raw is not None:
+            static_markers = {
+                str(tid): {
+                    "pixel": [float(c) for c in m["pixel"]],
+                    "world": [float(c) for c in m["world"]],
+                }
+                for tid, m in static_markers_raw.items()
+            }
+
+        static_marker_ids = d.get("static_marker_ids")
+        if static_marker_ids is not None:
+            static_marker_ids = [str(s) for s in static_marker_ids]
+
         return cls(
             device_name=d["device_name"],
             resolution=tuple(d["resolution"]),
@@ -156,6 +244,11 @@ class CameraCalibration:
             rms_error=d.get("rms_error", 0.0),
             settings=d.get("settings"),
             pipeline=d.get("pipeline"),
+            playfield_width_cm=pw,
+            playfield_height_cm=ph,
+            corner_pixels=corner_pixels,
+            static_markers=static_markers,
+            static_marker_ids=static_marker_ids,
         )
 
 
@@ -277,6 +370,7 @@ def save_calibration_to_camera_dir(
         "camera_matrix", "dist_coeffs",
         "field_width_cm", "field_height_cm",  # old keys — owned so they are dropped
         "playfield", "camera_position",
+        "corner_pixels", "static_markers", "static_marker_ids",
         "detection_fps",
     }
     preserved: dict = {}
@@ -634,6 +728,54 @@ def calibrate_from_corners(
     return H, pixel_pts, world_pts_cm
 
 
+def _build_static_markers(
+    tags: dict,
+    corner_pixels: list,
+    corner_worlds: list,
+    H: np.ndarray,
+    static_marker_ids: List[str],
+) -> Dict[str, Dict[str, List[float]]]:
+    """Build the per-id static-marker pixel+world record.
+
+    The static set is resolved from *static_marker_ids* (default
+    ``aruco_corners + apriltag:1``):
+
+    - ``aruco_corners`` — the four ArUco corner markers, recorded by their
+      *world* corner key (``"corner:UL"`` … ``"corner:LL"``) with the
+      calibration-time corner pixels and known world cm positions.
+    - ``apriltag:N`` — AprilTag id ``N`` (positive id), recorded with its
+      measured pixel position and the world position derived from *H*.
+      Skipped silently if that tag was not detected.
+
+    Returns ``{id_str: {"pixel": [u, v], "world": [x, y]}}``.  World
+    coordinates are real-world centimetres.
+    """
+    _CORNER_KEYS = ["corner:UL", "corner:UR", "corner:LR", "corner:LL"]
+    static_markers: Dict[str, Dict[str, List[float]]] = {}
+
+    for marker_id in static_marker_ids:
+        if marker_id == "aruco_corners":
+            for key, px, wp in zip(_CORNER_KEYS, corner_pixels, corner_worlds):
+                static_markers[key] = {
+                    "pixel": [float(px[0]), float(px[1])],
+                    "world": [float(wp[0]), float(wp[1])],
+                }
+        elif marker_id.startswith("apriltag:"):
+            try:
+                tid = int(marker_id.split(":", 1)[1])
+            except ValueError:
+                continue
+            if tid in tags:
+                px = tags[tid]
+                vec = H @ np.array([px[0], px[1], 1.0])
+                wx, wy = float(vec[0] / vec[2]), float(vec[1] / vec[2])
+                static_markers[marker_id] = {
+                    "pixel": [float(px[0]), float(px[1])],
+                    "world": [wx, wy],
+                }
+    return static_markers
+
+
 def calibrate_single(
     cap: cv.VideoCapture,
     field_width_cm: float = 101.0,
@@ -716,6 +858,17 @@ def calibrate_single(
 
     rms = _reprojection_rms(H, pts_for_rms, all_world)
 
+    # Capture the reference geometry the static-camera deskew path needs.
+    # corner_pixels: the four calibration-time ArUco corner positions
+    # (UL, UR, LR, LL) — exactly the pixel_pts used to seed the homography.
+    corner_pixels = [[float(p[0]), float(p[1])] for p in corner_pixels]
+
+    # static_markers: the fixed reference set (ArUco corners + AprilTag 1)
+    # with their measured pixel positions and known/derived world positions.
+    static_markers = _build_static_markers(
+        tags, corner_pixels, corner_worlds, H, DEFAULT_STATIC_MARKER_IDS
+    )
+
     from ..camera.camutil import get_device_name
 
     return CameraCalibration(
@@ -726,6 +879,11 @@ def calibrate_single(
         dist_coeffs=dist_coeffs,
         tags_used=n_pts,
         rms_error=rms,
+        playfield_width_cm=field_width_cm,
+        playfield_height_cm=field_height_cm,
+        corner_pixels=corner_pixels,
+        static_markers=static_markers,
+        static_marker_ids=list(DEFAULT_STATIC_MARKER_IDS),
     )
 
 

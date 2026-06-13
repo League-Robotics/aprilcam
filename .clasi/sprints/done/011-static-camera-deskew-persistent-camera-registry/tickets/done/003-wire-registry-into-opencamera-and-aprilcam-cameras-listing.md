@@ -1,9 +1,12 @@
 ---
 id: '003'
 title: Wire registry into OpenCamera and aprilcam cameras listing
-status: open
-use-cases: [SUC-006, SUC-007]
-depends-on: ['002']
+status: done
+use-cases:
+- SUC-006
+- SUC-007
+depends-on:
+- '002'
 github-issue: ''
 issue: persistent-camera-registry-with-stable-identity-and-enumeration.md
 completes_issue: true
@@ -34,17 +37,45 @@ visible end-to-end. This ticket completes the persistent-camera-registry issue.
 
 ## Acceptance Criteria
 
-- [ ] `OpenCamera` resolves the camera through the registry; reconnect of a
+- [x] `OpenCamera` resolves the camera through the registry; reconnect of a
   known camera (same `unique_id`) reuses its `cam_name`/dir with no daemon
   restart and no manual reindex.
-- [ ] A genuinely new camera receives a new monotonic enumeration number and a
+- [x] A genuinely new camera receives a new monotonic enumeration number and a
   fresh dir; existing cameras are unaffected.
-- [ ] `aprilcam cameras` lists connected and previously-seen-disconnected
+- [x] `aprilcam cameras` lists connected and previously-seen-disconnected
   cameras; disconnected ones are grayed out and marked offline; all retain
   their enumeration numbers.
-- [ ] Connected cameras display their current OS index in the listing.
-- [ ] The proto/wire contract is unchanged; existing clients still work.
-- [ ] `uv run pytest` passes.
+- [x] Connected cameras display their current OS index in the listing.
+  (Superseded by stakeholder follow-up below: the OS index is now shown only
+  under `--details`; the default listing prints exactly ONE number — the
+  stable enumeration number.)
+- [x] The proto/wire contract is unchanged; existing clients still work.
+- [x] `uv run pytest` passes.
+
+## Stakeholder follow-up (one user-facing number)
+
+`aprilcam cameras` previously printed TWO numbers per line (`#<enum> [<os>]`),
+which was confusing. The enumeration number is now the single user-facing
+camera selector.
+
+- [x] New resolver `resolve_enum_to_index(enum_no, registry, live_identities)`
+  in `camera/registry.py` (with `CameraSelectError`): maps an enumeration
+  number → live OS index via the record's `unique_id` and
+  `identity.resolve_all()`. Clear errors for unknown (`no camera #N`) and
+  disconnected (`camera #N (...) is not connected`) enum numbers.
+- [x] `aprilcam view CAMERA`: an integer CAMERA is the enumeration number,
+  resolved to the live OS index before `open_camera`. Name selection still
+  works. Arg help updated.
+- [x] `aprilcam calibrate`: numeric specs are enumeration numbers, resolved
+  to live OS indices. The old volatile-OS-index warning is removed.
+- [x] `aprilcam cameras` prints ONE number (the enumeration number); the OS
+  index appears only under `--details`. Offline records still show their
+  number, dimmed.
+- [x] Low-level gRPC `OpenCamera(index)` left as-is (OS index for agents).
+- [x] Tests added/updated: resolver tests in
+  `tests/unit/test_camera_registry.py`; one-number listing + `--details` in
+  `tests/test_cameras_cli.py`; view/calibrate enum-number selection in
+  `tests/test_camera_enum_selection.py`. `uv run pytest` passes.
 
 ## Implementation Plan
 

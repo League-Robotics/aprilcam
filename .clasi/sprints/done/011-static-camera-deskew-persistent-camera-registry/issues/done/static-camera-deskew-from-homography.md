@@ -1,11 +1,11 @@
 ---
-status: in-progress
+status: done
 sprint: '011'
 tickets:
-- 011-004
-- 011-005
-- 011-006
-- 011-007
+- '004'
+- '005'
+- '006'
+- '007'
 ---
 
 # Static-camera deskew from the saved homography (tolerate intermittent markers)

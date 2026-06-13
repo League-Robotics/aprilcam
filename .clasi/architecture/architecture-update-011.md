@@ -1,6 +1,6 @@
 ---
-sprint: "011"
-status: draft
+sprint: '011'
+status: final
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
 

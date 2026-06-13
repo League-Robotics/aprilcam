@@ -19,6 +19,13 @@ class CameraInfo:
     name: str
     backend: Optional[str] = None
     device_name: Optional[str] = None  # raw OS device name (no backend suffix)
+    # Optional hardware-identity fields (populated by camera.identity when
+    # available; absent fields leave behavior unchanged). See camera/identity.py.
+    unique_id: Optional[str] = None
+    vid: Optional[int] = None
+    pid: Optional[int] = None
+    serial: Optional[str] = None
+    location: Optional[str] = None
 
 
 def camera_slug(device_name: str, width: int, height: int) -> str:
@@ -139,6 +146,15 @@ def list_cameras(max_index: int = 10, backends: Optional[List[int]] = None, stop
         from cv2_enumerate_cameras import enumerate_cameras
 
         avf_offset = getattr(cv, "CAP_AVFOUNDATION", 1200)
+        # Resolve stable hardware identities once for all enumerated devices.
+        # Best-effort: never let identity resolution break enumeration.
+        identities = {}
+        try:
+            from .identity import resolve_all
+
+            identities = resolve_all()
+        except Exception:
+            identities = {}
         cameras: List[CameraInfo] = []
         for cam in enumerate_cameras():
             # Derive the OpenCV index from the raw backend index
@@ -146,7 +162,15 @@ def list_cameras(max_index: int = 10, backends: Optional[List[int]] = None, stop
             backend_name = "AVFOUNDATION" if cam.index >= avf_offset else None
             device_name = cam.name or None
             name = (device_name or f"Camera {idx}") + (f" ({backend_name})" if backend_name else "")
-            cameras.append(CameraInfo(index=idx, name=name, backend=backend_name, device_name=device_name))
+            info = CameraInfo(index=idx, name=name, backend=backend_name, device_name=device_name)
+            ident = identities.get(idx)
+            if ident is not None:
+                info.unique_id = ident.unique_id
+                info.vid = ident.vid
+                info.pid = ident.pid
+                info.serial = ident.serial
+                info.location = ident.location
+            cameras.append(info)
         return cameras
     except ImportError:
         pass

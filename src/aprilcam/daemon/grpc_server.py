@@ -83,19 +83,47 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
             cam_names = list(self._cameras.keys())
         return aprilcam_pb2.ListCamerasResponse(cameras=cam_names)
 
+    def _resolve_cam_name(self, index: int) -> str:
+        """Resolve an OpenCV ``index`` to its registry per-camera dir key.
+
+        Resolves the device's stable hardware identity and looks it up in the
+        persistent :class:`~aprilcam.camera.registry.CameraRegistry` (creating a
+        record on first sight, reusing it on reconnect). The registry-assigned
+        per-camera ``dir`` is returned as the ``cam_name`` so the daemon's
+        per-camera data dir (``cameras_dir / cam_name``) is owned by the
+        registry and is stable across unplug/replug and re-enumeration.
+
+        Falls back to the legacy ``device_name_slug`` / ``cam-<index>`` naming
+        only if identity resolution or registry persistence fails, so a camera
+        can always be opened even when the registry is unavailable.
+        """
+        from ..camera.camutil import get_device_name
+        from ..calibration.calibration import device_name_slug
+        from ..camera.identity import resolve_identity
+        from ..camera.registry import CameraRegistry
+
+        device_name = get_device_name(index)
+        try:
+            identity = resolve_identity(index, name=device_name)
+            registry = CameraRegistry(self._config.cameras_dir)
+            record = registry.resolve(identity)
+            if record.dir:
+                return record.dir
+        except Exception:
+            log.exception("OpenCamera: registry resolve failed for index %s", index)
+
+        return device_name_slug(device_name) if device_name else f"cam-{index}"
+
     def OpenCamera(
         self,
         request: aprilcam_pb2.OpenCameraRequest,
         context: grpc.ServicerContext,
     ) -> aprilcam_pb2.OpenCameraResponse:
         """Open a camera by index and return its cam_name."""
-        from ..camera.camutil import get_device_name
-        from ..calibration.calibration import device_name_slug
         from .camera_pipeline import CameraPipeline
 
         index = request.index
-        device_name = get_device_name(index)
-        cam_name = device_name_slug(device_name) if device_name else f"cam-{index}"
+        cam_name = self._resolve_cam_name(index)
 
         with self._cam_lock:
             if cam_name in self._cameras:

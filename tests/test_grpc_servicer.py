@@ -200,6 +200,117 @@ def test_get_tags_unknown_camera(tmp_path: Path) -> None:
     ctx.set_code.assert_called_once_with(grpc.StatusCode.NOT_FOUND)
 
 
+# ── Tests: OpenCamera (registry resolution) ───────────────────────────────────
+
+
+def _patch_open_camera(monkeypatch, *, unique_id: str, name: str = "Test Cam"):
+    """Patch the OpenCamera dependencies so no hardware/pipeline is needed.
+
+    Stubs ``get_device_name`` and ``resolve_identity`` (so a deterministic
+    identity flows into the real registry) and replaces ``CameraPipeline`` with
+    a no-op mock whose ``start()`` succeeds.
+    """
+    from aprilcam.camera.identity import CameraIdentity
+
+    monkeypatch.setattr(
+        "aprilcam.camera.camutil.get_device_name", lambda index: name
+    )
+    monkeypatch.setattr(
+        "aprilcam.camera.identity.resolve_identity",
+        lambda index, name=None, **kw: CameraIdentity(
+            unique_id=unique_id,
+            reason="avfoundation_unique_id",
+            is_fallback=False,
+            name=name,
+        ),
+    )
+
+    pipeline = MagicMock()
+    pipeline.start.return_value = None
+    monkeypatch.setattr(
+        "aprilcam.daemon.camera_pipeline.CameraPipeline",
+        lambda *a, **k: pipeline,
+    )
+    return pipeline
+
+
+def test_open_camera_resolves_through_registry(tmp_path, monkeypatch) -> None:
+    """OpenCamera resolves the index to a registry record and uses its dir.
+
+    The returned cam_name is the registry-assigned per-camera dir, and a
+    record is persisted under the resolved unique_id.
+    """
+    from aprilcam.camera.registry import CameraRegistry
+
+    _patch_open_camera(monkeypatch, unique_id="avf:UID1", name="Arducam OV9782")
+    servicer = _make_servicer(tmp_path=tmp_path)
+
+    resp = servicer.OpenCamera(
+        aprilcam_pb2.OpenCameraRequest(index=0), _mock_context()
+    )
+
+    assert resp.cam_name  # non-empty registry dir key
+    assert resp.camera_dir.endswith(resp.cam_name)
+    assert resp.cam_name in servicer._cameras
+
+    # A record now exists in the persisted registry for this identity.
+    reg = CameraRegistry(servicer._config.cameras_dir, adopt=False)
+    rec = reg.get("avf:UID1")
+    assert rec is not None
+    assert rec.dir == resp.cam_name
+    assert rec.enum is not None
+
+
+def test_open_camera_reconnect_reuses_dir_and_enum(tmp_path, monkeypatch) -> None:
+    """A reconnect (same unique_id) reuses the same cam_name/dir and enum.
+
+    Opening, closing, then reopening the same identity must not create a new
+    pipeline key or a new enumeration number — it resolves to the same record.
+    """
+    from aprilcam.camera.registry import CameraRegistry
+
+    _patch_open_camera(monkeypatch, unique_id="avf:UID2", name="Reconnect Cam")
+    servicer = _make_servicer(tmp_path=tmp_path)
+
+    resp1 = servicer.OpenCamera(
+        aprilcam_pb2.OpenCameraRequest(index=0), _mock_context()
+    )
+    reg1 = CameraRegistry(servicer._config.cameras_dir, adopt=False)
+    enum1 = reg1.get("avf:UID2").enum
+
+    # Simulate a disconnect: drop the pipeline, keep the persisted registry.
+    servicer._cameras.clear()
+
+    # Reopen at a different OS index — same hardware identity.
+    resp2 = servicer.OpenCamera(
+        aprilcam_pb2.OpenCameraRequest(index=4), _mock_context()
+    )
+    reg2 = CameraRegistry(servicer._config.cameras_dir, adopt=False)
+    enum2 = reg2.get("avf:UID2").enum
+
+    assert resp2.cam_name == resp1.cam_name
+    assert resp2.camera_dir == resp1.camera_dir
+    assert enum2 == enum1
+    # Only one record / one pipeline key for the single identity.
+    assert len(reg2) == 1
+    assert list(servicer._cameras.keys()) == [resp1.cam_name]
+
+
+def test_open_camera_response_carries_name_and_dir(tmp_path, monkeypatch) -> None:
+    """Regression: OpenCameraResponse still carries cam_name + camera_dir."""
+    _patch_open_camera(monkeypatch, unique_id="avf:UID3")
+    servicer = _make_servicer(tmp_path=tmp_path)
+
+    resp = servicer.OpenCamera(
+        aprilcam_pb2.OpenCameraRequest(index=0), _mock_context()
+    )
+
+    assert resp.cam_name
+    assert resp.camera_dir
+    expected = str(servicer._config.cameras_dir / resp.cam_name)
+    assert resp.camera_dir == expected
+
+
 # ── Tests: Shutdown ────────────────────────────────────────────────────────────
 
 

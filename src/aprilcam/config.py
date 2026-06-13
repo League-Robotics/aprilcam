@@ -258,6 +258,27 @@ class Config:
     calibration_dir: Optional[Path] = None
     detection_fps: int = 10
 
+    # --- Static-camera deskew (sprint 011, ticket 007) ---
+    # Master switch for the homography-derived static-camera deskew path.  When
+    # True (the default), static-camera mode engages AUTOMATICALLY for any camera
+    # that has a saved homography — the seeded-geometry deskew and static-marker
+    # fill-in / movement-invalidation run without live ArUco corner detection.
+    # Set ``APRILCAM_STATIC_DESKEW=0`` to force the legacy live-corner path even
+    # when a calibration exists.
+    static_deskew: bool = True
+    # Output resolution of the metric top-down deskew, in pixels per cm.  0 means
+    # "use geometry.DEFAULT_PX_PER_CM".  This is the single user-facing knob for
+    # the deskewed view's resolution (APRILCAM_DESKEW_PX_PER_CM).
+    deskew_px_per_cm: float = 0.0
+    # Optional pre-warp undistortion: when True AND the calibration carries
+    # camera_matrix + dist_coeffs, the frame is undistorted before the deskew
+    # warp for a flatter top-down result.  Off by default; a no-op when
+    # intrinsics are absent (APRILCAM_UNDISTORT).
+    undistort: bool = False
+    # Movement-invalidation threshold in source pixels.  0 means "use
+    # geometry.DEFAULT_MOVEMENT_THRESHOLD_PX" (APRILCAM_MOVEMENT_THRESHOLD_PX).
+    movement_threshold_px: float = 0.0
+
     @property
     def cameras_dir(self) -> Path:
         """Directory containing one subdirectory per camera keyed by slug."""
@@ -320,6 +341,21 @@ class Config:
         except (ValueError, TypeError):
             _fps = 10
 
+        def _bool(key: str, default: bool) -> bool:
+            raw = sources.get(key)
+            if raw is None:
+                return default
+            return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+        def _float(key: str, default: float) -> float:
+            raw = sources.get(key)
+            if raw is None:
+                return default
+            try:
+                return float(raw)
+            except (ValueError, TypeError):
+                return default
+
         cfg = cls(
             data_dir=data_dir,
             socket_dir=socket_dir,
@@ -329,6 +365,10 @@ class Config:
                 "APRILCAM_DAEMON_PIDFILE", socket_dir / "aprilcamd.pid"
             ),
             detection_fps=_fps,
+            static_deskew=_bool("APRILCAM_STATIC_DESKEW", True),
+            deskew_px_per_cm=_float("APRILCAM_DESKEW_PX_PER_CM", 0.0),
+            undistort=_bool("APRILCAM_UNDISTORT", False),
+            movement_threshold_px=_float("APRILCAM_MOVEMENT_THRESHOLD_PX", 0.0),
         )
 
         # Ensure socket_dir exists so daemon can bind sockets immediately

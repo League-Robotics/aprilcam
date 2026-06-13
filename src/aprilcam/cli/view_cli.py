@@ -264,6 +264,33 @@ def _fmt_stat_row(t: dict) -> str:
     return f"{tid:>2} {int(cx):>4} {int(cy):>4} {wx} {wy} {ang:>4.0f}\n"
 
 
+def _display_enum(registry, cam_name: Optional[str], enum_no: Optional[int]) -> Optional[int]:
+    """Resolve the enumeration number to show in the viewer's "Camera" status row.
+
+    The status panel must display the stable enumeration number the user typed
+    (the ``#`` shown by ``aprilcam cameras``), never the raw live OS index.
+
+    * When the user selected by number, ``enum_no`` is that number and is
+      returned directly.
+    * When the user selected by name, the daemon returns the registry-assigned
+      per-camera dir as ``cam_name``; look up the record whose ``dir`` matches
+      and return its ``enum``.
+    * When it cannot be determined, return ``None`` (the caller shows ``--``).
+
+    ``registry`` is any object exposing a ``records()`` iterable of objects with
+    ``dir`` and ``enum`` attributes (a :class:`CameraRegistry`); it is passed in
+    rather than constructed here so this helper is pure and unit-testable.
+    """
+    if enum_no is not None:
+        return enum_no
+    if registry is None or not cam_name:
+        return None
+    for record in registry.records():
+        if getattr(record, "dir", None) == cam_name:
+            return getattr(record, "enum", None)
+    return None
+
+
 # ── main ────────────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
@@ -271,7 +298,11 @@ def main(argv: list[str] | None = None) -> int:
         prog="aprilcam view",
         description="Open a live view window fed by the AprilCam daemon",
     )
-    parser.add_argument("camera", metavar="CAMERA", help="Camera name or integer index")
+    parser.add_argument(
+        "camera",
+        metavar="CAMERA",
+        help="Camera name or number (the # shown by `aprilcam cameras`)",
+    )
     parser.add_argument(
         "--unix-path",
         default=None,
@@ -294,6 +325,12 @@ def main(argv: list[str] | None = None) -> int:
     from aprilcam.client.control import DaemonControl
     from aprilcam.core.playfield import PlayfieldBoundary
     from aprilcam.ui.display import PlayfieldDisplay
+    from aprilcam.camera.identity import resolve_all
+    from aprilcam.camera.registry import (
+        CameraRegistry,
+        CameraSelectError,
+        resolve_enum_to_index,
+    )
 
     config = Config.load()
     dc = DaemonControl.connect_default(
@@ -302,11 +339,22 @@ def main(argv: list[str] | None = None) -> int:
 
     cam_name: Optional[str] = None
     cam_index: Optional[int] = None
+    enum_no: Optional[int] = None
     _camera_dir: Optional[str] = None
     try:
         camera_arg = args.camera
         try:
-            cam_index = int(camera_arg)
+            # An integer CAMERA is the stable enumeration number shown by
+            # `aprilcam cameras` — resolve it to the live OS index before
+            # opening, so the number the user types matches the listing.
+            enum_no = int(camera_arg)
+            registry = CameraRegistry(config.cameras_dir)
+            try:
+                cam_index = resolve_enum_to_index(enum_no, registry, resolve_all())
+            except CameraSelectError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                dc.close()
+                return 1
             cam_name, _camera_dir = dc.open_camera(cam_index)
         except ValueError:
             # camera_arg is a name, not an index — verify it is open
@@ -353,11 +401,27 @@ def main(argv: list[str] | None = None) -> int:
 
     _DISPLAY_W = 1000  # canvas is always this wide; height scales proportionally
 
-    boundary = PlayfieldBoundary()
+    boundary = PlayfieldBoundary(
+        px_per_cm=config.deskew_px_per_cm,
+        movement_threshold_px=config.movement_threshold_px,
+        static_mode=None if config.static_deskew else False,
+    )
+    # Load the camera's calibration so optional pre-warp undistortion
+    # (APRILCAM_UNDISTORT) can flatten residual barrel curvature in the
+    # deskewed view; a no-op when intrinsics are absent.
+    _view_cal = None
+    try:
+        from aprilcam.calibration.calibration import load_calibration_from_camera_dir
+        _cam_dir = Path(_camera_dir) if _camera_dir else (config.cameras_dir / cam_name)
+        _view_cal = load_calibration_from_camera_dir(_cam_dir)
+    except Exception:
+        _view_cal = None
     display = PlayfieldDisplay(
         playfield=boundary,
         window_name="aprilcam view",
         deskew_overlay=True,
+        calibration=_view_cal,
+        undistort=config.undistort,
     )
 
     from aprilcam.client.models import TagFrame
@@ -580,7 +644,12 @@ def main(argv: list[str] | None = None) -> int:
                  anchor="w").grid(row=row, column=1, sticky="w", pady=0)
         return var
 
-    var_idx = _kv_row(status_frame, 0, "Camera", init=str(cam_index) if cam_index is not None else "--")
+    # Show the stable enumeration number (what the user typed / `aprilcam
+    # cameras` prints), never the raw live OS index.
+    display_enum = _display_enum(
+        CameraRegistry(config.cameras_dir), cam_name, enum_no
+    )
+    var_idx = _kv_row(status_frame, 0, "Camera", init=str(display_enum) if display_enum is not None else "--")
     var_name = _kv_row(status_frame, 1, "Name", init=cam_name or "--")
     var_fps = _kv_row(status_frame, 2, "FPS")
     var_tags = _kv_row(status_frame, 3, "Tags")

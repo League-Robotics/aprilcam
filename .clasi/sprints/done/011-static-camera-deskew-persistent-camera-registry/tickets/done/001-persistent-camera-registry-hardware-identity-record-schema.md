@@ -1,8 +1,9 @@
 ---
 id: '001'
 title: 'Persistent camera registry: hardware identity + record schema'
-status: open
-use-cases: [SUC-005]
+status: done
+use-cases:
+- SUC-005
 depends-on: []
 github-issue: ''
 issue: persistent-camera-registry-with-stable-identity-and-enumeration.md
@@ -43,21 +44,21 @@ slug and there is no hardware-unique id (issue Gap 1). This ticket adds:
 
 ## Acceptance Criteria
 
-- [ ] `camera/identity.py` exposes a resolver returning a stable `unique_id`
+- [x] `camera/identity.py` exposes a resolver returning a stable `unique_id`
   plus component fields, with the documented fallback chain and a recorded
   reason for the chosen source.
-- [ ] When no serial/uniqueID is available, the resolver returns the USB
+- [x] When no serial/uniqueID is available, the resolver returns the USB
   location-path id and marks it as a fallback; the limitation is documented in
   the module docstring.
-- [ ] The resolver never raises on unsupported platforms or missing tools; it
+- [x] The resolver never raises on unsupported platforms or missing tools; it
   returns the name+resolution slug as the last-resort id.
-- [ ] `CameraInfo` carries the new optional identity fields; `list_cameras`
+- [x] `CameraInfo` carries the new optional identity fields; `list_cameras`
   populates them when available and is unchanged when they are absent.
-- [ ] `CameraRegistry` reads/writes `registry.json` atomically and round-trips
+- [x] `CameraRegistry` reads/writes `registry.json` atomically and round-trips
   a record through `upsert` + reload.
-- [ ] Two distinct devices (mocked) produce two distinct `unique_id`s even when
+- [x] Two distinct devices (mocked) produce two distinct `unique_id`s even when
   their device names are identical.
-- [ ] `uv run pytest` passes.
+- [x] `uv run pytest` passes.
 
 ## Implementation Plan
 

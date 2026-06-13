@@ -203,10 +203,17 @@ class RingBuffer:
 class DetectionLoop:
     """Runs tag detection in a background thread, writing results to a RingBuffer."""
 
-    def __init__(self, source: Any, aprilcam: Any, ring_buffer: RingBuffer) -> None:
+    def __init__(
+        self,
+        source: Any,
+        aprilcam: Any,
+        ring_buffer: RingBuffer,
+        coord_transform: Any = None,
+    ) -> None:
         self._source = source
         self._cam = aprilcam
         self._buf = ring_buffer
+        self._coord_transform = coord_transform
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._frame_count = 0
@@ -260,6 +267,8 @@ class DetectionLoop:
                 ts = time.monotonic()
                 self._last_frame = frame
                 tag_records = self._cam.process_frame(frame, ts)
+                if self._coord_transform is not None:
+                    tag_records = self._coord_transform(tag_records)
                 frame_record = FrameRecord(
                     timestamp=ts,
                     frame_index=self._frame_count,

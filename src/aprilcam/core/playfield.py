@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, List, Dict
@@ -7,6 +8,8 @@ from typing import Optional, Tuple, List, Dict
 import cv2 as cv
 import numpy as np
 from .models import AprilTag, AprilTagFlow
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -21,12 +24,46 @@ class PlayfieldBoundary:
     We compute a consistent UL,UR,LR,LL order by geometry to tolerate any ID swaps.
     """
 
+    # Static-marker corner keys, in the canonical UL/UR/LR/LL polygon order.
+    _CORNER_KEYS = ("corner:UL", "corner:UR", "corner:LR", "corner:LL")
+
     proc_width: int = 960
     detect_inverted: bool = False
     polygon: Optional[np.ndarray] = None  # shape (4,2) float32, UL/UR/LR/LL
     ema_alpha: float = 0.3
     deadband_threshold: float = 50.0
     corner_detect_interval: int = 30
+
+    # Saved-geometry (static-camera) seeding inputs. When a homography and
+    # physical dimensions are supplied, the polygon is seeded up front from
+    # H⁻¹-derived corners (no live ArUco detection required) and the metric
+    # deskew rectangle is sized from W×H × px_per_cm.
+    homography: Optional[np.ndarray] = None
+    width_cm: float = 0.0
+    height_cm: float = 0.0
+    px_per_cm: float = 0.0  # 0 → use geometry.DEFAULT_PX_PER_CM
+
+    # --- Static-camera mode (ticket 006) ---
+    # static_markers maps a marker key to its stored calibration-time pixel
+    # position: {"corner:UL": (u, v), ..., "apriltag:1": (u, v)}.  The corner
+    # keys (UL/UR/LR/LL) seed the polygon; "apriltag:N" keys are AprilTag
+    # sentinels.  When non-empty, the boundary runs in static mode: undetected
+    # static markers HOLD their stored position (fill-in) and detected ones are
+    # compared against the stored position for movement invalidation.
+    static_markers: Optional[Dict[str, Tuple[float, float]]] = None
+    # The configurable static-marker set (sentinels like "aruco_corners" /
+    # "apriltag:1").  Defaults to DEFAULT_STATIC_MARKER_IDS when None.  Determines
+    # which AprilTag ids are treated as static (held) vs dynamic (never held).
+    static_marker_ids: Optional[List[str]] = None
+    # Movement-invalidation threshold in source pixels.  0 → use the geometry
+    # module default (DEFAULT_MOVEMENT_THRESHOLD_PX).
+    movement_threshold_px: float = 0.0
+
+    # Static-camera mode override (ticket 007).  ``None`` → AUTO: static mode is
+    # on whenever stored static markers are present (the default).  ``True`` →
+    # force static mode on; ``False`` → force the legacy live-corner path even
+    # when static markers are stored.  Wired from ``APRILCAM_STATIC_DESKEW``.
+    static_mode: Optional[bool] = None
 
     _poly: Optional[np.ndarray] = field(default=None, init=False, repr=False)
     _flows: Dict[int, AprilTagFlow] = field(default_factory=dict, init=False, repr=False)
@@ -35,10 +72,90 @@ class PlayfieldBoundary:
     _aruco_detector: Optional[cv.aruco.ArucoDetector] = field(default=None, init=False, repr=False)
     _corner_frame_count: int = field(default=0, init=False, repr=False)
 
+    # Static-camera runtime state.  ``_held_static`` is the live working set of
+    # static-marker pixel positions (stored seed, overwritten by live detections
+    # each frame, held across gaps).  ``_calibration_stale`` is the
+    # movement-invalidation flag surfaced to the pipeline / info.json writer.
+    _held_static: Dict[str, Tuple[float, float]] = field(default_factory=dict, init=False, repr=False)
+    _calibration_stale: bool = field(default=False, init=False, repr=False)
+
     def __post_init__(self):
         if self.polygon is not None:
             self._poly = np.asarray(self.polygon, dtype=np.float32).reshape(4, 2)
+        elif self.homography is not None and self.width_cm > 0 and self.height_cm > 0:
+            # Static-camera path: seed the polygon from saved geometry so
+            # get_polygon() is non-None before any live frame is processed.
+            from ..calibration.geometry import corner_pixels_from_homography
+            try:
+                self._poly = corner_pixels_from_homography(
+                    self.homography, self.width_cm, self.height_cm
+                )
+            except Exception:
+                self._poly = None
         self._aruco_detector = self._build_aruco4_detector()
+        # Seed the static-hold working set from the stored static markers so
+        # fill-in has positions to hold before any live frame.
+        if self.static_markers:
+            self._held_static = {
+                k: (float(v[0]), float(v[1])) for k, v in self.static_markers.items()
+            }
+
+    def _effective_px_per_cm(self) -> float:
+        from ..calibration.geometry import DEFAULT_PX_PER_CM
+        return self.px_per_cm if self.px_per_cm > 0 else DEFAULT_PX_PER_CM
+
+    def _effective_movement_threshold(self) -> float:
+        from ..calibration.geometry import DEFAULT_MOVEMENT_THRESHOLD_PX
+        return (
+            self.movement_threshold_px
+            if self.movement_threshold_px > 0
+            else DEFAULT_MOVEMENT_THRESHOLD_PX
+        )
+
+    @property
+    def is_static_mode(self) -> bool:
+        """Whether the static-camera path is active for this boundary.
+
+        AUTO (``static_mode is None``, the default): on whenever stored static
+        markers are present.  An explicit ``static_mode`` overrides that: ``True``
+        forces it on, ``False`` forces the legacy live-corner path even when
+        static markers are stored.  The override is wired from the
+        ``APRILCAM_STATIC_DESKEW`` config flag.
+        """
+        if self.static_mode is not None:
+            return bool(self.static_mode) and bool(self.static_markers)
+        return bool(self.static_markers)
+
+    def _effective_static_marker_ids(self) -> List[str]:
+        if self.static_marker_ids is not None:
+            return self.static_marker_ids
+        from ..calibration.calibration import DEFAULT_STATIC_MARKER_IDS
+        return list(DEFAULT_STATIC_MARKER_IDS)
+
+    def _static_apriltag_ids(self) -> set:
+        """Set of AprilTag ids declared static via ``apriltag:N`` sentinels.
+
+        Every other AprilTag id is dynamic and must never be held.
+        """
+        out = set()
+        for mid in self._effective_static_marker_ids():
+            if mid.startswith("apriltag:"):
+                try:
+                    out.add(int(mid.split(":", 1)[1]))
+                except ValueError:
+                    continue
+        return out
+
+    @property
+    def calibration_stale(self) -> bool:
+        """Queryable movement-invalidation flag.
+
+        ``True`` once a live static-marker position has disagreed with its
+        stored position beyond the configured threshold (the camera was moved).
+        Consumed by the pipeline / ``info.json`` writer to surface stale
+        calibration.  Once set it stays set until the boundary is rebuilt.
+        """
+        return self._calibration_stale
 
     def _build_aruco4_detector(self):
         d = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_4X4_50)
@@ -91,7 +208,35 @@ class PlayfieldBoundary:
         LL, LR = bot[0], bot[1]
         return np.array([UL, UR, LR, LL], dtype=np.float32)
 
-    def update(self, frame_bgr: np.ndarray, gray: Optional[np.ndarray] = None) -> None:
+    def update(
+        self,
+        frame_bgr: np.ndarray,
+        gray: Optional[np.ndarray] = None,
+        apriltags: Optional[Dict[int, Tuple[float, float]]] = None,
+    ) -> None:
+        """Update the cached playfield polygon from the current frame.
+
+        In **live-corner mode** (no stored static markers) this detects ArUco
+        corners and EMA-smooths the polygon, as before.
+
+        In **static-camera mode** (stored ``static_markers`` present) this runs
+        static-marker fill-in and movement invalidation instead:
+
+        - ArUco corners are detected this frame; AprilTag sentinels (e.g.
+          AprilTag 1) are supplied via *apriltags* (id → pixel center).
+        - Each **static** marker (corners + ``apriltag:N`` ids) holds its stored
+          pixel position when not detected this frame; detected ones update the
+          held position and are checked against the stored position.
+        - **Dynamic** AprilTags (every id not in the static set) are ignored
+          here — they are taken live each frame by the detector and never held.
+        - If any detected static marker has drifted from its stored position by
+          more than the configured threshold, the static assumption is dropped
+          (``calibration_stale`` is set and a warning is logged).
+        """
+        if self.is_static_mode:
+            self._update_static(frame_bgr, gray=gray, apriltags=apriltags)
+            return
+
         self._corner_frame_count += 1
         # Throttle corner re-detection: only run every N frames
         # Always detect on the first frame (count == 1) or when no polygon exists
@@ -110,6 +255,85 @@ class PlayfieldBoundary:
                     self.ema_alpha * poly
                     + (1 - self.ema_alpha) * self._poly
                 ).astype(np.float32)
+
+    # ------------------------------------------------------------------
+    # Static-camera mode: fill-in + movement invalidation (ticket 006)
+    # ------------------------------------------------------------------
+
+    def _detected_static_markers(
+        self,
+        frame_bgr: np.ndarray,
+        gray: Optional[np.ndarray],
+        apriltags: Optional[Dict[int, Tuple[float, float]]],
+    ) -> Dict[str, Tuple[float, float]]:
+        """Map this frame's detected **static** markers to their stored keys.
+
+        ArUco corners are detected here and matched to the stored
+        ``corner:UL/UR/LR/LL`` keys by nearest stored position.  AprilTag
+        sentinels declared static (``apriltag:N``) are pulled from *apriltags*;
+        every other AprilTag is dynamic and excluded.
+        """
+        found: Dict[str, Tuple[float, float]] = {}
+
+        # ArUco corners → ordered UL/UR/LR/LL, then matched to stored corner keys.
+        cmap = self._detect_corners(frame_bgr, gray=gray)
+        poly = self._order_poly(cmap)
+        if poly is not None:
+            for key, pt in zip(self._CORNER_KEYS, poly):
+                if key in (self.static_markers or {}):
+                    found[key] = (float(pt[0]), float(pt[1]))
+
+        # AprilTag sentinels: only ids declared static are eligible to be held /
+        # checked; dynamic ids (every other AprilTag) are never considered here.
+        if apriltags:
+            static_ids = self._static_apriltag_ids()
+            for tid, px in apriltags.items():
+                if tid in static_ids:
+                    key = f"apriltag:{tid}"
+                    if key in (self.static_markers or {}):
+                        found[key] = (float(px[0]), float(px[1]))
+        return found
+
+    def _update_static(
+        self,
+        frame_bgr: np.ndarray,
+        gray: Optional[np.ndarray] = None,
+        apriltags: Optional[Dict[int, Tuple[float, float]]] = None,
+    ) -> None:
+        stored = self.static_markers or {}
+        detected = self._detected_static_markers(frame_bgr, gray, apriltags)
+
+        # --- Movement invalidation: compare detected vs stored positions ---
+        threshold = self._effective_movement_threshold()
+        for key, live in detected.items():
+            ref = stored.get(key)
+            if ref is None:
+                continue
+            dist = math.hypot(live[0] - ref[0], live[1] - ref[1])
+            if dist > threshold:
+                if not self._calibration_stale:
+                    log.warning(
+                        "Static marker %s moved %.1fpx (> %.1fpx threshold): "
+                        "camera appears to have moved; static calibration is "
+                        "stale and may need recalibration.",
+                        key, dist, threshold,
+                    )
+                self._calibration_stale = True
+
+        # --- Fill-in: hold stored position for any static marker not detected;
+        # update the held position for detected ones. ---
+        for key, ref in stored.items():
+            if key in detected:
+                self._held_static[key] = detected[key]
+            else:
+                # HOLD: keep last-known/stored position rather than dropping it.
+                self._held_static.setdefault(key, (float(ref[0]), float(ref[1])))
+
+        # Rebuild the polygon from the (held + live) corner positions so the
+        # playfield stays stable under flicker.
+        corner_pts = [self._held_static.get(k) for k in self._CORNER_KEYS]
+        if all(p is not None for p in corner_pts):
+            self._poly = np.array(corner_pts, dtype=np.float32)
 
     def get_polygon(self) -> Optional[np.ndarray]:
         return self._poly.copy() if self._poly is not None else None
@@ -146,9 +370,27 @@ class PlayfieldBoundary:
         except Exception:
             pass
 
-    def deskew(self, frame_bgr: np.ndarray) -> np.ndarray:
+    def deskew_transform(self) -> Optional[Tuple[np.ndarray, Tuple[int, int]]]:
+        """Return ``(M, (out_w, out_h))`` for the current playfield polygon.
+
+        When physical dimensions are known (saved-geometry / static-camera
+        path), this produces a **metric** top-down rectangle of size
+        ``(round(W·px_per_cm), round(H·px_per_cm))`` via the shared
+        :func:`calibration.geometry.metric_deskew_matrix` helper. When only a
+        live-corner polygon is available (no saved W×H), it falls back to the
+        legacy polygon-edge-length pixel rectangle.
+
+        Returns ``None`` when no polygon is available.
+        """
         if self._poly is None:
-            return frame_bgr
+            return None
+        if self.width_cm > 0 and self.height_cm > 0:
+            from ..calibration.geometry import metric_deskew_matrix
+            return metric_deskew_matrix(
+                self._poly, self.width_cm, self.height_cm, self._effective_px_per_cm()
+            )
+        # Fallback: size the rectangle from polygon edge lengths (live-corner
+        # path with no saved dimensions).
         UL, UR, LR, LL = self._poly.astype(np.float32)
         w_top = float(np.linalg.norm(UR - UL))
         w_bottom = float(np.linalg.norm(LR - LL))
@@ -157,8 +399,19 @@ class PlayfieldBoundary:
         out_w = max(10, int(round(max(w_top, w_bottom))))
         out_h = max(10, int(round(max(h_left, h_right))))
         src = np.array([UL, UR, LR, LL], dtype=np.float32)
-        dst = np.array([[0, 0], [out_w - 1, 0], [out_w - 1, out_h - 1], [0, out_h - 1]], dtype=np.float32)
+        dst = np.array(
+            [[0, 0], [out_w, 0], [out_w, out_h], [0, out_h]], dtype=np.float32
+        )
         M = cv.getPerspectiveTransform(src, dst)
+        return M, (out_w, out_h)
+
+    def deskew(self, frame_bgr: np.ndarray) -> np.ndarray:
+        if self._poly is None:
+            return frame_bgr
+        transform = self.deskew_transform()
+        if transform is None:
+            return frame_bgr
+        M, (out_w, out_h) = transform
         # Mask source to playfield polygon so outside pixels don't bleed in
         mask = np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
         cv.fillConvexPoly(mask, self._poly.astype(np.int32), 255)
@@ -167,18 +420,8 @@ class PlayfieldBoundary:
 
     def get_deskew_matrix(self) -> np.ndarray | None:
         """Return the 3x3 perspective transform used by :meth:`deskew`, or ``None``."""
-        if self._poly is None:
-            return None
-        UL, UR, LR, LL = self._poly.astype(np.float32)
-        w_top = float(np.linalg.norm(UR - UL))
-        w_bottom = float(np.linalg.norm(LR - LL))
-        h_left = float(np.linalg.norm(LL - UL))
-        h_right = float(np.linalg.norm(LR - UR))
-        out_w = max(10, int(round(max(w_top, w_bottom))))
-        out_h = max(10, int(round(max(h_left, h_right))))
-        src = np.array([UL, UR, LR, LL], dtype=np.float32)
-        dst = np.array([[0, 0], [out_w - 1, 0], [out_w - 1, out_h - 1], [0, out_h - 1]], dtype=np.float32)
-        return cv.getPerspectiveTransform(src, dst)
+        transform = self.deskew_transform()
+        return None if transform is None else transform[0]
 
     # --- tag flow integration ---
     def add_tag(self, tag: AprilTag, homography: Optional[np.ndarray] = None) -> None:
@@ -289,6 +532,9 @@ class Playfield:
         proc_width: int = 960,
         detect_interval: int = 3,
         data_dir: str = "data",
+        px_per_cm: float = 0.0,
+        static_mode: Optional[bool] = None,
+        movement_threshold_px: float = 0.0,
     ) -> None:
         from .detector import TagDetector, DetectorConfig
         from .tracker import OpticalFlowTracker
@@ -300,16 +546,29 @@ class Playfield:
         self._height_cm = height_cm
         self._calibration = calibration
         self._data_dir = data_dir
+        self._px_per_cm = px_per_cm
+        # Static-camera mode override (ticket 007): None=auto-on when a saved
+        # homography exists; False forces the live-corner path.
+        self._static_mode = static_mode
+        self._movement_threshold_px = movement_threshold_px
 
         # Homography is loaded eagerly only when an explicit path is provided.
         # When calibration=="auto", discovery is deferred to start() so that
         # the camera is already open and device_name/resolution are available.
         self._homography: Optional[np.ndarray] = None
+        self._corner_pixels: Optional[np.ndarray] = None
+        self._static_markers: Optional[Dict[str, Tuple[float, float]]] = None
+        self._static_marker_ids: Optional[List[str]] = None
         if calibration not in ("auto", None):
             self._homography = self._load_homography(calibration)
+            self._corner_pixels = self._load_corner_pixels(calibration)
+            self._static_markers = self._load_static_markers(calibration)
+            self._static_marker_ids = self._load_static_marker_ids(calibration)
 
-        # Internal components
+        # Internal components. When a homography is known up front, seed the
+        # boundary geometry so its polygon is non-None before any live frame.
         self._boundary = PlayfieldBoundary(proc_width=proc_width)
+        self._seed_boundary_geometry()
         self._detector = TagDetector(DetectorConfig(family=family, proc_width=proc_width))
         self._tracker = OpticalFlowTracker(detect_interval=detect_interval)
         self._ring_buffer = RingBuffer()
@@ -438,6 +697,9 @@ class Playfield:
             if self._homography is not None:
                 # Propagate the discovered homography into the running pipeline.
                 self._pipeline._homography = self._homography
+                # Seed boundary geometry so deskew engages from saved corners
+                # (or H⁻¹-derived corners) without live ArUco detection.
+                self._seed_boundary_geometry()
         self._pipeline.start()
 
     def stop(self) -> None:
@@ -502,10 +764,36 @@ class Playfield:
             from ..calibration.homography import discover_homography
             found = discover_homography(device_name, width, height, self._data_dir)
             if found is not None:
-                return self._load_homography(str(found))
+                H = self._load_homography(str(found))
+                if H is not None:
+                    # Also capture saved geometry (corner pixels + dimensions
+                    # + static markers) for boundary seeding. Dimensions fall
+                    # back to the constructor values when absent from the record.
+                    self._corner_pixels = self._load_corner_pixels(str(found))
+                    self._static_markers = self._load_static_markers(str(found))
+                    self._static_marker_ids = self._load_static_marker_ids(str(found))
+                    self._load_dimensions_into_self(str(found))
+                return H
         except Exception:
             pass
         return None
+
+    def _load_dimensions_into_self(self, path: str) -> None:
+        """Update ``self._width_cm`` / ``self._height_cm`` from a record's
+        ``playfield: {width, height}`` block when present."""
+        import json
+        from pathlib import Path
+        try:
+            data = json.loads(Path(path).read_text())
+            pf = data.get("playfield", {}) or {}
+            w = pf.get("width") or data.get("field_width_cm")
+            h = pf.get("height") or data.get("field_height_cm")
+            if w:
+                self._width_cm = float(w)
+            if h:
+                self._height_cm = float(h)
+        except Exception:
+            pass
 
     def _auto_discover_homography_from_camera(self) -> Optional[np.ndarray]:
         """Open the camera (if not already open), read device_name and resolution,
@@ -545,4 +833,111 @@ class Playfield:
         except Exception:
             pass
         return None
+
+    def _load_corner_pixels(self, path: str) -> Optional[np.ndarray]:
+        """Load saved ``corner_pixels`` (UL/UR/LR/LL) from a calibration file.
+
+        Returns a ``(4, 2)`` float32 array, or ``None`` when absent. When the
+        record only carries a homography + dimensions, the boundary derives the
+        corners from ``H⁻¹`` instead (see :meth:`_seed_boundary_geometry`).
+        """
+        import json
+        from pathlib import Path
+        try:
+            data = json.loads(Path(path).read_text())
+            cp = data.get("corner_pixels")
+            if cp is not None:
+                arr = np.asarray(cp, dtype=np.float32).reshape(4, 2)
+                return arr
+        except Exception:
+            pass
+        return None
+
+    def _load_static_markers(
+        self, path: str
+    ) -> Optional[Dict[str, Tuple[float, float]]]:
+        """Load saved ``static_markers`` pixel positions from a calibration file.
+
+        The on-disk record maps each static-marker key to
+        ``{"pixel": [u, v], "world": [x, y]}`` (ticket 005).  Static-camera
+        fill-in / invalidation (ticket 006) only needs the **pixel** positions,
+        so this returns ``{key: (u, v)}`` or ``None`` when absent.
+        """
+        import json
+        from pathlib import Path
+        try:
+            data = json.loads(Path(path).read_text())
+            sm = data.get("static_markers")
+            if sm:
+                out: Dict[str, Tuple[float, float]] = {}
+                for key, rec in sm.items():
+                    px = rec.get("pixel")
+                    if px is not None and len(px) >= 2:
+                        out[str(key)] = (float(px[0]), float(px[1]))
+                return out or None
+        except Exception:
+            pass
+        return None
+
+    def _load_static_marker_ids(self, path: str) -> Optional[List[str]]:
+        """Load the configurable ``static_marker_ids`` set from a calibration file.
+
+        Returns the saved list, or ``None`` when absent (the boundary then falls
+        back to :data:`DEFAULT_STATIC_MARKER_IDS`).
+        """
+        import json
+        from pathlib import Path
+        try:
+            data = json.loads(Path(path).read_text())
+            ids = data.get("static_marker_ids")
+            if ids:
+                return [str(s) for s in ids]
+        except Exception:
+            pass
+        return None
+
+    def _seed_boundary_geometry(self) -> None:
+        """Seed the boundary's deskew geometry from saved calibration.
+
+        Propagates the homography, physical dimensions, and (when present) the
+        saved corner pixels into the :class:`PlayfieldBoundary` so its polygon
+        is non-``None`` before any live frame. When only a homography exists,
+        the boundary derives the four corners via ``H⁻¹``. A no-op when no
+        homography is available (the live-corner path remains the fallback).
+        """
+        b = self._boundary
+        # Static-camera mode override (ticket 007): propagate the flag and the
+        # config-driven movement threshold.  When the operator disabled static
+        # mode (static_mode is False), skip all geometry seeding so the boundary
+        # falls back to live-corner detection even if a calibration exists.
+        b.static_mode = self._static_mode
+        b.movement_threshold_px = self._movement_threshold_px
+        if self._static_mode is False:
+            return
+        b.homography = self._homography
+        b.width_cm = self._width_cm
+        b.height_cm = self._height_cm
+        b.px_per_cm = self._px_per_cm
+        # Propagate the static-marker set so the boundary activates static-camera
+        # fill-in / movement-invalidation when a saved record carries them.
+        if self._static_markers:
+            b.static_markers = dict(self._static_markers)
+            b._held_static = {
+                k: (float(v[0]), float(v[1])) for k, v in self._static_markers.items()
+            }
+        if self._static_marker_ids is not None:
+            b.static_marker_ids = list(self._static_marker_ids)
+        if self._homography is None:
+            return
+        if self._corner_pixels is not None:
+            b.polygon = self._corner_pixels
+            b._poly = np.asarray(self._corner_pixels, dtype=np.float32).reshape(4, 2)
+        elif self._width_cm > 0 and self._height_cm > 0:
+            from ..calibration.geometry import corner_pixels_from_homography
+            try:
+                b._poly = corner_pixels_from_homography(
+                    self._homography, self._width_cm, self._height_cm
+                )
+            except Exception:
+                pass
 

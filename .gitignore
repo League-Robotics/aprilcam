@@ -21,6 +21,13 @@ dist/
 build/
 .pytest_cache/
 
+# Daemon runtime log (not source — should never be tracked)
+data/aprilcam/aprilcamd.log
+*.log
+
+# Camera registry — machine-specific (hardware unique IDs); runtime state
+data/aprilcam/cameras/registry.json
+
 
 *.mov
 .env

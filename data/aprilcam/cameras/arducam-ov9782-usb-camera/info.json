@@ -1,3 +1,4 @@
 {
-  "paths_file": "/Volumes/Proj/proj/RobotProjects/AprilTags/data/aprilcam/cameras/arducam-ov9782-usb-camera/paths.json"
+  "paths_file": "/Volumes/Proj/proj/RobotProjects/AprilTags/data/aprilcam/cameras/arducam-ov9782-usb-camera/paths.json",
+  "calibration_stale": true
 }
