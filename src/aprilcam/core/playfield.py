@@ -7,7 +7,7 @@ from typing import Optional, Tuple, List, Dict
 
 import cv2 as cv
 import numpy as np
-from .models import AprilTag, AprilTagFlow
+from .models import AprilTag, AprilTagFlow, world_yaw
 
 log = logging.getLogger(__name__)
 
@@ -491,8 +491,10 @@ class PlayfieldBoundary:
             wvx = float(w2[0] - w1[0])
             wvy = float(w2[1] - w1[1])
             speed_world = math.hypot(wvx, wvy)
-            heading_rad = math.atan2(wvy, wvx)
-            flow.set_world_velocity((wvx, wvy), speed_world, heading_rad)
+            # Report in ENU frame (y up): flip raw-world Y so world velocity &
+            # heading match world_xy; heading 0°=+X, CCW.
+            heading_rad = world_yaw(wvx, wvy)
+            flow.set_world_velocity((wvx, -wvy), speed_world, heading_rad)
 
     def get_flows(self) -> Dict[int, AprilTagFlow]:
         return self._flows

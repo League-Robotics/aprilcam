@@ -18,7 +18,7 @@ import numpy as np
 
 from .detection import TagRecord, FrameRecord, RingBuffer
 from .detector import TagDetector, Detection
-from .models import AprilTag as AprilTagModel
+from .models import AprilTag as AprilTagModel, world_yaw
 from .motion import VelocityEstimator
 from .tracker import OpticalFlowTracker
 
@@ -211,9 +211,11 @@ class DetectionPipeline:
                         w2 = w2 / w2[2]
                         wvx = float(w2[0] - w1[0])
                         wvy = float(w2[1] - w1[1])
-                        vel_world = (wvx, wvy)
+                        # Report in ENU frame (y up): flip raw-world Y so
+                        # vel_world & heading match world_xy; 0°=+X, CCW.
+                        vel_world = (wvx, -wvy)
                         speed_world = math.hypot(wvx, wvy)
-                        heading_rad = math.atan2(wvy, wvx)
+                        heading_rad = world_yaw(wvx, wvy)
 
                     model.frame = self._frame_count
                     if self._boundary is not None:

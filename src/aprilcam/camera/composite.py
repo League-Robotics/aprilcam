@@ -9,6 +9,8 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from aprilcam.core.models import world_yaw
+
 
 @dataclass
 class Composite:
@@ -117,8 +119,6 @@ def map_tags_to_primary(
     Returns:
         List of dicts, each with keys: id, center_px, corners_px, orientation_yaw.
     """
-    import math
-
     results: list[dict] = []
     for corners, _raw, tag_id in detections:
         pts = np.asarray(corners, dtype=np.float32).reshape(-1, 1, 2)
@@ -131,8 +131,8 @@ def map_tags_to_primary(
         p0, p1 = mapped_2d[0], mapped_2d[1]
         top_mid = (p0 + p1) / 2.0
         d = top_mid - center
-        # Yaw from world +Y, CCW positive (image y flipped vs world y).
-        yaw = float(math.atan2(-d[0], -d[1]))
+        # Yaw in the reported ENU frame: x right, y up, 0°=+X, CCW positive.
+        yaw = float(world_yaw(float(d[0]), float(d[1])))
 
         results.append({
             "id": int(tag_id),

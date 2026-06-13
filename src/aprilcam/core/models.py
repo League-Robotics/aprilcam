@@ -8,6 +8,55 @@ from collections import deque
 import numpy as np
 
 
+def world_yaw(dx_raw: float, dy_raw: float) -> float:
+    """Yaw of a raw (y-down) world/pixel direction in the reported ENU frame.
+
+    Reported frame: x right, y up, origin at A1, 0°=+X, counter-clockwise
+    positive (ROS REP-103 "math angles"). Raw coordinates straight out of the
+    homography — and pixel coordinates — have Y pointing *down*; negating Y
+    yields the y-up reporting frame so that ``forward = (cos yaw, sin yaw)``
+    points along the tag's heading in reported world coordinates.
+    """
+    return math.atan2(-dy_raw, dx_raw)
+
+
+def _project(
+    homography: np.ndarray, px: float, py: float
+) -> Optional[Tuple[float, float]]:
+    """Map a pixel point through ``homography`` to raw world coords, or None."""
+    v = homography @ np.array([float(px), float(py), 1.0], dtype=float)
+    w = float(v[2])
+    if abs(w) < 1e-9:
+        return None
+    return (float(v[0]) / w, float(v[1]) / w)
+
+
+def _yaw_and_world(
+    center: Tuple[float, float],
+    top_mid: Tuple[float, float],
+    n_unit: Tuple[float, float],
+    homography: Optional[np.ndarray],
+) -> Tuple[float, Optional[Tuple[float, float]]]:
+    """Return ``(orientation_yaw, world_xy)`` in the reported ENU frame.
+
+    With a homography the heading is measured in *world* space (center →
+    top-mid transformed through the homography), which correctly accounts for
+    camera rotation relative to the field. Without one — or if the world
+    heading is degenerate — fall back to the pixel-space top direction
+    (treated as raw y-down). See :func:`world_yaw` for the frame convention.
+    """
+    if homography is not None and homography.size == 9:
+        cw = _project(homography, center[0], center[1])
+        if cw is not None:
+            tw = _project(homography, top_mid[0], top_mid[1])
+            if tw is not None:
+                dx, dy = tw[0] - cw[0], tw[1] - cw[1]
+                if dx * dx + dy * dy > 1e-12:
+                    return world_yaw(dx, dy), cw
+            return world_yaw(n_unit[0], n_unit[1]), cw
+    return world_yaw(n_unit[0], n_unit[1]), None
+
+
 @dataclass
 class AprilTag:
     """Represents a detected AprilTag and its tracked state.
@@ -18,9 +67,10 @@ class AprilTag:
     - center_px: pixel center (computed)
     - top_dir_px: unit vector from center toward the top edge midpoint (image coords)
     - world_xy: optional (X,Y) in world units (via homography)
-    - orientation_yaw: yaw angle in radians, measured from world +Y axis,
-      positive counter-clockwise (right-handed, world-frame convention).
-      0 → tag's top edge faces world +Y; +pi/2 → faces world -X.
+    - orientation_yaw: yaw in radians in the reported ENU frame (x right,
+      y up, origin at A1), 0°=+X, counter-clockwise positive (ROS REP-103
+      "math angles"). 0 → top edge faces world +X; +pi/2 → faces world +Y.
+      forward = (cos yaw, sin yaw) in reported world coordinates.
     - last_ts: timestamp of last update
     - frame: video frame index when measured
     - in_playfield: whether the tag center is within the playfield polygon
@@ -60,16 +110,14 @@ class AprilTag:
             perp = np.array([-e[1], e[0]], dtype=np.float32)
             denom = float(np.linalg.norm(perp)) or 1.0
             n_unit = (float(perp[0]) / denom, float(perp[1]) / denom)
-        # Yaw measured from world +Y, CCW positive.
-        # Image y is flipped vs world y, so world dir = (nx, -ny); then
-        # angle from +Y CCW = atan2(-world_x, world_y) = atan2(-nx, -ny).
-        yaw = math.atan2(-n_unit[0], -n_unit[1])
-        world_xy: Optional[Tuple[float, float]] = None
-        if homography is not None and homography.size == 9:
-            vec = np.array([float(c[0]), float(c[1]), 1.0], dtype=float)
-            Xw = homography @ vec
-            if abs(float(Xw[2])) > 1e-9:
-                world_xy = (float(Xw[0] / Xw[2]), float(Xw[1] / Xw[2]))
+        # Orientation + world position in the reported ENU frame
+        # (x right, y up, 0°=+X, CCW). See world_yaw / _yaw_and_world.
+        yaw, world_xy = _yaw_and_world(
+            (float(c[0]), float(c[1])),
+            (float(top_mid[0]), float(top_mid[1])),
+            n_unit,
+            homography,
+        )
         return AprilTag(
             id=int(tag_id),
             family=family,
@@ -96,19 +144,20 @@ class AprilTag:
             perp = np.array([-e[1], e[0]], dtype=np.float32)
             denom = float(np.linalg.norm(perp)) or 1.0
             n_unit = (float(perp[0]) / denom, float(perp[1]) / denom)
-        # Yaw measured from world +Y, CCW positive.
-        # Image y is flipped vs world y, so world dir = (nx, -ny); then
-        # angle from +Y CCW = atan2(-world_x, world_y) = atan2(-nx, -ny).
-        yaw = math.atan2(-n_unit[0], -n_unit[1])
+        # Orientation + world position in the reported ENU frame
+        # (x right, y up, 0°=+X, CCW). See world_yaw / _yaw_and_world.
+        yaw, world_xy = _yaw_and_world(
+            (float(c[0]), float(c[1])),
+            (float(top_mid[0]), float(top_mid[1])),
+            n_unit,
+            homography,
+        )
         self.corners_px = ptsf.copy()
         self.center_px = (float(c[0]), float(c[1]))
         self.top_dir_px = n_unit
         self.orientation_yaw = float(yaw)
-        if homography is not None and homography.size == 9:
-            vec = np.array([float(c[0]), float(c[1]), 1.0], dtype=float)
-            Xw = homography @ vec
-            if abs(float(Xw[2])) > 1e-9:
-                self.world_xy = (float(Xw[0] / Xw[2]), float(Xw[1] / Xw[2]))
+        if world_xy is not None:
+            self.world_xy = world_xy
         self.last_ts = float(timestamp)
 
     def clone(self) -> "AprilTag":

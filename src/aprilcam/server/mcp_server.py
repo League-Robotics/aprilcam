@@ -2651,6 +2651,11 @@ async def get_tags(
     ``pixel_to_world`` only when you have raw pixel coordinates from
     somewhere else.
 
+    Angles (``orientation_yaw``, ``heading_rad``) share that frame:
+    radians, 0°=+X, counter-clockwise positive (ROS REP-103 "math
+    angles"), so a tag's forward direction is ``(cos yaw, sin yaw)`` in
+    world coordinates.
+
     Parallax correction and origin translation are applied automatically
     by the detection pipeline using ``data/aprilcam/tags.json``.
 
@@ -2669,7 +2674,7 @@ async def get_tags(
           - ``center_px``: [x, y] pixel position
           - ``corners_px``: list of 4 [x, y] corner points
           - ``world_xy``: [x_cm, y_cm] A1-centred world position, or null if uncalibrated
-          - ``orientation_yaw``: heading in radians
+          - ``orientation_yaw``: tag heading, radians, 0°=+X, CCW positive (forward = (cos, sin))
           - ``vel_px``: [vx, vy] velocity in pixels/s, or null if not yet computed
           - ``in_playfield``: bool, true if the tag center is inside the playfield polygon
           - ``gripper_world_xy``: [x_cm, y_cm] (only present when ``robot_tag_id``
@@ -2745,7 +2750,7 @@ async def get_tag_history(
               - ``center_px``: [x, y] pixel position
               - ``corners_px``: list of 4 [x, y] corner points
               - ``world_xy``: [x_cm, y_cm] world position, or null if uncalibrated
-              - ``orientation_yaw``: heading in radians
+              - ``orientation_yaw``: tag heading, radians, 0°=+X, CCW positive (forward = (cos, sin))
               - ``vel_px``: [vx, vy] velocity in pixels/s, or null if not yet computed
               - ``in_playfield``: bool
         On error: ``{"error": "<message>"}``.
