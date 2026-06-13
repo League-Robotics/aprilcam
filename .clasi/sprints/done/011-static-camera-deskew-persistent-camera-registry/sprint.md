@@ -1,7 +1,7 @@
 ---
 id: '011'
 title: Static-Camera Deskew & Persistent Camera Registry
-status: planning-docs
+status: done
 branch: sprint/011-static-camera-deskew-persistent-camera-registry
 use-cases:
 - SUC-001
