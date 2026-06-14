@@ -1,0 +1,89 @@
+"""Per-camera config.json helpers.
+
+Each camera directory may contain a ``config.json`` file that records which
+named playfield the camera is linked to.  This module provides atomic
+read/write helpers used by the MCP server and CLI.
+
+**Daemon-boundary rule**: ``daemon/camera_pipeline.py`` and
+``daemon/grpc_server.py`` must never import this module.  ``config.json``
+is owned exclusively by the MCP server and human operators; the daemon reads
+only ``calibration.json`` and ``info.json``.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+from pathlib import Path
+from typing import Optional
+
+log = logging.getLogger(__name__)
+
+
+def load_camera_config(camera_dir: Path | str) -> Optional[dict]:
+    """Read ``<camera_dir>/config.json`` and return the parsed dict.
+
+    Returns ``None`` when the file is absent or its contents cannot be
+    decoded as JSON.  Never raises on a missing or malformed file.
+
+    Parameters
+    ----------
+    camera_dir:
+        Directory that may contain ``config.json``.
+
+    Returns
+    -------
+    dict or None
+        The parsed JSON object, or ``None``.
+    """
+    path = Path(camera_dir) / "config.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except Exception:
+        log.warning("Could not parse %s — treating as absent", path)
+        return None
+
+
+def save_camera_config(camera_dir: Path | str, config_dict: dict) -> Path:
+    """Write *config_dict* to ``<camera_dir>/config.json`` atomically.
+
+    The write is atomic: the JSON is written to a sibling ``config.json.tmp``
+    file and then ``os.replace``-d over the target, so a crash mid-write
+    never leaves a partial ``config.json`` and no ``.tmp`` file is left
+    behind on success.
+
+    ``camera_dir`` is created with ``parents=True`` if it does not exist.
+
+    Parameters
+    ----------
+    camera_dir:
+        Directory in which to write (or update) ``config.json``.
+    config_dict:
+        Serialisable dict to write as JSON (``indent=2``, ``sort_keys=True``).
+
+    Returns
+    -------
+    Path
+        Absolute path of the file that was written (``config.json``).
+    """
+    camera_dir = Path(camera_dir)
+    camera_dir.mkdir(parents=True, exist_ok=True)
+    path = camera_dir / "config.json"
+    tmp = path.with_suffix(".json.tmp")
+    text = json.dumps(config_dict, indent=2, sort_keys=True) + "\n"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        # Remove leftover tmp on failure; on success it is already gone.
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+    return path
