@@ -592,6 +592,39 @@ def _handle_close_camera(camera_id: str) -> dict:
     return {"status": "closed"}
 
 
+def _handle_set_camera_playfield(camera_id: str, playfield: str) -> dict:
+    """Core logic for set_camera_playfield — returns result dict or ``{"error": ...}``."""
+    # Validate camera_id is open
+    if camera_id not in registry._cameras:
+        return {"error": f"Unknown camera_id '{camera_id}'"}
+
+    # Validate playfield name exists in the definition registry
+    available = playfield_def_registry.list()
+    if playfield not in available:
+        names = ", ".join(available) if available else "(none loaded)"
+        return {"error": f"Playfield '{playfield}' not found. Available: [{names}]"}
+
+    # Resolve camera_dir from _cam_info
+    info = _cam_info.get(camera_id)
+    if info is None:
+        return {"error": f"No camera info found for '{camera_id}' — was it opened via open_camera?"}
+    camera_dir_str = info.get("camera_dir")
+    if not camera_dir_str:
+        return {"error": f"camera_dir not available for '{camera_id}'"}
+
+    camera_dir = Path(camera_dir_str)
+
+    # Write config.json atomically
+    from aprilcam.camera.camera_config import save_camera_config
+
+    config_path = save_camera_config(camera_dir, {"playfield": playfield})
+    return {
+        "camera_id": camera_id,
+        "playfield": playfield,
+        "config_path": str(config_path),
+    }
+
+
 def _handle_capture_frame(
     camera_id: str,
     format: str = "base64",
@@ -1779,6 +1812,35 @@ async def close_camera(camera_id: str) -> list[TextContent]:
         On error: ``{"error": "<message>"}``.
     """
     result = _handle_close_camera(camera_id)
+    return [TextContent(type="text", text=json.dumps(result))]
+
+
+@server.tool()
+async def set_camera_playfield(
+    camera_id: str,
+    playfield: str,
+) -> list[TextContent]:
+    """Link a camera to a named playfield definition.
+
+    Writes data/aprilcam/cameras/<slug>/config.json with {"playfield": "<name>"}.
+    The named playfield must exist in the registry.
+
+    This must be called before calibrate_playfield when the camera has no
+    existing config.json, or to switch a camera to a different playfield.
+
+    Does not trigger recalibration. The existing calibration (if any) becomes
+    stale and will be flagged on the next open_camera.
+
+    Args:
+        camera_id: The camera_id from open_camera.
+        playfield: The playfield name (slug) to link. Must be a name returned
+            by list_playfields (not yet implemented) or known to the operator.
+
+    Returns:
+        ``{"camera_id": ..., "playfield": ..., "config_path": ...}`` on success.
+        ``{"error": ...}`` on failure.
+    """
+    result = _handle_set_camera_playfield(camera_id, playfield)
     return [TextContent(type="text", text=json.dumps(result))]
 
 
