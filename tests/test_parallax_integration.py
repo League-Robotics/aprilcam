@@ -192,8 +192,14 @@ def test_pipeline_skips_null_world_xy():
 # ---------------------------------------------------------------------------
 
 
-def test_calibrate_playfield_stores_camera_position(tmp_path):
-    """calibrate_playfield persists camera_position to calibration.json."""
+def test_calibrate_playfield_stores_camera_position(tmp_path, monkeypatch):
+    """calibrate_playfield persists camera_position to calibration.json.
+
+    Updated for sprint 012: calibrate_playfield now delegates to
+    calibrate_from_playfield_def.  We write a config.json and monkeypatch
+    calibrate_from_playfield_def to return a controlled calibration so the
+    test stays hardware-free.
+    """
     import asyncio
     import numpy as np
 
@@ -205,23 +211,22 @@ def test_calibrate_playfield_stores_camera_position(tmp_path):
         _cam_info,
     )
     from aprilcam.core.playfield import PlayfieldBoundary as Playfield
-
-    # Build a playfield with a simple polygon
-    pf = MagicMock(spec=Playfield)
-    poly = np.array([
-        [0.0, 0.0],
-        [100.0, 0.0],
-        [100.0, 80.0],
-        [0.0, 80.0],
-    ], dtype=np.float32)
-    pf.get_polygon.return_value = poly
+    from aprilcam.calibration.calibration import CameraCalibration, CameraPosition
 
     cam_id = "cam_test_cp"
     pf_id = f"pf_{cam_id}"
-
-    registry._cameras[cam_id] = None
     camera_dir = tmp_path / cam_id
     camera_dir.mkdir()
+
+    # Write config.json so the tool can resolve the camera slug → playfield.
+    (camera_dir / "config.json").write_text(
+        json.dumps({"playfield": "main-playfield"}), encoding="utf-8"
+    )
+
+    pf = MagicMock(spec=Playfield)
+    pf._poly = None
+
+    registry._cameras[cam_id] = None
     _cam_info[cam_id] = {"camera_dir": str(camera_dir)}
 
     entry = PlayfieldEntry(
@@ -231,13 +236,41 @@ def test_calibrate_playfield_stores_camera_position(tmp_path):
     )
     playfield_registry.register(entry)
 
+    # Patch calibrate_from_playfield_def to return a controlled calibration.
+    controlled_cal = CameraCalibration(
+        device_name=cam_id,
+        resolution=(1920, 1080),
+        homography=np.eye(3),
+        playfield_width_cm=40.0,
+        playfield_height_cm=32.0,
+        calibrated_playfield="main-playfield",
+        calibrated_camera=cam_id,
+        camera_position=CameraPosition(x_offset=5.0, y_offset=-2.0, height=150.0),
+    )
+
+    # Write the calibration.json that the tool will reference (saves via side effect).
+    import aprilcam.calibration.calibration as cal_mod
+
+    def _fake_calibrate_from_def(**kwargs):
+        # Write calibration.json mimicking what the real function does.
+        from aprilcam.calibration.calibration import save_calibration_to_camera_dir
+        save_calibration_to_camera_dir(
+            controlled_cal, camera_dir, 40.0, 32.0
+        )
+        return controlled_cal
+
+    monkeypatch.setattr(
+        cal_mod, "calibrate_from_playfield_def", _fake_calibrate_from_def
+    )
+
+    # Patch the daemon so no real connection is made.
+    fake_client = MagicMock()
+    monkeypatch.setattr(mcp_server, "_ensure_daemon_client", lambda: fake_client)
+
     try:
         result_contents = asyncio.run(
             mcp_server.calibrate_playfield(
                 playfield_id=pf_id,
-                width=40.0,
-                height=32.0,
-                units="cm",
                 camera_height_cm=150.0,
                 camera_x_offset_cm=5.0,
                 camera_y_offset_cm=-2.0,
@@ -268,8 +301,13 @@ def test_calibrate_playfield_stores_camera_position(tmp_path):
         _cam_info.pop(cam_id, None)
 
 
-def test_calibrate_playfield_response_includes_camera_height_cm(tmp_path):
-    """Response JSON always includes camera_height_cm field."""
+def test_calibrate_playfield_response_includes_camera_height_cm(tmp_path, monkeypatch):
+    """Response JSON always includes camera_height_cm field.
+
+    Updated for sprint 012: calibrate_playfield now delegates to
+    calibrate_from_playfield_def.  We write config.json and monkeypatch
+    calibrate_from_playfield_def so no live hardware is required.
+    """
     import asyncio
     import numpy as np
 
@@ -281,22 +319,21 @@ def test_calibrate_playfield_response_includes_camera_height_cm(tmp_path):
         _cam_info,
     )
     from aprilcam.core.playfield import PlayfieldBoundary as Playfield
-
-    pf = MagicMock(spec=Playfield)
-    poly = np.array([
-        [0.0, 0.0],
-        [100.0, 0.0],
-        [100.0, 80.0],
-        [0.0, 80.0],
-    ], dtype=np.float32)
-    pf.get_polygon.return_value = poly
+    from aprilcam.calibration.calibration import CameraCalibration
 
     cam_id = "cam_test_ch"
     pf_id = f"pf_{cam_id}"
-
-    registry._cameras[cam_id] = None
     camera_dir = tmp_path / cam_id
     camera_dir.mkdir()
+
+    (camera_dir / "config.json").write_text(
+        json.dumps({"playfield": "main-playfield"}), encoding="utf-8"
+    )
+
+    pf = MagicMock(spec=Playfield)
+    pf._poly = None
+
+    registry._cameras[cam_id] = None
     _cam_info[cam_id] = {"camera_dir": str(camera_dir)}
 
     entry = PlayfieldEntry(
@@ -306,13 +343,32 @@ def test_calibrate_playfield_response_includes_camera_height_cm(tmp_path):
     )
     playfield_registry.register(entry)
 
+    controlled_cal = CameraCalibration(
+        device_name=cam_id,
+        resolution=(1920, 1080),
+        homography=np.eye(3),
+        playfield_width_cm=40.0,
+        playfield_height_cm=32.0,
+        calibrated_playfield="main-playfield",
+        calibrated_camera=cam_id,
+    )
+
+    import aprilcam.calibration.calibration as cal_mod
+
+    def _fake_calibrate_from_def(**kwargs):
+        return controlled_cal
+
+    monkeypatch.setattr(
+        cal_mod, "calibrate_from_playfield_def", _fake_calibrate_from_def
+    )
+
+    fake_client = MagicMock()
+    monkeypatch.setattr(mcp_server, "_ensure_daemon_client", lambda: fake_client)
+
     try:
         result_contents = asyncio.run(
             mcp_server.calibrate_playfield(
                 playfield_id=pf_id,
-                width=40.0,
-                height=32.0,
-                units="cm",
             )
         )
         result = json.loads(result_contents[0].text)

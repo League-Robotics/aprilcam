@@ -293,3 +293,119 @@ Key variables:
 `tests/demo_overlay.py` in the repository walks through all features:
 triangle path → cross path → static overlay scene → animated robot orbit
 → cleanup.  Run it with a live camera open in `aprilcam view`.
+
+---
+
+## Coordinate System
+
+All world coordinates use a **playfield-centred ENU convention**:
+
+- **Origin**: the center of the playfield (AprilTag A1 = position 0, 0).
+- **X axis**: East (right when standing at the south edge looking north).
+- **Y axis**: North (toward the far edge of the field).
+- **Units**: centimetres.
+- **Yaw / heading**: measured in radians, 0 = East, π/2 = North
+  (standard mathematical / ENU convention).
+
+For the standard 134.3 × 89.3 cm main playfield the field corners are
+approximately ±67 cm (east–west) and ±44.65 cm (north–south) from the
+origin.
+
+---
+
+## Camera Configuration and Calibration (MCP Workflow)
+
+Calibration maps camera pixels to real-world cm.  Robot programs that use
+`tag.world_xy` require a valid calibration to be present.  Calibration is
+done once (or after the camera is moved) via the MCP tools, then
+persisted to `calibration.json` in the camera's data directory.
+
+### Normal setup — camera with a config.json
+
+When a camera's data directory already contains a `config.json` that names
+a playfield, calibration is a single MCP call with **no width/height
+arguments** — the dimensions come from the named playfield definition:
+
+```json
+// MCP call (via your AI agent or aprilcam MCP client)
+{
+  "tool": "calibrate_playfield",
+  "arguments": {
+    "playfield_id": "<camera_id returned by open_camera>"
+  }
+}
+```
+
+AprilCam reads `config.json → playfield`, looks up the matching definition
+in `data/aprilcam/playfields/`, extracts the corner ArUco IDs and world
+coordinates, detects those markers in the live feed, and saves
+`calibration.json` with provenance fields.
+
+### First-time setup — no config.json yet
+
+If the camera has no `config.json`, use `set_camera_playfield` first to
+link the camera to a named playfield definition:
+
+```json
+{
+  "tool": "set_camera_playfield",
+  "arguments": {
+    "camera_id": "<camera_id>",
+    "playfield_name": "main-playfield"
+  }
+}
+```
+
+Then call `calibrate_playfield` as above.
+
+### `open_camera` auto-rehydration
+
+When you call `open_camera` on a camera that has a stored `config.json`
+and `calibration.json`, the daemon automatically loads the calibration and
+creates the playfield.  The response includes:
+
+```json
+{
+  "camera_id": "cam_0",
+  "playfield_id": "pf_0",
+  "playfield_name": "main-playfield",
+  "calibrated": true
+}
+```
+
+In normal operation you do **not** need to call `create_playfield` after
+`open_camera` — if a saved calibration exists, the playfield is ready
+immediately.
+
+### Stale calibration warning
+
+`open_camera` may return `calibration_stale: true` when the stored
+calibration was made against a different playfield definition than the one
+currently configured (for example, after updating `main-playfield.json`
+with revised corner positions).  In that case:
+
+```json
+{
+  "camera_id": "cam_0",
+  "playfield_id": "pf_0",
+  "calibration_stale": true
+}
+```
+
+Fix: call `calibrate_playfield(playfield_id=...)` to re-calibrate with the
+current definition.  Until recalibrated, world coordinates will be computed
+from the old homography and may be inaccurate.
+
+### MCP camera and paths tools
+
+| Tool | Purpose |
+|------|---------|
+| `list_cameras()` | Enumerate available cameras |
+| `open_camera(index?, pattern?)` | Open a camera; returns `camera_id`, `playfield_id`, `playfield_name` if configured |
+| `close_camera(camera_id)` | Release a camera |
+| `set_camera_playfield(camera_id, playfield_name)` | Link a camera to a named playfield definition (writes `config.json`) |
+| `calibrate_playfield(playfield_id)` | Calibrate using the linked playfield def (no width/height needed) |
+| `create_path(playfield_id, waypoints)` | Add a persistent waypoint path |
+| `delete_path(path_id)` | Remove a path |
+| `clear_paths(playfield_id)` | Remove all paths for a playfield |
+| `list_paths(playfield_id)` | List paths for a playfield |

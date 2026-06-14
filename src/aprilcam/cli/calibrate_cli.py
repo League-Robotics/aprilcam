@@ -108,13 +108,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--width",
         type=float,
         default=None,
-        help="Playfield width in cm between ArUco corners (default: from calibration.json or 101.0)",
+        help="Retained for backward compatibility; superseded by the camera's "
+             "config.json playfield definition (ignored when config.json is present).",
     )
     parser.add_argument(
         "--height",
         type=float,
         default=None,
-        help="Playfield height in cm between ArUco corners (default: from calibration.json or 89.0)",
+        help="Retained for backward compatibility; superseded by the camera's "
+             "config.json playfield definition (ignored when config.json is present).",
     )
     parser.add_argument(
         "--output",
@@ -146,21 +148,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         cameras_dir = config.data_dir / "cameras"
 
-    # Load field dimension defaults from any existing calibration.json in a subdir
-    field_width = args.width
-    field_height = args.height
-    if (field_width is None or field_height is None) and cameras_dir.is_dir():
-        for cal_file in cameras_dir.glob("*/calibration.json"):
-            try:
-                d = json.loads(cal_file.read_text())
-                field_width = field_width or d.get("field_width_cm")
-                field_height = field_height or d.get("field_height_cm")
-                if field_width and field_height:
-                    break
-            except Exception:
-                pass
-    field_width = field_width or 101.0
-    field_height = field_height or 89.0
+    # Load playfield definition registry — dims come from the def, not from args.
+    from ..core.playfield_def import PlayfieldDefinitionRegistry
+    playfield_def_registry = PlayfieldDefinitionRegistry()
+    _playfields_dir = getattr(config, "playfields_dir", None) or (config.data_dir / "playfields")
+    playfield_def_registry.load_all(_playfields_dir)
 
     # Resolve which cameras to calibrate
     camera_indices: list[tuple[int, str]] = []  # (index, label)
@@ -226,7 +218,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("No cameras to calibrate.")
         return 1
 
-    print(f"Playfield: {field_width} x {field_height} cm")
     print(f"Output: {cameras_dir}")
     print(f"Cameras to calibrate: {len(camera_indices)}")
     for idx, label in camera_indices:
@@ -309,7 +300,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 1
 
     else:
-        # Independent single-camera calibration for each camera
+        # Independent single-camera calibration for each camera using the
+        # playfield definition as the single source of truth.
+        from ..calibration.calibration import calibrate_from_playfield_def, PlayfieldConfigError
+
         for idx, label in camera_indices:
             print(f"Calibrating [{idx}] {label} ...")
             try:
@@ -318,18 +312,23 @@ def main(argv: Optional[List[str]] = None) -> int:
                 _warmup_capture(dc, cam_name)
 
                 cap = _DaemonCapture(dc, cam_name)
-
-                cal = calibrate_single(
-                    cap,
-                    field_width_cm=field_width,
-                    field_height_cm=field_height,
-                    num_frames=args.frames,
-                    camera_index=idx,
-                )
-
                 camera_dir = cameras_dir / cam_name
-                cal_file = save_calibration_to_camera_dir(cal, camera_dir, field_width, field_height)
+                camera_slug = cam_name
 
+                try:
+                    cal = calibrate_from_playfield_def(
+                        cap=cap,
+                        camera_dir=camera_dir,
+                        camera_slug=camera_slug,
+                        playfield_def_registry=playfield_def_registry,
+                        num_frames=args.frames,
+                    )
+                except PlayfieldConfigError as exc:
+                    print(f"  ERROR: {exc}")
+                    print()
+                    continue
+
+                cal_file = camera_dir / "calibration.json"
                 print(f"Calibration saved to {cal_file}")
                 print(f"  Camera: {cal.device_name} {cal.resolution}, {cal.tags_used} tags, RMS {cal.rms_error:.6f}")
                 if cal.dist_coeffs is not None:

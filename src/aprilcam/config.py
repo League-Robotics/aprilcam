@@ -284,6 +284,11 @@ class Config:
         """Directory containing one subdirectory per camera keyed by slug."""
         return self.data_dir / "cameras"
 
+    @property
+    def playfields_dir(self) -> Path:
+        """Directory containing one JSON file per named playfield definition."""
+        return self.data_dir / "playfields"
+
     def __post_init__(self) -> None:
         if self.daemon_pidfile is None:
             self.daemon_pidfile = self.socket_dir / "aprilcamd.pid"

@@ -8,12 +8,24 @@ lives in :mod:`aprilcam.calibration.homography`.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import cv2 as cv
 import numpy as np
+
+_log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+
+class PlayfieldConfigError(Exception):
+    """Raised when a camera has no playfield configured or the def is missing."""
 
 
 # The default set of static (fixed) reference markers for a playfield.
@@ -117,6 +129,18 @@ class CameraCalibration:
     meaning "all detected ArUco corner markers"; ``apriltag:N`` names a
     specific AprilTag id.  ``None`` for legacy records.
     """
+    calibrated_playfield: Optional[str] = None
+    """The playfield slug that was active when this calibration was recorded.
+
+    ``None`` for legacy records written before provenance tracking.
+    Used by :func:`load_calibration_from_camera_dir` to detect stale
+    calibrations when the camera's linked playfield has changed.
+    """
+    calibrated_camera: Optional[str] = None
+    """The camera slug that was active when this calibration was recorded.
+
+    ``None`` for legacy records written before provenance tracking.
+    """
 
     def correct_world_for_height(
         self, wx: float, wy: float, tag_height_cm: float
@@ -193,6 +217,10 @@ class CameraCalibration:
             }
         if self.static_marker_ids is not None:
             d["static_marker_ids"] = list(self.static_marker_ids)
+        if self.calibrated_playfield is not None:
+            d["calibrated_playfield"] = self.calibrated_playfield
+        if self.calibrated_camera is not None:
+            d["calibrated_camera"] = self.calibrated_camera
         return d
 
     @classmethod
@@ -249,6 +277,8 @@ class CameraCalibration:
             corner_pixels=corner_pixels,
             static_markers=static_markers,
             static_marker_ids=static_marker_ids,
+            calibrated_playfield=d.get("calibrated_playfield"),
+            calibrated_camera=d.get("calibrated_camera"),
         )
 
 
@@ -304,6 +334,8 @@ def load_calibration_from_dir(
 
 def load_calibration_from_camera_dir(
     camera_dir: str | Path,
+    camera_config: "dict | None" = None,
+    playfield_def: "object | None" = None,
 ) -> Optional["CameraCalibration"]:
     """Load calibration from ``<camera_dir>/calibration.json``.
 
@@ -317,6 +349,29 @@ def load_calibration_from_camera_dir(
       for files written in the old format.
     - ``camera_position``: constructed from ``data["camera_position"]``
       dict when present; ``None`` otherwise.
+
+    Optional mismatch detection (sprint 012):
+
+    When both *camera_config* and *playfield_def* are provided, the loaded
+    calibration is compared against the current camera config and playfield
+    geometry.  If any mismatch is detected (mismatched slug, width, or
+    height), or if the record has no ``calibrated_playfield`` (legacy), the
+    transient attribute ``calibration_stale = True`` is set on the returned
+    object and a warning is logged.
+
+    ``calibration_stale`` is **not** a dataclass field; it is never
+    serialised.  Callers check ``getattr(cal, "calibration_stale", False)``.
+
+    Parameters
+    ----------
+    camera_dir:
+        Directory containing ``calibration.json``.
+    camera_config:
+        Optional dict from ``load_camera_config(camera_dir)``.  Expected to
+        have a ``"playfield"`` key naming the linked playfield slug.
+    playfield_def:
+        Optional :class:`~aprilcam.core.playfield_def.PlayfieldDefinition`.
+        Must expose ``width_cm`` and ``height_cm`` attributes.
     """
     cal_file = Path(camera_dir) / "calibration.json"
     if not cal_file.exists():
@@ -332,6 +387,46 @@ def load_calibration_from_camera_dir(
         cal.playfield_width_cm = pw
         cal.playfield_height_cm = ph
         cal.camera_position = camera_position
+
+        # Mismatch detection — only when both optional params are provided.
+        if camera_config is not None and playfield_def is not None:
+            stale = False
+            reason_parts: list[str] = []
+
+            # Legacy record: no provenance field at all.
+            if cal.calibrated_playfield is None:
+                stale = True
+                reason_parts.append("legacy record (no calibrated_playfield)")
+            else:
+                # Slug mismatch.
+                expected_slug = camera_config.get("playfield")
+                if expected_slug and cal.calibrated_playfield != expected_slug:
+                    stale = True
+                    reason_parts.append(
+                        f"slug mismatch ({cal.calibrated_playfield!r} != {expected_slug!r})"
+                    )
+
+                # Dimension mismatch.
+                _TOL = 0.01  # cm
+                if abs(cal.playfield_width_cm - playfield_def.width_cm) > _TOL:
+                    stale = True
+                    reason_parts.append(
+                        f"width mismatch ({cal.playfield_width_cm} != {playfield_def.width_cm})"
+                    )
+                if abs(cal.playfield_height_cm - playfield_def.height_cm) > _TOL:
+                    stale = True
+                    reason_parts.append(
+                        f"height mismatch ({cal.playfield_height_cm} != {playfield_def.height_cm})"
+                    )
+
+            if stale:
+                _log.warning(
+                    "Calibration in %s is stale: %s",
+                    camera_dir,
+                    "; ".join(reason_parts),
+                )
+                cal.calibration_stale = True
+
         return cal
     except Exception:
         return None
@@ -372,6 +467,7 @@ def save_calibration_to_camera_dir(
         "playfield", "camera_position",
         "corner_pixels", "static_markers", "static_marker_ids",
         "detection_fps",
+        "calibrated_playfield", "calibrated_camera",  # provenance (sprint 012)
     }
     preserved: dict = {}
     existing_camera_position: Optional[dict] = None
@@ -885,6 +981,204 @@ def calibrate_single(
         static_markers=static_markers,
         static_marker_ids=list(DEFAULT_STATIC_MARKER_IDS),
     )
+
+
+def calibrate_from_playfield_def(
+    cap: "cv.VideoCapture",
+    camera_dir: "Path | str",
+    camera_slug: str,
+    playfield_def_registry: "object",
+    num_frames: int = 30,
+    correct_distortion: bool = True,
+    camera_position: "CameraPosition | None" = None,
+) -> CameraCalibration:
+    """Calibrate a camera using a named playfield definition as the source of truth.
+
+    This is the single shared calibration helper used by both the MCP
+    ``calibrate_playfield`` tool and the ``aprilcam calibrate`` CLI.  It
+    reads the camera's ``config.json`` to find the linked playfield, loads
+    corner geometry from the :class:`PlayfieldDefinition`, detects the
+    corresponding ArUco markers in the live feed, computes the homography,
+    and writes ``calibration.json`` with provenance fields.
+
+    Parameters
+    ----------
+    cap:
+        Open VideoCapture-compatible object (must support ``read()`` and
+        ``get(cv.CAP_PROP_FRAME_WIDTH/HEIGHT)``).
+    camera_dir:
+        Per-camera directory containing ``config.json`` and where
+        ``calibration.json`` will be written.
+    camera_slug:
+        Human-readable camera identifier used in error messages and the
+        ``calibrated_camera`` provenance field.
+    playfield_def_registry:
+        A :class:`~aprilcam.core.playfield_def.PlayfieldDefinitionRegistry`
+        instance.  Must expose a ``get(name)`` method and a ``list()``
+        method.
+    num_frames:
+        Number of frames to accumulate for tag detection.
+    correct_distortion:
+        Whether to attempt barrel-distortion calibration when enough points
+        are available.
+    camera_position:
+        Optional camera-mounting offset used for parallax correction; stored
+        in the calibration but not used during the calibration computation.
+
+    Returns
+    -------
+    CameraCalibration
+        The freshly computed calibration, already saved to *camera_dir*.
+
+    Raises
+    ------
+    PlayfieldConfigError
+        If ``config.json`` is absent, or if the playfield slug it names is
+        not found in *playfield_def_registry*.
+    RuntimeError
+        If fewer than 4 of the expected corner ArUco markers are detected.
+    """
+    from .homography import compute_homography, detect_all_tags
+    from ..camera.camera_config import load_camera_config
+
+    camera_dir = Path(camera_dir)
+
+    # Step 1: load config.json to find the linked playfield.
+    config = load_camera_config(camera_dir)
+    if config is None:
+        available = ", ".join(playfield_def_registry.list()) or "(none)"
+        raise PlayfieldConfigError(
+            f"Camera '{camera_slug}' has no playfield configured. "
+            f"Create data/aprilcam/cameras/{camera_slug}/config.json with "
+            f'{{\"playfield\": \"<name>\"}}. '
+            f"Available playfields: [{available}]"
+        )
+
+    playfield_slug = config.get("playfield") or ""
+    if not playfield_slug:
+        available = ", ".join(playfield_def_registry.list()) or "(none)"
+        raise PlayfieldConfigError(
+            f"Camera '{camera_slug}' config.json has no 'playfield' key. "
+            f"Available playfields: [{available}]"
+        )
+
+    # Step 2: fetch the PlayfieldDefinition.
+    try:
+        pf_def = playfield_def_registry.get(playfield_slug)
+    except KeyError:
+        available = ", ".join(playfield_def_registry.list()) or "(none)"
+        raise PlayfieldConfigError(
+            f"Playfield '{playfield_slug}' not found in registry. "
+            f"Available playfields: [{available}]"
+        )
+
+    # Step 3: get corner ArUco IDs and world coordinates from the def.
+    # corner_aruco_ids() returns positive ints (e.g. 1/3/5/7).
+    # In the detection dict, ArUco ID N is stored as tid = -(N+1).
+    corner_ids_positive = pf_def.corner_aruco_ids()   # e.g. [1, 3, 5, 7]
+    corner_world_coords = pf_def.corner_world_coords() # e.g. [(-67,44.65),...]
+    corner_tids = [-(cid + 1) for cid in corner_ids_positive]  # e.g. [-2,-4,-6,-8]
+
+    # Step 4: detect all tags over num_frames.
+    tags = detect_all_tags(cap, num_frames)
+
+    cam_w = int(cap.get(cv.CAP_PROP_FRAME_WIDTH))
+    cam_h = int(cap.get(cv.CAP_PROP_FRAME_HEIGHT))
+
+    # Step 5: match detected ArUco tags to the def's corner IDs.
+    found_tids = [tid for tid in corner_tids if tid in tags]
+    if len(found_tids) < 4:
+        expected_ids_str = ", ".join(
+            f"ArUco {cid} (tid {tid})"
+            for cid, tid in zip(corner_ids_positive, corner_tids)
+        )
+        found_ids_str = ", ".join(
+            f"ArUco {-(tid+1)} (tid {tid})"
+            for tid in sorted(t for t in tags if t < 0)
+        ) or "(none)"
+        raise RuntimeError(
+            f"Camera '{camera_slug}': only {len(found_tids)} of 4 expected corner "
+            f"ArUco markers detected.\n"
+            f"  Expected: {expected_ids_str}\n"
+            f"  Found ArUco tids: {found_ids_str}"
+        )
+
+    # Build pixel/world pairs in the same order as the def's corner list.
+    pixel_corners = [tags[tid] for tid in corner_tids]
+    world_corners = list(corner_world_coords)
+
+    pixel_pts = np.array(pixel_corners, dtype=np.float32)
+    world_pts = np.array(world_corners, dtype=np.float32)
+
+    # Step 6: initial homography from corner correspondence.
+    H = compute_homography(pixel_pts, world_pts)
+
+    # Step 7: augment with AprilTags for a more accurate homography.
+    all_px = list(pixel_corners)
+    all_wp = list(world_corners)
+    for tid, px in tags.items():
+        if tid > 0:  # AprilTag (positive ID)
+            vec = H @ np.array([px[0], px[1], 1.0])
+            world_xy = (float(vec[0] / vec[2]), float(vec[1] / vec[2]))
+            all_px.append(px)
+            all_wp.append(world_xy)
+
+    all_pixel = np.array(all_px, dtype=np.float32)
+    all_world = np.array(all_wp, dtype=np.float32)
+    n_pts = len(all_px)
+
+    # Step 8: optional barrel-distortion correction.
+    camera_matrix = None
+    dist_coeffs = None
+    pts_for_rms = all_pixel
+
+    if correct_distortion and n_pts >= 6:
+        obj_pts_3d = np.zeros((n_pts, 1, 3), dtype=np.float32)
+        obj_pts_3d[:, 0, :2] = all_world
+        img_pts = all_pixel.reshape(n_pts, 1, 2)
+        _rms, camera_matrix, dist_coeffs, _rvecs, _tvecs = cv.calibrateCamera(
+            [obj_pts_3d], [img_pts], (cam_w, cam_h), None, None
+        )
+        dist_coeffs = dist_coeffs.flatten()
+        undist_pts = cv.undistortPoints(
+            all_pixel.reshape(-1, 1, 2), camera_matrix, dist_coeffs, P=camera_matrix
+        ).reshape(-1, 2)
+        H = compute_homography(undist_pts, all_world)
+        pts_for_rms = undist_pts
+    elif n_pts > 4:
+        H = compute_homography(all_pixel, all_world)
+
+    rms = _reprojection_rms(H, pts_for_rms, all_world)
+
+    # Step 9: record calibration-time corner pixel positions and static markers.
+    corner_pixels_rec = [[float(p[0]), float(p[1])] for p in pixel_corners]
+    static_markers = _build_static_markers(
+        tags, corner_pixels_rec, world_corners, H, DEFAULT_STATIC_MARKER_IDS
+    )
+
+    # Step 10: construct CameraCalibration with provenance fields.
+    cal = CameraCalibration(
+        device_name=camera_slug,
+        resolution=(cam_w, cam_h),
+        homography=H,
+        camera_matrix=camera_matrix,
+        dist_coeffs=dist_coeffs,
+        tags_used=n_pts,
+        rms_error=rms,
+        playfield_width_cm=pf_def.width_cm,
+        playfield_height_cm=pf_def.height_cm,
+        camera_position=camera_position,
+        corner_pixels=corner_pixels_rec,
+        static_markers=static_markers,
+        static_marker_ids=list(DEFAULT_STATIC_MARKER_IDS),
+        calibrated_playfield=playfield_slug,
+        calibrated_camera=camera_slug,
+    )
+
+    # Step 11: persist.
+    save_calibration_to_camera_dir(cal, camera_dir, pf_def.width_cm, pf_def.height_cm)
+
+    return cal
 
 
 def calibrate_secondary(
