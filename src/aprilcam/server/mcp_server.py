@@ -528,7 +528,55 @@ def _handle_open_camera(
             except OSError:
                 pass
 
-        return {"camera_id": handle, "cam_name": cam_name}
+        # --- Auto-rehydrate playfield entry from disk ---
+        result_extra: dict = {}
+        try:
+            camera_dir = Path(info.get("camera_dir", ""))
+            if camera_dir:
+                from aprilcam.camera.camera_config import load_camera_config
+                from aprilcam.calibration.calibration import load_calibration_from_camera_dir
+
+                cam_cfg = load_camera_config(camera_dir)
+                if cam_cfg and "playfield" in cam_cfg:
+                    pf_slug = cam_cfg["playfield"]
+                    try:
+                        pf_def = playfield_def_registry.get(pf_slug)
+                    except KeyError:
+                        pf_def = None
+
+                    if pf_def is not None:
+                        cal = load_calibration_from_camera_dir(camera_dir, cam_cfg, pf_def)
+                        if cal is not None and cal.homography is not None:
+                            # Guard: don't overwrite an existing PlayfieldEntry for this camera
+                            existing_pid = playfield_registry.find_by_camera(handle)
+                            if existing_pid is None:
+                                pf = Playfield(detect_inverted=True, proc_width=0)
+                                from aprilcam.calibration.geometry import corner_pixels_from_homography
+                                poly = corner_pixels_from_homography(
+                                    cal.homography, pf_def.width_cm, pf_def.height_cm
+                                )
+                                pf._poly = poly  # type: ignore[attr-defined]
+                                pf_entry = PlayfieldEntry(
+                                    playfield_id=f"pf_{handle}",
+                                    camera_id=handle,
+                                    playfield=pf,
+                                    field_spec=FieldSpec(pf_def.width_cm, pf_def.height_cm, "cm"),
+                                    homography=cal.homography,
+                                    tag1_origin_cm=(0.0, 0.0),
+                                )
+                                playfield_registry.register(pf_entry)
+                                result_extra = {
+                                    "playfield_id": f"pf_{handle}",
+                                    "playfield_name": pf_slug,
+                                }
+                                if getattr(cal, "calibration_stale", False):
+                                    result_extra["calibration_stale"] = True
+        except Exception as _rh_exc:
+            import logging
+            logging.getLogger("aprilcam").warning("Playfield rehydration failed: %s", _rh_exc)
+
+        base_result: dict = {"camera_id": handle, "cam_name": cam_name}
+        return {**base_result, **result_extra}
     except Exception as exc:
         return {"error": str(exc)}
 
@@ -1779,38 +1827,37 @@ async def create_playfield(
 @server.tool()
 async def calibrate_playfield(
     playfield_id: str,
-    width: float,
-    height: float,
+    width: Optional[float] = None,
+    height: Optional[float] = None,
     units: str = "inch",
     camera_height_cm: float = 0.0,
     camera_x_offset_cm: float = 0.0,
     camera_y_offset_cm: float = 0.0,
 ) -> list[TextContent]:
-    """Calibrate a playfield with real-world measurements to enable pixel-to-world mapping.
+    """Calibrate a playfield using the linked playfield definition.
 
-    Workflow: open_camera → create_playfield → calibrate_playfield.
+    Workflow: open_camera → calibrate_playfield.
 
-    This step is optional if a calibration.json was already stored for the
-    camera — ``create_playfield`` loads it automatically and sets
-    ``"calibrated": true`` in its response. Only call this tool when no
-    stored calibration exists and you need world-coordinate mapping.
-
-    Uses the detected corner markers to compute a homography that maps
-    pixel coordinates to real-world coordinates in the specified units.
+    Delegates to ``calibrate_from_playfield_def``: reads the camera's
+    ``config.json`` to find the linked playfield definition, detects the
+    corner ArUco markers from the live feed, computes a homography, and
+    writes ``calibration.json`` with provenance.  Field dimensions come
+    from the definition; any supplied *width* / *height* are ignored
+    when a ``config.json`` is present.
 
     The camera mounting position is stored in ``calibration.json`` under
     ``camera_position`` and is used by the daemon pipeline to apply
     automatic parallax correction for tags elevated above the playfield.
 
     Args:
-        playfield_id: The playfield handle from ``create_playfield``.
-        width: Real-world width of the playfield between corner markers.
-        height: Real-world height of the playfield between corner markers.
-        units: Measurement units — ``"inch"`` (default) or ``"cm"``.
+        playfield_id: The playfield handle from ``open_camera`` (rehydrated)
+            or ``create_playfield``.
+        width: Ignored when a ``config.json`` links the camera to a
+            playfield definition.  Retained for backward compatibility.
+        height: See *width*.
+        units: Ignored (dimensions now come from the definition).
         camera_height_cm: Height of the camera above the playfield surface
             in cm (default 0.0, which disables parallax correction).
-            Provide the actual measured height to enable automatic parallax
-            correction for elevated tags via the daemon pipeline.
         camera_x_offset_cm: Horizontal offset of the camera lens from the
             playfield center, in cm (default 0.0, positive = right).
         camera_y_offset_cm: Forward/depth offset of the camera lens from
@@ -1818,7 +1865,7 @@ async def calibrate_playfield(
 
     Returns:
         On success: ``{"playfield_id": "<id>", "calibrated": true,
-        "width_cm": ..., "height_cm": ..., "camera_height_cm": ...}``.
+        "width_cm": ..., "height_cm": ...}``.
         On error: ``{"error": "<message>"}``.
     """
     try:
@@ -1829,93 +1876,61 @@ async def calibrate_playfield(
                 {"error": f"Unknown playfield_id '{playfield_id}'"}
             ))]
 
-        poly = entry.playfield.get_polygon()
-        if poly is None:
+        camera_id = entry.camera_id
+        camera_dir_str = _cam_info.get(camera_id, {}).get("camera_dir", "")
+        if not camera_dir_str:
             return [TextContent(type="text", text=json.dumps(
-                {"error": "Playfield has no polygon (detection not complete)"}
+                {"error": f"No camera_dir recorded for camera '{camera_id}'"}
             ))]
 
-        # Build corner dict from polygon (UL, UR, LR, LL)
-        pixel_corners = {
-            "upper_left": (float(poly[0][0]), float(poly[0][1])),
-            "upper_right": (float(poly[1][0]), float(poly[1][1])),
-            "lower_right": (float(poly[2][0]), float(poly[2][1])),
-            "lower_left": (float(poly[3][0]), float(poly[3][1])),
-        }
-
-        field_spec = FieldSpec(width_in=width, height_in=height, units=units)
+        camera_dir = Path(camera_dir_str)
+        camera_slug = camera_dir.name  # slug == dir name
 
         try:
-            H, _, _ = calibrate_from_corners(pixel_corners, field_spec)
+            from aprilcam.calibration.calibration import (
+                calibrate_from_playfield_def,
+                PlayfieldConfigError,
+            )
+            cap = DaemonCapture(_ensure_daemon_client(), camera_id)
+            cal = calibrate_from_playfield_def(
+                cap=cap,
+                camera_dir=camera_dir,
+                camera_slug=camera_slug,
+                playfield_def_registry=playfield_def_registry,
+                camera_position=CameraPosition(
+                    x_offset=camera_x_offset_cm,
+                    y_offset=camera_y_offset_cm,
+                    height=camera_height_cm,
+                ),
+            )
+        except PlayfieldConfigError as exc:
+            return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
         except Exception as exc:
             return [TextContent(type="text", text=json.dumps(
-                {"error": f"Homography computation failed: {exc}"}
+                {"error": f"Calibration failed: {exc}"}
             ))]
 
-        # Store calibration in the entry
-        entry.field_spec = field_spec
-        entry.homography = H
+        # Update the in-memory PlayfieldEntry with the new calibration.
+        new_field_spec = FieldSpec(cal.playfield_width_cm, cal.playfield_height_cm, "cm")
+        entry.field_spec = new_field_spec
+        entry.homography = cal.homography
+        entry.tag1_origin_cm = (0.0, 0.0)
 
-        # Persist calibration to the daemon's per-camera directory, including
-        # camera_position so the daemon pipeline can apply parallax correction.
-        per_camera_path: str | None = None
-        try:
-            camera_id = entry.camera_id
-            camera_dir_str = _cam_info.get(camera_id, {}).get("camera_dir", "")
-            if camera_dir_str:
-                cap = registry._cameras.get(camera_id)
-                cap_w, cap_h = 0, 0
-                if cap is not None:
-                    import cv2
-                    cap_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                    cap_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-                from aprilcam.camera.camutil import get_device_name
-                from aprilcam.calibration.calibration import (
-                    CameraCalibration,
-                    save_calibration_to_camera_dir,
-                )
-
-                cam_idx: int | None = None
-                if camera_id.startswith("cam_"):
-                    try:
-                        cam_idx = int(camera_id.split("_", 1)[1])
-                    except (ValueError, IndexError):
-                        pass
-                dev_name = get_device_name(cam_idx) if cam_idx is not None else camera_id
-
-                cal = CameraCalibration(
-                    device_name=dev_name,
-                    resolution=(cap_w, cap_h) if cap_w and cap_h else (0, 0),
-                    homography=H,
-                    camera_position=CameraPosition(
-                        x_offset=camera_x_offset_cm,
-                        y_offset=camera_y_offset_cm,
-                        height=camera_height_cm,
-                    ),
-                )
-                pc_path = save_calibration_to_camera_dir(
-                    cal,
-                    camera_dir_str,
-                    field_width_cm=field_spec.width_cm,
-                    field_height_cm=field_spec.height_cm,
-                )
-                per_camera_path = str(pc_path)
-        except Exception as _persist_exc:
-            import logging
-            logging.getLogger("aprilcam").warning(
-                "Failed to persist calibration: %s", _persist_exc
-            )
+        # Refresh the polygon from the new homography.
+        from aprilcam.calibration.geometry import corner_pixels_from_homography
+        poly = corner_pixels_from_homography(
+            cal.homography, cal.playfield_width_cm, cal.playfield_height_cm
+        )
+        entry.playfield._poly = poly  # type: ignore[attr-defined]
 
         result: dict = {
             "playfield_id": playfield_id,
             "calibrated": True,
-            "width_cm": field_spec.width_cm,
-            "height_cm": field_spec.height_cm,
+            "width_cm": cal.playfield_width_cm,
+            "height_cm": cal.playfield_height_cm,
             "camera_height_cm": camera_height_cm,
+            "homography_file": str(camera_dir / "calibration.json"),
         }
-        if per_camera_path:
-            result["homography_file"] = per_camera_path
         return [TextContent(type="text", text=json.dumps(result))]
     except Exception as exc:
         return [TextContent(type="text", text=json.dumps({"error": f"Unexpected error: {exc}"}))]
