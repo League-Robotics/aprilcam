@@ -11,6 +11,13 @@ Sprint 011, ticket 004.  Covers:
   computes (detection mocked).
 - the committed ``global-shutter-camera/calibration.json`` playfield
   block reading back into ``playfield_width_cm`` / ``playfield_height_cm``.
+
+Sprint 012, ticket 004 additions.  Covers:
+
+- ``calibrated_playfield`` / ``calibrated_camera`` provenance fields
+  round-trip via ``to_dict`` / ``from_dict``.
+- ``load_calibration_from_camera_dir`` mismatch detection setting
+  ``calibration_stale`` on the returned object.
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ from aprilcam.calibration.calibration import (  # noqa: E402
     CameraCalibration,
     calibrate_single,
     load_calibration_from_camera_dir,
+    save_calibration_to_camera_dir,
 )
 
 pytestmark = pytest.mark.needs_cv2
@@ -259,3 +267,153 @@ def test_calibrate_single_geometry_round_trips(monkeypatch):
     assert restored.corner_pixels == cal.corner_pixels
     assert restored.static_markers == cal.static_markers
     assert restored.static_marker_ids == cal.static_marker_ids
+
+
+# ---------------------------------------------------------------------------
+# Sprint 012 — provenance fields and mismatch detection
+# ---------------------------------------------------------------------------
+
+
+def _minimal_cal(
+    *,
+    playfield_slug: str | None = None,
+    camera_slug: str | None = None,
+    width_cm: float = 134.3,
+    height_cm: float = 89.3,
+) -> CameraCalibration:
+    """Build a minimal CameraCalibration with optional provenance fields."""
+    return CameraCalibration(
+        device_name="TestCam",
+        resolution=(1920, 1080),
+        homography=_IDENTITY_H.copy(),
+        playfield_width_cm=width_cm,
+        playfield_height_cm=height_cm,
+        calibrated_playfield=playfield_slug,
+        calibrated_camera=camera_slug,
+    )
+
+
+class _FakePlayfieldDef:
+    """Minimal stand-in for PlayfieldDefinition for mismatch tests."""
+
+    def __init__(self, width_cm: float = 134.3, height_cm: float = 89.3) -> None:
+        self.width_cm = width_cm
+        self.height_cm = height_cm
+
+
+def test_provenance_fields_round_trip(tmp_path: Path) -> None:
+    """calibrated_playfield / calibrated_camera survive to_dict/from_dict."""
+    cal = _minimal_cal(playfield_slug="main-playfield", camera_slug="test-cam")
+
+    # to_dict includes them.
+    d = cal.to_dict()
+    assert d["calibrated_playfield"] == "main-playfield"
+    assert d["calibrated_camera"] == "test-cam"
+
+    # from_dict restores them.
+    restored = CameraCalibration.from_dict(d)
+    assert restored.calibrated_playfield == "main-playfield"
+    assert restored.calibrated_camera == "test-cam"
+
+    # Round-trip through save/load.
+    save_calibration_to_camera_dir(cal, tmp_path, 134.3, 89.3)
+    reloaded = load_calibration_from_camera_dir(tmp_path)
+    assert reloaded is not None
+    assert reloaded.calibrated_playfield == "main-playfield"
+    assert reloaded.calibrated_camera == "test-cam"
+
+
+def test_provenance_none_when_absent() -> None:
+    """Legacy dict without provenance keys → both fields are None."""
+    legacy = {
+        "device_name": "OldCam",
+        "resolution": [640, 480],
+        "homography": _IDENTITY_H.tolist(),
+    }
+    cal = CameraCalibration.from_dict(legacy)
+    assert cal.calibrated_playfield is None
+    assert cal.calibrated_camera is None
+
+
+def test_mismatch_sets_stale(tmp_path: Path) -> None:
+    """Mismatched playfield slug sets calibration_stale=True on load."""
+    # Save a calibration that references "old-field".
+    cal = _minimal_cal(playfield_slug="old-field", camera_slug="test-cam")
+    save_calibration_to_camera_dir(cal, tmp_path, 134.3, 89.3)
+
+    # Load with a config pointing to "main-playfield".
+    camera_config = {"playfield": "main-playfield"}
+    pf_def = _FakePlayfieldDef(width_cm=134.3, height_cm=89.3)
+    loaded = load_calibration_from_camera_dir(tmp_path, camera_config, pf_def)
+
+    assert loaded is not None
+    assert getattr(loaded, "calibration_stale", False) is True
+
+
+def test_legacy_record_sets_stale(tmp_path: Path) -> None:
+    """A legacy record (no calibrated_playfield) is marked stale when a def is known."""
+    # Save a calibration without provenance.
+    cal = _minimal_cal(playfield_slug=None)
+    save_calibration_to_camera_dir(cal, tmp_path, 134.3, 89.3)
+
+    camera_config = {"playfield": "main-playfield"}
+    pf_def = _FakePlayfieldDef(width_cm=134.3, height_cm=89.3)
+    loaded = load_calibration_from_camera_dir(tmp_path, camera_config, pf_def)
+
+    assert loaded is not None
+    assert getattr(loaded, "calibration_stale", False) is True
+
+
+def test_matching_provenance_not_stale(tmp_path: Path) -> None:
+    """Matching slug + dimensions → calibration_stale is not set."""
+    cal = _minimal_cal(
+        playfield_slug="main-playfield",
+        camera_slug="test-cam",
+        width_cm=134.3,
+        height_cm=89.3,
+    )
+    save_calibration_to_camera_dir(cal, tmp_path, 134.3, 89.3)
+
+    camera_config = {"playfield": "main-playfield"}
+    pf_def = _FakePlayfieldDef(width_cm=134.3, height_cm=89.3)
+    loaded = load_calibration_from_camera_dir(tmp_path, camera_config, pf_def)
+
+    assert loaded is not None
+    assert not getattr(loaded, "calibration_stale", False)
+
+
+def test_dimension_mismatch_sets_stale(tmp_path: Path) -> None:
+    """Calibration stored with different dims than current def → stale."""
+    # Calibration was done with old field dimensions.
+    cal = _minimal_cal(
+        playfield_slug="main-playfield",
+        camera_slug="test-cam",
+        width_cm=101.0,   # old dimension
+        height_cm=89.0,
+    )
+    save_calibration_to_camera_dir(cal, tmp_path, 101.0, 89.0)
+
+    camera_config = {"playfield": "main-playfield"}
+    # Def now reports different dimensions.
+    pf_def = _FakePlayfieldDef(width_cm=134.3, height_cm=89.3)
+    loaded = load_calibration_from_camera_dir(tmp_path, camera_config, pf_def)
+
+    assert loaded is not None
+    assert getattr(loaded, "calibration_stale", False) is True
+
+
+def test_mismatch_detection_ignores_when_no_params(tmp_path: Path) -> None:
+    """When camera_config or playfield_def is None, stale is never set."""
+    cal = _minimal_cal(playfield_slug=None)  # legacy record
+    save_calibration_to_camera_dir(cal, tmp_path, 134.3, 89.3)
+
+    # No optional params: old callers are unaffected.
+    loaded = load_calibration_from_camera_dir(tmp_path)
+    assert loaded is not None
+    assert not getattr(loaded, "calibration_stale", False)
+
+    # Only one param: still no mismatch detection (both required).
+    loaded2 = load_calibration_from_camera_dir(
+        tmp_path, camera_config={"playfield": "main-playfield"}
+    )
+    assert not getattr(loaded2, "calibration_stale", False)
