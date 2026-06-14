@@ -37,6 +37,7 @@ from mcp.types import ImageContent, TextContent
 from aprilcam.config import Config
 from aprilcam.client.control import DaemonControl
 from aprilcam.core.aprilcam import AprilCam
+from aprilcam.core.playfield_def import PlayfieldDefinitionRegistry
 from aprilcam.camera.composite import (
     CompositeManager,
     compute_cross_camera_homography,
@@ -236,6 +237,7 @@ playfield_registry = PlayfieldRegistry()
 path_registry = PathRegistry()
 composite_manager = CompositeManager()
 frame_registry = FrameRegistry()
+playfield_def_registry = PlayfieldDefinitionRegistry()
 
 # ---------------------------------------------------------------------------
 # Daemon client (initialised lazily on first use via DaemonControl.connect_default;
@@ -1254,21 +1256,43 @@ def _handle_get_objects(source_id: str) -> dict:
 def _handle_where(query: str, source_id: str = "") -> dict:
     """Core logic for the ``where`` tool — natural-language feature lookup.
 
-    Stage 1 runs a keyword search over the static playfield map
-    (``playfield.json``).  When *source_id* names a running detection loop,
-    live tag positions are merged into matched tag features.  Stage 2 (the
-    LLM fallback) is signalled by ``status == "needs_resolution"``, in which
-    case the full playfield map is returned for the agent to resolve.
+    Stage 1 runs a keyword search over the static playfield map.  When
+    *source_id* names a running detection loop, live tag positions are merged
+    into matched tag features.  Stage 2 (the LLM fallback) is signalled by
+    ``status == "needs_resolution"``, in which case the full playfield map is
+    returned for the agent to resolve.
+
+    The playfield map is loaded from ``playfield_def_registry`` when it is
+    populated (new ``data/aprilcam/playfields/`` layout).  When the registry
+    is empty (migration not yet run), falls back to the legacy
+    ``data/aprilcam/playfield.json`` path for backward compatibility.
     """
     try:
         from aprilcam.core import playfield_query as pq
 
-        config = Config.load()
-        pf_path = pq.default_playfield_path(config.data_dir)
-        try:
-            playfield = pq.load_playfield(pf_path)
-        except (FileNotFoundError, ValueError) as exc:
-            return {"error": str(exc)}
+        # Prefer the registry (new layout); fall back to legacy path.
+        pf_def = playfield_def_registry.first()
+        if pf_def is not None:
+            # Build a playfield dict from the definition so the rest of the
+            # handler (iter_features, where, needs_resolution) is unchanged.
+            playfield = {
+                "playfield": {
+                    "width_cm": pf_def.width_cm,
+                    "height_cm": pf_def.height_cm,
+                    "origin": pf_def.origin,
+                },
+                "april_tags": pf_def.april_tags,
+                "aruco_tags": pf_def.aruco_tags,
+                "rectangles": pf_def.rectangles,
+                "dots": pf_def.dots,
+            }
+        else:
+            config = Config.load()
+            pf_path = pq.default_playfield_path(config.data_dir)
+            try:
+                playfield = pq.load_playfield(pf_path)
+            except (FileNotFoundError, ValueError) as exc:
+                return {"error": str(exc)}
 
         # Merge live detections when a detection source is supplied.
         live_tags: Optional[dict[int, dict]] = None
@@ -4086,6 +4110,8 @@ def main(argv: list[str] | None = None) -> None:
     Args:
         argv: Unused; accepted for CLI entry-point compatibility.
     """
+    cfg = Config.load()
+    playfield_def_registry.load_all(cfg.playfields_dir)
     try:
         server.run(transport="stdio")
     finally:
