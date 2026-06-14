@@ -221,8 +221,17 @@ class CameraPipeline:
             cap.read()
 
         # Apply hardware settings now that the capture session is stable.
-        if self._calibration is not None and self._calibration.settings:
-            _apply_camera_settings(self._calibration.settings, device_name, self.config)
+        # Prefer settings from config.json (the authoritative source after the
+        # config/calibration split).  Fall back to calibration.settings for
+        # legacy un-migrated cameras that still carry settings there.
+        from ..camera.camera_config import load_camera_config as _load_cfg
+        _cam_cfg = _load_cfg(camera_dir)
+        _settings = (
+            (_cam_cfg.get("settings") if _cam_cfg else None)
+            or (self._calibration.settings if self._calibration is not None else None)
+        )
+        if _settings:
+            _apply_camera_settings(_settings, device_name, self.config)
 
         # Build AprilCam instance (headless, no display)
         homography: Optional[np.ndarray] = None

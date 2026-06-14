@@ -882,15 +882,28 @@ class Playfield:
         return None
 
     def _load_static_marker_ids(self, path: str) -> Optional[List[str]]:
-        """Load the configurable ``static_marker_ids`` set from a calibration file.
+        """Load the configurable ``static_marker_ids`` set.
 
-        Returns the saved list, or ``None`` when absent (the boundary then falls
-        back to :data:`DEFAULT_STATIC_MARKER_IDS`).
+        Checks ``config.json`` in the same directory first (the authoritative
+        source after the config/calibration split), then falls back to reading
+        the calibration file at *path*.  Returns ``None`` when absent (the
+        boundary then falls back to :data:`DEFAULT_STATIC_MARKER_IDS`).
         """
         import json
         from pathlib import Path
+        cal_path = Path(path)
+        # Check sibling config.json first.
+        config_path = cal_path.parent / "config.json"
         try:
-            data = json.loads(Path(path).read_text())
+            cfg = json.loads(config_path.read_text())
+            ids = cfg.get("static_marker_ids")
+            if ids:
+                return [str(s) for s in ids]
+        except Exception:
+            pass
+        # Fall back to calibration file.
+        try:
+            data = json.loads(cal_path.read_text())
             ids = data.get("static_marker_ids")
             if ids:
                 return [str(s) for s in ids]

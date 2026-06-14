@@ -263,8 +263,8 @@ class CameraCalibration:
             static_marker_ids = [str(s) for s in static_marker_ids]
 
         return cls(
-            device_name=d["device_name"],
-            resolution=tuple(d["resolution"]),
+            device_name=d.get("device_name", ""),
+            resolution=tuple(d["resolution"]) if "resolution" in d else (0, 0),
             homography=np.array(d["homography"], dtype=float),
             camera_matrix=cm,
             dist_coeffs=dc,
@@ -350,6 +350,23 @@ def load_calibration_from_camera_dir(
     - ``camera_position``: constructed from ``data["camera_position"]``
       dict when present; ``None`` otherwise.
 
+    Static configuration overlay (config split):
+
+    After loading from ``calibration.json``, static developer-owned fields
+    are overlaid from ``config.json`` (the *camera_config* param if supplied,
+    otherwise loaded from *camera_dir*).  ``config.json`` wins over any
+    legacy values that may still be present in an old ``calibration.json``:
+
+    - ``device_name`` — from ``config["device_name"]``
+    - ``resolution`` — from ``config["resolution"]`` (list → tuple)
+    - ``settings`` — from ``config["settings"]``
+    - ``static_marker_ids`` — from ``config["static_marker_ids"]``
+    - ``camera_position`` — from ``config["camera_position"]`` (dict → CameraPosition)
+
+    Legacy ``calibration.json`` files that still carry these keys will
+    continue to load correctly; their values are used as the fallback when
+    ``config.json`` does not supply a given key.
+
     Optional mismatch detection (sprint 012):
 
     When both *camera_config* and *playfield_def* are provided, the loaded
@@ -369,10 +386,13 @@ def load_calibration_from_camera_dir(
     camera_config:
         Optional dict from ``load_camera_config(camera_dir)``.  Expected to
         have a ``"playfield"`` key naming the linked playfield slug.
+        When ``None``, the function loads ``config.json`` itself.
     playfield_def:
         Optional :class:`~aprilcam.core.playfield_def.PlayfieldDefinition`.
         Must expose ``width_cm`` and ``height_cm`` attributes.
     """
+    from ..camera.camera_config import load_camera_config as _load_config
+
     cal_file = Path(camera_dir) / "calibration.json"
     if not cal_file.exists():
         return None
@@ -387,6 +407,22 @@ def load_calibration_from_camera_dir(
         cal.playfield_width_cm = pw
         cal.playfield_height_cm = ph
         cal.camera_position = camera_position
+
+        # Overlay static developer-owned fields from config.json.
+        # config wins over any legacy values already parsed from calibration.json.
+        cfg = camera_config if camera_config is not None else _load_config(camera_dir)
+        if cfg:
+            if "device_name" in cfg:
+                cal.device_name = cfg["device_name"]
+            if "resolution" in cfg:
+                cal.resolution = tuple(cfg["resolution"])
+            if "settings" in cfg:
+                cal.settings = cfg["settings"]
+            if "static_marker_ids" in cfg:
+                cal.static_marker_ids = [str(s) for s in cfg["static_marker_ids"]]
+            if "camera_position" in cfg:
+                cp = cfg["camera_position"]
+                cal.camera_position = CameraPosition(**cp)
 
         # Mismatch detection — only when both optional params are provided.
         if camera_config is not None and playfield_def is not None:
@@ -451,49 +487,52 @@ def save_calibration_to_camera_dir(
     keys are no longer written.  When present in an existing file they are
     treated as owned (not user-managed) so they are dropped on the next save.
 
-    ``camera_position`` from *cal* is written when present; any
-    user-managed keys not in the owned set are preserved.
+    Static developer-owned fields (``device_name``, ``resolution``,
+    ``settings``, ``camera_position``, ``static_marker_ids``) are **not**
+    written to ``calibration.json`` — they now live in ``config.json``.
+    A ``"camera"`` key equal to the directory name is written so the file
+    is self-identifying.
+
+    Any other keys in an existing ``calibration.json`` that are not in the
+    owned set are preserved (user-managed keys).
     """
     camera_dir = Path(camera_dir)
     camera_dir.mkdir(parents=True, exist_ok=True)
     cal_file = camera_dir / "calibration.json"
 
-    # Keys written by calibration — anything else in the existing file is
-    # user-managed (e.g. UVC settings) and must be preserved.
+    # Keys written by calibration code — anything else in the existing file is
+    # user-managed and must be preserved.  The 5 static keys are listed here
+    # so they are treated as owned (dropped if present in a legacy file).
     _CALIBRATION_KEYS = {
-        "device_name", "resolution", "homography", "tags_used", "rms_error",
+        "camera",  # new: camera slug key
+        "device_name", "resolution",  # moved to config.json — owned so they are dropped
+        "settings", "camera_position", "static_marker_ids",  # moved to config.json
+        "homography", "tags_used", "rms_error",
         "camera_matrix", "dist_coeffs",
         "field_width_cm", "field_height_cm",  # old keys — owned so they are dropped
-        "playfield", "camera_position",
-        "corner_pixels", "static_markers", "static_marker_ids",
+        "playfield",
+        "corner_pixels", "static_markers",
         "detection_fps",
         "calibrated_playfield", "calibrated_camera",  # provenance (sprint 012)
     }
     preserved: dict = {}
-    existing_camera_position: Optional[dict] = None
     if cal_file.exists():
         try:
             existing_data = json.loads(cal_file.read_text())
             preserved = {k: v for k, v in existing_data.items() if k not in _CALIBRATION_KEYS}
             if "detection_fps" in existing_data:
                 detection_fps = int(existing_data["detection_fps"])
-            # Preserve camera_position from existing file if the new cal doesn't have one
-            if existing_data.get("camera_position"):
-                existing_camera_position = existing_data["camera_position"]
         except Exception:
             pass
 
     data = cal.to_dict()
+    # Strip the 5 static fields that now live in config.json.
+    for _key in ("device_name", "resolution", "settings", "camera_position", "static_marker_ids"):
+        data.pop(_key, None)
+    # Add self-identifying camera slug.
+    data["camera"] = Path(camera_dir).name
     data["playfield"] = {"width": field_width_cm, "height": field_height_cm}
     data["detection_fps"] = detection_fps
-    if cal.camera_position is not None:
-        data["camera_position"] = {
-            "x_offset": cal.camera_position.x_offset,
-            "y_offset": cal.camera_position.y_offset,
-            "height": cal.camera_position.height,
-        }
-    elif existing_camera_position is not None:
-        data["camera_position"] = existing_camera_position
     data.update(preserved)
     cal_file.write_text(json.dumps(data, indent=2))
     return cal_file
@@ -1039,7 +1078,7 @@ def calibrate_from_playfield_def(
         If fewer than 4 of the expected corner ArUco markers are detected.
     """
     from .homography import compute_homography, detect_all_tags
-    from ..camera.camera_config import load_camera_config
+    from ..camera.camera_config import load_camera_config, save_camera_config
 
     camera_dir = Path(camera_dir)
 
@@ -1156,7 +1195,11 @@ def calibrate_from_playfield_def(
         tags, corner_pixels_rec, world_corners, H, DEFAULT_STATIC_MARKER_IDS
     )
 
-    # Step 10: construct CameraCalibration with provenance fields.
+    # Step 10: resolve camera_position — param wins; else fall back to config.
+    if camera_position is None and config and "camera_position" in config:
+        camera_position = CameraPosition(**config["camera_position"])
+
+    # Step 11: construct CameraCalibration with provenance fields.
     cal = CameraCalibration(
         device_name=camera_slug,
         resolution=(cam_w, cam_h),
@@ -1175,7 +1218,15 @@ def calibrate_from_playfield_def(
         calibrated_camera=camera_slug,
     )
 
-    # Step 11: persist.
+    # Step 12: merge auto-detected device_name and resolution into config.json so
+    # freshly-calibrated cameras have them present even though they are stripped
+    # from calibration.json.  Preserve all other config keys (playfield, settings…).
+    merged_config = dict(config) if config else {}
+    merged_config["device_name"] = camera_slug
+    merged_config["resolution"] = [cam_w, cam_h]
+    save_camera_config(camera_dir, merged_config)
+
+    # Step 13: persist calibration (strips the 5 static fields automatically).
     save_calibration_to_camera_dir(cal, camera_dir, pf_def.width_cm, pf_def.height_cm)
 
     return cal

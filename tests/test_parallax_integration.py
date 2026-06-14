@@ -193,12 +193,11 @@ def test_pipeline_skips_null_world_xy():
 
 
 def test_calibrate_playfield_stores_camera_position(tmp_path, monkeypatch):
-    """calibrate_playfield persists camera_position to calibration.json.
+    """calibrate_playfield persists camera_position to config.json.
 
-    Updated for sprint 012: calibrate_playfield now delegates to
-    calibrate_from_playfield_def.  We write a config.json and monkeypatch
-    calibrate_from_playfield_def to return a controlled calibration so the
-    test stays hardware-free.
+    Updated for the config/calibration split: camera_position now lives in
+    config.json (not calibration.json).  calibrate_from_playfield_def is
+    monkeypatched to mimic real persistence so no live hardware is required.
     """
     import asyncio
     import numpy as np
@@ -252,11 +251,23 @@ def test_calibrate_playfield_stores_camera_position(tmp_path, monkeypatch):
     import aprilcam.calibration.calibration as cal_mod
 
     def _fake_calibrate_from_def(**kwargs):
-        # Write calibration.json mimicking what the real function does.
+        # Mimic what the real calibrate_from_playfield_def does: write
+        # calibration.json (camera_position stripped) and write
+        # camera_position into config.json.
         from aprilcam.calibration.calibration import save_calibration_to_camera_dir
+        from aprilcam.camera.camera_config import load_camera_config, save_camera_config
         save_calibration_to_camera_dir(
             controlled_cal, camera_dir, 40.0, 32.0
         )
+        # Merge camera_position into config.json as the real function does.
+        existing_cfg = load_camera_config(camera_dir) or {}
+        if controlled_cal.camera_position is not None:
+            existing_cfg["camera_position"] = {
+                "x_offset": controlled_cal.camera_position.x_offset,
+                "y_offset": controlled_cal.camera_position.y_offset,
+                "height": controlled_cal.camera_position.height,
+            }
+        save_camera_config(camera_dir, existing_cfg)
         return controlled_cal
 
     monkeypatch.setattr(
@@ -282,13 +293,19 @@ def test_calibrate_playfield_stores_camera_position(tmp_path, monkeypatch):
         assert result["calibrated"] is True
         assert result["camera_height_cm"] == 150.0
 
+        # camera_position is now stored in config.json (not calibration.json).
+        cfg_file = camera_dir / "config.json"
+        if cfg_file.exists():
+            saved_cfg = json.loads(cfg_file.read_text())
+            assert "camera_position" in saved_cfg
+            assert saved_cfg["camera_position"]["height"] == 150.0
+            assert saved_cfg["camera_position"]["x_offset"] == 5.0
+            assert saved_cfg["camera_position"]["y_offset"] == -2.0
+        # Verify calibration.json does NOT contain camera_position.
         cal_file = camera_dir / "calibration.json"
         if cal_file.exists():
-            saved = json.loads(cal_file.read_text())
-            assert "camera_position" in saved
-            assert saved["camera_position"]["height"] == 150.0
-            assert saved["camera_position"]["x_offset"] == 5.0
-            assert saved["camera_position"]["y_offset"] == -2.0
+            saved_cal = json.loads(cal_file.read_text())
+            assert "camera_position" not in saved_cal
     finally:
         try:
             del registry._cameras[cam_id]

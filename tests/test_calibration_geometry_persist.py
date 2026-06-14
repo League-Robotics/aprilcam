@@ -417,3 +417,127 @@ def test_mismatch_detection_ignores_when_no_params(tmp_path: Path) -> None:
         tmp_path, camera_config={"playfield": "main-playfield"}
     )
     assert not getattr(loaded2, "calibration_stale", False)
+
+
+# ---------------------------------------------------------------------------
+# Config/calibration split — OOP refactor
+# ---------------------------------------------------------------------------
+
+
+def _write_cal_without_static(tmp_path: Path, *, slug: str = "test-cam") -> None:
+    """Write a minimal calibration.json with no static fields (post-split format)."""
+    data = {
+        "camera": slug,
+        "homography": _IDENTITY_H.tolist(),
+        "tags_used": 5,
+        "rms_error": 0.01,
+        "playfield": {"width": 109.0, "height": 79.5},
+        "detection_fps": 10,
+        "calibrated_playfield": "main-playfield",
+        "calibrated_camera": slug,
+    }
+    (tmp_path / "calibration.json").write_text(json.dumps(data))
+
+
+def test_config_overlay_populates_static_fields(tmp_path: Path) -> None:
+    """config.json supplies static fields when calibration.json omits them."""
+    _write_cal_without_static(tmp_path)
+    config = {
+        "playfield": "main-playfield",
+        "device_name": "My Camera",
+        "resolution": [1280, 800],
+        "settings": {"program": "uvc-util", "controls": {"gain": "1"}},
+        "camera_position": {"x_offset": 1.0, "y_offset": 2.0, "height": 100.0},
+        "static_marker_ids": ["aruco_corners", "apriltag:1"],
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+
+    cal = load_calibration_from_camera_dir(tmp_path)
+
+    assert cal is not None
+    assert cal.device_name == "My Camera"
+    assert cal.resolution == (1280, 800)
+    assert cal.settings == {"program": "uvc-util", "controls": {"gain": "1"}}
+    assert cal.camera_position is not None
+    assert cal.camera_position.x_offset == 1.0
+    assert cal.camera_position.y_offset == 2.0
+    assert cal.camera_position.height == 100.0
+    assert cal.static_marker_ids == ["aruco_corners", "apriltag:1"]
+
+
+def test_saved_calibration_omits_static_fields(tmp_path: Path) -> None:
+    """save_calibration_to_camera_dir does NOT write the 5 static fields."""
+    cal = CameraCalibration(
+        device_name="TestCam",
+        resolution=(1280, 800),
+        homography=_IDENTITY_H.copy(),
+        settings={"program": "uvc-util", "controls": {"gain": "1"}},
+        camera_position=None,
+        static_marker_ids=["aruco_corners"],
+    )
+    save_calibration_to_camera_dir(cal, tmp_path, 109.0, 79.5)
+    data = json.loads((tmp_path / "calibration.json").read_text())
+
+    for key in ("device_name", "resolution", "settings", "camera_position", "static_marker_ids"):
+        assert key not in data, f"calibration.json must not contain '{key}' after split"
+
+    # camera slug is present
+    assert data.get("camera") == tmp_path.name
+
+
+def test_saved_calibration_has_camera_key(tmp_path: Path) -> None:
+    """calibration.json written by save_calibration_to_camera_dir has a 'camera' key."""
+    cal = _minimal_cal(playfield_slug="main-playfield", camera_slug="test-cam")
+    save_calibration_to_camera_dir(cal, tmp_path, 134.3, 89.3)
+    data = json.loads((tmp_path / "calibration.json").read_text())
+    assert data.get("camera") == tmp_path.name
+
+
+def test_legacy_calibration_with_static_fields_loads(tmp_path: Path) -> None:
+    """Legacy calibration.json with static fields still loads them (fallback)."""
+    legacy_data = {
+        "device_name": "LegacyCam",
+        "resolution": [640, 480],
+        "homography": _IDENTITY_H.tolist(),
+        "settings": {"program": "uvc-util", "controls": {"gain": "2"}},
+        "camera_position": {"x_offset": 0.0, "y_offset": 0.0, "height": 50.0},
+        "static_marker_ids": ["aruco_corners"],
+        "tags_used": 4,
+        "rms_error": 0.1,
+    }
+    (tmp_path / "calibration.json").write_text(json.dumps(legacy_data))
+    # No config.json — the loader falls back to calibration.json values.
+
+    cal = load_calibration_from_camera_dir(tmp_path)
+
+    assert cal is not None
+    assert cal.device_name == "LegacyCam"
+    assert cal.resolution == (640, 480)
+    assert cal.settings == {"program": "uvc-util", "controls": {"gain": "2"}}
+    assert cal.camera_position is not None
+    assert cal.camera_position.height == 50.0
+    assert cal.static_marker_ids == ["aruco_corners"]
+
+
+def test_config_wins_over_legacy_calibration_values(tmp_path: Path) -> None:
+    """When both calibration.json and config.json have a key, config.json wins."""
+    legacy_data = {
+        "device_name": "LegacyCam",
+        "resolution": [640, 480],
+        "homography": _IDENTITY_H.tolist(),
+        "settings": {"program": "uvc-util", "controls": {"gain": "1"}},
+    }
+    (tmp_path / "calibration.json").write_text(json.dumps(legacy_data))
+    config = {
+        "device_name": "NewCam",
+        "resolution": [1920, 1080],
+        "settings": {"program": "uvc-util", "controls": {"gain": "5"}},
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+
+    cal = load_calibration_from_camera_dir(tmp_path)
+
+    assert cal is not None
+    assert cal.device_name == "NewCam"      # config wins
+    assert cal.resolution == (1920, 1080)   # config wins
+    assert cal.settings["controls"]["gain"] == "5"  # config wins

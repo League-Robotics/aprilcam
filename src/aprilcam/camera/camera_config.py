@@ -1,13 +1,16 @@
 """Per-camera config.json helpers.
 
 Each camera directory may contain a ``config.json`` file that records which
-named playfield the camera is linked to.  This module provides atomic
-read/write helpers used by the MCP server and CLI.
+named playfield the camera is linked to, plus static hardware settings
+(device_name, resolution, UVC controls, camera_position, static_marker_ids).
+This module provides atomic read/write helpers.
 
-**Daemon-boundary rule**: ``daemon/camera_pipeline.py`` and
-``daemon/grpc_server.py`` must never import this module.  ``config.json``
-is owned exclusively by the MCP server and human operators; the daemon reads
-only ``calibration.json`` and ``info.json``.
+**Daemon-boundary rule**: ``daemon/camera_pipeline.py`` may import
+``load_camera_config`` to read hardware settings (UVC controls, device_name,
+resolution) needed at camera-open time.  However, daemon modules must
+**never call** ``save_camera_config`` — ``config.json`` is written exclusively
+by the MCP server and human operators.  The daemon reads config for hardware
+parameters only and must treat it as read-only.
 """
 from __future__ import annotations
 

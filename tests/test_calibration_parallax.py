@@ -204,11 +204,12 @@ def test_old_keys_not_written(tmp_path):
 
 
 def test_save_camera_position(tmp_path):
-    """camera_position is written to JSON when present."""
+    """camera_position is NOT written to calibration.json (moved to config.json)."""
     cal = _minimal_cal(camera_position=CameraPosition(x_offset=5.0, y_offset=2.0, height=150.0))
     save_calibration_to_camera_dir(cal, tmp_path, 101.0, 89.0)
     data = json.loads((tmp_path / "calibration.json").read_text())
-    assert data["camera_position"] == {"x_offset": 5.0, "y_offset": 2.0, "height": 150.0}
+    # After the config/calibration split, camera_position lives in config.json.
+    assert "camera_position" not in data
 
 
 def test_save_no_tag_heights(tmp_path):
@@ -266,13 +267,24 @@ def test_load_field_dimensions_old_format(tmp_path):
 
 
 def test_round_trip(tmp_path):
-    """Save CameraCalibration with camera_position; reload and compare."""
+    """Save CameraCalibration then reload; camera_position comes from config.json."""
+    from aprilcam.camera.camera_config import save_camera_config
+
     pos = CameraPosition(x_offset=3.0, y_offset=-1.5, height=200.0)
     cal = _minimal_cal(
         camera_position=pos,
         playfield_width_cm=101.0,
         playfield_height_cm=89.0,
     )
+    # After the config/calibration split, camera_position is stored in config.json.
+    # Write it there so load_calibration_from_camera_dir can overlay it.
+    save_camera_config(tmp_path, {
+        "camera_position": {
+            "x_offset": pos.x_offset,
+            "y_offset": pos.y_offset,
+            "height": pos.height,
+        }
+    })
     save_calibration_to_camera_dir(cal, tmp_path, field_width_cm=101.0, field_height_cm=89.0)
     loaded = load_calibration_from_camera_dir(tmp_path)
 

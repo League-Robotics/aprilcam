@@ -1,9 +1,4 @@
 {
-  "device_name": "Global Shutter Camera",
-  "resolution": [
-    1920,
-    1080
-  ],
   "homography": [
     [
       0.11301313604805908,
@@ -27,5 +22,6 @@
     "width": 109.0,
     "height": 79.5
   },
-  "detection_fps": 10
+  "detection_fps": 10,
+  "camera": "global-shutter-camera"
 }

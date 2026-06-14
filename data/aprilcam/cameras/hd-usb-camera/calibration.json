@@ -1,9 +1,4 @@
 {
-  "device_name": "HD USB CAMERA",
-  "resolution": [
-    1920,
-    1080
-  ],
   "homography": [
     [
       0.0766777312450762,
@@ -49,5 +44,6 @@
   ],
   "field_width_cm": 109.0,
   "field_height_cm": 79.5,
-  "detection_fps": 10
+  "detection_fps": 10,
+  "camera": "hd-usb-camera"
 }

@@ -1,9 +1,4 @@
 {
-  "device_name": "Arducam OV9782 USB Camera",
-  "resolution": [
-    1280,
-    800
-  ],
   "homography": [
     [
       0.10888962868228169,
@@ -137,24 +132,6 @@
       ]
     }
   },
-  "static_marker_ids": [
-    "aruco_corners",
-    "apriltag:1"
-  ],
   "detection_fps": 10,
-  "camera_position": {
-    "x_offset": 0.0,
-    "y_offset": 0.0,
-    "height": 127.0
-  },
-  "settings": {
-    "program": "uvc-util",
-    "controls": {
-      "auto-exposure-mode": "0",
-      "auto-exposure-priority": "0",
-      "auto-white-balance-temp": "false",
-      "exposure-time-abs": "7",
-      "gain": "1"
-    }
-  }
+  "camera": "arducam-ov9782-usb-camera"
 }
