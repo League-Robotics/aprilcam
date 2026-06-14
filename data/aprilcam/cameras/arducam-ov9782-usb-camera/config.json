@@ -14,7 +14,7 @@
     "controls": {
       "auto-exposure-mode": "0",
       "auto-exposure-priority": "0",
-      "auto-white-balance-temp": "false",
+      "auto-white-balance-temp": "true",
       "exposure-time-abs": "7",
       "gain": "1"
     },
