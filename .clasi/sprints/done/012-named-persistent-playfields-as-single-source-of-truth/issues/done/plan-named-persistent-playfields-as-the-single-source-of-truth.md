@@ -1,5 +1,14 @@
 ---
-status: pending
+status: done
+sprint: '012'
+tickets:
+- 012-001
+- 012-002
+- 012-003
+- 012-004
+- 012-005
+- 012-006
+- 012-007
 ---
 
 # Plan: Named, persistent playfields as the single source of truth
