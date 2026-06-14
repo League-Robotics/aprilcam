@@ -1,9 +1,12 @@
 {
+  "name": "main-playfield",
+  "display_name": "Main Playfield",
   "playfield": {
     "width_cm": 134.3,
     "height_cm": 89.3,
     "origin": "apriltag-center-a1",
-    "description": "Origin at AprilTag A1 (center of field). X increases east, Y increases north."
+    "description": "Origin at AprilTag A1 (center of field). X increases east, Y increases north.",
+    "display_name": "Main Playfield"
   },
   "april_tags": [
     {
