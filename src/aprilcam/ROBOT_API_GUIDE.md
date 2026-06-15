@@ -405,6 +405,9 @@ from the old homography and may be inaccurate.
 | `close_camera(camera_id)` | Release a camera |
 | `set_camera_playfield(camera_id, playfield_name)` | Link a camera to a named playfield definition (writes `config.json`) |
 | `calibrate_playfield(playfield_id)` | Calibrate using the linked playfield def (no width/height needed) |
+| `list_playfields()` | List all named playfield definitions (`name`, `display_name`, dimensions) |
+| `get_playfield(name?)` | Return a playfield's entire structure — all AprilTags, ArUco tags, rectangles, dots, dimensions, origin (whole map, not a search) |
+| `where(query, source_id?)` | Search the playfield map for one feature by natural language |
 | `create_path(playfield_id, waypoints)` | Add a persistent waypoint path |
 | `delete_path(path_id)` | Remove a path |
 | `clear_paths(playfield_id)` | Remove all paths for a playfield |

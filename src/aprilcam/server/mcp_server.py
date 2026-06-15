@@ -1407,6 +1407,55 @@ def _handle_where(query: str, source_id: str = "") -> dict:
         return {"error": f"Unexpected error: {exc}"}
 
 
+def _handle_list_playfields() -> dict:
+    """Core logic for list_playfields — return registered playfield summaries."""
+    try:
+        playfields = []
+        for n in playfield_def_registry.list():
+            d = playfield_def_registry.get(n)
+            playfields.append({
+                "name": d.name,
+                "display_name": d.display_name,
+                "width_cm": d.width_cm,
+                "height_cm": d.height_cm,
+            })
+        return {"playfields": playfields}
+    except Exception as exc:
+        return {"error": f"Unexpected error: {exc}"}
+
+
+def _handle_get_playfield(name: str = "") -> dict:
+    """Core logic for get_playfield — return one full playfield definition.
+
+    Returns the complete structure (dimensions, origin, and every AprilTag,
+    ArUco tag, rectangle, and dot) for *name*, or the first/only registered
+    playfield when *name* is empty.  Falls back to the legacy single-file
+    ``data/aprilcam/playfield.json`` layout when the registry is empty.
+    """
+    try:
+        if name:
+            try:
+                return playfield_def_registry.get(name).to_dict()
+            except KeyError:
+                available = ", ".join(playfield_def_registry.list()) or "(none)"
+                return {"error": f"Unknown playfield '{name}'. Available: [{available}]"}
+
+        pf_def = playfield_def_registry.first()
+        if pf_def is not None:
+            return pf_def.to_dict()
+
+        # Legacy fallback: single data/aprilcam/playfield.json (pre-migration).
+        from aprilcam.core import playfield_query as pq
+        config = Config.load()
+        try:
+            legacy = pq.load_playfield(pq.default_playfield_path(config.data_dir))
+        except (FileNotFoundError, ValueError) as exc:
+            return {"error": f"No playfield definitions available: {exc}"}
+        return {"name": "playfield", "display_name": "playfield", **legacy}
+    except Exception as exc:
+        return {"error": f"Unexpected error: {exc}"}
+
+
 def _warp_points(points: list, homography: np.ndarray) -> list:
     """Transform a list of [x, y] points through a homography matrix."""
     import cv2
@@ -2939,6 +2988,47 @@ async def where(query: str, source_id: str = "") -> list[TextContent]:
         On error: ``{"error": "<message>"}``.
     """
     result = _handle_where(query, source_id)
+    return [TextContent(type="text", text=json.dumps(result))]
+
+
+@server.tool()
+async def list_playfields() -> list[TextContent]:
+    """List all named playfield definitions known to the server.
+
+    Playfield definitions live in ``data/aprilcam/playfields/<name>.json`` and
+    are loaded at startup. Use this to discover the ``name`` to pass to
+    ``get_playfield``.
+
+    Returns:
+        On success: ``{"playfields": [{"name", "display_name", "width_cm",
+        "height_cm"}, ...]}`` (empty list when none are configured).
+        On error: ``{"error": "<message>"}``.
+    """
+    result = _handle_list_playfields()
+    return [TextContent(type="text", text=json.dumps(result))]
+
+
+@server.tool()
+async def get_playfield(name: str = "") -> list[TextContent]:
+    """Return a playfield's entire structure — every component on it.
+
+    Unlike ``where`` (which searches for a single feature), this returns the
+    whole map: field dimensions, coordinate origin, and the full lists of
+    AprilTags, ArUco tags, rectangles, and dots — each with its world position
+    in cm (origin at AprilTag 1 / playfield center; +x east, +y north).
+
+    Args:
+        name: The playfield name (from ``list_playfields``). When omitted,
+            returns the first/only registered playfield.
+
+    Returns:
+        On success: ``{"name", "display_name", "playfield": {"width_cm",
+        "height_cm", "origin"}, "april_tags": [...], "aruco_tags": [...],
+        "rectangles": [...], "dots": [...]}``.
+        On error: ``{"error": "<message>"}`` (unknown name includes the list of
+        available names).
+    """
+    result = _handle_get_playfield(name)
     return [TextContent(type="text", text=json.dumps(result))]
 
 

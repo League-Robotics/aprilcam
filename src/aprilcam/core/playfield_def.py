@@ -148,6 +148,32 @@ class PlayfieldDefinition:
                 coords.append((float(tag["x"]), float(tag["y"])))
         return coords
 
+    def to_dict(self) -> dict:
+        """Return the full definition as a JSON-serialisable dict.
+
+        Shape mirrors the on-disk file plus the identity fields::
+
+            {
+              "name": ..., "display_name": ...,
+              "playfield": {"width_cm": ..., "height_cm": ..., "origin": ...},
+              "april_tags": [...], "aruco_tags": [...],
+              "rectangles": [...], "dots": [...]
+            }
+        """
+        return {
+            "name": self.name,
+            "display_name": self.display_name,
+            "playfield": {
+                "width_cm": self.width_cm,
+                "height_cm": self.height_cm,
+                "origin": self.origin,
+            },
+            "april_tags": self.april_tags,
+            "aruco_tags": self.aruco_tags,
+            "rectangles": self.rectangles,
+            "dots": self.dots,
+        }
+
 
 class PlayfieldDefinitionRegistry:
     """Registry of named playfield definitions loaded from a directory.
