@@ -75,7 +75,7 @@ wheels = [
 
 [[package]]
 name = "aprilcam"
-version = "0.20260614.1"
+version = "0.20260614.2"
 source = { editable = "." }
 dependencies = [
     { name = "grpcio" },
