@@ -1856,6 +1856,20 @@ async def open_camera(
     Workflow: Start here. The returned camera_id is used by capture_frame,
     create_playfield, start_detection, start_live_view, and set_live_overlay.
 
+    Playfield rehydration (world coordinates): if the camera's data directory
+    contains a ``config.json`` linking it to a known playfield definition AND a
+    stored ``calibration.json``, open_camera reconstructs the calibrated
+    playfield from disk and additionally returns ``playfield_id`` and
+    ``playfield_name``. Pass that ``playfield_id`` as the source_id to
+    stream_tags / get_tags / get_objects / where so tag and object ``world_xy``
+    (cm, A1-centred: origin at AprilTag 1, +x east, +y north) populate. Passing
+    the camera_id to those tools also works — the server auto-resolves the
+    camera's playfield. If no playfield is configured, only camera_id/cam_name
+    come back and world coordinates are null; link one with ``set_camera_playfield``
+    then ``calibrate_playfield`` (which needs a playfield definition in
+    ``<data_dir>/playfields/``). The server keeps no state across restarts, so
+    open_camera must be called in your session before any query.
+
     If you are writing a robot program that needs high-frequency tag access
     or live overlay drawing, call get_robot_api_guide() first — it shows the
     equivalent DaemonControl Python API for use without MCP at runtime.
@@ -1870,7 +1884,11 @@ async def open_camera(
         backend: OpenCV backend constant name (e.g. ``"CAP_AVFOUNDATION"``).
 
     Returns:
-        On success: ``{"camera_id": "<camera_name>"}``.
+        On success: ``{"camera_id": "<camera_name>", "cam_name": "<slug>"}``;
+        when a configured, calibrated playfield is rehydrated, also
+        ``"playfield_id"`` and ``"playfield_name"``, plus ``"calibration_stale":
+        true`` when the stored calibration predates the current playfield
+        definition.
         On error: ``{"error": "<message>"}``.
     """
     result = _handle_open_camera(index=index, pattern=pattern, source=source, backend=backend)
