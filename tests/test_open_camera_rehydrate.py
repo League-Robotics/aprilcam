@@ -388,7 +388,10 @@ async def test_calibrate_mcp_no_config_returns_error(
     result = json.loads(content[0].text)
 
     assert "error" in result
-    assert "no playfield configured" in result["error"].lower() or "config.json" in result["error"]
+    # Tool-oriented guidance, no filesystem path leaked to the client.
+    assert "not linked to a playfield" in result["error"].lower()
+    assert "set_camera_playfield" in result["error"]
+    assert "config.json" not in result["error"] and "/" not in result["error"]
 
 
 # ---------------------------------------------------------------------------

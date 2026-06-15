@@ -1087,9 +1087,9 @@ def calibrate_from_playfield_def(
     if config is None:
         available = ", ".join(playfield_def_registry.list()) or "(none)"
         raise PlayfieldConfigError(
-            f"Camera '{camera_slug}' has no playfield configured. "
-            f"Create data/aprilcam/cameras/{camera_slug}/config.json with "
-            f'{{\"playfield\": \"<name>\"}}. '
+            f"Camera '{camera_slug}' is not linked to a playfield. "
+            f"Call set_camera_playfield(camera_id, playfield) to link one "
+            f"(list options with list_playfields). "
             f"Available playfields: [{available}]"
         )
 
@@ -1097,7 +1097,8 @@ def calibrate_from_playfield_def(
     if not playfield_slug:
         available = ", ".join(playfield_def_registry.list()) or "(none)"
         raise PlayfieldConfigError(
-            f"Camera '{camera_slug}' config.json has no 'playfield' key. "
+            f"Camera '{camera_slug}' is not linked to a playfield. "
+            f"Call set_camera_playfield(camera_id, playfield) to link one. "
             f"Available playfields: [{available}]"
         )
 

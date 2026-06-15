@@ -79,3 +79,14 @@ def test_list_playfields(tmp_path, monkeypatch):
 def test_list_playfields_empty(monkeypatch):
     monkeypatch.setattr(mcp_server, "playfield_def_registry", PlayfieldDefinitionRegistry())
     assert mcp_server._handle_list_playfields() == {"playfields": []}
+
+
+def test_get_playfield_error_does_not_leak_filesystem_path(monkeypatch):
+    # Empty registry + no legacy file -> generic error with NO filesystem path.
+    monkeypatch.setattr(mcp_server, "playfield_def_registry", PlayfieldDefinitionRegistry())
+    out = mcp_server._handle_get_playfield()
+    assert "error" in out
+    msg = out["error"]
+    assert "/" not in msg and "data/aprilcam" not in msg and ".json" not in msg
+    # It should steer the client to a tool, not a file.
+    assert "create_playfield" in msg or "operator" in msg

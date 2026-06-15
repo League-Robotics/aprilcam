@@ -259,19 +259,23 @@ class PlayfieldRegistry:
 _SERVER_INSTRUCTIONS = """\
 AprilCam MCP server — perception for an AprilTag/ArUco robotics playfield.
 
-Golden path (do this in order, in YOUR session):
-  1. open_camera(pattern="<name>") or open_camera(index=N). It returns
-     camera_id and — when the camera is configured + calibrated — playfield_id
-     and playfield_name. open_camera REHYDRATES the playfield from disk; the
-     server keeps NO state across restarts and auto-opens nothing, so you must
-     call open_camera before any query.
-  2. Use the playfield_id (e.g. "pf_<camera>") as the source_id for
-     stream_tags / get_tags / get_objects / where / create_path. The playfield
-     carries the calibration homography, so tag and object world_xy populate
-     (centimetres, A1-centred: origin at AprilTag 1, +x east, +y north).
-     Passing the camera_id also works — the server auto-resolves the camera's
-     playfield — but playfield_id is canonical. Without a calibrated playfield,
-     world_xy is null and only pixel coordinates are available.
+Everything is done through these tools. You never need — and do not have —
+filesystem access; camera_id and playfield_id are opaque handles, not paths.
+
+Golden path (in order, in YOUR session — the server keeps no state across
+restarts and auto-opens nothing, so start here every time):
+  1. open_camera(pattern="<name>") or open_camera(index=N) -> camera_id. If the
+     camera is already configured it also returns playfield_id and
+     playfield_name; if so, skip step 2.
+  2. create_playfield(camera_id) -> playfield_id. This reconstructs the
+     calibrated playfield from the camera's stored calibration. "calibrated":
+     true means world coordinates are available; "calibrated": false means the
+     camera has not been calibrated yet — ask the operator to calibrate it.
+  3. Use the playfield_id as the source_id for stream_tags / get_tags /
+     get_objects / where / create_path. Tag and object world_xy then populate
+     in centimetres, A1-centred (origin at AprilTag 1, +x east, +y north).
+     Passing the camera_id to those tools also works — the server auto-resolves
+     the camera's playfield.
 
 Discover the field with get_playfield()/list_playfields(); search it with
 where(). Call get_robot_api_guide() for the full reference (incl. the
@@ -664,11 +668,11 @@ def _handle_set_camera_playfield(camera_id: str, playfield: str) -> dict:
     # Write config.json atomically
     from aprilcam.camera.camera_config import save_camera_config
 
-    config_path = save_camera_config(camera_dir, {"playfield": playfield})
+    save_camera_config(camera_dir, {"playfield": playfield})
     return {
         "camera_id": camera_id,
         "playfield": playfield,
-        "config_path": str(config_path),
+        "linked": True,
     }
 
 
@@ -1001,8 +1005,6 @@ def _handle_calibrate_playfield(
             "width_cm": field_spec.width_cm,
             "height_cm": field_spec.height_cm,
         }
-        if per_camera_path:
-            result["homography_file"] = per_camera_path
         return result
     except Exception as exc:
         return {"error": f"Unexpected error: {exc}"}
@@ -1429,8 +1431,10 @@ def _handle_where(query: str, source_id: str = "") -> dict:
             pf_path = pq.default_playfield_path(config.data_dir)
             try:
                 playfield = pq.load_playfield(pf_path)
-            except (FileNotFoundError, ValueError) as exc:
-                return {"error": str(exc)}
+            except (FileNotFoundError, ValueError):
+                return {"error": "No playfield is configured. Open a camera and "
+                                 "call create_playfield, or ask the operator to "
+                                 "set up a playfield."}
 
         # Merge live detections when a detection source is supplied.
         live_tags: Optional[dict[int, dict]] = None
@@ -1506,8 +1510,10 @@ def _handle_get_playfield(name: str = "") -> dict:
         config = Config.load()
         try:
             legacy = pq.load_playfield(pq.default_playfield_path(config.data_dir))
-        except (FileNotFoundError, ValueError) as exc:
-            return {"error": f"No playfield definitions available: {exc}"}
+        except (FileNotFoundError, ValueError):
+            return {"error": "No playfields are available. Open a camera and call "
+                             "create_playfield to build one from the camera's "
+                             "calibration, or ask the operator to configure a playfield."}
         return {"name": "playfield", "display_name": "playfield", **legacy}
     except Exception as exc:
         return {"error": f"Unexpected error: {exc}"}
@@ -1856,19 +1862,15 @@ async def open_camera(
     Workflow: Start here. The returned camera_id is used by capture_frame,
     create_playfield, start_detection, start_live_view, and set_live_overlay.
 
-    Playfield rehydration (world coordinates): if the camera's data directory
-    contains a ``config.json`` linking it to a known playfield definition AND a
-    stored ``calibration.json``, open_camera reconstructs the calibrated
-    playfield from disk and additionally returns ``playfield_id`` and
-    ``playfield_name``. Pass that ``playfield_id`` as the source_id to
-    stream_tags / get_tags / get_objects / where so tag and object ``world_xy``
-    (cm, A1-centred: origin at AprilTag 1, +x east, +y north) populate. Passing
-    the camera_id to those tools also works — the server auto-resolves the
-    camera's playfield. If no playfield is configured, only camera_id/cam_name
-    come back and world coordinates are null; link one with ``set_camera_playfield``
-    then ``calibrate_playfield`` (which needs a playfield definition in
-    ``<data_dir>/playfields/``). The server keeps no state across restarts, so
-    open_camera must be called in your session before any query.
+    World coordinates: when the camera is already configured, open_camera also
+    returns ``playfield_id`` and ``playfield_name``; otherwise call
+    ``create_playfield(camera_id)``, which reconstructs the calibrated playfield
+    from the camera's stored calibration. Use the resulting ``playfield_id`` as
+    the source_id for stream_tags / get_tags / get_objects / where so tag and
+    object ``world_xy`` (cm, A1-centred: origin at AprilTag 1, +x east, +y
+    north) populate. Passing the camera_id to those tools also works — the
+    server auto-resolves the camera's playfield. The server keeps no state
+    across restarts, so open_camera must be called in your session first.
 
     If you are writing a robot program that needs high-frequency tag access
     or live overlay drawing, call get_robot_api_guide() first — it shows the
@@ -1942,11 +1944,9 @@ async def set_camera_playfield(
 ) -> list[TextContent]:
     """Link a camera to a named playfield definition.
 
-    Writes data/aprilcam/cameras/<slug>/config.json with {"playfield": "<name>"}.
-    The named playfield must exist in the registry.
-
-    This must be called before calibrate_playfield when the camera has no
-    existing config.json, or to switch a camera to a different playfield.
+    Links the camera to the named playfield (which must exist on the server —
+    see list_playfields). Call this before calibrate_playfield when a camera is
+    not yet linked to a playfield, or to switch a camera to a different one.
 
     Does not trigger recalibration. The existing calibration (if any) becomes
     stale and will be flagged on the next open_camera.
@@ -2020,22 +2020,21 @@ async def calibrate_playfield(
 
     Workflow: open_camera → calibrate_playfield.
 
-    Delegates to ``calibrate_from_playfield_def``: reads the camera's
-    ``config.json`` to find the linked playfield definition, detects the
-    corner ArUco markers from the live feed, computes a homography, and
-    writes ``calibration.json`` with provenance.  Field dimensions come
-    from the definition; any supplied *width* / *height* are ignored
-    when a ``config.json`` is present.
+    Uses the camera's linked playfield definition as the source of truth:
+    detects the corner ArUco markers from the live feed, computes a homography,
+    and stores the calibration with provenance.  Field dimensions come from the
+    definition; any supplied *width* / *height* are ignored. Link the camera to
+    a playfield first (see set_camera_playfield).
 
-    The camera mounting position is stored in ``calibration.json`` under
-    ``camera_position`` and is used by the daemon pipeline to apply
-    automatic parallax correction for tags elevated above the playfield.
+    The camera mounting position is stored with the calibration and is used by
+    the daemon pipeline to apply automatic parallax correction for tags
+    elevated above the playfield.
 
     Args:
-        playfield_id: The playfield handle from ``open_camera`` (rehydrated)
-            or ``create_playfield``.
-        width: Ignored when a ``config.json`` links the camera to a
-            playfield definition.  Retained for backward compatibility.
+        playfield_id: The playfield handle from ``open_camera`` or
+            ``create_playfield``.
+        width: Ignored; dimensions come from the linked playfield definition.
+            Retained for backward compatibility.
         height: See *width*.
         units: Ignored (dimensions now come from the definition).
         camera_height_cm: Height of the camera above the playfield surface
@@ -2111,7 +2110,6 @@ async def calibrate_playfield(
             "width_cm": cal.playfield_width_cm,
             "height_cm": cal.playfield_height_cm,
             "camera_height_cm": camera_height_cm,
-            "homography_file": str(camera_dir / "calibration.json"),
         }
         return [TextContent(type="text", text=json.dumps(result))]
     except Exception as exc:
@@ -2884,7 +2882,7 @@ async def get_tags(
     world coordinates.
 
     Parallax correction and origin translation are applied automatically
-    by the detection pipeline using ``data/aprilcam/tags.json``.
+    by the detection pipeline using stored per-tag heights.
 
     Requires an active detection loop. Recommended workflow:
     ``open_camera`` → ``create_playfield`` → ``stream_tags`` (preferred) →
@@ -3028,8 +3026,8 @@ async def where(query: str, source_id: str = "") -> list[TextContent]:
 
     Answers questions like *"where is the northwest orange dot"*, *"where is
     the eastern red square"*, *"where is the blue dot"*, or *"where is april
-    tag one"*.  Features come from the static playfield map
-    (``data/aprilcam/playfield.json``): AprilTags, ArUco tags, colored
+    tag one"*.  Features come from the playfield map (get_playfield):
+    AprilTags, ArUco tags, colored
     rectangles, and colored dots — each with a world position in cm
     (A1-centred: origin at AprilTag 1, +x east, +y north).
 
@@ -3072,9 +3070,8 @@ async def where(query: str, source_id: str = "") -> list[TextContent]:
 async def list_playfields() -> list[TextContent]:
     """List all named playfield definitions known to the server.
 
-    Playfield definitions live in ``data/aprilcam/playfields/<name>.json`` and
-    are loaded at startup. Use this to discover the ``name`` to pass to
-    ``get_playfield``.
+    Returns the named playfield definitions known to the server. Use this to
+    discover the ``name`` to pass to ``get_playfield``.
 
     Returns:
         On success: ``{"playfields": [{"name", "display_name", "width_cm",

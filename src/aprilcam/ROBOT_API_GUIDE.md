@@ -315,74 +315,50 @@ origin.
 
 ## Camera Configuration and Calibration (MCP Workflow)
 
-Calibration maps camera pixels to real-world cm.  Robot programs that use
-`tag.world_xy` require a valid calibration to be present.  Calibration is
-done once (or after the camera is moved) via the MCP tools, then
-persisted to `calibration.json` in the camera's data directory.
+Calibration maps camera pixels to real-world cm.  Anything that uses
+`tag.world_xy` requires a calibrated playfield.  All of this is done through
+MCP tools — `camera_id` and `playfield_id` are opaque handles, never file
+paths, and you never read or write files yourself.
 
-### Normal setup — camera with a config.json
-
-When a camera's data directory already contains a `config.json` that names
-a playfield, calibration is a single MCP call with **no width/height
-arguments** — the dimensions come from the named playfield definition:
+### Get world coordinates from an already-calibrated camera
 
 ```json
-// MCP call (via your AI agent or aprilcam MCP client)
-{
-  "tool": "calibrate_playfield",
-  "arguments": {
-    "playfield_id": "<camera_id returned by open_camera>"
-  }
-}
+// 1. open the camera
+{ "tool": "open_camera", "arguments": { "pattern": "<name>" } }
+// -> { "camera_id": "...", "playfield_id": "...", "playfield_name": "..." }
+//    playfield_id / playfield_name are present only if already configured.
+
+// 2. if you did NOT get a playfield_id, build one from the stored calibration
+{ "tool": "create_playfield", "arguments": { "camera_id": "<camera_id>" } }
+// -> { "playfield_id": "...", "calibrated": true }
 ```
 
-AprilCam reads `config.json → playfield`, looks up the matching definition
-in `data/aprilcam/playfields/`, extracts the corner ArUco IDs and world
-coordinates, detects those markers in the live feed, and saves
-`calibration.json` with provenance fields.
+Then use the `playfield_id` as the `source_id` for `stream_tags` / `get_tags`
+/ `get_objects` / `where`; `world_xy` (cm) is populated.  A `create_playfield`
+result of `"calibrated": false` means the camera has not been calibrated yet.
 
-### First-time setup — no config.json yet
+### Link a camera to a playfield, then calibrate (setup)
 
-If the camera has no `config.json`, use `set_camera_playfield` first to
-link the camera to a named playfield definition:
+If a camera is not yet linked to a playfield, link it then calibrate — both
+via MCP tools, no files:
 
 ```json
-{
-  "tool": "set_camera_playfield",
-  "arguments": {
-    "camera_id": "<camera_id>",
-    "playfield_name": "main-playfield"
-  }
-}
+{ "tool": "set_camera_playfield",
+  "arguments": { "camera_id": "<camera_id>", "playfield_name": "main-playfield" } }
+{ "tool": "calibrate_playfield",
+  "arguments": { "playfield_id": "<playfield_id>" } }
 ```
 
-Then call `calibrate_playfield` as above.
-
-### `open_camera` auto-rehydration
-
-When you call `open_camera` on a camera that has a stored `config.json`
-and `calibration.json`, the daemon automatically loads the calibration and
-creates the playfield.  The response includes:
-
-```json
-{
-  "camera_id": "cam_0",
-  "playfield_id": "pf_0",
-  "playfield_name": "main-playfield",
-  "calibrated": true
-}
-```
-
-In normal operation you do **not** need to call `create_playfield` after
-`open_camera` — if a saved calibration exists, the playfield is ready
-immediately.
+`calibrate_playfield` takes **no width/height** — dimensions come from the
+named playfield definition.  Discover the available names with
+`list_playfields`.
 
 ### Stale calibration warning
 
 `open_camera` may return `calibration_stale: true` when the stored
 calibration was made against a different playfield definition than the one
-currently configured (for example, after updating `main-playfield.json`
-with revised corner positions).  In that case:
+currently configured (for example, after the playfield definition's corner
+positions were revised).  In that case:
 
 ```json
 {
@@ -418,7 +394,7 @@ only from a **calibrated playfield**:
 | `list_cameras()` | Enumerate available cameras |
 | `open_camera(index?, pattern?)` | Open a camera; returns `camera_id`, `playfield_id`, `playfield_name` if configured |
 | `close_camera(camera_id)` | Release a camera |
-| `set_camera_playfield(camera_id, playfield_name)` | Link a camera to a named playfield definition (writes `config.json`) |
+| `set_camera_playfield(camera_id, playfield_name)` | Link a camera to a named playfield definition |
 | `calibrate_playfield(playfield_id)` | Calibrate using the linked playfield def (no width/height needed) |
 | `list_playfields()` | List all named playfield definitions (`name`, `display_name`, dimensions) |
 | `get_playfield(name?)` | Return a playfield's entire structure — all AprilTags, ArUco tags, rectangles, dots, dimensions, origin (whole map, not a search) |

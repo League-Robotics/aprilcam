@@ -71,7 +71,7 @@ def _register_playfield_def(def_registry, name="main-playfield"):
 
 
 def test_set_camera_playfield_writes_config(isolated_state):
-    """set_camera_playfield writes config.json and returns camera_id, playfield, config_path."""
+    """set_camera_playfield links the camera and returns no filesystem path."""
     reg, def_reg, cam_info, camera_dir = isolated_state
     camera_id = _register_camera(reg, cam_info, camera_dir)
     _register_playfield_def(def_reg, "main-playfield")
@@ -81,7 +81,10 @@ def test_set_camera_playfield_writes_config(isolated_state):
     assert "error" not in result, f"Unexpected error: {result.get('error')}"
     assert result["camera_id"] == camera_id
     assert result["playfield"] == "main-playfield"
-    assert result["config_path"] == str(camera_dir / "config.json")
+    assert result["linked"] is True
+    # The response must not leak filesystem paths to the client.
+    assert "config_path" not in result
+    assert not any(isinstance(v, str) and "/" in v for v in result.values())
 
     # config.json must exist and be loadable with the correct value
     config = load_camera_config(camera_dir)

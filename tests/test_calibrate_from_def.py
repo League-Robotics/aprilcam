@@ -134,7 +134,9 @@ def test_precondition_no_config(tmp_path: Path) -> None:
 
     msg = str(exc_info.value)
     assert "test-cam" in msg
-    assert "config.json" in msg
+    # Steer the client to the MCP tool, never to a filesystem path.
+    assert "set_camera_playfield" in msg
+    assert "config.json" not in msg and "/" not in msg
     assert "Available playfields:" in msg
     assert "main-playfield" in msg
 
