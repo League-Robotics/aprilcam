@@ -396,6 +396,21 @@ Fix: call `calibrate_playfield(playfield_id=...)` to re-calibrate with the
 current definition.  Until recalibrated, world coordinates will be computed
 from the old homography and may be inaccurate.
 
+### Getting world coordinates (read this)
+
+World positions (cm, A1-centred: origin at AprilTag 1, +x east, +y north) come
+only from a **calibrated playfield**:
+
+1. Call `open_camera(...)` in your session first — the server holds no state
+   across restarts and auto-opens nothing. It returns `playfield_id` and
+   `playfield_name` when the camera is configured + calibrated.
+2. Pass the **`playfield_id`** (e.g. `pf_<camera>`) as the `source_id` to
+   `stream_tags` / `get_tags` / `get_objects` / `where`. Tag and object
+   `world_xy` then populate. Passing the bare `camera_id` also works — the
+   server auto-resolves the camera's playfield — but `playfield_id` is
+   canonical. With no calibrated playfield, `world_xy` is `null` and only
+   pixel coordinates are returned.
+
 ### MCP camera and paths tools
 
 | Tool | Purpose |

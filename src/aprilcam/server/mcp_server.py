@@ -174,6 +174,31 @@ def _a1_coord_transform(origin_x: float, origin_y: float):
     return _transform
 
 
+def _resolve_source_playfield(source_id: str, camera_id: "str | None" = None):
+    """Return the PlayfieldEntry for *source_id*, accepting either handle.
+
+    Resolves a playfield from a playfield_id directly, or — when *source_id*
+    (or *camera_id*) is a camera handle — from the playfield associated with
+    that camera (e.g. one rehydrated by ``open_camera``).  This lets world-
+    coordinate conversion work whether the caller passes the playfield_id or
+    the camera_id.  Returns ``None`` when no playfield can be resolved.
+    """
+    try:
+        return playfield_registry.get(source_id)
+    except KeyError:
+        pass
+    for cid in (source_id, camera_id):
+        if not cid:
+            continue
+        pid = playfield_registry.find_by_camera(cid)
+        if pid is not None:
+            try:
+                return playfield_registry.get(pid)
+            except KeyError:
+                pass
+    return None
+
+
 class DaemonCapture:
     """Wraps a DaemonControl client as a cv2.VideoCapture-compatible source.
 
@@ -231,7 +256,29 @@ class PlayfieldRegistry:
 # Module-level instances
 # ---------------------------------------------------------------------------
 
-server = FastMCP("aprilcam")
+_SERVER_INSTRUCTIONS = """\
+AprilCam MCP server — perception for an AprilTag/ArUco robotics playfield.
+
+Golden path (do this in order, in YOUR session):
+  1. open_camera(pattern="<name>") or open_camera(index=N). It returns
+     camera_id and — when the camera is configured + calibrated — playfield_id
+     and playfield_name. open_camera REHYDRATES the playfield from disk; the
+     server keeps NO state across restarts and auto-opens nothing, so you must
+     call open_camera before any query.
+  2. Use the playfield_id (e.g. "pf_<camera>") as the source_id for
+     stream_tags / get_tags / get_objects / where / create_path. The playfield
+     carries the calibration homography, so tag and object world_xy populate
+     (centimetres, A1-centred: origin at AprilTag 1, +x east, +y north).
+     Passing the camera_id also works — the server auto-resolves the camera's
+     playfield — but playfield_id is canonical. Without a calibrated playfield,
+     world_xy is null and only pixel coordinates are available.
+
+Discover the field with get_playfield()/list_playfields(); search it with
+where(). Call get_robot_api_guide() for the full reference (incl. the
+DaemonControl Python API for high-rate robot control).
+"""
+
+server = FastMCP("aprilcam", instructions=_SERVER_INSTRUCTIONS)
 registry = CameraRegistry()
 playfield_registry = PlayfieldRegistry()
 path_registry = PathRegistry()
@@ -998,12 +1045,21 @@ def _handle_start_detection(
             if poly is not None:
                 playfield_poly = poly
         except KeyError:
-            # Not a playfield — treat source_id as a camera handle
+            # Not a playfield_id — treat source_id as a camera handle.
             camera_id = source_id
             try:
                 cap = registry.get(source_id)
             except KeyError:
                 return {"error": f"Unknown source_id '{source_id}'"}
+            # Hardening: if this camera has an associated playfield (e.g. one
+            # rehydrated by open_camera), use its homography/polygon so tag
+            # world_xy is computed even when the caller passes the camera id.
+            _assoc = _resolve_source_playfield(source_id)
+            if _assoc is not None:
+                homography = _assoc.homography
+                _assoc_poly = _assoc.playfield.get_polygon()
+                if _assoc_poly is not None:
+                    playfield_poly = _assoc_poly
 
         # For real cameras (cam_N handles), open an exclusive capture to
         # avoid frame contention with other MCP tools reading the same handle.
@@ -1060,13 +1116,11 @@ def _handle_start_detection(
 
         buf = RingBuffer(maxlen=300)
         coord_transform = None
-        try:
-            _pf = playfield_registry.get(source_id)
+        _pf = _resolve_source_playfield(source_id, camera_id)
+        if _pf is not None:
             ox, oy = _get_playfield_origin(_pf)
             if ox != 0.0 or oy != 0.0:
                 coord_transform = _a1_coord_transform(ox, oy)
-        except KeyError:
-            pass
         loop = DetectionLoop(source=cap, aprilcam=cam, ring_buffer=buf,
                              coord_transform=coord_transform)
         loop.start()
@@ -1181,12 +1235,12 @@ def _handle_get_tags(source_id: str) -> dict:
             homography = None
             origin_x = 0.0
             origin_y = 0.0
-            try:
-                pf_entry = playfield_registry.get(source_id)
+            pf_entry = _resolve_source_playfield(
+                source_id, getattr(entry, "_camera_id", None)
+            )
+            if pf_entry is not None:
                 homography = pf_entry.homography
                 origin_x, origin_y = _get_playfield_origin(pf_entry)
-            except KeyError:
-                pass
             for tag in result.get("tags", []):
                 if tag["id"] == entry.robot_tag_id:
                     tag["gripper_world_xy"] = _compute_gripper_world_xy(
@@ -1274,14 +1328,17 @@ def _handle_get_objects(source_id: str) -> dict:
         pf_poly = None
         origin_x = 0.0
         origin_y = 0.0
-        try:
-            pf_entry = playfield_registry.get(source_id)
+        pf_entry = _resolve_source_playfield(
+            source_id, getattr(det_entry, "_camera_id", None)
+        )
+        if pf_entry is not None:
             if pf_entry.homography is not None:
                 homography = pf_entry.homography
-            pf_poly = pf_entry.playfield.get_polygon()
+            try:
+                pf_poly = pf_entry.playfield.get_polygon()
+            except AttributeError:
+                pf_poly = None
             origin_x, origin_y = _get_playfield_origin(pf_entry)
-        except (KeyError, AttributeError):
-            pass
 
         # Detect colored objects via HSV classification.
         classifier = ColorClassifier(min_area=600, max_area=30000)
@@ -1624,19 +1681,15 @@ def _handle_get_frame(
                         )
 
             homography = None
-            try:
-                pf_entry = playfield_registry.get(source_id)
-                if pf_entry.homography is not None:
-                    homography = pf_entry.homography
-            except KeyError:
-                pass
-
             pf_poly_ann = None
-            try:
-                pf_entry_ann = playfield_registry.get(source_id)
-                pf_poly_ann = pf_entry_ann.playfield.get_polygon()
-            except (KeyError, AttributeError):
-                pass
+            _pf_ann = _resolve_source_playfield(source_id)
+            if _pf_ann is not None:
+                if _pf_ann.homography is not None:
+                    homography = _pf_ann.homography
+                try:
+                    pf_poly_ann = _pf_ann.playfield.get_polygon()
+                except AttributeError:
+                    pf_poly_ann = None
 
             objects = detector.detect(
                 gray_ann, homography=homography,
@@ -2644,7 +2697,7 @@ async def stream_tags(
             if poly is not None:
                 playfield_poly = poly
         except KeyError:
-            # Not a playfield — treat source_id as a camera handle
+            # Not a playfield_id — treat source_id as a camera handle.
             camera_id = source_id
             try:
                 cap = registry.get(source_id)
@@ -2652,6 +2705,14 @@ async def stream_tags(
                 return [TextContent(type="text", text=json.dumps(
                     {"error": f"Unknown source_id '{source_id}'"}
                 ))]
+            # Hardening: use the camera's associated playfield (if any) so tag
+            # world_xy is computed even when the caller passes the camera id.
+            _assoc = _resolve_source_playfield(source_id)
+            if _assoc is not None:
+                homography = _assoc.homography
+                _assoc_poly = _assoc.playfield.get_polygon()
+                if _assoc_poly is not None:
+                    playfield_poly = _assoc_poly
 
         # For real cameras (cam_N handles), open an exclusive capture
         if camera_id and camera_id.startswith("cam_"):
@@ -2706,13 +2767,11 @@ async def stream_tags(
 
         buf = RingBuffer(maxlen=300)
         coord_transform = None
-        try:
-            _pf = playfield_registry.get(source_id)
+        _pf = _resolve_source_playfield(source_id, camera_id)
+        if _pf is not None:
             ox, oy = _get_playfield_origin(_pf)
             if ox != 0.0 or oy != 0.0:
                 coord_transform = _a1_coord_transform(ox, oy)
-        except KeyError:
-            pass
         loop = DetectionLoop(source=cap, aprilcam=cam, ring_buffer=buf,
                              coord_transform=coord_transform)
         loop.start()
