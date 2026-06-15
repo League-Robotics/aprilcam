@@ -9,6 +9,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from typing import Optional
@@ -227,6 +228,55 @@ def _decode_frame(frame_bytes, np, cv):
 def _vel_mag(t: dict) -> float:
     vp = t.get("vel_px", [0, 0])
     return math.hypot(float(vp[0]), float(vp[1]))
+
+
+# Mobility classification tuning.
+_VEL_THRESHOLD = 1.0       # px/s — above this a tag counts as moving this frame
+_PROMOTE_FRAMES = 10       # consecutive over-threshold frames before stamping
+_STILL_TIMEOUT_S = 10.0    # revert mobile -> stationary after this long with no movement
+
+
+def _classify_tag_mobility(
+    raw_tags: list[dict],
+    vel_counts: dict[int, int],
+    last_moving: dict[int, float],
+    now: float,
+    *,
+    vel_threshold: float = _VEL_THRESHOLD,
+    promote_frames: int = _PROMOTE_FRAMES,
+    still_timeout_s: float = _STILL_TIMEOUT_S,
+) -> tuple[list[dict], list[dict]]:
+    """Partition *raw_tags* into ``(mobile, stationary)`` lists.
+
+    A tag is **mobile** when it is over *vel_threshold* this frame, or it moved
+    within the last *still_timeout_s* seconds; otherwise it is **stationary**.
+    The last-movement time is stamped only after *promote_frames* consecutive
+    over-threshold frames, so a single jittery frame shows mobile for just that
+    frame rather than pinning a still tag to mobile for the whole timeout.
+
+    *vel_counts* and *last_moving* are per-tag state dicts, mutated in place so
+    state persists across calls.  *now* is a monotonic timestamp (seconds).
+    """
+    for t in raw_tags:
+        tid = int(t.get("id", -1))
+        if _vel_mag(t) > vel_threshold:
+            vel_counts[tid] = vel_counts.get(tid, 0) + 1
+            if vel_counts[tid] >= promote_frames:
+                last_moving[tid] = now
+        else:
+            vel_counts[tid] = 0
+
+    mobile: list[dict] = []
+    stationary: list[dict] = []
+    for t in sorted(raw_tags, key=lambda x: int(x.get("id", 0))):
+        tid = int(t.get("id", -1))
+        last = last_moving.get(tid)
+        recently_moved = last is not None and (now - last) < still_timeout_s
+        if recently_moved or _vel_mag(t) > vel_threshold:
+            mobile.append(t)
+        else:
+            stationary.append(t)
+    return mobile, stationary
 
 
 
@@ -888,10 +938,10 @@ def main(argv: list[str] | None = None) -> int:
             del_btn.pack(side=tk.RIGHT, padx=(4, 0))
 
     # ── Mobility tracking (main-thread only) ──────────────────────────────
+    # Per-tag state for _classify_tag_mobility: a tag stays "mobile" until it
+    # has been still for _STILL_TIMEOUT_S seconds, then reverts to "stationary".
     _vel_counts: dict[int, int] = {}
-    _perm_mobile: set[int] = set()
-    _VEL_THRESHOLD = 1.0   # px/s
-    _PROMOTE_FRAMES = 10
+    _last_moving: dict[int, float] = {}
 
     def _set_text(widget, text: str) -> None:
         widget.config(state=tk.NORMAL)
@@ -900,20 +950,9 @@ def main(argv: list[str] | None = None) -> int:
         widget.config(state=tk.DISABLED)
 
     def _update_tag_panel(raw_tags: list[dict]) -> None:
-        for t in raw_tags:
-            tid = int(t.get("id", -1))
-            if _vel_mag(t) > _VEL_THRESHOLD:
-                _vel_counts[tid] = _vel_counts.get(tid, 0) + 1
-                if _vel_counts[tid] >= _PROMOTE_FRAMES:
-                    _perm_mobile.add(tid)
-
-        mobile, stationary = [], []
-        for t in sorted(raw_tags, key=lambda x: int(x.get("id", 0))):
-            tid = int(t.get("id", -1))
-            if tid in _perm_mobile or _vel_mag(t) > _VEL_THRESHOLD:
-                mobile.append(t)
-            else:
-                stationary.append(t)
+        mobile, stationary = _classify_tag_mobility(
+            raw_tags, _vel_counts, _last_moving, time.monotonic()
+        )
 
         mob_str = _MOB_HDR + "".join(_fmt_mobile_row(t) for t in mobile) if mobile else "(none)\n"
         st_str = _STAT_HDR + "".join(_fmt_stat_row(t) for t in stationary) if stationary else "(none)\n"
