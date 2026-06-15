@@ -147,7 +147,20 @@ class CameraPipeline:
 
         # Latest raw frame (JPEG bytes) for capture_frame() RPC
         self._latest_raw_jpeg: Optional[bytes] = None
+        # Latest raw frame (ndarray) so capture_frame() can encode on demand
+        # when the loop is not already producing JPEGs for an image subscriber.
+        self._latest_raw_frame = None
+        self._latest_frame_id: int = -1
+        self._latest_jpeg_frame_id: int = -1
         self._raw_lock = threading.Lock()
+
+        # Idle-gating: monotonic time of the last pull RPC (capture_frame /
+        # get_current_tags).  When there are no stream subscribers and no recent
+        # pull, the capture loop drops to a slow idle rate and skips JPEG
+        # encoding so the daemon does not burn CPU for nobody.
+        self._last_pull_mono: float = 0.0
+        self._idle_grace_s: float = 3.0
+        self._idle_interval_s: float = 1.0
 
         # Stream producers (optional — injected after construction)
         self._image_producer = None   # ImageStreamProducer | None
@@ -312,10 +325,30 @@ class CameraPipeline:
     def capture_frame(self) -> Optional[bytes]:
         """Return the most recent raw camera frame as JPEG bytes.
 
-        Returns ``None`` if no frame has been captured yet.
+        Encodes on demand from the latest raw frame when the capture loop is
+        not already producing JPEGs for an image-stream subscriber, so a pull
+        always gets a current frame.  Records the pull so the loop stays at
+        full rate.  Returns ``None`` if no frame has been captured yet.
         """
+        self._last_pull_mono = time.monotonic()
         with self._raw_lock:
-            return self._latest_raw_jpeg
+            if (
+                self._latest_raw_jpeg is not None
+                and self._latest_jpeg_frame_id == self._latest_frame_id
+            ):
+                return self._latest_raw_jpeg
+            frame = self._latest_raw_frame
+            fid = self._latest_frame_id
+        if frame is None:
+            return None
+        ok, buf = cv.imencode(".jpg", frame, [cv.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY])
+        if not ok:
+            return None
+        jpeg = buf.tobytes()
+        with self._raw_lock:
+            self._latest_raw_jpeg = jpeg
+            self._latest_jpeg_frame_id = fid
+        return jpeg
 
     def get_current_tags(self) -> "aprilcam_pb2.TagFrameResponse":
         """Return a ``TagFrameResponse`` built from the latest ring-buffer entry.
@@ -323,6 +356,7 @@ class CameraPipeline:
         Returns an empty ``TagFrameResponse`` when no frames have been
         captured yet.
         """
+        self._last_pull_mono = time.monotonic()
         latest = self._ring.get_latest()
         if latest is None:
             return aprilcam_pb2.TagFrameResponse()
@@ -625,13 +659,29 @@ class CameraPipeline:
             ts_mono_ns = time.monotonic_ns()
             ts_wall_ms = int(time.time() * 1000)
 
-            # JPEG-encode raw frame for capture_frame() RPC BEFORE processing
-            ok_raw, raw_buf = cv.imencode(
-                ".jpg", frame, [cv.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY]
-            )
-            if ok_raw:
-                with self._raw_lock:
-                    self._latest_raw_jpeg = raw_buf.tobytes()
+            # Resolve current consumers up front — drives idle-gating.
+            with self._producers_lock:
+                image_prod = self._image_producer
+                tag_prod = self._tag_producer
+            img_subs = image_prod.has_subscribers() if image_prod is not None else False
+            tag_subs = tag_prod.has_subscribers() if tag_prod is not None else False
+
+            # Always keep the latest raw frame so capture_frame() can encode on
+            # demand.  Only JPEG-encode here when an image-stream subscriber is
+            # live; capture_frame() encodes lazily otherwise.
+            with self._raw_lock:
+                self._latest_raw_frame = frame
+                self._latest_frame_id = self._frame_id
+            frame_jpeg = b""
+            if img_subs:
+                ok_raw, raw_buf = cv.imencode(
+                    ".jpg", frame, [cv.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY]
+                )
+                if ok_raw:
+                    frame_jpeg = raw_buf.tobytes()
+                    with self._raw_lock:
+                        self._latest_raw_jpeg = frame_jpeg
+                        self._latest_jpeg_frame_id = self._frame_id
 
             # Run detection / tracking
             try:
@@ -689,14 +739,8 @@ class CameraPipeline:
             # Frame size
             frame_h, frame_w = frame.shape[:2]
 
-            # JPEG bytes (already encoded above; reuse for image stream)
-            frame_jpeg = raw_buf.tobytes() if ok_raw else b""
-
-            # Publish JPEG frame via image producer (if set)
-            with self._producers_lock:
-                image_prod = self._image_producer
-                tag_prod = self._tag_producer
-
+            # image_prod / tag_prod / frame_jpeg were resolved at the top of the
+            # loop (frame_jpeg is empty unless an image subscriber is live).
             if image_prod is not None and frame_jpeg:
                 try:
                     image_prod.publish(
@@ -728,9 +772,18 @@ class CameraPipeline:
 
             self._frame_id += 1
 
-            # Throttle detection to the configured target rate
-            elapsed = time.monotonic() - frame_start
-            target_interval = 1.0 / self._detection_fps
-            sleep_time = target_interval - elapsed
+            # Throttle to the configured rate when something is consuming;
+            # idle down to a slow rate when there are no subscribers and no
+            # recent pull, so the daemon stops burning CPU for nobody.
+            now_end = time.monotonic()
+            active = (
+                img_subs
+                or tag_subs
+                or (now_end - self._last_pull_mono) < self._idle_grace_s
+            )
+            target_interval = (
+                1.0 / self._detection_fps if active else self._idle_interval_s
+            )
+            sleep_time = target_interval - (now_end - frame_start)
             if sleep_time > 0:
                 time.sleep(sleep_time)

@@ -274,6 +274,11 @@ class _BaseProducer:
             except OSError:
                 pass
 
+    def has_subscribers(self) -> bool:
+        """Return True when at least one subscriber is currently connected."""
+        with self._senders_lock:
+            return bool(self._senders)
+
     def _publish_bytes(self, data: bytes) -> None:
         """Enqueue *data* for all active connections (drop if queue full)."""
         with self._senders_lock:
