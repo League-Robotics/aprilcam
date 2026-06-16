@@ -47,10 +47,11 @@ _GLOBAL_SHUTTER = (
 
 def _homography_from_corners(poly: np.ndarray, width_cm: float, height_cm: float) -> np.ndarray:
     """Build a pixel->world homography that maps *poly* (UL/UR/LR/LL) to the
-    world corners (0,0),(W,0),(W,H),(0,H)."""
+    A1-centred world corners (-W/2, H/2),(W/2, H/2),(W/2, -H/2),(-W/2, -H/2)."""
+    hw, hh = float(width_cm) / 2.0, float(height_cm) / 2.0
     src = np.asarray(poly, dtype=np.float32).reshape(4, 2)
     dst = np.array(
-        [[0, 0], [width_cm, 0], [width_cm, height_cm], [0, height_cm]],
+        [[-hw, hh], [hw, hh], [hw, -hh], [-hw, -hh]],
         dtype=np.float32,
     )
     return cv.getPerspectiveTransform(src, dst).astype(np.float64)
@@ -83,7 +84,7 @@ def test_corner_pixels_order_matches_world_corners():
     poly = np.array([[0, 0], [100, 0], [100, 50], [0, 50]], dtype=np.float32)
     H = _homography_from_corners(poly, 100.0, 50.0)
     recovered = corner_pixels_from_homography(H, 100.0, 50.0)
-    # UL=(0,0), UR=(100,0), LR=(100,50), LL=(0,50)
+    # A1-centred: UL=(-50,25), UR=(50,25), LR=(50,-25), LL=(-50,-25)
     np.testing.assert_allclose(recovered, poly, atol=1e-3)
 
 

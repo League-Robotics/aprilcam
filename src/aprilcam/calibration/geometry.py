@@ -20,8 +20,9 @@ Conventions
 -----------
 - Polygon corner order is **UL, UR, LR, LL** (clockwise from the upper-left),
   matching ``PlayfieldBoundary``.
-- World corners map to that order as
-  ``UL=(0,0)``, ``UR=(W,0)``, ``LR=(W,H)``, ``LL=(0,H)`` (cm).
+- World corners are **A1-centred** (origin at field centre, +y up) and map to
+  that order as ``UL=(-W/2, H/2)``, ``UR=(W/2, H/2)``, ``LR=(W/2, -H/2)``,
+  ``LL=(-W/2, -H/2)`` (cm).
 - A *homography* ``H`` maps source pixels to world cm:
   ``[x, y, w]ᵀ = H · [u, v, 1]ᵀ`` with ``(x/w, y/w)`` the world point.
   Its inverse ``H⁻¹`` maps world cm back to source pixels.
@@ -58,11 +59,17 @@ DEFAULT_MOVEMENT_THRESHOLD_PX: float = 25.0
 
 
 def _world_corners(width_cm: float, height_cm: float) -> np.ndarray:
-    """Return the four world corners (cm) in UL, UR, LR, LL order."""
-    W = float(width_cm)
-    H = float(height_cm)
+    """Return the four playfield world corners (cm) in UL, UR, LR, LL order.
+
+    The coordinate system is **A1-centred**: the origin is the field centre
+    (AprilTag 1) and +y points up (north).  The corners are therefore
+    ``UL=(-W/2, H/2)``, ``UR=(W/2, H/2)``, ``LR=(W/2, -H/2)``, ``LL=(-W/2, -H/2)``
+    — UL being the field's north-west corner (image upper-left).
+    """
+    hw = float(width_cm) / 2.0
+    hh = float(height_cm) / 2.0
     return np.array(
-        [[0.0, 0.0], [W, 0.0], [W, H], [0.0, H]],
+        [[-hw, hh], [hw, hh], [hw, -hh], [-hw, -hh]],
         dtype=np.float64,
     )
 
@@ -81,7 +88,8 @@ def corner_pixels_from_homography(
 
     Returns:
         A ``(4, 2)`` float32 array of pixel positions in UL, UR, LR, LL order,
-        corresponding to world corners ``(0,0),(W,0),(W,H),(0,H)``.
+        corresponding to the A1-centred world corners ``(-W/2, H/2),
+        (W/2, H/2), (W/2, -H/2), (-W/2, -H/2)``.
 
     Raises:
         numpy.linalg.LinAlgError: if ``H`` is singular.
