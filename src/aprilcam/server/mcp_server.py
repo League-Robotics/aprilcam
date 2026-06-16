@@ -584,6 +584,25 @@ def _handle_open_camera(
         try:
             camera_dir = Path(info.get("camera_dir", ""))
             if camera_dir:
+                # Load the playfield-definition registry from the daemon's
+                # ACTUAL data dir, derived from the absolute camera_dir
+                # (<data_dir>/cameras/<cam_name>), rather than a CWD-relative
+                # Config.load().  The registry backs list_playfields /
+                # get_playfield / where; loading it here makes those tools work
+                # even when the MCP server's working directory differs from the
+                # daemon's (the common multi-agent case).  load_all is
+                # idempotent (replace-by-name), so re-loading on each open is safe.
+                try:
+                    _pf_dir = camera_dir.parent.parent / "playfields"
+                    if _pf_dir.is_dir():
+                        playfield_def_registry.load_all(_pf_dir)
+                except Exception as _reg_exc:
+                    import logging
+                    logging.getLogger("aprilcam").warning(
+                        "Playfield registry reload from %s failed: %s",
+                        camera_dir, _reg_exc,
+                    )
+
                 from aprilcam.camera.camera_config import load_camera_config
                 from aprilcam.calibration.calibration import load_calibration_from_camera_dir
 
