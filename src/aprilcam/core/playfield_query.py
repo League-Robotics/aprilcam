@@ -111,6 +111,42 @@ def load_playfield(path: Path) -> dict:
         raise ValueError(f"playfield map is not valid JSON: {exc}") from exc
 
 
+def load_playfield_map(config) -> dict:
+    """Return the active playfield map dict for ``where`` resolution.
+
+    Prefers the named-playfields registry (``<data_dir>/playfields/``) and
+    falls back to the legacy single-file ``playfield.json`` for installations
+    that predate the migration.  *config* must expose ``playfields_dir`` and
+    ``data_dir``.
+
+    Raises:
+        FileNotFoundError: If neither a named playfield nor the legacy file
+            is present.
+        ValueError: If the legacy file exists but is not valid JSON.
+    """
+    from aprilcam.core.playfield_def import PlayfieldDefinitionRegistry
+
+    reg = PlayfieldDefinitionRegistry()
+    try:
+        reg.load_all(config.playfields_dir)
+        defn = reg.first()
+    except Exception:
+        defn = None
+    if defn is not None:
+        return {
+            "playfield": {
+                "width_cm": defn.width_cm,
+                "height_cm": defn.height_cm,
+                "origin": defn.origin,
+            },
+            "april_tags": defn.april_tags,
+            "aruco_tags": defn.aruco_tags,
+            "rectangles": defn.rectangles,
+            "dots": defn.dots,
+        }
+    return load_playfield(default_playfield_path(config.data_dir))
+
+
 def iter_features(playfield: dict) -> list[dict]:
     """Flatten all feature categories into one list of record dicts.
 

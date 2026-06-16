@@ -344,22 +344,23 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
         request: aprilcam_pb2.WhereRequest,
         context: grpc.ServicerContext,
     ) -> aprilcam_pb2.WhereResponse:
-        """Resolve a natural-language "where is X" query against playfield.json.
+        """Resolve a natural-language "where is X" query against the playfield map.
 
-        Runs a full-text keyword search over the static playfield map.  When
-        *cam_name* is given and that camera is open, live detections are
-        merged into matched tag features.  On a keyword miss the full
-        playfield.json text is returned so the caller can fall back to an LLM.
+        Runs a full-text keyword search over the static playfield map (loaded
+        from the named-playfields registry, falling back to the legacy
+        single-file layout).  When *cam_name* is given and that camera is open,
+        live detections are merged into matched tag features.  On a keyword
+        miss the full playfield map is returned so the caller can fall back to
+        an LLM.
         """
         import json as _json
         from ..core import playfield_query as pq
 
-        pf_path = pq.default_playfield_path(self._config.data_dir)
         try:
-            playfield = pq.load_playfield(pf_path)
-        except (FileNotFoundError, ValueError) as exc:
+            playfield = pq.load_playfield_map(self._config)
+        except (FileNotFoundError, ValueError):
             context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
-            context.set_details(str(exc))
+            context.set_details("no playfield is configured")
             return aprilcam_pb2.WhereResponse(status="not_found")
 
         # Gather live tag positions for the named camera, if any.
@@ -407,8 +408,8 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
 
         if result["status"] == "not_found":
             try:
-                resp.playfield_json = pf_path.read_text(encoding="utf-8")
-            except OSError:
+                resp.playfield_json = _json.dumps(playfield)
+            except (TypeError, ValueError):
                 pass
 
         return resp
