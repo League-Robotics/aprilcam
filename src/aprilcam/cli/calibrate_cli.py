@@ -4,7 +4,7 @@ Usage:
     aprilcam calibrate                     # re-calibrate all cameras in calibration.json
     aprilcam calibrate 1 3                 # calibrate camera #1 and #3 (the numbers shown by `aprilcam cameras`)
     aprilcam calibrate "Global Shutter"    # calibrate by name pattern
-    aprilcam calibrate --width 101 --height 89   # override field dimensions
+    aprilcam calibrate --width 134.3 --height 89.3   # override field dimensions
 """
 
 from __future__ import annotations

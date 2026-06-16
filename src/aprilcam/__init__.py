@@ -5,7 +5,7 @@ Primary API::
     import aprilcam
 
     camera = aprilcam.Camera.find("Brio")
-    field = aprilcam.Playfield(camera, width_cm=101, height_cm=89)
+    field = aprilcam.Playfield(camera, width_cm=134.3, height_cm=89.3)
     field.start()
     tag = field.tag(42)
     if tag:

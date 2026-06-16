@@ -514,7 +514,7 @@ class Playfield:
     Usage::
 
         camera = Camera.find("Brio")
-        field = Playfield(camera, width_cm=101, height_cm=89)
+        field = Playfield(camera, width_cm=134.3, height_cm=89.3)
         field.start()
         tag = field.tag(42)
         if tag:
@@ -527,8 +527,8 @@ class Playfield:
         self,
         camera,
         *,
-        width_cm: float = 101.0,
-        height_cm: float = 89.0,
+        width_cm: float = 134.3,
+        height_cm: float = 89.3,
         family: str = "36h11",
         calibration: Optional[str] = "auto",
         proc_width: int = 960,

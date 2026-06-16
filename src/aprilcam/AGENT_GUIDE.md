@@ -246,7 +246,7 @@ cap.release()
 1. list_cameras          → find camera index
 2. open_camera(index=0)  → cam_0
 3. create_playfield(camera_id="cam_0")  → pf_0
-4. calibrate_playfield(playfield_id="pf_0", width=102, height=89, units="cm")
+4. calibrate_playfield(playfield_id="pf_0")   # dimensions come from the linked playfield definition
 5. start_detection(source_id="pf_0")
 6. get_tags(source_id="pf_0")  → tags with world_xy in cm
 ```
@@ -270,7 +270,7 @@ cap.release()
 
 ```
 1. Run joint calibration once (saves to data/joint-calibration.json):
-   calibrate_joint(bw_cap, color_cap, field_width_cm=101, field_height_cm=89)
+   calibrate_joint(bw_cap, color_cap, field_width_cm=134.3, field_height_cm=89.3)
 2. aprilcam live -c 3 --color-camera 2
 3. Press 'd' to detect objects — uses joint calibration for
    barrel-corrected color fusion in world coordinates

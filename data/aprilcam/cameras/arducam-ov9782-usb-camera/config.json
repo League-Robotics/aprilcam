@@ -15,9 +15,9 @@
       "auto-exposure-mode": "1",
       "auto-exposure-priority": "0",
       "auto-white-balance-temp": "false",
-      "white-balance-temp": "4600",
       "exposure-time-abs": "6",
-      "gain": "2"
+      "gain": "2",
+      "white-balance-temp": "4600"
     },
     "program": "uvc-util"
   },

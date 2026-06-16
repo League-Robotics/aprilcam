@@ -164,10 +164,10 @@ def detect_all_tags(
 # ArUco 4x4 corner world positions (cm).
 # Stored as negative IDs: -1=ArUco0=UL, -2=ArUco1=UR, -3=ArUco2=LL, -4=ArUco3=LR.
 ARUCO_CORNER_WORLD: Dict[int, Tuple[float, float]] = {
-    -1: (0.0, 0.0),      # ArUco 0 = upper-left
-    -2: (101.0, 0.0),     # ArUco 1 = upper-right
-    -3: (0.0, 89.0),      # ArUco 2 = lower-left
-    -4: (101.0, 89.0),    # ArUco 3 = lower-right
+    -1: (0.0, 0.0),       # ArUco 0 = upper-left
+    -2: (134.3, 0.0),     # ArUco 1 = upper-right
+    -3: (0.0, 89.3),      # ArUco 2 = lower-left
+    -4: (134.3, 89.3),    # ArUco 3 = lower-right
 }
 
 def run_once(cap: cv.VideoCapture) -> Optional[Dict[str, Tuple[float, float]]]:

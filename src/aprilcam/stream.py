@@ -353,8 +353,8 @@ def calibrate(
     camera: int | str | None = None,
     bw_camera: int | str | None = None,
     color_camera: int | str | None = None,
-    field_width_cm: float = 101.0,
-    field_height_cm: float = 89.0,
+    field_width_cm: float = 134.3,
+    field_height_cm: float = 89.3,
     output: str | Path = "data/calibration.json",
     num_frames: int = 30,
 ) -> Path:

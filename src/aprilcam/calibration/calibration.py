@@ -668,8 +668,8 @@ def load_calibration_for_camera(
 def save_calibration(
     calibrations: List[CameraCalibration],
     data_dir: str | Path = "data",
-    field_width_cm: float = 101.0,
-    field_height_cm: float = 89.0,
+    field_width_cm: float = 134.3,
+    field_height_cm: float = 89.3,
 ) -> Path:
     """Save calibration for all cameras to ``data/calibration.json``.
 
@@ -913,8 +913,8 @@ def _build_static_markers(
 
 def calibrate_single(
     cap: cv.VideoCapture,
-    field_width_cm: float = 101.0,
-    field_height_cm: float = 89.0,
+    field_width_cm: float = 134.3,
+    field_height_cm: float = 89.3,
     num_frames: int = 30,
     correct_distortion: bool = True,
     camera_index: int = 0,
@@ -1223,7 +1223,10 @@ def calibrate_from_playfield_def(
     # freshly-calibrated cameras have them present even though they are stripped
     # from calibration.json.  Preserve all other config keys (playfield, settings…).
     merged_config = dict(config) if config else {}
-    merged_config["device_name"] = camera_slug
+    # device_name is a developer-owned field (the OS device name, used as a
+    # display/identity key) — only fill it if absent; never clobber it with the
+    # camera slug on recalibration.
+    merged_config.setdefault("device_name", camera_slug)
     merged_config["resolution"] = [cam_w, cam_h]
     save_camera_config(camera_dir, merged_config)
 
@@ -1340,8 +1343,8 @@ def calibrate_secondary(
 def calibrate_joint(
     bw_cap: cv.VideoCapture,
     color_cap: cv.VideoCapture,
-    field_width_cm: float = 101.0,
-    field_height_cm: float = 89.0,
+    field_width_cm: float = 134.3,
+    field_height_cm: float = 89.3,
     num_frames: int = 30,
     correct_distortion: bool = True,
     bw_index: int = 3,
@@ -1494,8 +1497,8 @@ def calibrate_joint(
 def calibrate(
     camera: "cv.VideoCapture | int",
     *,
-    width_cm: float = 101.0,
-    height_cm: float = 89.0,
+    width_cm: float = 134.3,
+    height_cm: float = 89.3,
     frames: int = 30,
     output: "str | Path | None" = None,
 ) -> CameraCalibration:
@@ -1566,8 +1569,8 @@ def save_joint_calibration(
     bw_cal: CameraCalibration,
     color_cal: CameraCalibration,
     path: Path,
-    field_width_cm: float = 101.0,
-    field_height_cm: float = 89.0,
+    field_width_cm: float = 134.3,
+    field_height_cm: float = 89.3,
 ) -> None:
     """Save calibration (legacy -- prefers :func:`save_calibration`)."""
     save_calibration(

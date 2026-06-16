@@ -829,12 +829,11 @@ def _handle_create_playfield(
                 cam_dir = Path(_camera_dir) if _camera_dir else None
                 cal = load_calibration_from_camera_dir(cam_dir) if cam_dir is not None else None
                 if cal is not None and cal.homography is not None:
-                    # Read field dimensions from the calibration file
-                    import json as _json
-                    cal_file = cam_dir / "calibration.json"
-                    cal_data = _json.loads(cal_file.read_text())
-                    fw = cal_data.get("field_width_cm", 101.0)
-                    fh = cal_data.get("field_height_cm", 89.0)
+                    # Field dimensions the stored homography was calibrated
+                    # against — sourced from the linked playfield definition via
+                    # the loaded calibration, never a hardcoded default.
+                    fw = cal.playfield_width_cm
+                    fh = cal.playfield_height_cm
                     # Invert H to project world corners → pixel corners
                     H_inv = np.linalg.inv(cal.homography)
                     world_corners = np.array([[0,0],[fw,0],[fw,fh],[0,fh]], dtype=np.float64)
