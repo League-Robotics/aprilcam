@@ -1119,6 +1119,18 @@ def calibrate_from_playfield_def(
     corner_world_coords = pf_def.corner_world_coords() # e.g. [(-67,44.65),...]
     corner_tids = [-(cid + 1) for cid in corner_ids_positive]  # e.g. [-2,-4,-6,-8]
 
+    # Full ground-truth map of EVERY defined ArUco marker (diagonal corners,
+    # edge midpoints, and interior reference markers such as the west/east
+    # internal tags), keyed by detection tid (ArUco id N -> tid -(N+1)).
+    # These carry surveyed world coordinates, so any of them that are detected
+    # are used as extra homography correspondences in Step 7 below — this is
+    # what lets interior markers actually improve the calibration.
+    aruco_world_by_tid: Dict[int, Tuple[float, float]] = {
+        -(int(t["id"]) + 1): (float(t["x"]), float(t["y"]))
+        for t in (getattr(pf_def, "aruco_tags", None) or [])
+        if "id" in t and "x" in t and "y" in t
+    }
+
     # Step 4: detect all tags over num_frames.
     tags = detect_all_tags(cap, num_frames)
 
@@ -1153,15 +1165,34 @@ def calibrate_from_playfield_def(
     # Step 6: initial homography from corner correspondence.
     H = compute_homography(pixel_pts, world_pts)
 
-    # Step 7: augment with AprilTags for a more accurate homography.
+    # Step 7: augment the 4 diagonal corners with every other ground-truth
+    # marker for a more accurate homography (and enough points for distortion).
+    #   (a) Every other detected ArUco marker that the definition gives a
+    #       surveyed world position for — edge midpoints (2/4/6/8) and interior
+    #       reference markers (e.g. west/east internal 9/10).  These use their
+    #       TRUE world coordinates, so they genuinely constrain the fit.
+    #   (b) AprilTags, whose world positions are derived via the initial H.
+    corner_tid_set = set(corner_tids)
     all_px = list(pixel_corners)
     all_wp = list(world_corners)
+    extra_aruco_ids: List[int] = []
     for tid, px in tags.items():
-        if tid > 0:  # AprilTag (positive ID)
+        if tid in aruco_world_by_tid and tid not in corner_tid_set:
+            # Ground-truth ArUco marker (non-corner) — use its surveyed world xy.
+            all_px.append(px)
+            all_wp.append(aruco_world_by_tid[tid])
+            extra_aruco_ids.append(-(tid + 1))
+        elif tid > 0:  # AprilTag (positive ID) — world derived via initial H.
             vec = H @ np.array([px[0], px[1], 1.0])
             world_xy = (float(vec[0] / vec[2]), float(vec[1] / vec[2]))
             all_px.append(px)
             all_wp.append(world_xy)
+
+    _log.info(
+        "calibrate_from_playfield_def: %d diagonal-corner + %d ground-truth "
+        "ArUco (%s) correspondences used for homography",
+        len(corner_ids_positive), len(extra_aruco_ids), sorted(extra_aruco_ids),
+    )
 
     all_pixel = np.array(all_px, dtype=np.float32)
     all_world = np.array(all_wp, dtype=np.float32)

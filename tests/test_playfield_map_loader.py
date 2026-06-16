@@ -20,10 +20,11 @@ def test_load_playfield_map_prefers_registry_real_data():
     assert pf["playfield"]["width_cm"] == 134.3
     feats = pq.iter_features(pf)
     assert len(feats) >= 20
-    # The whole point the daemon needs: 'red west' resolves through this map.
-    r = pq.where("red west", feats)
+    # The whole point the daemon needs: a feature resolves through this map.
+    # (The former 'red west' rectangle was replaced by interior ArUco 9.)
+    r = pq.where("purple northwest", feats)
     assert r["status"] == "ok"
-    assert r["matches"][0]["slug"] == "rect-west-red"
+    assert r["matches"][0]["slug"] == "rect-northwest-purple"
 
 
 def test_load_playfield_map_falls_back_to_legacy_file(tmp_path):

@@ -61,8 +61,10 @@ def test_main_playfield_preserves_existing_content():
     assert pf.get("height_cm") == pytest.approx(89.3)
     assert pf.get("origin") == "apriltag-center-a1"
     assert len(data.get("april_tags", [])) == 1
-    assert len(data.get("aruco_tags", [])) == 8
-    assert len(data.get("rectangles", [])) == 8
+    # 8 perimeter ArUco markers + 2 interior reference markers (west/east
+    # internal, ids 9/10) that replaced the red east/west rectangles.
+    assert len(data.get("aruco_tags", [])) == 10
+    assert len(data.get("rectangles", [])) == 6  # red east/west removed
     assert len(data.get("dots", [])) == 8
 
 

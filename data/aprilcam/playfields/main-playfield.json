@@ -26,17 +26,17 @@
     { "slug": "aruco-east-u4",      "type": "aruco_tag", "id": 4, "cardinal": "east",       "x":  67,   "y":   0    },
     { "slug": "aruco-southwest-u7", "type": "aruco_tag", "id": 7, "cardinal": "southwest",  "x": -67,   "y": -44.65 },
     { "slug": "aruco-south-u6",     "type": "aruco_tag", "id": 6, "cardinal": "south",      "x":   0,   "y": -44.65 },
-    { "slug": "aruco-southeast-u5", "type": "aruco_tag", "id": 5, "cardinal": "southeast",  "x":  67,   "y": -44.65 }
+    { "slug": "aruco-southeast-u5", "type": "aruco_tag", "id": 5, "cardinal": "southeast",  "x":  67,   "y": -44.65 },
+    { "slug": "aruco-west-internal-u9",  "type": "aruco_tag", "id":  9, "cardinal": "west", "x": -35,   "y":   0    },
+    { "slug": "aruco-east-internal-u10", "type": "aruco_tag", "id": 10, "cardinal": "east", "x":  35,   "y":   0    }
   ],
   "rectangles": [
     { "slug": "rect-northwest-purple",  "type": "rectangle", "color": "purple",  "cardinal": "northwest", "x": -35, "y":  24, "width_cm": 5, "height_cm": 4 },
     { "slug": "rect-north-black",       "type": "rectangle", "color": "black",   "cardinal": "north",     "x":   0, "y":  24, "width_cm": 5, "height_cm": 4 },
     { "slug": "rect-northeast-orange",  "type": "rectangle", "color": "orange",  "cardinal": "northeast", "x":  35, "y":  24, "width_cm": 5, "height_cm": 4 },
-    { "slug": "rect-east-red",          "type": "rectangle", "color": "red",     "cardinal": "east",      "x":  35, "y":   0, "width_cm": 5, "height_cm": 4 },
     { "slug": "rect-southeast-green",   "type": "rectangle", "color": "green",   "cardinal": "southeast", "x":  35, "y": -24, "width_cm": 5, "height_cm": 4 },
     { "slug": "rect-south-magenta",     "type": "rectangle", "color": "magenta", "cardinal": "south",     "x":   0, "y": -24, "width_cm": 5, "height_cm": 4 },
-    { "slug": "rect-southwest-blue",    "type": "rectangle", "color": "blue",    "cardinal": "southwest", "x": -35, "y": -24, "width_cm": 5, "height_cm": 4 },
-    { "slug": "rect-west-red",          "type": "rectangle", "color": "red",     "cardinal": "west",      "x": -35, "y":   0, "width_cm": 5, "height_cm": 4 }
+    { "slug": "rect-southwest-blue",    "type": "rectangle", "color": "blue",    "cardinal": "southwest", "x": -35, "y": -24, "width_cm": 5, "height_cm": 4 }
   ],
   "dots": [
     { "slug": "dot-northwest-orange", "type": "dot", "color": "orange", "cardinal": "northwest", "size": "large", "x": -50, "y":  30 },
