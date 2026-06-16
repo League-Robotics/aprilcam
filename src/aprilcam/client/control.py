@@ -429,4 +429,8 @@ def _tag_frame_response_to_pydantic(resp: "aprilcam_pb2.TagFrameResponse") -> Ta
         homography=homography,
         playfield_corners=playfield_corners,
         fps=0.0,
+        field_width_cm=float(resp.field_width_cm),
+        field_height_cm=float(resp.field_height_cm),
+        origin_x=float(resp.origin_x),
+        origin_y=float(resp.origin_y),
     )

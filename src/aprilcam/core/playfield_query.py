@@ -1,8 +1,11 @@
 """aprilcam.core.playfield_query — natural-language "where is X" resolution.
 
 This module powers the ``where`` MCP tool and the ``WhereIs`` daemon RPC.
-It loads the static playfield map (``playfield.json``) and answers
-natural-language location questions in two stages:
+It loads the static playfield map via :func:`load_playfield_map` — which
+prefers the named-playfield registry under ``<data_dir>/playfields/`` (e.g.
+``playfields/main-playfield.json``) and only falls back to a legacy
+single-file ``<data_dir>/playfield.json`` for pre-migration installs — and
+answers natural-language location questions in two stages:
 
 1. **Full-text keyword search.**  Every feature (AprilTag, ArUco tag,
    rectangle, dot) is reduced to a bag of keyword tokens drawn from its
@@ -16,11 +19,11 @@ natural-language location questions in two stages:
 2. **LLM fallback (caller-driven).**  When the keyword search finds no
    match, :func:`where` returns ``status="not_found"``.  The caller (the
    MCP tool / daemon wrapper) then hands the raw query plus the whole
-   ``playfield.json`` back to the calling agent, which resolves the
+   playfield map back to the calling agent, which resolves the
    reference and re-invokes the tool with an exact slug.
 
 The location reported for each match is the static world position from
-``playfield.json`` (cm, A1-centred — origin at AprilTag 1, +x east,
+the playfield map (cm, A1-centred — origin at AprilTag 1, +x east,
 +y north).  Callers may additionally merge a live detected position via
 the ``live_tags`` argument.
 """
@@ -91,12 +94,20 @@ _NUMBER_WORDS = {
 
 
 def default_playfield_path(data_dir: Path) -> Path:
-    """Return the conventional playfield.json path under *data_dir*."""
+    """Return the **legacy** single-file ``playfield.json`` path under *data_dir*.
+
+    This is only the pre-migration fallback; the current map lives in the
+    named-playfield registry under ``<data_dir>/playfields/``. Prefer
+    :func:`load_playfield_map`.
+    """
     return Path(data_dir) / "playfield.json"
 
 
 def load_playfield(path: Path) -> dict:
-    """Load and parse ``playfield.json`` from *path*.
+    """Load and parse a **legacy** single-file ``playfield.json`` from *path*.
+
+    Prefer :func:`load_playfield_map`, which reads the named-playfield
+    registry and only falls back to this single-file form.
 
     Raises:
         FileNotFoundError: If *path* does not exist.

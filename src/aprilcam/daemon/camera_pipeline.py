@@ -412,6 +412,7 @@ class CameraPipeline:
 
         cal_fw = self._calibration.playfield_width_cm if self._calibration else 0.0
         cal_fh = self._calibration.playfield_height_cm if self._calibration else 0.0
+        origin_x, origin_y = self._a1_origin()
 
         return aprilcam_pb2.TagFrameResponse(
             frame_id=latest.frame_index,
@@ -420,6 +421,8 @@ class CameraPipeline:
             playfield_corners=corners_flat,
             field_width_cm=float(cal_fw),
             field_height_cm=float(cal_fh),
+            origin_x=float(origin_x),
+            origin_y=float(origin_y),
         )
 
     # ------------------------------------------------------------------
@@ -560,6 +563,29 @@ class CameraPipeline:
             return 0.0
         return (len(self._ts_deque) - 1) / elapsed
 
+    def _a1_origin(self) -> tuple[float, float]:
+        """Return the (origin_x, origin_y) used to express ``world_xy`` in the
+        A1-centred frame.
+
+        This MUST match the origin applied to ``world_xy`` in the capture loop
+        so that consumers (e.g. the live view) can invert the transform and
+        project A1-centred world coordinates back to pixels.  Prefers the
+        calibration-time world position of AprilTag 1 (the physical origin);
+        falls back to the geometric field centre (half the playfield
+        dimensions) when that marker was not recorded.
+        """
+        cal = self._calibration
+        if cal is None:
+            return (0.0, 0.0)
+        origin_x = cal.playfield_width_cm / 2.0
+        origin_y = cal.playfield_height_cm / 2.0
+        if cal.static_markers:
+            _m = cal.static_markers.get("apriltag:1")
+            if _m and _m.get("world") and len(_m["world"]) >= 2:
+                origin_x = float(_m["world"][0])
+                origin_y = float(_m["world"][1])
+        return (origin_x, origin_y)
+
     def _build_tag_frame(
         self,
         tag_records: List[TagRecord],
@@ -615,6 +641,7 @@ class CameraPipeline:
 
         field_w = self._calibration.playfield_width_cm if self._calibration else 0.0
         field_h = self._calibration.playfield_height_cm if self._calibration else 0.0
+        origin_x, origin_y = self._a1_origin()
 
         return aprilcam_pb2.TagFrame(
             frame_id=self._frame_id,
@@ -626,6 +653,8 @@ class CameraPipeline:
             fps=float(fps),
             field_width_cm=float(field_w),
             field_height_cm=float(field_h),
+            origin_x=float(origin_x),
+            origin_y=float(origin_y),
         )
 
     def _capture_loop(self) -> None:
@@ -704,13 +733,7 @@ class CameraPipeline:
                 or self._calibration.camera_position is not None
             ):
                 import dataclasses as _dc
-                origin_x = self._calibration.playfield_width_cm / 2.0
-                origin_y = self._calibration.playfield_height_cm / 2.0
-                if self._calibration.static_markers:
-                    _m = self._calibration.static_markers.get("apriltag:1")
-                    if _m and _m.get("world") and len(_m["world"]) >= 2:
-                        origin_x = float(_m["world"][0])
-                        origin_y = float(_m["world"][1])
+                origin_x, origin_y = self._a1_origin()
                 corrected = []
                 for tr in tag_records:
                     if tr.world_xy is None:

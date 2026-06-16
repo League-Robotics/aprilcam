@@ -109,6 +109,10 @@ class TagFrame(BaseModel):
     fps: float
     field_width_cm: float = 0.0
     field_height_cm: float = 0.0
+    # A1-centred origin (cm) the daemon applied to tag world_xy. Invert with
+    # H_world = (wx + origin_x, origin_y - wy) to project back to pixels.
+    origin_x: float = 0.0
+    origin_y: float = 0.0
 
     def by_id(self, tag_id: int) -> "TagRecord | None":
         """Return the tag with marker id *tag_id*, or ``None`` if not present.
@@ -147,6 +151,8 @@ class TagFrame(BaseModel):
             fps=float(msg.fps),
             field_width_cm=float(msg.field_width_cm),
             field_height_cm=float(msg.field_height_cm),
+            origin_x=float(msg.origin_x),
+            origin_y=float(msg.origin_y),
         )
 
 

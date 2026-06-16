@@ -102,6 +102,11 @@ message TagFrameResponse {
   repeated float playfield_corners = 4;
   float          field_width_cm    = 5;
   float          field_height_cm   = 6;
+  // A1-centred origin (cm) applied to tag world_xy. Consumers invert the
+  // transform with: H_world = (wx + origin_x, origin_y - wy). Prefers the
+  // AprilTag-1 world position; falls back to the field half-dimensions.
+  float          origin_x          = 7;
+  float          origin_y          = 8;
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +180,11 @@ message TagFrame {
   // Playfield dimensions in cm (0 = unknown); used to convert world_xy to A1-centred
   float           field_width_cm    = 8;
   float           field_height_cm   = 9;
+  // A1-centred origin (cm) applied to tag world_xy. Consumers invert the
+  // transform with: H_world = (wx + origin_x, origin_y - wy). Prefers the
+  // AprilTag-1 world position; falls back to the field half-dimensions.
+  float           origin_x          = 10;
+  float           origin_y          = 11;
 }
 
 // ImageFrame — published on the image stream socket for every camera frame.

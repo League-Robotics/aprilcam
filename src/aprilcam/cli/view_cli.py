@@ -528,15 +528,20 @@ def main(argv: list[str] | None = None) -> int:
                 except Exception:
                     pass
 
-        # Field origin offsets for A1-centred → raw world coord conversion
+        # Origin offsets for inverting the daemon's A1-centred world transform.
+        # MUST match the origin the daemon applied to world_xy (it prefers the
+        # AprilTag-1 world position, not the geometric field centre), so the
+        # daemon now publishes it explicitly.  Fall back to half the field
+        # dimensions for older daemons that don't send origin_x/origin_y.
         origin_x = 0.0
         origin_y = 0.0
         if tag_frame is not None:
-            fw = tag_frame.field_width_cm
-            fh = tag_frame.field_height_cm
-            if fw > 0:
-                origin_x = fw / 2.0
-                origin_y = fh / 2.0
+            if tag_frame.origin_x or tag_frame.origin_y:
+                origin_x = tag_frame.origin_x
+                origin_y = tag_frame.origin_y
+            elif tag_frame.field_width_cm > 0:
+                origin_x = tag_frame.field_width_cm / 2.0
+                origin_y = tag_frame.field_height_cm / 2.0
 
         display.draw_overlays(disp, tags, homography,
                               origin_x=origin_x, origin_y=origin_y)
