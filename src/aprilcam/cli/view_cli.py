@@ -585,7 +585,7 @@ def main(argv: list[str] | None = None) -> int:
                         continue
                     if obj.world_xy is not None:
                         rx, ry = obj.world_xy
-                        obj = _dc_replace(obj, world_xy=(rx - origin_x, origin_y - ry))
+                        obj = _dc_replace(obj, world_xy=(rx - origin_x, ry - origin_y))
                     detected.append(obj)
                 _draw_object_boxes(disp, detected)
                 with _obj_lock:

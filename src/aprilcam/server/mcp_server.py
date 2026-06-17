@@ -160,7 +160,12 @@ def _get_playfield_origin(entry: "PlayfieldEntry") -> tuple:
 
 
 def _a1_coord_transform(origin_x: float, origin_y: float):
-    """Return a tag-record transform that applies A1-centred coordinate conversion."""
+    """Return a tag-record transform that re-centres world_xy on AprilTag 1.
+
+    The homography is A1-centred with +y = NORTH, so this is a pure origin
+    shift in both axes — NOT a y-flip.  (A stale ``origin_y - y`` inverted
+    north/south.)
+    """
     def _transform(tag_records):
         result = []
         for tr in tag_records:
@@ -168,7 +173,7 @@ def _a1_coord_transform(origin_x: float, origin_y: float):
                 result.append(tr)
             else:
                 wx = tr.world_xy[0] - origin_x
-                wy = origin_y - tr.world_xy[1]
+                wy = tr.world_xy[1] - origin_y
                 result.append(_dc_replace(tr, world_xy=(wx, wy)))
         return result
     return _transform
@@ -1231,7 +1236,7 @@ def _compute_gripper_world_xy(
             return None
         w_unit = w_dir / w_norm
         gripper = cw_xy + w_unit * offset_cm
-        return [float(gripper[0]) - origin_x, origin_y - float(gripper[1])]
+        return [float(gripper[0]) - origin_x, float(gripper[1]) - origin_y]
     except Exception:
         return None
 
@@ -1304,7 +1309,7 @@ def _handle_pixel_to_world(
             else:
                 world_points.append([
                     float(vec[0] / vec[2]) - origin_x,
-                    origin_y - float(vec[1] / vec[2]),
+                    float(vec[1] / vec[2]) - origin_y,
                 ])
 
         return {"source_id": source_id, "world_points": world_points}
@@ -1390,7 +1395,7 @@ def _handle_get_objects(source_id: str) -> dict:
         def _centre(wxy):
             if wxy is None:
                 return None
-            return [wxy[0] - origin_x, origin_y - wxy[1]]
+            return [wxy[0] - origin_x, wxy[1] - origin_y]
 
         return {
             "source_id": source_id,

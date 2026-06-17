@@ -120,9 +120,10 @@ def test_yellow_cross_uses_published_origin():
     center = (300.0, 300.0)
     origin = (5.0, -7.0)                       # daemon origin (apriltag:1 world)
 
-    # Reproduce the daemon's A1-centring of world_xy for this tag.
-    # H @ center = center; daemon: wx = Hx - ox, wy = oy - Hy.
-    world_xy = (center[0] - origin[0], origin[1] - center[1])
+    # Reproduce the daemon's A1-centring of world_xy for this tag (+y = north,
+    # pure origin shift — no flip).  H @ center = center; daemon: wx = Hx - ox,
+    # wy = Hy - oy.
+    world_xy = (center[0] - origin[0], center[1] - origin[1])
 
     # Correct: project with the published origin -> cross on the tag center.
     d = _display()

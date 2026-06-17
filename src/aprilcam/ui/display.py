@@ -261,13 +261,13 @@ class PlayfieldDisplay:
                     H_inv = np.linalg.inv(homography)
                     wx, wy = tag.world_xy
                     # Convert A1-centred back to raw corner-origin for H_inv
-                    raw_vec = H_inv @ np.array([wx + origin_x, origin_y - wy, 1.0])
+                    raw_vec = H_inv @ np.array([wx + origin_x, wy + origin_y, 1.0])
                     rx, ry = raw_vec[0] / raw_vec[2], raw_vec[1] / raw_vec[2]
                     cross_src = np.array([[rx, ry]], dtype=np.float32)
                     cross_disp = self._map_points_to_display(cross_src).reshape(2)
                     gx, gy = int(round(float(cross_disp[0]))), int(round(float(cross_disp[1])))
                     # Arm length = half of 1cm in pixels; map (wx+0.5, wy) to get scale
-                    arm_vec = H_inv @ np.array([wx + origin_x + 0.5, origin_y - wy, 1.0])
+                    arm_vec = H_inv @ np.array([wx + origin_x + 0.5, wy + origin_y, 1.0])
                     arm_src = np.array([[arm_vec[0] / arm_vec[2], arm_vec[1] / arm_vec[2]]], dtype=np.float32)
                     arm_disp = self._map_points_to_display(arm_src).reshape(2)
                     arm_px = max(4, int(round(float(np.linalg.norm(arm_disp - cross_disp)))))
@@ -436,7 +436,7 @@ class PlayfieldDisplay:
 
         def _world_to_disp(x: float, y: float):
             """Return display-space coords; input is A1-centred world cm."""
-            hvec = H_inv @ np.array([x + origin_x, origin_y - y, 1.0])
+            hvec = H_inv @ np.array([x + origin_x, y + origin_y, 1.0])
             sx, sy = hvec[0] / hvec[2], hvec[1] / hvec[2]
             src_pt = np.array([[sx, sy]], dtype=np.float32)
             disp_pt = self._map_points_to_display(src_pt).reshape(2)
@@ -444,7 +444,7 @@ class PlayfieldDisplay:
 
         def _compute_radius(x: float, y: float, size_cm: float, disp_pt: np.ndarray) -> int:
             """Return pixel half-extent for size_cm at world position (x, y)."""
-            hvec2 = H_inv @ np.array([x + size_cm / 2.0 + origin_x, origin_y - y, 1.0])
+            hvec2 = H_inv @ np.array([x + size_cm / 2.0 + origin_x, y + origin_y, 1.0])
             sx2, sy2 = hvec2[0] / hvec2[2], hvec2[1] / hvec2[2]
             src_pt2 = np.array([[sx2, sy2]], dtype=np.float32)
             disp_pt2 = self._map_points_to_display(src_pt2).reshape(2)
@@ -558,7 +558,7 @@ class PlayfieldDisplay:
         H_inv = np.linalg.inv(homography)
 
         def _w2d(x: float, y: float):
-            hvec = H_inv @ np.array([x + origin_x, origin_y - y, 1.0])
+            hvec = H_inv @ np.array([x + origin_x, y + origin_y, 1.0])
             sx, sy = hvec[0] / hvec[2], hvec[1] / hvec[2]
             src_pt = np.array([[sx, sy]], dtype=np.float32)
             disp_pt = self._map_points_to_display(src_pt).reshape(2)

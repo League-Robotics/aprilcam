@@ -101,8 +101,8 @@ def test_draw_paths_all_symbols_no_crash():
         for i, sym in enumerate(symbols)
     ]
 
-    # origin_y=400 so raw_y = 400-200 = 200, landing on-frame (500px frame).
-    disp.draw_paths(frame, {"path_000": {"waypoints": waypoints}}, playfield=None, homography=H_IDENTITY, origin_y=400.0)
+    # origin_y=0 → raw_y = 0+200 = 200 (A1-centred, +y up; identity H), on-frame.
+    disp.draw_paths(frame, {"path_000": {"waypoints": waypoints}}, playfield=None, homography=H_IDENTITY, origin_y=0.0)
 
     # At least some pixels should have changed (all non-"none" symbols should draw).
     assert frame.any(), "Some pixels should have been drawn"
@@ -137,8 +137,8 @@ def test_draw_paths_none_symbol_skips_marker():
         },
     ]
 
-    # origin_y=500 so raw_y = 500-250 = 250, mapping to pixel row 250 (identity H).
-    disp.draw_paths(frame, {"path_000": {"waypoints": waypoints}}, playfield=None, homography=H_IDENTITY, origin_y=500.0)
+    # origin_y=0 → raw_y = 250 (A1-centred, +y up; identity H), pixel row 250.
+    disp.draw_paths(frame, {"path_000": {"waypoints": waypoints}}, playfield=None, homography=H_IDENTITY, origin_y=0.0)
 
     # A line was drawn between the two waypoints: check a pixel on the path.
     # The line runs from x=50 to x=200 at pixel row 250. A pixel near x=125,y=250 should be non-black.
@@ -177,8 +177,8 @@ def test_draw_paths_color_is_bgr():
         }
     ]
 
-    # origin_y=500 so raw_y = 500-250 = 250, pixel row 250 (identity H).
-    disp.draw_paths(frame, {"path_000": {"waypoints": waypoints}}, playfield=None, homography=H_IDENTITY, origin_y=500.0)
+    # origin_y=0 → raw_y = 250 (A1-centred, +y up; identity H), pixel row 250.
+    disp.draw_paths(frame, {"path_000": {"waypoints": waypoints}}, playfield=None, homography=H_IDENTITY, origin_y=0.0)
 
     # The filled circle center should be red in BGR storage:
     # frame[cy, cx] in BGR → channel 2 is R → should be high

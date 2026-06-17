@@ -109,8 +109,8 @@ class TagFrame(BaseModel):
     fps: float
     field_width_cm: float = 0.0
     field_height_cm: float = 0.0
-    # A1-centred origin (cm) the daemon applied to tag world_xy. Invert with
-    # H_world = (wx + origin_x, origin_y - wy) to project back to pixels.
+    # A1-centred origin (cm) the daemon applied to tag world_xy (+y = north).
+    # Invert with H_world = (wx + origin_x, wy + origin_y) to project to pixels.
     origin_x: float = 0.0
     origin_y: float = 0.0
 

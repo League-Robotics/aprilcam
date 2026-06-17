@@ -727,7 +727,12 @@ class CameraPipeline:
             # calibration stale this frame, reflect it in info.json.
             self._maybe_update_stale_flag()
 
-            # Translate world_xy to A1-centred coords and apply parallax correction.
+            # Re-centre world_xy on AprilTag 1 and apply parallax correction.
+            # The def-driven homography is already A1-centred with +y pointing
+            # NORTH (north markers map to +y; see calibrate_from_playfield_def /
+            # geometry._world_corners), so this is a pure origin shift — NOT a
+            # y-flip.  Subtracting origin in BOTH axes keeps north = +y, matching
+            # the operator map.  (A stale `origin_y - y` here inverted north/south.)
             if self._calibration and (
                 self._calibration.playfield_width_cm > 0
                 or self._calibration.camera_position is not None
@@ -740,7 +745,7 @@ class CameraPipeline:
                         corrected.append(tr)
                         continue
                     wx = tr.world_xy[0] - origin_x
-                    wy = origin_y - tr.world_xy[1]
+                    wy = tr.world_xy[1] - origin_y
                     tag_h = self._tag_heights.get(tr.id, 0.0)
                     if self._calibration.camera_position and tag_h > 0.0:
                         wx, wy = self._calibration.correct_world_for_height(wx, wy, tag_h)
