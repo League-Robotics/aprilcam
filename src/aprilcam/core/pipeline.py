@@ -211,11 +211,12 @@ class DetectionPipeline:
                         w2 = w2 / w2[2]
                         wvx = float(w2[0] - w1[0])
                         wvy = float(w2[1] - w1[1])
-                        # Report in ENU frame (y up): flip raw-world Y so
-                        # vel_world & heading match world_xy; 0°=+X, CCW.
-                        vel_world = (wvx, -wvy)
+                        # (wvx, wvy) come from an A1-centred, +y-north
+                        # homography — already y-up, so report directly (no Y
+                        # flip) to match world_xy & orientation_yaw; 0°=+X, CCW.
+                        vel_world = (wvx, wvy)
                         speed_world = math.hypot(wvx, wvy)
-                        heading_rad = world_yaw(wvx, wvy)
+                        heading_rad = math.atan2(wvy, wvx)
 
                     model.frame = self._frame_count
                     if self._boundary is not None:

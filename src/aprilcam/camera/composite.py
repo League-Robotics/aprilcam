@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
+import math
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
 import cv2
 import numpy as np
-
-from aprilcam.core.models import world_yaw
 
 
 @dataclass
@@ -131,8 +130,9 @@ def map_tags_to_primary(
         p0, p1 = mapped_2d[0], mapped_2d[1]
         top_mid = (p0 + p1) / 2.0
         d = top_mid - center
-        # Yaw in the reported ENU frame: x right, y up, 0°=+X, CCW positive.
-        yaw = float(world_yaw(float(d[0]), float(d[1])))
+        # (d) is a WORLD direction from an A1-centred, +y-north homography —
+        # already y-up, so take the angle directly (no Y flip). 0°=+X, CCW.
+        yaw = float(math.atan2(float(d[1]), float(d[0])))
 
         results.append({
             "id": int(tag_id),

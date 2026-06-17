@@ -52,7 +52,11 @@ def _yaw_and_world(
             if tw is not None:
                 dx, dy = tw[0] - cw[0], tw[1] - cw[1]
                 if dx * dx + dy * dy > 1e-12:
-                    return world_yaw(dx, dy), cw
+                    # (dx, dy) are WORLD deltas from an A1-centred, +y-north
+                    # homography — already in the reported y-up frame, so take
+                    # the angle directly (do NOT negate y; world_yaw is only for
+                    # the raw y-down pixel fallback below).
+                    return math.atan2(dy, dx), cw
             return world_yaw(n_unit[0], n_unit[1]), cw
     return world_yaw(n_unit[0], n_unit[1]), None
 

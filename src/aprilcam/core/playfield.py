@@ -491,10 +491,11 @@ class PlayfieldBoundary:
             wvx = float(w2[0] - w1[0])
             wvy = float(w2[1] - w1[1])
             speed_world = math.hypot(wvx, wvy)
-            # Report in ENU frame (y up): flip raw-world Y so world velocity &
-            # heading match world_xy; heading 0°=+X, CCW.
-            heading_rad = world_yaw(wvx, wvy)
-            flow.set_world_velocity((wvx, -wvy), speed_world, heading_rad)
+            # (wvx, wvy) come from an A1-centred, +y-north homography — already
+            # in the reported y-up frame, so report them directly (no Y flip) to
+            # stay consistent with world_xy and orientation_yaw; 0°=+X, CCW.
+            heading_rad = math.atan2(wvy, wvx)
+            flow.set_world_velocity((wvx, wvy), speed_world, heading_rad)
 
     def get_flows(self) -> Dict[int, AprilTagFlow]:
         return self._flows

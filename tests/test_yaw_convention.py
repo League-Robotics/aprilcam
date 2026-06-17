@@ -3,9 +3,12 @@
 Reported world frame: x right, y up, origin at AprilTag 1. Angles use
 ``yaw = atan2(Δy, Δx)`` measured 0°=+X, counter-clockwise positive
 (ROS REP-103 "math angles"), so ``forward = (cos yaw, sin yaw)`` points
-along the tag heading in reported world coordinates. Raw homography /
-pixel coordinates are y-down; :func:`world_yaw` negates Y to reach the
-reported frame.
+along the tag heading in reported world coordinates.
+
+Frames: the def-driven homography is A1-centred with +y = NORTH, so directions
+measured THROUGH it (center→top-mid) are already y-up and the yaw is taken
+directly (``atan2(Δy, Δx)``). Only the no-homography PIXEL fallback is y-down,
+where :func:`world_yaw` negates Y to reach the reported y-up frame.
 """
 
 import math
@@ -88,15 +91,18 @@ def test_from_corners_uses_world_space_not_pixel():
     )
     corners = _tag_corners((100.0, 100.0), (1.0, 0.0))  # pixel top points +X
     tag = AprilTag.from_corners(1, corners, homography=H)
-    # world heading becomes (0, +10) -> world_yaw(0, 10) = -pi/2
-    assert _angles_close(tag.orientation_yaw, -math.pi / 2)
+    # world heading becomes (0, +10); measured directly in the y-up world
+    # frame -> atan2(10, 0) = +pi/2.
+    assert _angles_close(tag.orientation_yaw, math.pi / 2)
     # pixel-only would have yielded yaw 0 — confirm we did NOT get that
     assert not _angles_close(tag.orientation_yaw, 0.0)
 
 
 def test_composite_yaw_convention():
     corners = _tag_corners((50.0, 50.0), (0.0, -1.0))  # top points image-up
-    out = map_tags_to_primary([(corners, None, 7)], np.eye(3, dtype=np.float64))
+    # A y-up homography (flips image y-down to world y-up, as a real overhead
+    # calibration does): image-up -> world +Y -> +90°.
+    H_yup = np.array([[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]])
+    out = map_tags_to_primary([(corners, None, 7)], H_yup)
     assert len(out) == 1
-    # image-up -> world +Y -> +90°
     assert _angles_close(out[0]["orientation_yaw"], math.pi / 2)
