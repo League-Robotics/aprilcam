@@ -1024,12 +1024,14 @@ def calibrate_single(
 
 def calibrate_from_playfield_def(
     cap: "cv.VideoCapture",
-    camera_dir: "Path | str",
+    camera_dir: "Path | str | None",
     camera_slug: str,
     playfield_def_registry: "object",
     num_frames: int = 30,
     correct_distortion: bool = True,
     camera_position: "CameraPosition | None" = None,
+    camera_config: "dict | None" = None,
+    skip_save: bool = False,
 ) -> CameraCalibration:
     """Calibrate a camera using a named playfield definition as the source of truth.
 
@@ -1047,7 +1049,9 @@ def calibrate_from_playfield_def(
         ``get(cv.CAP_PROP_FRAME_WIDTH/HEIGHT)``).
     camera_dir:
         Per-camera directory containing ``config.json`` and where
-        ``calibration.json`` will be written.
+        ``calibration.json`` will be written.  May be ``None`` when
+        *camera_config* is supplied and *skip_save* is ``True`` — in
+        that case no filesystem access is performed.
     camera_slug:
         Human-readable camera identifier used in error messages and the
         ``calibrated_camera`` provenance field.
@@ -1063,27 +1067,46 @@ def calibrate_from_playfield_def(
     camera_position:
         Optional camera-mounting offset used for parallax correction; stored
         in the calibration but not used during the calibration computation.
+    camera_config:
+        Optional pre-loaded camera config dict.  When provided, Step 1
+        (``load_camera_config``) is skipped and this dict is used instead.
+        Useful for MCP-server callers that obtained the config via a gRPC
+        ``GetCameraConfig`` RPC rather than from local disk.
+    skip_save:
+        When ``True``, Steps 12 and 13 (write ``config.json`` and
+        ``calibration.json``) are skipped.  The caller is responsible for
+        persisting the calibration (e.g. via ``SetCalibration`` /
+        ``SetCameraConfig`` RPCs).
 
     Returns
     -------
     CameraCalibration
-        The freshly computed calibration, already saved to *camera_dir*.
+        The freshly computed calibration.  When *skip_save* is ``False``
+        (the default), it has already been saved to *camera_dir*.
 
     Raises
     ------
     PlayfieldConfigError
-        If ``config.json`` is absent, or if the playfield slug it names is
-        not found in *playfield_def_registry*.
+        If ``config.json`` is absent (and *camera_config* is not provided),
+        or if the playfield slug it names is not found in
+        *playfield_def_registry*.
     RuntimeError
         If fewer than 4 of the expected corner ArUco markers are detected.
     """
     from .homography import compute_homography, detect_all_tags
     from ..camera.camera_config import load_camera_config, save_camera_config
 
-    camera_dir = Path(camera_dir)
+    if camera_dir is not None:
+        camera_dir = Path(camera_dir)
 
     # Step 1: load config.json to find the linked playfield.
-    config = load_camera_config(camera_dir)
+    # When camera_config is pre-supplied (MCP RPC path), skip the file read.
+    if camera_config is not None:
+        config = camera_config
+    elif camera_dir is not None:
+        config = load_camera_config(camera_dir)
+    else:
+        config = None
     if config is None:
         available = ", ".join(playfield_def_registry.list()) or "(none)"
         raise PlayfieldConfigError(
@@ -1259,10 +1282,17 @@ def calibrate_from_playfield_def(
     # camera slug on recalibration.
     merged_config.setdefault("device_name", camera_slug)
     merged_config["resolution"] = [cam_w, cam_h]
-    save_camera_config(camera_dir, merged_config)
 
-    # Step 13: persist calibration (strips the 5 static fields automatically).
-    save_calibration_to_camera_dir(cal, camera_dir, pf_def.width_cm, pf_def.height_cm)
+    if not skip_save:
+        # Daemon-local path: write config.json and calibration.json to camera_dir.
+        if camera_dir is not None:
+            save_camera_config(camera_dir, merged_config)
+            # Step 13: persist calibration (strips the 5 static fields automatically).
+            save_calibration_to_camera_dir(cal, camera_dir, pf_def.width_cm, pf_def.height_cm)
+    else:
+        # MCP/RPC path: caller persists via SetCalibration / SetCameraConfig RPCs.
+        # Store merged_config on the cal object so the caller can access it.
+        cal._merged_config = merged_config  # type: ignore[attr-defined]
 
     return cal
 
@@ -1589,6 +1619,32 @@ def calibrate(
         out_path.write_text(_json.dumps(cal_data, indent=2))
 
     return cal
+
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Parse-from-dict helpers (for MCP file-proxy RPC clients)
+# ---------------------------------------------------------------------------
+
+
+def parse_calibration_from_dict(d: dict) -> "CameraCalibration":
+    """Deserialize a calibration dict received from a ``GetCalibration`` RPC blob.
+
+    This is a pure (no I/O) companion to :func:`load_calibration_from_camera_dir`
+    for the MCP server side: the daemon returns ``calibration.json`` content as a
+    JSON blob via gRPC, the MCP server calls ``json.loads()`` on the blob, then
+    calls this function to obtain a :class:`CameraCalibration` object.
+
+    Parameters
+    ----------
+    d:
+        Parsed JSON dict exactly as it appears in ``calibration.json`` on disk.
+
+    Returns
+    -------
+    CameraCalibration
+    """
+    return CameraCalibration.from_dict(d)
 
 
 # ---------------------------------------------------------------------------

@@ -252,6 +252,20 @@ cap.release()
 - `start_live_view(source_id, annotate?)` → `{view_id, url}`
 - `stop_live_view(view_id)` → confirmation
 
+### Server / Daemon Management
+- `get_version()` → `{version, active_daemon_host, active_daemon_port}` — package
+  version plus the host/port (or `unix:<path>`) of the currently connected daemon.
+  `active_daemon_host` and `active_daemon_port` are `null` when no daemon is
+  connected yet.
+- `connect_daemon(host?, port?, local?)` → `{target, cameras}` — switch the MCP
+  server's live daemon connection at runtime without restarting the MCP process.
+  Tears down all open cameras, detection loops, and session state, then reconnects
+  to the specified target.  Arguments:
+  - `host` (str, optional) — hostname or IP; omit for mDNS auto-discovery.
+  - `port` (int, default 5280) — TCP port.
+  - `local` (bool, default false) — force Unix-socket connection to the local daemon.
+  On success returns the resolved target string and a list of available cameras.
+
 ## Common Workflows
 
 ### Workflow 1: Detect tags on a playfield with world coordinates

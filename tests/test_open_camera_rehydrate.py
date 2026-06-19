@@ -146,10 +146,40 @@ def isolated_server_state(monkeypatch, tmp_path):
     }
 
 
+def _make_json_blob_reply(json_str: str | None) -> MagicMock:
+    """Return a mock that looks like a JsonBlobReply (present + json_blob)."""
+    reply = MagicMock()
+    reply.present = json_str is not None
+    reply.json_blob = json_str or ""
+    return reply
+
+
 def _patch_daemon_open(monkeypatch, camera_dir: Path, cam_name: str = "test-cam") -> None:
-    """Monkeypatch the daemon client so ``open_camera`` returns our fixture paths."""
+    """Monkeypatch the daemon client so RPC calls load fixture files.
+
+    Now that _handle_open_camera uses GetCameraConfig / GetCalibration RPCs
+    instead of reading local disk, the fake client must return mock replies
+    whose ``json_blob`` contains the JSON text from the fixture files.
+    """
     fake_client = MagicMock()
     fake_client.open_camera.return_value = (cam_name, str(camera_dir))
+
+    # Wire GetCameraConfig to read config.json if present, else absent.
+    config_path = camera_dir / "config.json"
+    fake_client.get_camera_config.return_value = _make_json_blob_reply(
+        config_path.read_text(encoding="utf-8") if config_path.exists() else None
+    )
+
+    # Wire GetCalibration to read calibration.json if present, else absent.
+    cal_path = camera_dir / "calibration.json"
+    fake_client.get_calibration.return_value = _make_json_blob_reply(
+        cal_path.read_text(encoding="utf-8") if cal_path.exists() else None
+    )
+
+    # Wire SetPaths to silently succeed.
+    set_paths_reply = MagicMock()
+    set_paths_reply.ok = True
+    fake_client.set_paths.return_value = set_paths_reply
 
     monkeypatch.setattr(mcp_server, "_daemon_client", fake_client)
     monkeypatch.setattr(mcp_server, "_ensure_daemon_client", lambda: fake_client)
@@ -366,7 +396,7 @@ async def test_calibrate_mcp_no_config_returns_error(
     camera_dir.mkdir(parents=True, exist_ok=True)
     # No config.json.
 
-    # Register a PlayfieldEntry and populate _cam_info.
+    # Register a PlayfieldEntry and populate _cam_info with no camera_dir (RPC path).
     pf_reg = isolated_server_state["pf_reg"]
     pf_entry = PlayfieldEntry(
         playfield_id="pf_test-cam",
@@ -377,11 +407,16 @@ async def test_calibrate_mcp_no_config_returns_error(
     monkeypatch.setitem(
         mcp_server._cam_info,
         cam_name,
-        {"camera_dir": str(camera_dir), "paths_file": str(camera_dir / "paths.json")},
+        {"cam_name": cam_name},
     )
 
     # Patch DaemonCapture so no real daemon is needed.
+    # GetCameraConfig returns "not present" → no playfield linked → PlayfieldConfigError.
     fake_client = MagicMock()
+    cfg_reply = MagicMock()
+    cfg_reply.present = False
+    cfg_reply.json_blob = ""
+    fake_client.get_camera_config.return_value = cfg_reply
     monkeypatch.setattr(mcp_server, "_ensure_daemon_client", lambda: fake_client)
 
     content = await calibrate_playfield(playfield_id="pf_test-cam")
