@@ -75,7 +75,7 @@ wheels = [
 
 [[package]]
 name = "aprilcam"
-version = "0.20260619.5"
+version = "0.20260619.7"
 source = { editable = "." }
 dependencies = [
     { name = "grpcio" },
@@ -85,6 +85,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "rich" },
+    { name = "zeroconf" },
 ]
 
 [package.optional-dependencies]
@@ -98,7 +99,6 @@ daemon = [
     { name = "opencv-contrib-python" },
     { name = "pillow" },
     { name = "websockets" },
-    { name = "zeroconf" },
 ]
 dev = [
     { name = "anthropic" },
@@ -152,7 +152,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "rich", specifier = ">=13.0" },
     { name = "websockets", marker = "extra == 'daemon'", specifier = ">=12.0" },
-    { name = "zeroconf", marker = "extra == 'daemon'", specifier = ">=0.131" },
+    { name = "zeroconf", specifier = ">=0.131" },
 ]
 provides-extras = ["imaging", "daemon", "dev", "playfield"]
 
