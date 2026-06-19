@@ -69,6 +69,8 @@ def _get_version():
 
 
 def _print_help():
+    from ..config import CONFIG_VARS
+
     print(f"aprilcam {_get_version()}")
     print()
     print("usage: aprilcam <command> [options]")
@@ -80,6 +82,28 @@ def _print_help():
         print(f"  {name:<12} {info['help']}")
     print()
     print("Run 'aprilcam <command> --help' for command-specific options.")
+    print()
+    print("Configuration:")
+    print("  Source precedence (lowest to highest):")
+    print("    /etc/aprilcam.env")
+    print("    /etc/aprilcam/aprilcam.env")
+    print("    ~/.aprilcam")
+    print("    .aprilcam  (walk up from CWD)")
+    print("    .env       (walk up from CWD, via dotenv)")
+    print("    APRILCAM_* environment variables  (highest)")
+    print()
+    print("  Run 'aprilcam config' to see all resolved paths and current values.")
+    print()
+    print("Environment variables:")
+    header_key = "VARIABLE"
+    header_default = "DEFAULT"
+    header_desc = "DESCRIPTION"
+    print(f"  {header_key:<36}{header_default:<32}{header_desc}")
+    for var in CONFIG_VARS:
+        key = var["key"]
+        default = var["default"]
+        description = var["description"]
+        print(f"  {key:<36}{default:<32}{description}")
 
 
 def main(argv=None):

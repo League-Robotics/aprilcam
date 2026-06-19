@@ -1,13 +1,13 @@
 ---
-id: "003"
-title: "CONFIG_VARS table in config.py and _print_help() expansion"
-status: open
+id: '003'
+title: CONFIG_VARS table in config.py and _print_help() expansion
+status: done
 use-cases:
-  - SUC-004
+- SUC-004
 depends-on:
-  - "001"
-github-issue: ""
-issue: ""
+- '001'
+github-issue: ''
+issue: ''
 completes_issue: false
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
@@ -114,17 +114,17 @@ The `--agent` flag is listed in the help flags section in Ticket 004.
 
 ## Acceptance Criteria
 
-- [ ] `CONFIG_VARS` is defined at module scope in `config.py` as a list of
+- [x] `CONFIG_VARS` is defined at module scope in `config.py` as a list of
       dicts with `key`, `default`, and `description` fields.
-- [ ] Every `APRILCAM_*` variable currently handled in `Config.load()` has
+- [x] Every `APRILCAM_*` variable currently handled in `Config.load()` has
       an entry in `CONFIG_VARS` (verified by Ticket 007 test).
-- [ ] `aprilcam --help` output includes a "Configuration:" section with the
+- [x] `aprilcam --help` output includes a "Configuration:" section with the
       six-level precedence chain.
-- [ ] `aprilcam --help` output includes an "Environment variables:" section
+- [x] `aprilcam --help` output includes an "Environment variables:" section
       listing every entry from `CONFIG_VARS`.
-- [ ] `_print_help()` imports `CONFIG_VARS` from `aprilcam.config` — no
+- [x] `_print_help()` imports `CONFIG_VARS` from `aprilcam.config` — no
       duplication of variable metadata in `cli/__init__.py`.
-- [ ] `uv run pytest tests/test_cli_dispatch.py` passes.
+- [x] `uv run pytest tests/test_cli_dispatch.py` passes.
 
 ## Implementation Plan
 

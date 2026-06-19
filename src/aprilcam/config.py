@@ -192,6 +192,65 @@ class AppConfig:
 # ---------------------------------------------------------------------------
 
 
+CONFIG_VARS: list[dict] = [
+    {
+        "key": "APRILCAM_DATA_DIR",
+        "default": "(FHS: /var/lib/aprilcam · XDG: ~/.local/share/aprilcam)",
+        "description": "Root directory for persistent state (cameras, calibrations, playfields).",
+    },
+    {
+        "key": "APRILCAM_SOCKET_DIR",
+        "default": "(FHS: /run/aprilcam · XDG: $XDG_RUNTIME_DIR/aprilcam)",
+        "description": "Directory for the control socket, stream sockets, and pidfile.",
+    },
+    {
+        "key": "APRILCAM_LOG_DIR",
+        "default": "(FHS: /var/log/aprilcam · XDG: ~/.local/state/aprilcam)",
+        "description": "Directory for aprilcamd.log.",
+    },
+    {
+        "key": "APRILCAM_LOG_LEVEL",
+        "default": "INFO",
+        "description": "Python logging level for the daemon (DEBUG, INFO, WARNING, ERROR).",
+    },
+    {
+        "key": "APRILCAM_DAEMON_PIDFILE",
+        "default": "<socket_dir>/aprilcamd.pid",
+        "description": "Pidfile path.",
+    },
+    {
+        "key": "APRILCAM_DETECTION_FPS",
+        "default": "10",
+        "description": "Detection loop frame-rate cap in frames per second.",
+    },
+    {
+        "key": "APRILCAM_STATIC_DESKEW",
+        "default": "1",
+        "description": "Enable homography-derived static-camera deskew (0 to disable).",
+    },
+    {
+        "key": "APRILCAM_DESKEW_PX_PER_CM",
+        "default": "0",
+        "description": "Output resolution for the deskewed view in pixels/cm (0 = auto).",
+    },
+    {
+        "key": "APRILCAM_UNDISTORT",
+        "default": "0",
+        "description": "Apply lens undistortion before deskew warp when intrinsics are present.",
+    },
+    {
+        "key": "APRILCAM_MOVEMENT_THRESHOLD_PX",
+        "default": "0",
+        "description": "Movement-invalidation threshold in source pixels (0 = auto).",
+    },
+    {
+        "key": "APRILCAM_SYSTEM",
+        "default": "auto",
+        "description": "Force FHS directory layout (1) or XDG (0); auto selects by euid.",
+    },
+]
+
+
 def _find_dotfile(name: str, start: Path) -> Optional[Path]:
     """Walk up from *start* to filesystem root looking for a file named *name*.
 
