@@ -1,10 +1,11 @@
 """`aprilcam config` — show the version and resolved configuration.
 
 A pure-client command: it loads :class:`aprilcam.config.Config` (which reads
-``~/.aprilcam``, project ``.aprilcam``/``.env`` dotfiles, and ``APRILCAM_*``
-environment variables) and prints the effective values, so a user can see
-exactly where the daemon and clients will read/write data. No camera hardware
-or daemon stack is touched.
+``/etc/aprilcam.env``, ``/etc/aprilcam/aprilcam.env``, ``~/.aprilcam``,
+project ``.aprilcam``/``.env`` dotfiles, and ``APRILCAM_*`` environment
+variables) and prints the effective values, so a user can see exactly where
+the daemon and clients will read/write data, including the log directory.
+No camera hardware or daemon stack is touched.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ def _collect(cfg: Config) -> dict:
         "cameras_dir": str(cfg.cameras_dir),
         "playfields_dir": str(cfg.playfields_dir),
         "calibration_dir": str(cfg.calibration_dir),
+        "log_dir": str(cfg.log_dir),
         "socket_dir": str(cfg.socket_dir),
         "daemon_pidfile": str(cfg.daemon_pidfile),
         "env_dir": str(cfg.env_dir) if cfg.env_dir else "(none)",
@@ -42,8 +44,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         prog="config",
         description=(
             "Show the aprilcam version and the resolved configuration "
-            "(data/socket directories, daemon pidfile, deskew settings, ...) "
-            "as merged from ~/.aprilcam, project .aprilcam/.env dotfiles, and "
+            "(data/socket/log directories, daemon pidfile, deskew settings, ...) "
+            "as merged from /etc/aprilcam.env, /etc/aprilcam/aprilcam.env, "
+            "~/.aprilcam, project .aprilcam/.env dotfiles, and "
             "APRILCAM_* environment variables."
         ),
     )
@@ -52,7 +55,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Emit the configuration as a JSON object instead of a table.",
     )
+    parser.add_argument(
+        "--vars",
+        action="store_true",
+        help="List all APRILCAM_* variables with defaults and descriptions.",
+    )
     args = parser.parse_args(argv)
+
+    if args.vars:
+        from ..config import CONFIG_VARS
+        for var in CONFIG_VARS:
+            print(f"{var['key']:<40} {var['default']:<35} {var['description']}")
+        return 0
 
     cfg = Config.load()
     data = _collect(cfg)

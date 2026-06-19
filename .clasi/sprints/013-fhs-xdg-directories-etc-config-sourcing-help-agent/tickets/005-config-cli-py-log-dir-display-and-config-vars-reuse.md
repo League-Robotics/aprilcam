@@ -1,15 +1,15 @@
 ---
-id: "005"
-title: "config_cli.py: log_dir display and CONFIG_VARS reuse"
-status: open
+id: '005'
+title: 'config_cli.py: log_dir display and CONFIG_VARS reuse'
+status: done
 use-cases:
-  - SUC-001
-  - SUC-002
-  - SUC-004
+- SUC-001
+- SUC-002
+- SUC-004
 depends-on:
-  - "003"
-github-issue: ""
-issue: ""
+- '003'
+github-issue: ''
+issue: ''
 completes_issue: false
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
@@ -67,15 +67,15 @@ if args.vars:
 
 ## Acceptance Criteria
 
-- [ ] `aprilcam config` output includes `log_dir` with the resolved path.
-- [ ] `aprilcam config` output still includes `data_dir`, `socket_dir`, and
+- [x] `aprilcam config` output includes `log_dir` with the resolved path.
+- [x] `aprilcam config` output still includes `data_dir`, `socket_dir`, and
       all previously shown fields.
-- [ ] `aprilcam config --vars` lists every entry from `CONFIG_VARS` with
+- [x] `aprilcam config --vars` lists every entry from `CONFIG_VARS` with
       key, default, and description.
-- [ ] `aprilcam config --json` includes `log_dir` in the JSON output.
-- [ ] No duplication of variable metadata between `config_cli.py` and
+- [x] `aprilcam config --json` includes `log_dir` in the JSON output.
+- [x] No duplication of variable metadata between `config_cli.py` and
       `config.py` (imports from `CONFIG_VARS`).
-- [ ] `uv run pytest` passes.
+- [x] `uv run pytest` passes.
 
 ## Implementation Plan
 
