@@ -77,14 +77,14 @@ def discover_daemons(timeout: float = 1.0) -> list[DaemonInfo]:
     results: list[DaemonInfo] = []
 
     def _on_service_state_change(
-        zeroconf_instance: "Zeroconf",
+        zeroconf: "Zeroconf",
         service_type: str,
         name: str,
         state_change: "ServiceStateChange",
     ) -> None:
         if state_change is not ServiceStateChange.Added:
             return
-        info = zeroconf_instance.get_service_info(service_type, name)
+        info = zeroconf.get_service_info(service_type, name)
         if info is None:
             return
 

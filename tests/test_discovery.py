@@ -600,3 +600,118 @@ class TestDaemonInfo:
             addresses=["192.168.1.50", "fe80::1"]
         )
         assert "192.168.1.50" in info.addresses
+
+
+# ---------------------------------------------------------------------------
+# Real handler-contract test (D — zeroconf keyword-argument signature)
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverDaemonsHandlerContract:
+    """Verify that the ServiceBrowser handler is callable with the EXACT
+    keyword arguments that zeroconf passes:
+
+        handler(zeroconf=<Zeroconf>, service_type=..., name=..., state_change=...)
+
+    This contract test would have caught defect D (014-010), where the
+    parameter was named ``zeroconf_instance`` instead of ``zeroconf``,
+    causing every live invocation to raise TypeError.
+    """
+
+    def test_handler_accepts_zeroconf_keyword(self):
+        """Registered handler must accept ``zeroconf=`` as a keyword argument.
+
+        The test captures the handler closure that discover_daemons registers
+        with ServiceBrowser, then invokes it with the exact keyword arguments
+        used by the zeroconf library (see zeroconf/_services/browser.py line ~735):
+
+            handler(zeroconf=zc, service_type=..., name=..., state_change=...)
+
+        A DaemonInfo must be appended to the results list, proving end-to-end
+        handler execution succeeded.
+        """
+        from unittest.mock import MagicMock, patch
+        from zeroconf import ServiceStateChange  # type: ignore[import]
+
+        # --- Build a minimal fake ServiceInfo ----------------------------
+        fake_info = MagicMock()
+        fake_info.port = 5280
+        fake_info.properties = {b"host": b"pi.local"}
+        fake_info.parsed_addresses.return_value = ["192.168.1.50"]
+
+        # --- Fake Zeroconf instance that returns the fake_info -----------
+        fake_zc = MagicMock()
+        fake_zc.get_service_info.return_value = fake_info
+
+        # --- Capture the handler that discover_daemons registers ---------
+        captured_handlers: list = []
+
+        class CapturingBrowser:
+            """Drop-in for ServiceBrowser: captures handlers, does nothing else."""
+
+            def __init__(self, zc, service_type, handlers=None):
+                if handlers:
+                    captured_handlers.extend(handlers)
+
+        # Patch at the zeroconf source module so the local ``from zeroconf import``
+        # inside discover_daemons picks up the mock.  Also patch time.sleep so
+        # the test doesn't actually wait.
+        with (
+            patch("zeroconf.Zeroconf", return_value=fake_zc),
+            patch("zeroconf.ServiceBrowser", CapturingBrowser),
+            patch("aprilcam.client.discovery.time.sleep"),
+        ):
+            result = discover_daemons(timeout=0.01)
+
+        assert len(captured_handlers) == 1, "discover_daemons must register exactly one handler"
+        handler = captured_handlers[0]
+
+        # --- Call the handler with the EXACT keyword args zeroconf uses --
+        # This must not raise TypeError. Before the fix (zeroconf_instance),
+        # this would raise:
+        #   TypeError: _on_service_state_change() got an unexpected keyword
+        #   argument 'zeroconf'
+        handler(
+            zeroconf=fake_zc,
+            service_type="_aprilcam._tcp.local.",
+            name="aprilcam-pi._aprilcam._tcp.local.",
+            state_change=ServiceStateChange.Added,
+        )
+
+        # The handler should have appended a DaemonInfo to results
+        assert len(result) == 1
+        assert isinstance(result[0], DaemonInfo)
+        assert result[0].host == "pi.local"
+        assert result[0].port == 5280
+
+    def test_handler_ignores_removed_events(self):
+        """Handler must be a no-op for ServiceStateChange.Removed events."""
+        from unittest.mock import MagicMock, patch
+        from zeroconf import ServiceStateChange  # type: ignore[import]
+
+        fake_zc = MagicMock()
+        captured_handlers: list = []
+
+        class CapturingBrowser:
+            def __init__(self, zc, service_type, handlers=None):
+                if handlers:
+                    captured_handlers.extend(handlers)
+
+        with (
+            patch("zeroconf.Zeroconf", return_value=fake_zc),
+            patch("zeroconf.ServiceBrowser", CapturingBrowser),
+            patch("aprilcam.client.discovery.time.sleep"),
+        ):
+            result = discover_daemons(timeout=0.01)
+
+        handler = captured_handlers[0]
+
+        # Call with Removed — must not raise, must not append anything
+        handler(
+            zeroconf=fake_zc,
+            service_type="_aprilcam._tcp.local.",
+            name="aprilcam-pi._aprilcam._tcp.local.",
+            state_change=ServiceStateChange.Removed,
+        )
+
+        assert result == [], "Removed events must not add DaemonInfo entries"
