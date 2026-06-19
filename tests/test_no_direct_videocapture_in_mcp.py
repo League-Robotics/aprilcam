@@ -1,11 +1,11 @@
-"""Tests verifying that the MCP detection path uses DaemonCapture, never
-direct cv2.VideoCapture(device_index).
+"""Tests verifying that the MCP detection path uses daemon RPCs, never
+direct cv2.VideoCapture(device_index) or in-process vision machinery.
 
 Ticket 014-006: Remove direct VideoCapture in MCP server and vision/objects.py.
+Ticket 015-003: Remove in-process detection; rewire MCP tag tools to daemon RPCs.
 
 The daemon's CameraPipeline is the sole camera opener.  The MCP server must
-never construct cv2.VideoCapture(device) — it fetches frames from the daemon
-via gRPC (DaemonCapture / CaptureFrame RPC).
+never construct cv2.VideoCapture(device) or instantiate DetectionLoop/AprilCam.
 """
 from __future__ import annotations
 
@@ -24,20 +24,23 @@ def _fake_frame() -> np.ndarray:
     return np.zeros((10, 10, 3), dtype=np.uint8)
 
 
-def _make_daemon_client(frame: np.ndarray | None = None):
-    """Build a mock DaemonControl that returns *frame* from capture_frame."""
+def _make_daemon_client():
+    """Build a mock DaemonControl."""
     dc = MagicMock()
-    dc.capture_frame.return_value = frame if frame is not None else _fake_frame()
+    mock_consumer = MagicMock()
+    mock_consumer.__iter__ = MagicMock(return_value=iter([]))
+    dc.get_tag_stream.return_value = mock_consumer
+    dc.capture_frame.return_value = _fake_frame()
     return dc
 
 
 # ---------------------------------------------------------------------------
-# Tests: _handle_start_detection uses DaemonCapture (not VideoCapture)
+# Tests: _handle_start_detection uses daemon GetTagStream (not DetectionLoop)
 # ---------------------------------------------------------------------------
 
 
-def test_start_detection_uses_daemon_capture(monkeypatch) -> None:
-    """start_detection wraps the camera in DaemonCapture; no VideoCapture opened."""
+def test_start_detection_uses_daemon_stream(monkeypatch) -> None:
+    """start_detection subscribes to the daemon's tag stream; no DetectionLoop opened."""
     from aprilcam.server import mcp_server
 
     dc = _make_daemon_client()
@@ -48,38 +51,24 @@ def test_start_detection_uses_daemon_capture(monkeypatch) -> None:
     mcp_server.registry.open(None, handle=cam_id)
     mcp_server._cam_info[cam_id] = {"cam_name": cam_id}
 
-    # Monkeypatch DetectionLoop to not actually run
-    started = {"n": 0}
-    stopped = {"n": 0}
-
-    class FakeLoop:
-        def __init__(self, source, aprilcam, ring_buffer, coord_transform=None):
-            # Verify source is a DaemonCapture, not a real VideoCapture
-            assert isinstance(source, mcp_server.DaemonCapture), (
-                f"Expected DaemonCapture, got {type(source)}"
-            )
-            started["source"] = source
-
-        def start(self):
-            started["n"] += 1
-
-        def stop(self, timeout=5.0):
-            stopped["n"] += 1
-
-        is_running = True
-        frame_count = 0
-        error = None
-        last_frame = None
-
-    monkeypatch.setattr(mcp_server, "DetectionLoop", FakeLoop)
-
-    # cv2.VideoCapture must not be called with any positional device index
+    # cv2.VideoCapture must not be called
     with patch("cv2.VideoCapture") as mock_vc:
-        result = mcp_server._handle_start_detection(cam_id)
+        with patch("aprilcam.server.mcp_server.threading") as mock_threading:
+            mock_thread = MagicMock()
+            mock_threading.Thread.return_value = mock_thread
+            result = mcp_server._handle_start_detection(cam_id)
 
     mock_vc.assert_not_called()
     assert result.get("status") == "started", result
-    assert started["n"] == 1
+    # Thread was started
+    mock_thread.start.assert_called_once()
+
+    # Entry is a DaemonStreamEntry, not the old DetectionEntry
+    entry = mcp_server.detection_registry.get(cam_id)
+    assert entry is not None
+    assert hasattr(entry, "consumer")
+    assert hasattr(entry, "history")
+    assert not hasattr(entry, "loop")  # no DetectionLoop
 
     # Cleanup
     mcp_server.detection_registry.pop(cam_id, None)
@@ -88,11 +77,7 @@ def test_start_detection_uses_daemon_capture(monkeypatch) -> None:
 
 
 def test_start_detection_no_videocapture_on_cam_handle(monkeypatch) -> None:
-    """cam_<N> handles no longer trigger exclusive VideoCapture opens.
-
-    Before 014-006 the server did cv2.VideoCapture(camera_index) for cam_N
-    handles.  After the refactor, all opens go through DaemonCapture.
-    """
+    """cam_<N> handles never trigger VideoCapture opens — all via daemon RPC."""
     from aprilcam.server import mcp_server
 
     dc = _make_daemon_client()
@@ -102,20 +87,10 @@ def test_start_detection_no_videocapture_on_cam_handle(monkeypatch) -> None:
     mcp_server.registry.open(None, handle=cam_id)
     mcp_server._cam_info[cam_id] = {"cam_name": cam_id}
 
-    class FakeLoop:
-        def __init__(self, source, aprilcam, ring_buffer, coord_transform=None):
-            self.source_type = type(source).__name__
-        def start(self): pass
-        def stop(self, timeout=5.0): pass
-        is_running = True
-        frame_count = 0
-        error = None
-        last_frame = None
-
-    monkeypatch.setattr(mcp_server, "DetectionLoop", FakeLoop)
-
     with patch("cv2.VideoCapture") as mock_vc:
-        result = mcp_server._handle_start_detection(cam_id)
+        with patch("aprilcam.server.mcp_server.threading") as mock_threading:
+            mock_threading.Thread.return_value = MagicMock()
+            result = mcp_server._handle_start_detection(cam_id)
 
     mock_vc.assert_not_called()
     assert "error" not in result, result
@@ -127,50 +102,45 @@ def test_start_detection_no_videocapture_on_cam_handle(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Tests: _handle_stop_detection no longer re-opens VideoCapture
+# Tests: _handle_stop_detection closes consumer (not DetectionLoop.stop)
 # ---------------------------------------------------------------------------
 
 
 def test_stop_detection_no_videocapture(monkeypatch) -> None:
-    """stop_detection does not re-open a VideoCapture to 'restore' the camera."""
+    """stop_detection closes the TagStreamConsumer; no VideoCapture re-open."""
     from aprilcam.server import mcp_server
-    from aprilcam.core.detection import RingBuffer
+    from aprilcam.server.mcp_server import DaemonStreamEntry
 
     cam_id = "stop-cam-002"
-
-    # Inject a fake DetectionEntry directly (bypass start)
-    loop = MagicMock()
-    loop.stop = MagicMock()
-    buf = RingBuffer(maxlen=10)
-
-    entry = mcp_server.DetectionEntry(
+    mock_consumer = MagicMock()
+    entry = DaemonStreamEntry(
         source_id=cam_id,
-        loop=loop,
-        ring_buffer=buf,
-        aprilcam=MagicMock(),
+        consumer=mock_consumer,
+        _done_flag=[False],
     )
-    entry._camera_id = cam_id  # type: ignore[attr-defined]
+    entry._camera_id = cam_id
     mcp_server.detection_registry[cam_id] = entry
 
     with patch("cv2.VideoCapture") as mock_vc:
         result = mcp_server._handle_stop_detection(cam_id)
 
     mock_vc.assert_not_called()
-    loop.stop.assert_called_once()
+    mock_consumer.close.assert_called_once()
     assert result == {"source_id": cam_id, "status": "stopped"}
 
 
 # ---------------------------------------------------------------------------
-# Tests: _read_one_frame uses gRPC (no AF_UNIX socket)
+# Tests: _capture_jpeg_bytes uses gRPC (no AF_UNIX socket)
 # ---------------------------------------------------------------------------
 
 
-def test_read_one_frame_uses_grpc(monkeypatch) -> None:
-    """_read_one_frame calls client.capture_frame(), not AF_UNIX socket."""
+def test_capture_jpeg_bytes_uses_grpc(monkeypatch) -> None:
+    """_capture_jpeg_bytes calls client.capture_frame_jpeg(), not a socket."""
     from aprilcam.server import mcp_server
 
-    frame = _fake_frame()
-    dc = _make_daemon_client(frame)
+    jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 100  # minimal JPEG-like bytes
+    dc = MagicMock()
+    dc.capture_frame_jpeg.return_value = jpeg
     monkeypatch.setattr(mcp_server, "_ensure_daemon_client", lambda: dc)
 
     cam_id = "grpc-cam-003"
@@ -178,13 +148,13 @@ def test_read_one_frame_uses_grpc(monkeypatch) -> None:
 
     import socket as _socket
     with patch.object(_socket, "socket") as mock_sock:
-        result = mcp_server._read_one_frame(cam_id)
+        result = mcp_server._capture_jpeg_bytes(cam_id)
 
     # AF_UNIX socket must NOT have been opened
     mock_sock.assert_not_called()
-    # Frame came from gRPC
-    dc.capture_frame.assert_called_once_with(cam_id)
-    assert np.array_equal(result, frame)
+    # Bytes came from gRPC
+    dc.capture_frame_jpeg.assert_called_once_with(cam_id)
+    assert result == jpeg
 
     mcp_server._cam_info.pop(cam_id, None)
 
@@ -199,7 +169,8 @@ def test_frames_from_daemon_uses_grpc(monkeypatch) -> None:
     from aprilcam.server import mcp_server
 
     frame = _fake_frame()
-    dc = _make_daemon_client(frame)
+    dc = _make_daemon_client()
+    dc.capture_frame.return_value = frame
     monkeypatch.setattr(mcp_server, "_ensure_daemon_client", lambda: dc)
 
     cam_id = "grpc-cam-004"
@@ -224,7 +195,7 @@ def test_frames_from_daemon_uses_grpc(monkeypatch) -> None:
 
 def test_detection_survives_videocapture_ban(monkeypatch) -> None:
     """If cv2.VideoCapture is banned (raises), start_detection still works
-    because all opens go through DaemonCapture/gRPC.
+    because all opens go through the daemon's GetTagStream RPC.
 
     This is the regression gate: if anyone reintroduces a direct VideoCapture
     call in the MCP detection path, this test will fail.
@@ -248,20 +219,10 @@ def test_detection_survives_videocapture_ban(monkeypatch) -> None:
     mcp_server.registry.open(None, handle=cam_id)
     mcp_server._cam_info[cam_id] = {"cam_name": cam_id}
 
-    class FakeLoop:
-        def __init__(self, source, aprilcam, ring_buffer, coord_transform=None):
-            pass
-        def start(self): pass
-        def stop(self, timeout=5.0): pass
-        is_running = True
-        frame_count = 0
-        error = None
-        last_frame = None
-
-    monkeypatch.setattr(mcp_server, "DetectionLoop", FakeLoop)
-
     # Must not raise despite VideoCapture being banned
-    result = mcp_server._handle_start_detection(cam_id)
+    with patch("aprilcam.server.mcp_server.threading") as mock_threading:
+        mock_threading.Thread.return_value = MagicMock()
+        result = mcp_server._handle_start_detection(cam_id)
 
     assert "error" not in result, f"Unexpected error: {result.get('error')}"
     assert result.get("status") == "started"
@@ -273,36 +234,28 @@ def test_detection_survives_videocapture_ban(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Tests: vision/objects.py ColorCameraThread is NOT reachable from get_objects
+# Tests: get_objects delegates to daemon RPC (no ColorCameraThread)
 # ---------------------------------------------------------------------------
 
 
-def test_get_objects_does_not_instantiate_color_camera_thread(monkeypatch) -> None:
-    """_handle_get_objects reads from det_entry.loop.last_frame, not from
-    ColorCameraThread.  ColorCameraThread is DAEMON-ONLY and must never be
-    instantiated from the MCP path.
+def test_get_objects_delegates_to_daemon_rpc(monkeypatch) -> None:
+    """_handle_get_objects calls client.get_objects() RPC, not ColorCameraThread.
+
+    ColorCameraThread is DAEMON-ONLY and must never be instantiated from the
+    MCP path.
     """
     from aprilcam.server import mcp_server
-    from aprilcam.vision import objects as _objects_mod
-    from aprilcam.core.detection import RingBuffer
 
     cam_id = "obj-cam-006"
 
-    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    mock_resp = MagicMock()
+    mock_resp.objects = []
 
-    loop = MagicMock()
-    loop.last_frame = frame
-    buf = RingBuffer(maxlen=10)
+    dc = MagicMock()
+    dc.get_objects.return_value = mock_resp
+    monkeypatch.setattr(mcp_server, "_ensure_daemon_client", lambda: dc)
 
-    entry = mcp_server.DetectionEntry(
-        source_id=cam_id,
-        loop=loop,
-        ring_buffer=buf,
-        aprilcam=MagicMock(),
-    )
-    entry._camera_id = cam_id  # type: ignore[attr-defined]
-    mcp_server.detection_registry[cam_id] = entry
-
+    from aprilcam.vision import objects as _objects_mod
     instantiated = {"n": 0}
     original_init = _objects_mod.ColorCameraThread.__init__
 
@@ -312,12 +265,11 @@ def test_get_objects_does_not_instantiate_color_camera_thread(monkeypatch) -> No
 
     monkeypatch.setattr(_objects_mod.ColorCameraThread, "__init__", _patched_init)
 
-    mcp_server._handle_get_objects(cam_id)
+    result = mcp_server._handle_get_objects(cam_id)
 
+    assert "error" not in result, f"Unexpected error: {result}"
+    dc.get_objects.assert_called_once()
     assert instantiated["n"] == 0, (
         "ColorCameraThread was instantiated from _handle_get_objects — "
         "it is DAEMON-ONLY and must not be reached from the MCP path"
     )
-
-    # Cleanup
-    mcp_server.detection_registry.pop(cam_id, None)

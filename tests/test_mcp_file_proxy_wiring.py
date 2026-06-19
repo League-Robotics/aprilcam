@@ -263,14 +263,15 @@ async def test_get_version_with_unix_daemon():
 
 @pytest.mark.asyncio
 async def test_connect_daemon_tears_down_detection_loops():
-    """connect_daemon stops all detection loops and clears detection_registry."""
+    """connect_daemon closes all stream consumers and clears detection_registry."""
     from aprilcam.server import mcp_server
     from aprilcam.server.mcp_server import connect_daemon
 
-    # Inject a fake detection loop.
-    fake_loop = MagicMock()
+    # Inject a fake DaemonStreamEntry with a mock consumer.
+    fake_consumer = MagicMock()
     fake_entry = MagicMock()
-    fake_entry.loop = fake_loop
+    fake_entry.consumer = fake_consumer
+    fake_entry._done_flag = [False]
     mcp_server.detection_registry["cam_0"] = fake_entry  # type: ignore[assignment]
 
     # Mock the new daemon connection so it succeeds without real hardware.
@@ -291,8 +292,8 @@ async def test_connect_daemon_tears_down_detection_loops():
             result = await connect_daemon(host="127.0.0.1", port=5280)
 
     data = json.loads(result[0].text)
-    # Should have torn down the loop.
-    fake_loop.stop.assert_called_once()
+    # Should have torn down the stream consumer.
+    fake_consumer.close.assert_called_once()
     # detection_registry should be empty.
     assert mcp_server.detection_registry == {}
     # Result should be success (target key present, no error).

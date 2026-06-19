@@ -305,6 +305,14 @@ class DaemonControl:
         )
         return CameraInfo.from_proto(resp)
 
+    def capture_frame_jpeg(self, cam_name: str) -> bytes:
+        """Capture a single frame; return raw JPEG bytes (no cv2 decode)."""
+        stub = self._stub_or_raise()
+        resp: aprilcam_pb2.CaptureFrameResponse = stub.CaptureFrame(
+            aprilcam_pb2.CameraRequest(cam_name=cam_name)
+        )
+        return bytes(resp.jpeg)
+
     def capture_frame(self, cam_name: str) -> np.ndarray:
         """Capture a single frame; return a BGR ``np.ndarray``."""
         stub = self._stub_or_raise()

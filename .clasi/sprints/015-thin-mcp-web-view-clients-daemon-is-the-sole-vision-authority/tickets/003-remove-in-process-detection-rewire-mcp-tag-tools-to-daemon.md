@@ -1,11 +1,15 @@
 ---
-id: "003"
-title: "Remove in-process detection; rewire MCP tag tools to daemon"
-status: open
-use-cases: [SUC-001, SUC-002, SUC-003]
-depends-on: ["001"]
-github-issue: ""
-issue: ""
+id: '003'
+title: Remove in-process detection; rewire MCP tag tools to daemon
+status: done
+use-cases:
+- SUC-001
+- SUC-002
+- SUC-003
+depends-on:
+- '001'
+github-issue: ''
+issue: ''
 completes_issue: false
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
@@ -35,30 +39,30 @@ can call `client.get_objects()`).
 
 ## Acceptance Criteria
 
-- [ ] `mcp_server.py` contains no class definition for `DaemonCapture`.
-- [ ] `mcp_server.py` contains no import of `DetectionLoop`, `AprilCam`, or
+- [x] `mcp_server.py` contains no class definition for `DaemonCapture`.
+- [x] `mcp_server.py` contains no import of `DetectionLoop`, `AprilCam`, or
   `RingBuffer` from `aprilcam.core.detection`.
-- [ ] `mcp_server.py` contains no `resolve_source()` function and no
+- [x] `mcp_server.py` contains no `resolve_source()` function and no
   `_resolve_source_playfield()` function.
-- [ ] `mcp_server.py` contains no `import cv2` (at module level or in any
+- [x] `mcp_server.py` contains no `import cv2` (at module level or in any
   function — including inline imports).
-- [ ] `stream_tags` and `start_detection` start a `TagStreamConsumer` (from
+- [x] `stream_tags` and `start_detection` start a `TagStreamConsumer` (from
   `client/stream.py`) connected to the daemon's tag stream socket; they do NOT
   instantiate `DetectionLoop`, `AprilCam`, or `DaemonCapture`.
-- [ ] A new `DaemonStreamEntry` dataclass (or equivalent) holds: `source_id`,
+- [x] A new `DaemonStreamEntry` dataclass (or equivalent) holds: `source_id`,
   `consumer: TagStreamConsumer`, `history: deque[dict]`, `robot_tag_id`,
   `gripper_offset_cm`, `_camera_id`.
-- [ ] `get_tags` reads the latest `TagFrame` dict from the deque; includes
+- [x] `get_tags` reads the latest `TagFrame` dict from the deque; includes
   `gripper_world_xy` computed via `_compute_gripper_world_xy()` when `robot_tag_id`
   is set (this function operates on dict fields; no cv2 needed).
-- [ ] `get_tag_history` returns the last N dicts from the deque.
-- [ ] `_handle_get_objects` calls `client.get_objects(cam_name)` and returns the
+- [x] `get_tag_history` returns the last N dicts from the deque.
+- [x] `_handle_get_objects` calls `client.get_objects(cam_name)` and returns the
   structured result; no cv2, no `ColorClassifier`, no numpy pixel ops.
-- [ ] `stop_stream` / `stop_detection` closes the `TagStreamConsumer` and removes
+- [x] `stop_stream` / `stop_detection` closes the `TagStreamConsumer` and removes
   the `DaemonStreamEntry` from the registry.
-- [ ] `uv run pytest tests/test_mcp_*.py` green (update tests that mock the old
+- [x] `uv run pytest tests/test_mcp_*.py` green (update tests that mock the old
   `DetectionEntry` to mock `DaemonStreamEntry` instead).
-- [ ] `uv run pytest` (full suite) green.
+- [x] `uv run pytest` (full suite) green.
 
 ## Implementation Plan
 

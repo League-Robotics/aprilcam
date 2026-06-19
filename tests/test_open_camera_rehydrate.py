@@ -41,7 +41,6 @@ from aprilcam.server.mcp_server import (
     PlayfieldEntry,
     PlayfieldRegistry,
     CameraRegistry,
-    DaemonCapture,
     FieldSpec,
     _get_playfield_origin,
 )

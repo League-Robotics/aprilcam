@@ -30,20 +30,23 @@ from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
 from typing import Any, Optional
 
+import threading
+from collections import deque
+
 import numpy as np
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent
 
 from aprilcam.config import Config
 from aprilcam.client.control import DaemonControl
-from aprilcam.core.aprilcam import AprilCam
+from aprilcam.client.models import TagFrame
+from aprilcam.client.stream import TagStreamConsumer
 from aprilcam.core.playfield_def import PlayfieldDefinitionRegistry
 from aprilcam.camera.composite import (
     CompositeManager,
     compute_cross_camera_homography,
     map_tags_to_primary,
 )
-from aprilcam.core.detection import DetectionLoop, RingBuffer
 from aprilcam.server.frame import FrameEntry, FrameRegistry
 from aprilcam.calibration.homography import (
     CORNER_ID_MAP,
@@ -175,7 +178,7 @@ def _a1_coord_transform(origin_x: float, origin_y: float):
     return _transform
 
 
-def _resolve_source_playfield(source_id: str, camera_id: "str | None" = None):
+def _lookup_playfield_for_source(source_id: str, camera_id: "str | None" = None):
     """Return the PlayfieldEntry for *source_id*, accepting either handle.
 
     Resolves a playfield from a playfield_id directly, or — when *source_id*
@@ -198,34 +201,6 @@ def _resolve_source_playfield(source_id: str, camera_id: "str | None" = None):
             except KeyError:
                 pass
     return None
-
-
-class DaemonCapture:
-    """Wraps a DaemonControl client as a cv2.VideoCapture-compatible source.
-
-    The DetectionLoop calls ``source.read()`` expecting ``(bool, ndarray)``.
-    Daemon-owned cameras are not backed by a real VideoCapture object in the
-    registry, so this adapter bridges the gap.
-    """
-
-    def __init__(self, client: "DaemonControl", cam_name: str) -> None:
-        self._client = client
-        self._cam_name = cam_name
-
-    def read(self):
-        try:
-            frame = self._client.capture_frame(self._cam_name)
-            if frame is None:
-                return False, None
-            return True, frame
-        except Exception:
-            return False, None
-
-    def isOpened(self) -> bool:  # noqa: N802
-        return True
-
-    def release(self) -> None:
-        pass
 
 
 class PlayfieldRegistry:
@@ -309,6 +284,26 @@ _daemon_host_override: Optional[str] = None
 _daemon_port_override: Optional[int] = None
 
 
+def _tag_stream_reader(
+    consumer: "TagStreamConsumer",
+    history: deque,
+    done_flag: list,
+) -> None:
+    """Background thread: read TagFrames from consumer into history deque.
+
+    Runs until the socket closes (EOFError) or *done_flag[0]* is set True.
+    OverlayFrame messages are silently skipped.
+    """
+    try:
+        for msg in consumer:
+            if done_flag[0]:
+                break
+            if isinstance(msg, TagFrame):
+                history.appendleft(msg.model_dump())
+    except Exception:
+        pass
+
+
 def _on_daemon_connect(client: DaemonControl) -> None:
     """Post-connect hook: populate the playfield_def_registry via ListPlayfields RPC.
 
@@ -388,19 +383,20 @@ def _push_paths_rpc(playfield_id: str) -> None:
 
 
 @dataclass
-class DetectionEntry:
-    """A running detection loop bound to a source (camera or playfield)."""
+class DaemonStreamEntry:
+    """A tag stream backed by the daemon's GetTagStream socket."""
 
     source_id: str
-    loop: DetectionLoop
-    ring_buffer: RingBuffer
-    aprilcam: AprilCam
-    operations: list[str] = field(default_factory=lambda: ["detect_tags"])
+    consumer: "TagStreamConsumer"
+    history: deque = field(default_factory=lambda: deque(maxlen=300))
     robot_tag_id: Optional[int] = None
     gripper_offset_cm: float = 14.0
+    _camera_id: Optional[str] = None
+    _thread: Optional[Any] = None   # background reader thread
+    _done_flag: Optional[list] = None  # [False] sentinel; set True to stop thread
 
 
-detection_registry: dict[str, DetectionEntry] = {}
+detection_registry: dict[str, DaemonStreamEntry] = {}
 
 
 @dataclass
@@ -409,7 +405,7 @@ class LiveViewEntry:
 
     source_id: str
     process: Any  # Popen handle or None for detached subprocesses
-    ring_buffer: RingBuffer
+    ring_buffer: Any  # unused; retained for registry sentinel compatibility
 
 
 live_view_registry: dict[str, LiveViewEntry] = {}
@@ -420,69 +416,40 @@ live_view_registry: dict[str, LiveViewEntry] = {}
 # ---------------------------------------------------------------------------
 
 
-def resolve_source(source_id: str) -> np.ndarray:
-    """Resolve a source_id (playfield or camera) to a captured frame.
+def _resolve_cam_name(source_id: str) -> str:
+    """Return the daemon cam_name for *source_id* (camera or playfield handle).
 
-    If a detection loop is running on the source, returns the latest
-    frame from the loop's cache (avoids racing with the loop for
-    camera reads).  Otherwise reads directly from the camera.
-
-    If *source_id* names a playfield, the frame is deskewed automatically.
-
-    Raises:
-        KeyError: if *source_id* is not found in either registry.
-        RuntimeError: if the underlying capture fails to read a frame.
+    Looks up the cam_name from the _cam_info cache, falling back to
+    source_id itself.  When source_id is a playfield handle, resolves the
+    underlying camera_id first.
     """
-    # If a detection loop is running, grab its cached frame to avoid
-    # racing with the loop thread for camera reads.
-    det_entry = detection_registry.get(source_id)
-    if det_entry is not None and det_entry.loop.last_frame is not None:
-        frame = det_entry.loop.last_frame.copy()
-        # Apply playfield deskew if this source is a playfield
-        try:
-            pf_entry = playfield_registry.get(source_id)
-            frame = pf_entry.playfield.deskew(frame)
-        except KeyError:
-            pass
-        return frame
-
-    # Try playfield first
+    # Try playfield → camera_id → cam_name
     try:
         pf_entry = playfield_registry.get(source_id)
         camera_id = pf_entry.camera_id
-        frame = _read_one_frame(camera_id)
-        return pf_entry.playfield.deskew(frame)
+        info = _cam_info.get(camera_id, {})
+        return info.get("cam_name", camera_id)
     except KeyError:
         pass
-
-    # Try camera (may be None sentinel when daemon owns the capture)
-    if source_id not in registry._cameras:
-        raise KeyError(f"Unknown source_id '{source_id}'")
-
-    cap = registry._cameras.get(source_id)
-    if cap is None:
-        # Daemon-owned camera — read from data socket
-        return _read_one_frame(source_id)
-
-    ret, frame = cap.read()
-    if not ret:
-        raise RuntimeError("Failed to read frame")
-    return frame
+    info = _cam_info.get(source_id, {})
+    return info.get("cam_name", source_id)
 
 
-def _read_one_frame(camera_id: str) -> np.ndarray:
-    """Fetch a single BGR frame from the daemon via gRPC CaptureFrame.
+def _capture_jpeg_bytes(source_id: str) -> bytes:
+    """Fetch a raw JPEG frame from the daemon for the given source.
 
-    The daemon is the sole opener of camera hardware; the MCP server never
-    calls cv2.VideoCapture(device_index) directly.
+    No cv2 decoding is performed; the raw JPEG bytes are returned as-is.
+    When *source_id* is a playfield, the underlying camera_id is resolved.
+
+    Raises:
+        RuntimeError: if the daemon returns empty bytes.
     """
     client = _ensure_daemon_client()
-    info = _cam_info.get(camera_id)
-    cam_name = info.get("cam_name") if info else camera_id
-    frame = client.capture_frame(cam_name)
-    if frame is None:
-        raise RuntimeError(f"No frame available from daemon for camera '{camera_id}'")
-    return frame
+    cam_name = _resolve_cam_name(source_id)
+    jpeg = client.capture_frame_jpeg(cam_name)
+    if not jpeg:
+        raise RuntimeError(f"No frame available from daemon for '{source_id}'")
+    return jpeg
 
 
 def format_image_output(
@@ -741,73 +708,36 @@ def _handle_capture_frame(
 ) -> dict:
     """Core logic for capture_frame — returns image dict or error dict.
 
+    Fetches raw JPEG bytes from the daemon via the CaptureFrame RPC and
+    passes them through without cv2 decode/re-encode.
+
     Returns:
         ``{"type": "image", "data": ..., "mime": "image/jpeg"}`` for base64,
         ``{"type": "file", "path": ...}`` for file format,
         ``{"type": "error", "error": ...}`` for errors.
     """
-    # Check if this is a playfield ID first
-    pf_entry = None
+    # Validate the camera/playfield handle exists
+    is_playfield = False
     try:
-        pf_entry = playfield_registry.get(camera_id)
-        # Resolve to underlying camera
-        try:
-            cap = registry.get(pf_entry.camera_id)
-        except KeyError:
-            return {"type": "error", "error": f"Underlying camera '{pf_entry.camera_id}' is no longer open"}
+        playfield_registry.get(camera_id)
+        is_playfield = True
     except KeyError:
-        # Not a playfield, try camera registry
-        try:
-            cap = registry.get(camera_id)
-        except KeyError:
+        if camera_id not in registry._cameras:
             return {"type": "error", "error": f"Unknown camera_id '{camera_id}'"}
 
     try:
-        import cv2
-        import time
-
-        ret, frame = None, None
-        if cap is None:
-            # Daemon-owned camera: fetch a frame via gRPC
-            cam_id = pf_entry.camera_id if pf_entry is not None else camera_id
-            try:
-                client = _ensure_daemon_client()
-                frame = client.capture_frame(cam_id)
-                ret = True
-            except Exception:
-                pass
-        else:
-            for _attempt in range(5):
-                ret, frame = cap.read()
-                if ret:
-                    break
-                time.sleep(0.1)
-        if not ret:
-            return {"type": "error", "error": "Failed to read frame"}
-
-        # Apply deskew if this is a playfield capture
-        if pf_entry is not None:
-            frame = pf_entry.playfield.deskew(frame)
-
-        ok, buf = cv2.imencode(
-            ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality]
-        )
-        if not ok:
-            return {"type": "error", "error": "Failed to encode frame"}
-
-        if format == "file":
-            tmp = tempfile.NamedTemporaryFile(
-                suffix=".jpg", delete=False
-            )
-            tmp.write(buf.tobytes())
-            tmp.close()
-            return {"type": "file", "path": tmp.name}
-
-        # default: base64
-        b64 = base64.b64encode(buf.tobytes()).decode("ascii")
-        return {"type": "image", "data": b64, "mime": "image/jpeg"}
+        jpeg = _capture_jpeg_bytes(camera_id)
     except Exception as exc:
         return {"type": "error", "error": str(exc)}
+
+    if format == "file":
+        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        tmp.write(jpeg)
+        tmp.close()
+        return {"type": "file", "path": tmp.name}
+
+    b64 = base64.b64encode(jpeg).decode("ascii")
+    return {"type": "image", "data": b64, "mime": "image/jpeg"}
 
 
 def _frames_from_daemon(camera_id: str, count: int):
@@ -1037,94 +967,45 @@ def _handle_start_detection(
 ) -> dict:
     """Core logic for start_detection — returns status dict or error dict.
 
-    All camera sources are daemon-owned.  Direct cv2.VideoCapture(device_index)
-    calls are prohibited here; the daemon's CameraPipeline is the sole camera
-    opener.  DaemonCapture wraps gRPC CaptureFrame so DetectionLoop can call
-    .read() as usual.
+    Subscribes to the daemon's GetTagStream socket; no in-process vision
+    machinery (AprilCam, DetectionLoop, RingBuffer) is instantiated here.
     """
     try:
         if source_id in detection_registry:
             return {"error": f"Detection already running on '{source_id}'"}
 
-        # Resolve source to a capture object and optional playfield data
-        cap = None
-        homography = None
-        playfield_poly = None
+        # Resolve camera_id and cam_name
         camera_id: str | None = None
-
         try:
             pf_entry = playfield_registry.get(source_id)
             camera_id = pf_entry.camera_id
-            try:
-                cap = registry.get(camera_id)
-            except KeyError:
-                return {"error": f"Underlying camera '{camera_id}' is no longer open"}
-            homography = pf_entry.homography
-            poly = pf_entry.playfield.get_polygon()
-            if poly is not None:
-                playfield_poly = poly
         except KeyError:
-            # Not a playfield_id — treat source_id as a camera handle.
             camera_id = source_id
-            try:
-                cap = registry.get(source_id)
-            except KeyError:
+            if source_id not in registry._cameras:
                 return {"error": f"Unknown source_id '{source_id}'"}
-            # Hardening: if this camera has an associated playfield (e.g. one
-            # rehydrated by open_camera), use its homography/polygon so tag
-            # world_xy is computed even when the caller passes the camera id.
-            _assoc = _resolve_source_playfield(source_id)
-            if _assoc is not None:
-                homography = _assoc.homography
-                _assoc_poly = _assoc.playfield.get_polygon()
-                if _assoc_poly is not None:
-                    playfield_poly = _assoc_poly
 
-        # Daemon-owned cameras have None in the registry; wrap with DaemonCapture
-        # so DetectionLoop can call .read() via gRPC.
-        if cap is None and camera_id is not None:
-            try:
-                daemon_client = _ensure_daemon_client()
-                cap = DaemonCapture(daemon_client, camera_id)
-            except Exception as exc:
-                return {"error": f"Cannot reach daemon for camera '{camera_id}': {exc}"}
+        cam_name = _resolve_cam_name(source_id)
 
-        cam = AprilCam(
-            index=0,
-            backend=None,
-            speed_alpha=0.3,
-            family=family,
-            proc_width=proc_width,
-            detect_interval=detect_interval,
-            use_clahe=use_clahe,
-            use_sharpen=use_sharpen,
-            headless=True,
-            cap=None,
-            homography=homography,
-            playfield_poly_init=playfield_poly,
-        )
+        client = _ensure_daemon_client()
+        consumer = client.get_tag_stream(cam_name)
 
-        buf = RingBuffer(maxlen=300)
-        coord_transform = None
-        _pf = _resolve_source_playfield(source_id, camera_id)
-        if _pf is not None:
-            ox, oy = _get_playfield_origin(_pf)
-            if ox != 0.0 or oy != 0.0:
-                coord_transform = _a1_coord_transform(ox, oy)
-        loop = DetectionLoop(source=cap, aprilcam=cam, ring_buffer=buf,
-                             coord_transform=coord_transform)
-        loop.start()
-
-        detection_registry[source_id] = DetectionEntry(
+        done_flag: list = [False]
+        entry = DaemonStreamEntry(
             source_id=source_id,
-            loop=loop,
-            ring_buffer=buf,
-            aprilcam=cam,
+            consumer=consumer,
             robot_tag_id=robot_tag_id,
             gripper_offset_cm=gripper_offset_cm,
+            _camera_id=camera_id,
+            _done_flag=done_flag,
         )
-        # Store camera_id so stop_detection can reference it if needed
-        detection_registry[source_id]._camera_id = camera_id  # type: ignore[attr-defined]
+        t = threading.Thread(
+            target=_tag_stream_reader,
+            args=(consumer, entry.history, done_flag),
+            daemon=True,
+        )
+        t.start()
+        entry._thread = t
+        detection_registry[source_id] = entry
 
         return {"source_id": source_id, "status": "started"}
     except Exception as exc:
@@ -1134,15 +1015,20 @@ def _handle_start_detection(
 def _handle_stop_detection(source_id: str) -> dict:
     """Core logic for stop_detection — returns status dict or error dict.
 
-    Daemon-owned cameras need no client-side camera release; the daemon
-    holds the hardware.  This teardown only stops the DetectionLoop.
+    Signals the background reader thread to exit and closes the
+    TagStreamConsumer socket.
     """
     try:
         entry = detection_registry.pop(source_id, None)
         if entry is None:
             return {"error": f"No detection running on '{source_id}'"}
 
-        entry.loop.stop()
+        if entry._done_flag is not None:
+            entry._done_flag[0] = True
+        try:
+            entry.consumer.close()
+        except Exception:
+            pass
 
         return {"source_id": source_id, "status": "stopped"}
     except Exception as exc:
@@ -1190,18 +1076,80 @@ def _compute_gripper_world_xy(
         return None
 
 
+def _normalize_tag_dict(tag: dict) -> dict:
+    """Normalize a TagRecord model_dump dict to the MCP output format.
+
+    Maps ``yaw`` → ``orientation_yaw``, converts tuples to lists, and
+    ensures ``center_px`` / ``corners_px`` are JSON-serializable lists.
+    """
+    center = tag.get("center_px")
+    corners = tag.get("corners_px")
+    if isinstance(center, tuple):
+        center = list(center)
+    if isinstance(corners, (list, tuple)):
+        corners = [list(c) if isinstance(c, tuple) else c for c in corners]
+    world_xy = tag.get("world_xy")
+    if isinstance(world_xy, tuple):
+        world_xy = list(world_xy)
+    vel_px = tag.get("vel_px")
+    if isinstance(vel_px, tuple):
+        vel_px = list(vel_px)
+    vel_world = tag.get("vel_world")
+    if isinstance(vel_world, tuple):
+        vel_world = list(vel_world)
+    return {
+        "id": tag.get("id"),
+        "center_px": center,
+        "corners_px": corners,
+        "orientation_yaw": tag.get("yaw"),  # map yaw → orientation_yaw
+        "world_xy": world_xy,
+        "in_playfield": tag.get("in_playfield"),
+        "vel_px": vel_px,
+        "speed_px": tag.get("speed_px"),
+        "vel_world": vel_world,
+        "speed_world": tag.get("speed_world"),
+        "heading_rad": tag.get("heading_rad"),
+        "age": tag.get("age"),
+    }
+
+
+def _frame_dict_to_mcp(frame_dump: dict) -> dict:
+    """Convert a TagFrame.model_dump() dict to the MCP output format.
+
+    Maps ``frame_id`` → ``frame`` and normalizes each tag record.
+    """
+    tags = [_normalize_tag_dict(t) for t in frame_dump.get("tags", [])]
+    return {
+        "frame": frame_dump.get("frame_id"),
+        "fps": frame_dump.get("fps"),
+        "origin_x": frame_dump.get("origin_x"),
+        "origin_y": frame_dump.get("origin_y"),
+        "field_width_cm": frame_dump.get("field_width_cm"),
+        "field_height_cm": frame_dump.get("field_height_cm"),
+        "tags": tags,
+    }
+
+
 def _handle_get_tags(source_id: str) -> dict:
     """Core logic for get_tags — returns tag data dict or error dict."""
     try:
         entry = detection_registry.get(source_id)
         if entry is None:
-            return {"error": f"No detection running on '{source_id}'"}
+            # Fall back: call GetTags RPC directly (no active stream)
+            try:
+                client = _ensure_daemon_client()
+                cam_name = _resolve_cam_name(source_id)
+                tf: TagFrame = client.get_tags(cam_name)
+                result = _frame_dict_to_mcp(tf.model_dump())
+                result["source_id"] = source_id
+                return result
+            except Exception as exc:
+                return {"error": f"No detection running on '{source_id}' and RPC failed: {exc}"}
 
-        latest = entry.ring_buffer.get_latest()
-        if latest is None:
+        if not entry.history:
             return {"source_id": source_id, "frame": None, "tags": []}
 
-        result = latest.to_dict()
+        result = _frame_dict_to_mcp(dict(entry.history[0]))
         result["source_id"] = source_id
 
         # Add gripper position for the robot tag if configured
@@ -1209,8 +1157,8 @@ def _handle_get_tags(source_id: str) -> dict:
             homography = None
             origin_x = 0.0
             origin_y = 0.0
-            pf_entry = _resolve_source_playfield(
-                source_id, getattr(entry, "_camera_id", None)
+            pf_entry = _lookup_playfield_for_source(
+                source_id, entry._camera_id
             )
             if pf_entry is not None:
                 homography = pf_entry.homography
@@ -1276,89 +1224,31 @@ def _handle_get_tag_history(
         if entry is None:
             return {"error": f"No detection running on '{source_id}'"}
 
-        records = entry.ring_buffer.get_last_n(num_frames)
-        return {"source_id": source_id, "frames": [r.to_dict() for r in records]}
+        frames = [_frame_dict_to_mcp(d) for d in list(entry.history)[:num_frames]]
+        return {"source_id": source_id, "frames": frames}
     except Exception as exc:
         return {"error": f"Unexpected error: {exc}"}
 
 
 def _handle_get_objects(source_id: str) -> dict:
-    """Core logic for get_objects — returns detected non-tag objects or error."""
+    """Core logic for get_objects — delegates to daemon's GetObjects RPC."""
     try:
-        import cv2 as cv
-        import math as _math
-        from aprilcam.vision.color_classifier import ColorClassifier
-
-        det_entry = detection_registry.get(source_id)
-        if det_entry is None:
-            return {"error": f"No detection loop on '{source_id}'"}
-
-        frame = det_entry.loop.last_frame
-        if frame is None:
-            return {"error": "No frames captured yet"}
-
-        # Get homography, field dimensions, and playfield polygon if this source is a playfield.
-        homography = None
-        pf_poly = None
-        origin_x = 0.0
-        origin_y = 0.0
-        pf_entry = _resolve_source_playfield(
-            source_id, getattr(det_entry, "_camera_id", None)
-        )
-        if pf_entry is not None:
-            if pf_entry.homography is not None:
-                homography = pf_entry.homography
-            try:
-                pf_poly = pf_entry.playfield.get_polygon()
-            except AttributeError:
-                pf_poly = None
-            origin_x, origin_y = _get_playfield_origin(pf_entry)
-
-        # Detect colored objects via HSV classification.
-        classifier = ColorClassifier(min_area=600, max_area=30000)
-        raw = classifier.classify(frame, homography=homography)
-
-        # Filter: inside playfield polygon (inset by 60 px) + roughly square shape.
-        objects = []
-        shrunk_poly = None
-        if pf_poly is not None:
-            pts = pf_poly.reshape(-1, 2).astype(np.float32)
-            center = pts.mean(axis=0)
-            dirs = pts - center
-            lens = np.linalg.norm(dirs, axis=1, keepdims=True)
-            lens = np.maximum(lens, 1e-6)
-            shrunk = pts - dirs / lens * 60
-            shrunk_poly = shrunk.reshape(-1, 1, 2).astype(np.float32)
-
-        for obj in raw:
-            cx, cy = obj.center_px
-            if shrunk_poly is not None:
-                if cv.pointPolygonTest(shrunk_poly, (float(cx), float(cy)), False) < 0:
-                    continue
-            x, y, bw, bh = obj.bbox
-            aspect = max(bw, bh) / max(min(bw, bh), 1)
-            if aspect > 2.0 or min(bw, bh) < 15:
-                continue
-            objects.append(obj)
-
-        def _centre(wxy):
-            if wxy is None:
-                return None
-            return [wxy[0] - origin_x, wxy[1] - origin_y]
-
+        client = _ensure_daemon_client()
+        cam_name = _resolve_cam_name(source_id)
+        resp = client.get_objects(cam_name)
         return {
             "source_id": source_id,
             "objects": [
                 {
-                    "center_px": list(o.center_px),
-                    "world_xy": _centre(o.world_xy),
+                    "center_px": [o.cx_px, o.cy_px],
+                    "world_xy": [o.wx, o.wy] if (o.wx != 0.0 or o.wy != 0.0) else None,
                     "color": o.color,
-                    "bbox": list(o.bbox),
+                    "bbox": [o.x_bbox, o.y_bbox, o.w_bbox, o.h_bbox],
                     "area_px": o.area_px,
                     "object_type": o.object_type,
                     "confidence": o.confidence,
                 }
-                for o in objects
+                for o in resp.objects
             ],
         }
     except Exception as exc:
@@ -1412,7 +1302,7 @@ def _handle_where(query: str, source_id: str = "") -> dict:
         live_tags: Optional[dict[int, dict]] = None
         if source_id:
             tags_result = _handle_get_tags(source_id)
-            if "error" not in tags_result:
+            if "error" not in tags_result and tags_result.get("frame") is not None:
                 live_tags = {}
                 for t in tags_result.get("tags", []) or []:
                     tid = t.get("id")
@@ -1491,112 +1381,6 @@ def _handle_get_playfield(name: str = "") -> dict:
         return {"error": f"Unexpected error: {exc}"}
 
 
-def _warp_points(points: list, homography: np.ndarray) -> list:
-    """Transform a list of [x, y] points through a homography matrix."""
-    import cv2
-    pts = np.array(points, dtype=np.float32).reshape(-1, 1, 2)
-    warped = cv2.perspectiveTransform(pts, homography)
-    return warped.reshape(-1, 2).tolist()
-
-
-# Color name to BGR mapping for drawing object annotations
-_COLOR_BGR = {
-    "red": (0, 0, 255),
-    "green": (0, 200, 0),
-    "blue": (255, 0, 0),
-    "yellow": (0, 255, 255),
-    "orange": (0, 165, 255),
-    "purple": (255, 0, 255),
-    "unknown": (200, 200, 200),
-}
-
-
-def _draw_object_overlay(
-    frame: np.ndarray,
-    objects: list,
-) -> None:
-    """Draw object detection overlays directly on *frame* (mutates in place)."""
-    import cv2
-
-    for obj in objects:
-        x, y, w, h = obj.bbox
-        bgr = _COLOR_BGR.get(obj.color, (200, 200, 200))
-        cv2.rectangle(frame, (x, y), (x + w, y + h), bgr, 2)
-        label = obj.color
-        cv2.putText(frame, label, (x, y - 5),
-                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, bgr, 1, cv2.LINE_AA)
-        if obj.world_xy:
-            coord = f"({obj.world_xy[0]:.1f}, {obj.world_xy[1]:.1f})"
-            cv2.putText(frame, coord, (x, y + h + 15),
-                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, bgr, 1, cv2.LINE_AA)
-
-
-def _draw_tag_overlay(
-    frame: np.ndarray,
-    tags: list,
-    has_homography: bool = False,
-    homography: np.ndarray | None = None,
-) -> None:
-    """Draw tag detection overlays directly on *frame* (mutates in place).
-
-    When *homography* is provided, tag coordinates (which are in raw
-    camera space) are transformed through the homography so they align
-    with the deskewed image.
-
-    Draws corner outlines, tag IDs, and world coordinates (when
-    *has_homography* is True and ``world_xy`` is present).
-    """
-    import cv2
-    import math
-
-    for tag in tags:
-        corners = tag.corners_px
-        center = list(tag.center_px)
-
-        # Transform coordinates if we have a homography (raw -> deskewed)
-        if homography is not None:
-            corners = _warp_points(corners, homography)
-            center = _warp_points([center], homography)[0]
-
-        pts = [(int(c[0]), int(c[1])) for c in corners]
-        # Draw corner polygon — green top edge, red other sides
-        cv2.line(frame, pts[0], pts[1], (0, 255, 0), 2, cv2.LINE_AA)
-        cv2.line(frame, pts[1], pts[2], (0, 0, 255), 2, cv2.LINE_AA)
-        cv2.line(frame, pts[2], pts[3], (0, 0, 255), 2, cv2.LINE_AA)
-        cv2.line(frame, pts[3], pts[0], (0, 0, 255), 2, cv2.LINE_AA)
-
-        # Center dot
-        cx, cy = int(center[0]), int(center[1])
-        cv2.circle(frame, (cx, cy), 4, (0, 255, 255), -1)
-
-        # ID label
-        id_text = str(tag.id)
-        (tw, th), _ = cv2.getTextSize(id_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-        tx, ty = cx - tw // 2, cy + th // 2
-        # Outline for readability
-        cv2.putText(frame, id_text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 4, cv2.LINE_AA)
-        cv2.putText(frame, id_text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
-
-        # World coordinates label
-        if has_homography and tag.world_xy is not None:
-            wx, wy = tag.world_xy
-            coord_text = f"({wx:.1f}, {wy:.1f})"
-            y_bottom = max(p[1] for p in pts)
-            cv2.putText(frame, coord_text, (cx - 30, y_bottom + 18),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
-            cv2.putText(frame, coord_text, (cx - 30, y_bottom + 18),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA)
-
-        # Velocity arrow
-        if tag.vel_px is not None:
-            vx, vy = tag.vel_px
-            norm = math.hypot(vx, vy)
-            if norm > 1e-6:
-                length = int(max(12, min(250, norm * 0.5)))
-                ux, uy = vx / norm, vy / norm
-                end_pt = (int(cx + ux * length), int(cy + uy * length))
-                cv2.arrowedLine(frame, (cx, cy), end_pt, (0, 255, 255), 2, tipLength=0.12)
-
 
 def _handle_get_frame(
     source_id: str,
@@ -1606,9 +1390,10 @@ def _handle_get_frame(
 ) -> dict:
     """Core logic for get_frame — returns image dict or error dict.
 
-    When *annotate* is True and a detection loop is running on the
-    source, draws tag overlays (corners, IDs, world coordinates) on
-    the frame before encoding.
+    Fetches raw JPEG bytes from the daemon and passes them through without
+    cv2 decode/re-encode.  The *annotate* parameter is accepted for API
+    compatibility but ignored; annotation requires in-process detection which
+    is no longer present in this server.
 
     Returns:
         ``{"type": "image", "data": ..., "mime": "image/jpeg"}`` for base64,
@@ -1616,85 +1401,22 @@ def _handle_get_frame(
         ``{"type": "error", "error": ...}`` for errors.
     """
     try:
-        frame = resolve_source(source_id)
+        jpeg = _capture_jpeg_bytes(source_id)
     except KeyError as e:
         return {"type": "error", "error": str(e)}
     except RuntimeError as e:
         return {"type": "error", "error": str(e)}
+    except Exception as e:
+        return {"type": "error", "error": str(e)}
 
-    # Draw tag overlays if requested
-    if annotate:
-        det_entry = detection_registry.get(source_id)
-        if det_entry is not None:
-            latest = det_entry.ring_buffer.get_latest()
-            if latest is not None:
-                deskew_matrix = None
-                has_homography = False
-                try:
-                    pf_entry = playfield_registry.get(source_id)
-                    has_homography = True
-                    deskew_matrix = pf_entry.playfield.get_deskew_matrix()
-                except KeyError:
-                    pass
-                _draw_tag_overlay(frame, latest.tags,
-                                 has_homography=has_homography,
-                                 homography=deskew_matrix)
+    if format == "file":
+        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        tmp.write(jpeg)
+        tmp.close()
+        return {"type": "file", "path": tmp.name}
 
-        # Draw detected objects
-        try:
-            import cv2 as _cv
-            from aprilcam.vision.objects import SquareDetector
-
-            detector = SquareDetector()
-            gray_ann = _cv.cvtColor(frame, _cv.COLOR_BGR2GRAY)
-
-            # Get tag corners for exclusion
-            tag_corners_for_exclude = []
-            if det_entry is not None:
-                latest_for_obj = det_entry.ring_buffer.get_latest()
-                if latest_for_obj is not None:
-                    for tag in latest_for_obj.tags:
-                        tag_corners_for_exclude.append(
-                            np.array(tag.corners_px, dtype=np.float32)
-                        )
-
-            homography = None
-            pf_poly_ann = None
-            _pf_ann = _resolve_source_playfield(source_id)
-            if _pf_ann is not None:
-                if _pf_ann.homography is not None:
-                    homography = _pf_ann.homography
-                try:
-                    pf_poly_ann = _pf_ann.playfield.get_polygon()
-                except AttributeError:
-                    pf_poly_ann = None
-
-            objects = detector.detect(
-                gray_ann, homography=homography,
-                tag_corners=tag_corners_for_exclude,
-                playfield_polygon=pf_poly_ann,
-            )
-            _draw_object_overlay(frame, objects)
-        except Exception:
-            pass  # Object annotation is best-effort
-
-    try:
-        import cv2
-
-        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
-        if not ok:
-            raise RuntimeError("Failed to encode frame as JPEG")
-
-        if format == "file":
-            tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-            tmp.write(buf.tobytes())
-            tmp.close()
-            return {"type": "file", "path": tmp.name}
-
-        b64 = base64.b64encode(buf.tobytes()).decode("ascii")
-        return {"type": "image", "data": b64, "mime": "image/jpeg"}
-    except Exception as exc:
-        return {"type": "error", "error": f"Unexpected error: {exc}"}
+    b64 = base64.b64encode(jpeg).decode("ascii")
+    return {"type": "image", "data": b64, "mime": "image/jpeg"}
 
 
 def _handle_start_live_view(
@@ -1866,10 +1588,13 @@ async def connect_daemon(
     _log = logging.getLogger("aprilcam")
 
     # --- Tear down session state ---
-    # 1. Stop all detection loops.
+    # 1. Stop all detection streams.
     for _det_src in list(detection_registry.keys()):
         try:
-            detection_registry[_det_src].loop.stop()
+            _entry = detection_registry[_det_src]
+            if _entry._done_flag is not None:
+                _entry._done_flag[0] = True
+            _entry.consumer.close()
         except Exception:
             pass
     detection_registry.clear()
@@ -2183,7 +1908,44 @@ async def calibrate_playfield(
             cfg_reply = client.get_camera_config(camera_id)
             cam_cfg = parse_camera_config(json.loads(cfg_reply.json_blob)) if cfg_reply.present else {}
 
-            cap = DaemonCapture(client, camera_id)
+            # Build a minimal VideoCapture-compatible adapter backed by the
+            # daemon's CaptureFrame RPC.  Kept local to avoid a module-level
+            # class that imports cv2 for calibration only.
+            class _DaemonCap:
+                """Minimal cv2.VideoCapture adapter for calibrate_from_playfield_def."""
+
+                def __init__(self, _client, _cam_name):
+                    self._client = _client
+                    self._cam_name = _cam_name
+                    self._w = 0
+                    self._h = 0
+
+                def read(self):
+                    try:
+                        frame = self._client.capture_frame(self._cam_name)
+                        if frame is None:
+                            return False, None
+                        if self._w == 0 and frame is not None:
+                            self._h, self._w = frame.shape[:2]
+                        return True, frame
+                    except Exception:
+                        return False, None
+
+                def get(self, prop_id):
+                    import cv2 as _cv2
+                    if prop_id == _cv2.CAP_PROP_FRAME_WIDTH:
+                        return float(self._w)
+                    if prop_id == _cv2.CAP_PROP_FRAME_HEIGHT:
+                        return float(self._h)
+                    return 0.0
+
+                def isOpened(self):  # noqa: N802
+                    return True
+
+                def release(self):
+                    pass
+
+            cap = _DaemonCap(client, camera_id)
             cal = calibrate_from_playfield_def(
                 cap=cap,
                 camera_dir=None,  # no local file access
@@ -2813,101 +2575,17 @@ async def stream_tags(
         operations = ["detect_tags"]
 
     try:
-        if source_id in detection_registry:
-            return [TextContent(type="text", text=json.dumps(
-                {"error": f"Detection already running on '{source_id}'"}
-            ))]
-
-        # Resolve source to a capture object and optional playfield data.
-        # All camera sources are daemon-owned; no direct cv2.VideoCapture(device)
-        # call is made here.  DaemonCapture wraps gRPC CaptureFrame so
-        # DetectionLoop can call .read() as usual.
-        cap = None
-        homography = None
-        playfield_poly = None
-        camera_id: str | None = None
-
-        try:
-            pf_entry = playfield_registry.get(source_id)
-            camera_id = pf_entry.camera_id
-            try:
-                cap = registry.get(camera_id)
-            except KeyError:
-                return [TextContent(type="text", text=json.dumps(
-                    {"error": f"Underlying camera '{camera_id}' is no longer open"}
-                ))]
-            homography = pf_entry.homography
-            poly = pf_entry.playfield.get_polygon()
-            if poly is not None:
-                playfield_poly = poly
-        except KeyError:
-            # Not a playfield_id — treat source_id as a camera handle.
-            camera_id = source_id
-            try:
-                cap = registry.get(source_id)
-            except KeyError:
-                return [TextContent(type="text", text=json.dumps(
-                    {"error": f"Unknown source_id '{source_id}'"}
-                ))]
-            # Hardening: use the camera's associated playfield (if any) so tag
-            # world_xy is computed even when the caller passes the camera id.
-            _assoc = _resolve_source_playfield(source_id)
-            if _assoc is not None:
-                homography = _assoc.homography
-                _assoc_poly = _assoc.playfield.get_polygon()
-                if _assoc_poly is not None:
-                    playfield_poly = _assoc_poly
-
-        # Daemon-owned cameras have None in the registry; wrap with DaemonCapture
-        if cap is None and camera_id is not None:
-            try:
-                daemon_client = _ensure_daemon_client()
-                cap = DaemonCapture(daemon_client, camera_id)
-            except Exception as exc:
-                return [TextContent(type="text", text=json.dumps(
-                    {"error": f"Cannot reach daemon for camera '{camera_id}': {exc}"}
-                ))]
-
-        cam = AprilCam(
-            index=0,
-            backend=None,
-            speed_alpha=0.3,
+        result = _handle_start_detection(
+            source_id,
             family=family,
             proc_width=proc_width,
-            detect_interval=1,
-            use_clahe=False,
-            use_sharpen=False,
-            headless=True,
-            cap=None,
-            homography=homography,
-            playfield_poly_init=playfield_poly,
-        )
-
-        buf = RingBuffer(maxlen=300)
-        coord_transform = None
-        _pf = _resolve_source_playfield(source_id, camera_id)
-        if _pf is not None:
-            ox, oy = _get_playfield_origin(_pf)
-            if ox != 0.0 or oy != 0.0:
-                coord_transform = _a1_coord_transform(ox, oy)
-        loop = DetectionLoop(source=cap, aprilcam=cam, ring_buffer=buf,
-                             coord_transform=coord_transform)
-        loop.start()
-
-        detection_registry[source_id] = DetectionEntry(
-            source_id=source_id,
-            loop=loop,
-            ring_buffer=buf,
-            aprilcam=cam,
-            operations=list(operations),
             robot_tag_id=robot_tag_id,
             gripper_offset_cm=gripper_offset_cm,
         )
-        # Store camera_id so stop_stream can reference it if needed
-        detection_registry[source_id]._camera_id = camera_id  # type: ignore[attr-defined]
-
+        if "error" in result:
+            return [TextContent(type="text", text=json.dumps(result))]
         return [TextContent(type="text", text=json.dumps(
-            {"stream_id": source_id, "operations": operations, "status": "started"}
+            {"stream_id": source_id, "operations": list(operations), "status": "started"}
         ))]
     except Exception as exc:
         return [TextContent(type="text", text=json.dumps({"error": f"Unexpected error: {exc}"}))]
@@ -2931,16 +2609,9 @@ async def stop_stream(source_id: str) -> list[TextContent]:
         On error: ``{"error": "<message>"}``.
     """
     try:
-        entry = detection_registry.pop(source_id, None)
-        if entry is None:
-            return [TextContent(type="text", text=json.dumps(
-                {"error": f"No stream running on '{source_id}'"}
-            ))]
-
-        entry.loop.stop()
-        # Daemon-owned cameras need no client-side release; the daemon holds
-        # the hardware.
-
+        result = _handle_stop_detection(source_id)
+        if "error" in result:
+            return [TextContent(type="text", text=json.dumps(result))]
         return [TextContent(type="text", text=json.dumps(
             {"stream_id": source_id, "status": "stopped"}
         ))]
@@ -3688,8 +3359,11 @@ async def create_frame(
         On error: ``{"error": "<message>"}``.
     """
     try:
-        frame = resolve_source(source_id)
+        client = _ensure_daemon_client()
+        frame = client.capture_frame(_resolve_cam_name(source_id))
     except (KeyError, RuntimeError) as exc:
+        return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
+    except Exception as exc:
         return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
 
     entry = frame_registry.add(raw=frame, source=source_id)
@@ -4143,10 +3817,12 @@ def main(argv: list[str] | None = None) -> None:
             except Exception:
                 pass
         live_view_registry.clear()
-        # Stop all detection loops before closing cameras
+        # Stop all detection streams before closing cameras
         for entry in list(detection_registry.values()):
             try:
-                entry.loop.stop()
+                if entry._done_flag is not None:
+                    entry._done_flag[0] = True
+                entry.consumer.close()
             except Exception:
                 pass
         detection_registry.clear()
