@@ -43,6 +43,11 @@ class AprilCamStub(object):
                 request_serializer=aprilcam__pb2.Empty.SerializeToString,
                 response_deserializer=aprilcam__pb2.ListCamerasResponse.FromString,
                 _registered_method=True)
+        self.EnumerateCameras = channel.unary_unary(
+                '/aprilcam.AprilCam/EnumerateCameras',
+                request_serializer=aprilcam__pb2.Empty.SerializeToString,
+                response_deserializer=aprilcam__pb2.EnumerateCamerasResponse.FromString,
+                _registered_method=True)
         self.OpenCamera = channel.unary_unary(
                 '/aprilcam.AprilCam/OpenCamera',
                 request_serializer=aprilcam__pb2.OpenCameraRequest.SerializeToString,
@@ -110,6 +115,12 @@ class AprilCamServicer(object):
     def ListCameras(self, request, context):
         """Camera lifecycle
         """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def EnumerateCameras(self, request, context):
+        """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -191,6 +202,11 @@ def add_AprilCamServicer_to_server(servicer, server):
                     servicer.ListCameras,
                     request_deserializer=aprilcam__pb2.Empty.FromString,
                     response_serializer=aprilcam__pb2.ListCamerasResponse.SerializeToString,
+            ),
+            'EnumerateCameras': grpc.unary_unary_rpc_method_handler(
+                    servicer.EnumerateCameras,
+                    request_deserializer=aprilcam__pb2.Empty.FromString,
+                    response_serializer=aprilcam__pb2.EnumerateCamerasResponse.SerializeToString,
             ),
             'OpenCamera': grpc.unary_unary_rpc_method_handler(
                     servicer.OpenCamera,
@@ -279,6 +295,33 @@ class AprilCam(object):
             '/aprilcam.AprilCam/ListCameras',
             aprilcam__pb2.Empty.SerializeToString,
             aprilcam__pb2.ListCamerasResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def EnumerateCameras(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.AprilCam/EnumerateCameras',
+            aprilcam__pb2.Empty.SerializeToString,
+            aprilcam__pb2.EnumerateCamerasResponse.FromString,
             options,
             channel_credentials,
             insecure,

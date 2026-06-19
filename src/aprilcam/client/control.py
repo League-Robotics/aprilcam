@@ -21,6 +21,7 @@ from aprilcam.client._imaging import require_cv2
 
 from aprilcam.proto import aprilcam_pb2, aprilcam_pb2_grpc
 from aprilcam.client.models import (
+    CameraDevice,
     CameraInfo,
     ImageFrame,
     StreamEndpoint,
@@ -204,6 +205,18 @@ class DaemonControl:
             aprilcam_pb2.Empty()
         )
         return list(resp.cameras)
+
+    def enumerate_cameras(self) -> list[CameraDevice]:
+        """Return all available hardware camera devices (not necessarily open).
+
+        Calls the ``EnumerateCameras`` RPC; the daemon probes the hardware and
+        returns one :class:`CameraDevice` per detected device.
+        """
+        stub = self._stub_or_raise()
+        resp: aprilcam_pb2.EnumerateCamerasResponse = stub.EnumerateCameras(
+            aprilcam_pb2.Empty()
+        )
+        return [CameraDevice.from_proto(d) for d in resp.cameras]
 
     def open_camera(self, index: int) -> tuple[str, str]:
         """Open camera by device index; return ``(cam_name, camera_dir)``."""

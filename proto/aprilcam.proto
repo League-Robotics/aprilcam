@@ -9,6 +9,7 @@ package aprilcam;
 service AprilCam {
   // Camera lifecycle
   rpc ListCameras       (Empty)               returns (ListCamerasResponse);
+  rpc EnumerateCameras  (Empty)               returns (EnumerateCamerasResponse);
   rpc OpenCamera        (OpenCameraRequest)   returns (OpenCameraResponse);
   rpc CloseCamera       (CameraRequest)       returns (Empty);
   rpc ReloadCalibration (CameraRequest)       returns (Empty);
@@ -42,6 +43,16 @@ message Empty {}
 
 message ListCamerasResponse {
   repeated string cameras = 1;
+}
+
+message CameraDevice {
+  int32  index = 1;  // device index (e.g. 0, 1, 2)
+  string name  = 2;  // human-readable name (e.g. "OV9782 1")
+  string slug  = 3;  // URL-safe identifier (e.g. "ov9782-1")
+}
+
+message EnumerateCamerasResponse {
+  repeated CameraDevice cameras = 1;
 }
 
 message OpenCameraRequest {
