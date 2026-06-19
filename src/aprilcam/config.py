@@ -229,15 +229,44 @@ def _parse_dotfile(path: Path) -> Dict[str, str]:
     return result
 
 
+def _default_dirs() -> tuple[Path, Path, Path]:
+    """Return (data_dir, socket_dir, log_dir) for FHS or XDG mode.
+
+    FHS mode triggers when os.geteuid() == 0 OR APRILCAM_SYSTEM env var == '1'.
+    XDG mode is used otherwise (APRILCAM_SYSTEM=0 forces XDG even for root).
+    This function performs no I/O.
+    """
+    import os as _os
+
+    system_env = _os.environ.get("APRILCAM_SYSTEM", "").strip()
+    is_root = _os.geteuid() == 0
+    use_fhs = (system_env == "1") or (is_root and system_env != "0")
+
+    if use_fhs:
+        return (
+            Path("/var/lib/aprilcam"),
+            Path("/run/aprilcam"),
+            Path("/var/log/aprilcam"),
+        )
+    # XDG paths with fallbacks
+    uid = _os.getuid()
+    data = Path(_os.environ.get("XDG_DATA_HOME", "") or Path.home() / ".local/share") / "aprilcam"
+    run = Path(_os.environ.get("XDG_RUNTIME_DIR", "") or f"/run/user/{uid}") / "aprilcam"
+    log = Path(_os.environ.get("XDG_STATE_HOME", "") or Path.home() / ".local/state") / "aprilcam"
+    return data, run, log
+
+
 @dataclass
 class Config:
     """Priority-ordered configuration for the AprilCam daemon and clients.
 
     Loading priority (highest wins):
-      4. ``os.environ`` keys starting with ``APRILCAM_``
-      3. ``.env`` file found by walking up from *start* (via python-dotenv)
-      2. ``.aprilcam`` file found by walking up from *start* (project-local)
-      1. ``~/.aprilcam`` (user-global dotfile)
+      6. ``APRILCAM_*`` process environment variables
+      5. ``.env`` file found by walking up from *start* (via python-dotenv)
+      4. ``.aprilcam`` file found by walking up from *start* (project-local)
+      3. ``~/.aprilcam`` (user-global dotfile)
+      2. ``/etc/aprilcam/aprilcam.env`` (system-wide, directory form)
+      1. ``/etc/aprilcam.env`` (system-wide, single-file form, lowest priority)
 
     Call ``Config.load()`` at startup; do not instantiate directly.
 
@@ -248,6 +277,10 @@ class Config:
     ``cameras_dir``
         Per-camera subdirectory: ``<data_dir>/cameras/<slug>/``.
         Each camera directory contains ``calibration.json`` and ``paths.json``.
+    ``socket_dir``
+        Directory for the Unix socket and pidfile (``APRILCAM_SOCKET_DIR``).
+    ``log_dir``
+        Directory for log files (``APRILCAM_LOG_DIR``).
     """
 
     data_dir: Path = field(default_factory=lambda: Path("./data/aprilcam/"))
@@ -256,6 +289,7 @@ class Config:
     log_level: str = "INFO"
     daemon_pidfile: Optional[Path] = None
     calibration_dir: Optional[Path] = None
+    log_dir: Path = field(default_factory=lambda: Path("~/.local/state/aprilcam").expanduser())
     detection_fps: int = 10
 
     # --- Static-camera deskew (sprint 011, ticket 007) ---
@@ -302,6 +336,10 @@ class Config:
 
         sources: Dict[str, str] = {}
 
+        # 0a. System-wide lowest priority
+        for etc_path in (Path("/etc/aprilcam.env"), Path("/etc/aprilcam/aprilcam.env")):
+            sources.update(_parse_dotfile(etc_path))
+
         # 1. User-global dotfile (~/.aprilcam)
         user_dot = Path.home() / ".aprilcam"
         if user_dot.exists():
@@ -336,8 +374,10 @@ class Config:
             p = Path(sources[key])
             return p.resolve() if not p.is_absolute() else p
 
-        socket_dir = _path("APRILCAM_SOCKET_DIR", Path("/tmp/aprilcam/"))
-        data_dir = _path("APRILCAM_DATA_DIR", Path("./data/aprilcam/"))
+        _dd, _sd, _ld = _default_dirs()
+        data_dir = _path("APRILCAM_DATA_DIR", _dd)
+        socket_dir = _path("APRILCAM_SOCKET_DIR", _sd)
+        log_dir = _path("APRILCAM_LOG_DIR", _ld)
 
         # Parse detection_fps — default 10, must be a positive integer
         _fps_raw = sources.get("APRILCAM_DETECTION_FPS", "10")
@@ -369,6 +409,7 @@ class Config:
             daemon_pidfile=_path(
                 "APRILCAM_DAEMON_PIDFILE", socket_dir / "aprilcamd.pid"
             ),
+            log_dir=log_dir,
             detection_fps=_fps,
             static_deskew=_bool("APRILCAM_STATIC_DESKEW", True),
             deskew_px_per_cm=_float("APRILCAM_DESKEW_PX_PER_CM", 0.0),
@@ -376,7 +417,24 @@ class Config:
             movement_threshold_px=_float("APRILCAM_MOVEMENT_THRESHOLD_PX", 0.0),
         )
 
-        # Ensure socket_dir exists so daemon can bind sockets immediately
-        cfg.socket_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure runtime directories exist; guarded to emit an actionable message
+        # when the process lacks permission (e.g. system install without systemd).
+        _dir_labels = [
+            (cfg.socket_dir, "RuntimeDirectory=aprilcam"),
+            (cfg.data_dir,   "StateDirectory=aprilcam"),
+            (cfg.log_dir,    "LogsDirectory=aprilcam"),
+        ]
+        for _dir, _label in _dir_labels:
+            try:
+                _dir.mkdir(parents=True, exist_ok=True)
+            except PermissionError:
+                import sys as _sys
+                print(
+                    f"aprilcam: cannot create {_dir} (permission denied).\n"
+                    f"  For system installs, add to the systemd unit:\n"
+                    f"    {_label}",
+                    file=_sys.stderr,
+                )
+                raise
 
         return cfg

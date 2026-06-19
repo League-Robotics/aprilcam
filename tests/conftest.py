@@ -15,7 +15,26 @@ needs_daemon
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _safe_xdg_runtime_dir(tmp_path, monkeypatch):
+    """Ensure XDG_RUNTIME_DIR points to a writable directory for every test.
+
+    On Linux, ``$XDG_RUNTIME_DIR`` is typically ``/run/user/<uid>`` — a
+    directory created by systemd-logind and always present.  On macOS it is
+    absent, so Config.load() would try to create ``/run/user/<uid>/aprilcam``
+    and fail on the read-only ``/run`` mount.
+
+    This fixture sets ``XDG_RUNTIME_DIR`` to a per-test tmp directory only
+    when the environment variable is not already defined (i.e. it never
+    overrides an explicit value set by the test itself or the system).
+    """
+    if "XDG_RUNTIME_DIR" not in os.environ:
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "xdg_runtime"))
 
 
 def pytest_configure(config: pytest.Config) -> None:
