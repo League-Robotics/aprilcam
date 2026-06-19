@@ -23,6 +23,9 @@ service AprilCam {
   // Natural-language playfield feature lookup ("where is the blue dot")
   rpc WhereIs           (WhereRequest)        returns (WhereResponse);
 
+  // One-shot object detection on a live camera frame
+  rpc GetObjects        (CameraRequest)       returns (GetObjectsResponse);
+
   // Stream discovery — allocates a socket/port pair on demand
   rpc GetImageStream    (StreamRequest)       returns (StreamEndpoint);
   rpc GetTagStream      (StreamRequest)       returns (StreamEndpoint);
@@ -127,6 +130,30 @@ message TagFrameResponse {
   // AprilTag-1 world position; falls back to the field half-dimensions.
   float          origin_x          = 7;
   float          origin_y          = 8;
+}
+
+// ---------------------------------------------------------------------------
+// GetObjects — one-shot object detection on a live camera frame.
+// ---------------------------------------------------------------------------
+
+message ObjectRecord {
+  float  cx_px       = 1;
+  float  cy_px       = 2;
+  float  wx          = 3;   // world X cm (A1-centred); 0 = uncalibrated
+  float  wy          = 4;   // world Y cm (A1-centred); 0 = uncalibrated
+  string color       = 5;
+  int32  x_bbox      = 6;
+  int32  y_bbox      = 7;
+  int32  w_bbox      = 8;
+  int32  h_bbox      = 9;
+  float  area_px     = 10;
+  string object_type = 11;
+  float  confidence  = 12;
+}
+
+message GetObjectsResponse {
+  string               cam_name = 1;
+  repeated ObjectRecord objects  = 2;
 }
 
 // ---------------------------------------------------------------------------

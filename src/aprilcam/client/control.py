@@ -338,6 +338,25 @@ class DaemonControl:
         """
         return self.get_tags(cam_name).by_id(tag_id)
 
+    def get_objects(self, cam_name: str) -> "aprilcam_pb2.GetObjectsResponse":
+        """Run one-shot object detection on the daemon and return structured results.
+
+        The daemon grabs the latest frame for *cam_name*, runs HSV colour
+        classification (``ColorClassifier``), filters by playfield polygon
+        containment and shape, and returns detected objects as an
+        ``ObjectRecord`` repeated field.  World coordinates are A1-centred
+        when the camera is calibrated; ``wx=0, wy=0`` otherwise.
+
+        Args:
+            cam_name: Camera name as returned by :meth:`open_camera`.
+
+        Returns:
+            ``GetObjectsResponse`` with ``cam_name`` and a repeated
+            ``ObjectRecord`` list (may be empty).
+        """
+        stub = self._stub_or_raise()
+        return stub.GetObjects(aprilcam_pb2.CameraRequest(cam_name=cam_name))
+
     def where_is(self, query: str, cam_name: str = "") -> dict:
         """Resolve a natural-language "where is X" question via the daemon.
 

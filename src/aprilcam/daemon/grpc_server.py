@@ -382,6 +382,126 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
 
         return pipeline.get_current_tags()
 
+    def GetObjects(
+        self,
+        request: aprilcam_pb2.CameraRequest,
+        context: grpc.ServicerContext,
+    ) -> aprilcam_pb2.GetObjectsResponse:
+        """Run one-shot HSV object detection on the latest frame for *cam_name*.
+
+        Returns a ``GetObjectsResponse`` with detected non-tag colored objects
+        filtered by playfield polygon containment (60 px inset), aspect ratio
+        (<= 2.0), and minimum dimension (>= 15 px).  World coordinates are
+        A1-centred when the camera is calibrated; ``wx=0, wy=0`` otherwise.
+        """
+        import cv2 as cv
+        import numpy as np
+        from ..vision.color_classifier import ColorClassifier
+
+        cam_name = request.cam_name
+
+        with self._cam_lock:
+            pipeline = self._cameras.get(cam_name)
+
+        if pipeline is None:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(f"camera '{cam_name}' not open")
+            return aprilcam_pb2.GetObjectsResponse(cam_name=cam_name)
+
+        # Grab the latest BGR frame from the pipeline's raw frame cache.
+        with pipeline._raw_lock:
+            frame = pipeline._latest_raw_frame
+
+        if frame is None:
+            return aprilcam_pb2.GetObjectsResponse(cam_name=cam_name, objects=[])
+
+        # Retrieve homography and playfield polygon from calibration.
+        homography = None
+        pf_poly = None
+        origin_x = 0.0
+        origin_y = 0.0
+
+        calibration = pipeline._calibration
+        if calibration is not None and calibration.homography is not None:
+            homography = calibration.homography
+
+        april_cam = pipeline._april_cam
+        if april_cam is not None:
+            try:
+                pf_poly = april_cam.playfield.get_polygon()
+            except Exception:
+                pf_poly = None
+
+            # Derive A1 origin from the calibration's field dimensions / AprilTag 1
+            # position, matching the logic used in GetTags / TagFrameResponse.
+            if calibration is not None:
+                try:
+                    from ..calibration.calibration import CameraCalibration
+
+                    fw = calibration.playfield_width_cm
+                    fh = calibration.playfield_height_cm
+                    if fw > 0 and fh > 0:
+                        origin_x = fw / 2.0
+                        origin_y = fh / 2.0
+                except Exception:
+                    pass
+
+        # Detect colored objects via HSV classification.
+        classifier = ColorClassifier(min_area=600, max_area=30000)
+        raw = classifier.classify(frame, homography=homography)
+
+        # Build shrunk polygon (60 px inset toward centroid).
+        shrunk_poly = None
+        if pf_poly is not None:
+            pts = np.array(pf_poly, dtype=np.float32).reshape(-1, 2)
+            center = pts.mean(axis=0)
+            dirs = pts - center
+            lens = np.linalg.norm(dirs, axis=1, keepdims=True)
+            lens = np.maximum(lens, 1e-6)
+            shrunk = pts - dirs / lens * 60
+            shrunk_poly = shrunk.reshape(-1, 1, 2).astype(np.float32)
+
+        # Filter and build ObjectRecord protos.
+        object_msgs = []
+        for obj in raw:
+            cx_f, cy_f = obj.center_px
+
+            # Polygon containment filter.
+            if shrunk_poly is not None:
+                if cv.pointPolygonTest(shrunk_poly, (float(cx_f), float(cy_f)), False) < 0:
+                    continue
+
+            x, y, bw, bh = obj.bbox
+            aspect = max(bw, bh) / max(min(bw, bh), 1)
+            if aspect > 2.0 or min(bw, bh) < 15:
+                continue
+
+            # A1-centred world coordinates.
+            wx_cm = 0.0
+            wy_cm = 0.0
+            if obj.world_xy is not None:
+                wx_cm = float(obj.world_xy[0]) - origin_x
+                wy_cm = float(obj.world_xy[1]) - origin_y
+
+            object_msgs.append(
+                aprilcam_pb2.ObjectRecord(
+                    cx_px=float(cx_f),
+                    cy_px=float(cy_f),
+                    wx=wx_cm,
+                    wy=wy_cm,
+                    color=obj.color,
+                    x_bbox=int(x),
+                    y_bbox=int(y),
+                    w_bbox=int(bw),
+                    h_bbox=int(bh),
+                    area_px=float(obj.area_px),
+                    object_type=obj.object_type,
+                    confidence=float(obj.confidence),
+                )
+            )
+
+        return aprilcam_pb2.GetObjectsResponse(cam_name=cam_name, objects=object_msgs)
+
     def WhereIs(
         self,
         request: aprilcam_pb2.WhereRequest,
