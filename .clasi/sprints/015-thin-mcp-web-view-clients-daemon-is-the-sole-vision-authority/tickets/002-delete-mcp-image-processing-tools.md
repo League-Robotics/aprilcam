@@ -1,11 +1,13 @@
 ---
-id: "002"
-title: "Delete MCP image-processing tools"
-status: open
-use-cases: [SUC-001, SUC-006]
+id: '002'
+title: Delete MCP image-processing tools
+status: done
+use-cases:
+- SUC-001
+- SUC-006
 depends-on: []
-github-issue: ""
-issue: ""
+github-issue: ''
+issue: ''
 completes_issue: false
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
@@ -25,17 +27,17 @@ The seven tools to delete: `detect_lines`, `detect_circles`, `detect_contours`,
 
 ## Acceptance Criteria
 
-- [ ] `mcp_server.py` contains no `@server.tool()` definition for any of:
+- [x] `mcp_server.py` contains no `@server.tool()` definition for any of:
   `detect_lines`, `detect_circles`, `detect_contours`, `detect_motion`,
   `detect_qr_codes`, `crop_region`, `apply_transform`.
-- [ ] `mcp_server.py` imports no symbols from `aprilcam.vision.image_processing`
+- [x] `mcp_server.py` imports no symbols from `aprilcam.vision.image_processing`
   at module level or via inline import in any remaining function.
-- [ ] `mcp_server.py` contains no `_FrameEntry` class and no `_frame_registry`
+- [x] `mcp_server.py` contains no `_FrameEntry` class and no `_frame_registry`
   dict **unless** `create_composite` / `get_composite_frame` genuinely uses them
   (implementer must check; if so, leave the registry but remove only the 7 tools).
-- [ ] All tests that test the deleted tools are removed or replaced with
+- [x] All tests that test the deleted tools are removed or replaced with
   "tool is not present" assertions.
-- [ ] `uv run pytest` green after deletions.
+- [x] `uv run pytest` green after deletions.
 
 ## Implementation Plan
 

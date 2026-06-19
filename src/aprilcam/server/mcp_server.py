@@ -56,12 +56,6 @@ from aprilcam.calibration.calibration import (
     parse_calibration_from_dict,
 )
 from aprilcam.camera.camera_config import parse_camera_config
-from aprilcam.vision.image_processing import (
-    process_detect_circles,
-    process_detect_contours,
-    process_detect_lines,
-    process_detect_qr_codes,
-)
 from aprilcam.errors import CameraError, CameraNotFoundError, CameraInUseError
 from aprilcam.core.models import AprilTag
 from aprilcam.core.playfield import PlayfieldBoundary as Playfield
@@ -3201,9 +3195,6 @@ async def get_playfield(name: str = "") -> list[TextContent]:
 # Image processing tools
 # ---------------------------------------------------------------------------
 
-_motion_prev_frames: dict[str, Any] = {}
-
-
 @server.tool()
 async def get_frame(
     source_id: str,
@@ -3225,304 +3216,6 @@ async def get_frame(
     """
     result = _handle_get_frame(source_id, format=format, quality=quality)
     return _image_result_to_mcp(result)
-
-
-@server.tool()
-async def crop_region(
-    source_id: str,
-    x: int,
-    y: int,
-    w: int,
-    h: int,
-    format: str = "base64",
-    quality: int = 85,
-) -> list[TextContent | ImageContent]:
-    """Crop a rectangular region from a camera or playfield frame.
-
-    The crop rectangle is clipped to the frame boundaries. Returns an
-    error if the clipped region has zero area.
-
-    Args:
-        source_id: A camera UUID or playfield_id.
-        x: Left edge of the crop rectangle in pixels.
-        y: Top edge of the crop rectangle in pixels.
-        w: Width of the crop rectangle in pixels.
-        h: Height of the crop rectangle in pixels.
-        format: ``"base64"`` (default) or ``"file"``.
-        quality: JPEG encoding quality (0-100, default 85).
-
-    Returns:
-        On success (base64): an ``ImageContent`` with inline JPEG data.
-        On success (file): ``{"path": "<temp_file_path>"}``.
-        On error: ``{"error": "<message>"}``.
-    """
-    try:
-        try:
-            frame = resolve_source(source_id)
-        except (KeyError, RuntimeError) as e:
-            return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
-        fh, fw = frame.shape[:2]
-        # Clip to frame bounds
-        x1 = max(0, min(x, fw))
-        y1 = max(0, min(y, fh))
-        x2 = max(0, min(x + w, fw))
-        y2 = max(0, min(y + h, fh))
-        if x2 <= x1 or y2 <= y1:
-            return [TextContent(type="text", text=json.dumps(
-                {"error": "Crop region is entirely outside frame bounds"}
-            ))]
-        cropped = frame[y1:y2, x1:x2]
-        return format_image_output(cropped, format, quality)
-    except Exception as exc:
-        return [TextContent(type="text", text=json.dumps({"error": f"Unexpected error: {exc}"}))]
-
-
-@server.tool()
-async def detect_lines(
-    source_id: str,
-    threshold: int = 50,
-    min_length: int = 50,
-    max_gap: int = 10,
-) -> list[TextContent]:
-    """Detect line segments in a frame using probabilistic Hough transform.
-
-    Args:
-        source_id: A camera UUID or playfield_id.
-        threshold: Hough accumulator threshold (default 50).
-        min_length: Minimum line length in pixels (default 50).
-        max_gap: Maximum gap between line segments to merge (default 10).
-
-    Returns:
-        On success: ``{"source_id": "<id>", "lines": [[x1,y1,x2,y2],...]}``.
-        On error: ``{"error": "<message>"}``.
-    """
-    try:
-        try:
-            frame = resolve_source(source_id)
-        except (KeyError, RuntimeError) as e:
-            return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
-
-        # Track frame in registry for pipeline integration
-        entry = frame_registry.add(frame, source_id)
-        try:
-            lines = process_detect_lines(entry.processed, threshold, min_length, max_gap)
-            entry.results["detect_lines"] = lines
-            entry.operations_applied.append("detect_lines")
-            return [TextContent(type="text", text=json.dumps(
-                {"source_id": source_id, "lines": lines}
-            ))]
-        finally:
-            frame_registry.release(entry.frame_id)
-    except Exception as exc:
-        return [TextContent(type="text", text=json.dumps({"error": f"Unexpected error: {exc}"}))]
-
-
-@server.tool()
-async def detect_circles(
-    source_id: str,
-    min_radius: int = 0,
-    max_radius: int = 0,
-    param1: float = 100.0,
-    param2: float = 30.0,
-) -> list[TextContent]:
-    """Detect circles in a frame using Hough circle transform.
-
-    Args:
-        source_id: A camera UUID or playfield_id.
-        min_radius: Minimum circle radius in pixels (0 = no minimum).
-        max_radius: Maximum circle radius in pixels (0 = no maximum).
-        param1: Canny edge detector upper threshold (default 100).
-        param2: Accumulator threshold for circle centers (default 30).
-
-    Returns:
-        On success: ``{"source_id": "<id>", "circles": [{"x":..,"y":..,"radius":..},...]}``.
-        On error: ``{"error": "<message>"}``.
-    """
-    try:
-        try:
-            frame = resolve_source(source_id)
-        except (KeyError, RuntimeError) as e:
-            return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
-
-        # Track frame in registry for pipeline integration
-        entry = frame_registry.add(frame, source_id)
-        try:
-            circles = process_detect_circles(entry.processed, min_radius, max_radius, param1, param2)
-            entry.results["detect_circles"] = circles
-            entry.operations_applied.append("detect_circles")
-            return [TextContent(type="text", text=json.dumps(
-                {"source_id": source_id, "circles": circles}
-            ))]
-        finally:
-            frame_registry.release(entry.frame_id)
-    except Exception as exc:
-        return [TextContent(type="text", text=json.dumps({"error": f"Unexpected error: {exc}"}))]
-
-
-@server.tool()
-async def detect_contours(
-    source_id: str,
-    min_area: float = 100.0,
-) -> list[TextContent]:
-    """Detect contours in a frame, filtered by minimum area.
-
-    Args:
-        source_id: A camera UUID or playfield_id.
-        min_area: Minimum contour area in pixels squared (default 100).
-            Contours smaller than this are discarded.
-
-    Returns:
-        On success: ``{"source_id": "<id>", "contours": [...]}``. Each
-        contour is a list of ``[x, y]`` vertex points.
-        On error: ``{"error": "<message>"}``.
-    """
-    try:
-        try:
-            frame = resolve_source(source_id)
-        except (KeyError, RuntimeError) as e:
-            return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
-
-        # Track frame in registry for pipeline integration
-        entry = frame_registry.add(frame, source_id)
-        try:
-            contours = process_detect_contours(entry.processed, min_area)
-            entry.results["detect_contours"] = contours
-            entry.operations_applied.append("detect_contours")
-            return [TextContent(type="text", text=json.dumps(
-                {"source_id": source_id, "contours": contours}
-            ))]
-        finally:
-            frame_registry.release(entry.frame_id)
-    except Exception as exc:
-        return [TextContent(type="text", text=json.dumps({"error": f"Unexpected error: {exc}"}))]
-
-
-@server.tool()
-async def detect_motion(source_id: str) -> list[TextContent]:
-    """Detect motion between the current and previous frame using frame differencing.
-
-    The first call for a given source establishes the baseline frame and
-    returns ``is_baseline: true`` with no motion regions. Subsequent calls
-    compare the current frame against the previous one.
-
-    Args:
-        source_id: A camera UUID or playfield_id.
-
-    Returns:
-        On success: ``{"source_id": "<id>", "motion_regions": [...],
-        "is_baseline": <bool>}``. Each region is a bounding rectangle.
-        On error: ``{"error": "<message>"}``.
-    """
-    try:
-        try:
-            frame = resolve_source(source_id)
-        except (KeyError, RuntimeError) as e:
-            return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
-        import cv2
-
-        from aprilcam.vision.image_processing import process_detect_motion
-
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        prev = _motion_prev_frames.get(source_id)
-        regions = process_detect_motion(frame, prev)
-        _motion_prev_frames[source_id] = gray
-        return [TextContent(type="text", text=json.dumps(
-            {"source_id": source_id, "motion_regions": regions, "is_baseline": prev is None}
-        ))]
-    except Exception as exc:
-        return [TextContent(type="text", text=json.dumps({"error": f"Unexpected error: {exc}"}))]
-
-
-@server.tool()
-async def detect_qr_codes(source_id: str) -> list[TextContent]:
-    """Detect and decode QR codes in a frame.
-
-    Args:
-        source_id: A camera UUID or playfield_id.
-
-    Returns:
-        On success: ``{"source_id": "<id>", "qr_codes": [...]}``. Each
-        QR code entry includes the decoded ``data`` string and ``points``
-        (corner coordinates).
-        On error: ``{"error": "<message>"}``.
-    """
-    try:
-        try:
-            frame = resolve_source(source_id)
-        except (KeyError, RuntimeError) as e:
-            return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
-
-        # Track frame in registry for pipeline integration
-        entry = frame_registry.add(frame, source_id)
-        try:
-            codes = process_detect_qr_codes(entry.processed)
-            entry.results["detect_qr"] = codes
-            entry.operations_applied.append("detect_qr")
-            return [TextContent(type="text", text=json.dumps(
-                {"source_id": source_id, "qr_codes": codes}
-            ))]
-        finally:
-            frame_registry.release(entry.frame_id)
-    except Exception as exc:
-        return [TextContent(type="text", text=json.dumps({"error": f"Unexpected error: {exc}"}))]
-
-
-@server.tool()
-async def apply_transform(
-    source_id: str,
-    operation: str,
-    params: str = "{}",
-    format: str = "base64",
-    quality: int = 85,
-) -> list[TextContent | ImageContent]:
-    """Apply an image transform to a live frame from a camera or playfield.
-
-    Supported operations and their params:
-      - ``"rotate"``: rotate the frame by an angle.
-        Params: ``{"angle": <degrees>}`` (default 90).
-      - ``"scale"``: resize the frame by a scale factor.
-        Params: ``{"factor": <float>}`` (default 0.5).
-      - ``"threshold"``: convert to grayscale and apply binary threshold.
-        Params: ``{"value": <0-255>}`` (default 127).
-      - ``"canny"``: apply Canny edge detection.
-        Params: ``{"low": <threshold>, "high": <threshold>}`` (defaults 50, 150).
-      - ``"blur"``: apply Gaussian blur.
-        Params: ``{"kernel_size": <odd int>}`` (default 5).
-
-    Args:
-        source_id: A camera UUID or playfield_id.
-        operation: The transform operation name: ``"rotate"``, ``"scale"``,
-            ``"threshold"``, ``"canny"``, or ``"blur"``.
-        params: JSON string with operation-specific parameters
-            (e.g. ``'{"angle": 45}'`` for rotate). Defaults to ``"{}"``.
-        format: ``"base64"`` (default) or ``"file"``.
-        quality: JPEG encoding quality (0-100, default 85).
-
-    Returns:
-        On success (base64): an ``ImageContent`` with the transformed JPEG.
-        On success (file): ``{"path": "<temp_file_path>"}``.
-        On error: ``{"error": "<message>"}``.
-    """
-    try:
-        try:
-            frame = resolve_source(source_id)
-        except (KeyError, RuntimeError) as e:
-            return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
-        import json as _json
-
-        try:
-            p = _json.loads(params) if isinstance(params, str) else params
-        except Exception:
-            p = {}
-        from aprilcam.vision.image_processing import process_apply_transform
-
-        try:
-            result = process_apply_transform(frame, operation, p)
-        except ValueError as e:
-            return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
-        return format_image_output(result, format, quality)
-    except Exception as exc:
-        return [TextContent(type="text", text=json.dumps({"error": f"Unexpected error: {exc}"}))]
 
 
 # ---------------------------------------------------------------------------
@@ -3824,10 +3517,6 @@ _KNOWN_OPERATIONS = frozenset({
     "deskew",
     "detect_tags",
     "detect_aruco",
-    "detect_lines",
-    "detect_circles",
-    "detect_contours",
-    "detect_qr",
 })
 
 
@@ -3932,22 +3621,6 @@ def run_operations(entry: FrameEntry, operations: list[str]) -> dict[str, Any]:
             result = _detect_aruco_on_frame(entry.processed)
             entry.results["detect_aruco"] = result
             entry.aruco_corners = {d["id"]: d["corners_px"] for d in result}
-            combined[op] = result
-        elif op == "detect_lines":
-            result = process_detect_lines(entry.processed)
-            entry.results["detect_lines"] = result
-            combined[op] = result
-        elif op == "detect_circles":
-            result = process_detect_circles(entry.processed)
-            entry.results["detect_circles"] = result
-            combined[op] = result
-        elif op == "detect_contours":
-            result = process_detect_contours(entry.processed)
-            entry.results["detect_contours"] = result
-            combined[op] = result
-        elif op == "detect_qr":
-            result = process_detect_qr_codes(entry.processed)
-            entry.results["detect_qr"] = result
             combined[op] = result
 
         entry.operations_applied.append(op)
@@ -4054,7 +3727,7 @@ async def create_frame_from_image(
         image_path: Absolute path to an image file (JPEG, PNG, etc.).
         operations: Optional list of pipeline operations to run on the
             frame immediately after loading (e.g.
-            ``["detect_tags", "detect_lines"]``).
+            ``["deskew", "detect_tags"]``).
 
     Returns:
         On success: ``{"frame_id": "<id>", "source": "file:<path>"}``
@@ -4118,9 +3791,7 @@ async def process_frame(
     image; the ``deskew`` operation replaces the ``deskewed`` and
     ``processed`` slots with a perspective-warped image.
 
-    Supported operations: ``deskew``, ``detect_tags``, ``detect_aruco``,
-    ``detect_lines``, ``detect_circles``, ``detect_contours``,
-    ``detect_qr``.
+    Supported operations: ``deskew``, ``detect_tags``, ``detect_aruco``.
 
     Args:
         frame_id: The frame handle from ``create_frame`` or
