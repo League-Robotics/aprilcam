@@ -497,14 +497,18 @@ def format_image_output(
 
 
 def _handle_list_cameras() -> list[dict]:
-    """Core logic for list_cameras — returns a list of camera info dicts."""
-    from aprilcam.camera.camutil import list_cameras as _list_cameras
+    """Core logic for list_cameras — returns a list of camera info dicts.
 
+    Calls the daemon ``EnumerateCameras`` RPC instead of probing local
+    hardware.  The daemon is the sole camera owner; clients must not probe
+    hardware directly.
+    """
     try:
-        cams = _list_cameras(max_index=10, quiet=True, detailed_names=True)
+        client = _ensure_daemon_client()
+        devices = client.enumerate_cameras()
         return [
-            {"index": c.index, "name": c.name, "backend": c.backend, "device_name": c.device_name}
-            for c in cams
+            {"index": d.index, "name": d.name, "slug": d.slug}
+            for d in devices
         ]
     except Exception:
         return []  # empty array, not an error

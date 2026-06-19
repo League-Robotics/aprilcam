@@ -20,7 +20,7 @@ import cv2 as cv
 import grpc
 import numpy as np
 
-from ..camera.camutil import list_cameras, select_camera_by_pattern
+from ..camera.camutil import CameraInfo, select_camera_by_pattern
 from ..config import Config
 from ..client.control import DaemonControl
 
@@ -154,9 +154,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     _playfields_dir = getattr(config, "playfields_dir", None) or (config.data_dir / "playfields")
     playfield_def_registry.load_all(_playfields_dir)
 
-    # Resolve which cameras to calibrate
+    # Resolve which cameras to calibrate — enumerate via daemon (no local probe)
     camera_indices: list[tuple[int, str]] = []  # (index, label)
-    available = list_cameras()
+
+    # Enumerate available cameras through the daemon so no local hardware probe
+    # is performed by the client.  Convert CameraDevice to CameraInfo so that
+    # select_camera_by_pattern (which takes List[CameraInfo]) still works.
+    try:
+        _devices = dc.enumerate_cameras()
+    except Exception as exc:
+        print(f"Warning: could not enumerate cameras from daemon: {exc}")
+        _devices = []
+    available: list[CameraInfo] = [
+        CameraInfo(index=d.index, name=d.name, device_name=d.name)
+        for d in _devices
+    ]
 
     if args.cameras:
         from ..camera.identity import resolve_all

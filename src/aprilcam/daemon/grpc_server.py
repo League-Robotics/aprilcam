@@ -83,6 +83,49 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
             cam_names = list(self._cameras.keys())
         return aprilcam_pb2.ListCamerasResponse(cameras=cam_names)
 
+    def EnumerateCameras(
+        self,
+        request: aprilcam_pb2.Empty,
+        context: grpc.ServicerContext,
+    ) -> aprilcam_pb2.EnumerateCamerasResponse:
+        """Probe host hardware and return all available camera devices.
+
+        Unlike ``ListCameras`` (which returns currently-open cameras), this
+        RPC calls ``camutil.list_cameras()`` to enumerate every device
+        detectable on the host.  Clients must call this RPC instead of
+        probing hardware locally; only the daemon owns camera hardware.
+        """
+        from ..camera.camutil import list_cameras
+        from ..calibration.calibration import device_name_slug
+
+        with self._cam_lock:
+            # Hold the lock while probing so we don't race with OpenCamera
+            # (brief contention; probe is local and fast in quiet mode).
+            try:
+                cams = list_cameras(
+                    max_index=10,
+                    quiet=True,
+                    detailed_names=True,
+                )
+            except Exception as exc:
+                log.exception("EnumerateCameras: hardware probe failed")
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details(f"camera enumeration failed: {exc}")
+                return aprilcam_pb2.EnumerateCamerasResponse()
+
+        devices = []
+        for cam in cams:
+            name = cam.device_name or cam.name or f"Camera {cam.index}"
+            slug = device_name_slug(name)
+            devices.append(
+                aprilcam_pb2.CameraDevice(
+                    index=cam.index,
+                    name=name,
+                    slug=slug,
+                )
+            )
+        return aprilcam_pb2.EnumerateCamerasResponse(cameras=devices)
+
     def _resolve_cam_name(self, index: int) -> str:
         """Resolve an OpenCV ``index`` to its registry per-camera dir key.
 
