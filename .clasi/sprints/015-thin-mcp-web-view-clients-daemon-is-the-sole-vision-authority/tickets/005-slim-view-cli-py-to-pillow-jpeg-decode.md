@@ -1,11 +1,12 @@
 ---
-id: "005"
-title: "Slim view_cli.py to Pillow JPEG decode"
-status: open
-use-cases: [SUC-005]
+id: '005'
+title: Slim view_cli.py to Pillow JPEG decode
+status: done
+use-cases:
+- SUC-005
 depends-on: []
-github-issue: ""
-issue: ""
+github-issue: ''
+issue: ''
 completes_issue: false
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
@@ -34,18 +35,18 @@ present in the `imaging` extra. This ticket can proceed independently of ticket 
 
 ## Acceptance Criteria
 
-- [ ] `view_cli.py` contains zero occurrences of `import cv2`, `from cv2`, or
+- [x] `view_cli.py` contains zero occurrences of `import cv2`, `from cv2`, or
   `import cv2 as`.
-- [ ] JPEG bytes from `ImageStreamConsumer` are decoded with
+- [x] JPEG bytes from `ImageStreamConsumer` are decoded with
   `Image.open(io.BytesIO(jpeg_bytes))` and converted to `ImageTk.PhotoImage`.
-- [ ] `_draw_object_boxes()` either:
+- [x] `_draw_object_boxes()` either:
   - Uses `ImageDraw.rectangle()` and `ImageDraw.text()` on a Pillow `Image`, or
   - Is removed (if the object-box overlay is superseded by the daemon overlay channel).
-- [ ] `import aprilcam.cli.view_cli` succeeds with cv2 monkeypatched to raise
+- [x] `import aprilcam.cli.view_cli` succeeds with cv2 monkeypatched to raise
   `ImportError`.
-- [ ] Any `numpy` imports that remain in `view_cli.py` exist only for non-cv2
+- [x] Any `numpy` imports that remain in `view_cli.py` exist only for non-cv2
   computation (e.g., corner coordinate math). Comment each with `# numpy-only`.
-- [ ] `uv run pytest` green.
+- [x] `uv run pytest` green.
 
 ## Implementation Plan
 
