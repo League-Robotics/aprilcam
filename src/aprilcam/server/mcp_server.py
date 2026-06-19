@@ -479,9 +479,8 @@ def resolve_source(source_id: str) -> np.ndarray:
 def _read_one_frame(camera_id: str) -> np.ndarray:
     """Fetch a single BGR frame from the daemon via gRPC CaptureFrame.
 
-    This replaces the former AF_UNIX data-socket path.  The daemon is the
-    sole opener of camera hardware; the MCP server never calls
-    cv2.VideoCapture(device_index) directly.
+    The daemon is the sole opener of camera hardware; the MCP server never
+    calls cv2.VideoCapture(device_index) directly.
     """
     client = _ensure_daemon_client()
     info = _cam_info.get(camera_id)
@@ -820,9 +819,8 @@ def _handle_capture_frame(
 def _frames_from_daemon(camera_id: str, count: int):
     """Yield up to *count* BGR frames from the daemon via gRPC CaptureFrame.
 
-    Replaces the former AF_UNIX data-socket iterator.  The daemon is the
-    sole opener of camera hardware; no cv2.VideoCapture(device_index) call
-    is made here.
+    The daemon is the sole opener of camera hardware; no cv2.VideoCapture(device_index)
+    call is made here.
     """
     client = _ensure_daemon_client()
     info = _cam_info.get(camera_id)
