@@ -17,6 +17,32 @@ log = logging.getLogger(__name__)
 _SERVICE_TYPE = "_aprilcam._tcp.local."
 
 
+def _primary_routable_ipv4() -> str:
+    """Return the primary routable IPv4 address of this host.
+
+    Uses the UDP-socket trick — connect a SOCK_DGRAM socket to a non-routable
+    TEST-NET-1 address (192.0.2.1).  No packets are sent; the OS selects the
+    outbound interface and we read the local address from ``getsockname()``.
+    This avoids resolving the hostname via ``/etc/hosts``, which on Ubuntu
+    often maps the hostname to ``127.0.1.1`` (a loopback alias).
+
+    Falls back to ``127.0.0.1`` on any error.
+    """
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.connect(("192.0.2.1", 53))
+            addr = sock.getsockname()[0]
+        finally:
+            sock.close()
+        # Skip loopback addresses (127.*) — they are not routable.
+        if addr and not addr.startswith("127."):
+            return addr
+    except OSError:
+        pass
+    return "127.0.0.1"
+
+
 class MDNSAdvertiser:
     """Advertise the AprilCam daemon on the local network via mDNS/Bonjour.
 
@@ -48,12 +74,13 @@ class MDNSAdvertiser:
             hostname = socket.gethostname()
             service_name = f"aprilcam-{hostname}.{_SERVICE_TYPE}"
 
-            # Resolve a local IP address for the service record.
-            try:
-                addr_str = socket.gethostbyname(hostname)
-                addr_bytes = socket.inet_aton(addr_str)
-            except OSError:
-                addr_bytes = socket.inet_aton("127.0.0.1")
+            # Determine the primary routable IPv4 address via the UDP-socket
+            # trick rather than resolving the hostname.  On Ubuntu the hostname
+            # often resolves to 127.0.1.1 (a /etc/hosts loopback alias) which
+            # is not reachable from remote clients.
+            addr_str = _primary_routable_ipv4()
+            addr_bytes = socket.inet_aton(addr_str)
+            log.debug("mDNS: advertising on IP %s", addr_str)
 
             self._info = ServiceInfo(
                 type_=_SERVICE_TYPE,

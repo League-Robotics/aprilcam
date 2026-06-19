@@ -327,9 +327,25 @@ def _default_dirs() -> tuple[Path, Path, Path]:
             Path("/var/log/aprilcam"),
         )
     # XDG paths with fallbacks
+    import tempfile as _tempfile
+
     uid = _os.getuid()
     data = Path(_os.environ.get("XDG_DATA_HOME", "") or Path.home() / ".local/share") / "aprilcam"
-    run = Path(_os.environ.get("XDG_RUNTIME_DIR", "") or f"/run/user/{uid}") / "aprilcam"
+
+    # XDG_RUNTIME_DIR: use env var if set, else use /run/user/<uid> only when
+    # that directory already exists (Linux + systemd-logind), otherwise fall
+    # back to a writable per-user temp directory so macOS and headless systems
+    # don't crash trying to create dirs under the read-only /run mount.
+    xdg_runtime_env = _os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    if xdg_runtime_env:
+        run = Path(xdg_runtime_env) / "aprilcam"
+    else:
+        linux_runtime = Path(f"/run/user/{uid}")
+        if linux_runtime.is_dir():
+            run = linux_runtime / "aprilcam"
+        else:
+            run = Path(_tempfile.gettempdir()) / f"aprilcam-{uid}"
+
     log = Path(_os.environ.get("XDG_STATE_HOME", "") or Path.home() / ".local/state") / "aprilcam"
     return data, run, log
 

@@ -166,18 +166,66 @@ class DaemonControl:
                 "`systemctl start aprilcamd`, or set APRILCAM_DAEMON_HOST."
             ) from exc
 
+    @staticmethod
+    def _resolve_host_to_ip(host: str, port: int) -> str:
+        """Resolve *host* to a numeric IPv4 address string.
+
+        gRPC's c-ares resolver does not perform multicast DNS (mDNS), so
+        ``.local`` hostnames that resolve fine via the OS resolver (Bonjour /
+        Avahi) fail when passed directly to gRPC.  This method resolves via
+        :func:`socket.getaddrinfo` — which delegates to the OS resolver and
+        therefore handles mDNS — and returns the numeric IP so that gRPC
+        receives an address it can always reach.
+
+        If *host* is already a numeric IP address it is returned unchanged.
+        On resolution failure a clear :exc:`OSError` is raised.
+        """
+        import ipaddress as _ip
+        import socket as _socket
+
+        # Pass through numeric IPs without a DNS round-trip.
+        try:
+            _ip.ip_address(host)
+            return host
+        except ValueError:
+            pass
+
+        try:
+            results = _socket.getaddrinfo(
+                host, port, _socket.AF_INET, _socket.SOCK_STREAM
+            )
+        except OSError as exc:
+            raise OSError(
+                f"Cannot resolve host '{host}': {exc}. "
+                "Check the hostname or use a numeric IP address."
+            ) from exc
+
+        if not results:
+            raise OSError(
+                f"Cannot resolve host '{host}': getaddrinfo returned no results."
+            )
+
+        # results[i] = (family, type, proto, canonname, (addr, port))
+        return results[0][4][0]
+
     def connect(self) -> "DaemonControl":
         """Open the gRPC channel and create the stub.
 
         Idempotent — calling ``connect()`` on an already-connected instance
         is a no-op.
+
+        When connecting via TCP, the host is resolved to a numeric IP via the
+        OS resolver before being passed to gRPC.  This allows ``.local``
+        (mDNS/Bonjour) hostnames to work even though gRPC's c-ares resolver
+        does not support multicast DNS.
         """
         if self._channel is not None:
             return self
         if self._unix_path:
             target = f"unix:{self._unix_path}"
         else:
-            target = f"{self._host}:{self._port}"
+            resolved_ip = self._resolve_host_to_ip(self._host, self._port)
+            target = f"{resolved_ip}:{self._port}"
         self._channel = grpc.insecure_channel(target)
         self._stub = aprilcam_pb2_grpc.AprilCamStub(self._channel)
         return self
