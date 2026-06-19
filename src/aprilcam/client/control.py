@@ -418,6 +418,114 @@ class DaemonControl:
         stub = self._stub_or_raise()
         stub.Shutdown(aprilcam_pb2.Empty())
 
+    # ------------------------------------------------------------------
+    # File-proxy RPCs
+    # ------------------------------------------------------------------
+
+    def get_camera_config(self, cam_name: str) -> "aprilcam_pb2.JsonBlobReply":
+        """Return the raw ``JsonBlobReply`` from ``GetCameraConfig``.
+
+        MCP-server parsing (``json.loads`` + ``from_dict`` helpers) happens
+        in ticket 014-005.  This stub returns the proto message as-is.
+
+        Args:
+            cam_name: Camera name as returned by :meth:`open_camera`.
+
+        Returns:
+            ``JsonBlobReply`` with ``json_blob`` (UTF-8 JSON string) and
+            ``present`` (False when config.json is absent on the daemon host).
+        """
+        stub = self._stub_or_raise()
+        return stub.GetCameraConfig(aprilcam_pb2.CameraRequest(cam_name=cam_name))
+
+    def set_camera_config(self, cam_name: str, json_blob: str) -> "aprilcam_pb2.StatusReply":
+        """Write *json_blob* to ``config.json`` on the daemon host.
+
+        Args:
+            cam_name: Camera name as returned by :meth:`open_camera`.
+            json_blob: UTF-8 JSON string to write (must be valid JSON).
+
+        Returns:
+            ``StatusReply`` with ``ok=True`` on success.
+        """
+        stub = self._stub_or_raise()
+        return stub.SetCameraConfig(
+            aprilcam_pb2.CameraJsonRequest(cam_name=cam_name, json_blob=json_blob)
+        )
+
+    def get_calibration(self, cam_name: str) -> "aprilcam_pb2.JsonBlobReply":
+        """Return the raw ``JsonBlobReply`` from ``GetCalibration``.
+
+        MCP-server parsing happens in ticket 014-005.
+
+        Args:
+            cam_name: Camera name as returned by :meth:`open_camera`.
+
+        Returns:
+            ``JsonBlobReply`` with ``json_blob`` (calibration.json content)
+            and ``present`` (False when calibration.json is absent).
+        """
+        stub = self._stub_or_raise()
+        return stub.GetCalibration(aprilcam_pb2.CameraRequest(cam_name=cam_name))
+
+    def set_calibration(self, cam_name: str, json_blob: str) -> "aprilcam_pb2.StatusReply":
+        """Write *json_blob* to ``calibration.json`` and trigger a live reload.
+
+        The daemon writes the file atomically and calls
+        ``pipeline.reload_calibration()`` if the camera is currently open.
+
+        Args:
+            cam_name: Camera name as returned by :meth:`open_camera`.
+            json_blob: UTF-8 JSON string to write (must be valid JSON).
+
+        Returns:
+            ``StatusReply`` with ``ok=True`` on success.
+        """
+        stub = self._stub_or_raise()
+        return stub.SetCalibration(
+            aprilcam_pb2.CameraJsonRequest(cam_name=cam_name, json_blob=json_blob)
+        )
+
+    def get_paths(self, cam_name: str) -> "aprilcam_pb2.JsonBlobReply":
+        """Return the raw ``JsonBlobReply`` from ``GetPaths``.
+
+        Args:
+            cam_name: Camera name as returned by :meth:`open_camera`.
+
+        Returns:
+            ``JsonBlobReply`` with ``json_blob`` (paths.json content) and
+            ``present`` (False when paths.json is absent).
+        """
+        stub = self._stub_or_raise()
+        return stub.GetPaths(aprilcam_pb2.CameraRequest(cam_name=cam_name))
+
+    def set_paths(self, cam_name: str, json_blob: str) -> "aprilcam_pb2.StatusReply":
+        """Write *json_blob* to ``paths.json`` on the daemon host atomically.
+
+        Args:
+            cam_name: Camera name as returned by :meth:`open_camera`.
+            json_blob: UTF-8 JSON string to write (must be valid JSON).
+
+        Returns:
+            ``StatusReply`` with ``ok=True`` on success.
+        """
+        stub = self._stub_or_raise()
+        return stub.SetPaths(
+            aprilcam_pb2.CameraJsonRequest(cam_name=cam_name, json_blob=json_blob)
+        )
+
+    def list_playfields(self) -> "aprilcam_pb2.ListPlayfieldsResponse":
+        """Return all playfield definitions from the daemon's playfields dir.
+
+        MCP-server parsing happens in ticket 014-005.
+
+        Returns:
+            ``ListPlayfieldsResponse`` with a repeated ``PlayfieldEntry`` list,
+            each carrying ``name`` (slug) and ``json_blob`` (raw file content).
+        """
+        stub = self._stub_or_raise()
+        return stub.ListPlayfields(aprilcam_pb2.Empty())
+
 
 # ---------------------------------------------------------------------------
 # Private converters
