@@ -1,5 +1,8 @@
 ---
-status: pending
+status: in-progress
+sprint: '013'
+tickets:
+- 013-001
 ---
 
 # Plan: FHS/XDG directory layout, /etc config sourcing, self-documenting `--help`, and `--agent`

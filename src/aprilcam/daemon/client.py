@@ -149,8 +149,8 @@ def ensure_running(config: Config, log_level: str | None = None) -> ControlClien
             return ControlClient(control_path)
 
         # Step 5: spawn the daemon
-        config.data_dir.mkdir(parents=True, exist_ok=True)
-        log_file = open(config.data_dir / "aprilcamd.log", "a")  # noqa: WPS515
+        config.log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = open(config.log_dir / "aprilcamd.log", "a")  # noqa: WPS515
         env = os.environ.copy()
         if log_level:
             env["APRILCAM_LOG_LEVEL"] = log_level

@@ -4,28 +4,33 @@
 # Use this file when you want daemon settings separate from other
 # environment variables. Loading priority (highest wins):
 #
-#   1. ~/.aprilcam          (user-global, lowest priority)
+#   0. /etc/aprilcam.env, /etc/aprilcam/aprilcam.env  (system-wide, lowest)
+#   1. ~/.aprilcam          (user-global)
 #   2. .aprilcam            (this file, project-local)
 #   3. .env                 (via python-dotenv)
-#   4. APRILCAM_* env vars  (process environment, highest priority)
+#   4. APRILCAM_* env vars  (process environment, highest)
 #
 # Format: KEY=value, one per line. # comments and blank lines are ignored.
 # No quoting — values are used as-is.
 
+# Root directory for persistent state (cameras, calibrations, playfields).
+# Auto-selected: FHS /var/lib/aprilcam or XDG ~/.local/share/aprilcam.
+# APRILCAM_DATA_DIR=./data/aprilcam/
+
 # Directory for Unix domain sockets and the pidfile.
+# Auto-selected: FHS /run/aprilcam or XDG $XDG_RUNTIME_DIR/aprilcam.
 # APRILCAM_SOCKET_DIR=/tmp/aprilcam/
 
-# Directory for per-camera runtime data (info.json, paths.json) and daemon log.
-# APRILCAM_DATA_DIR=./data/runtime/
-
-# Calibration file read by the daemon and written by `aprilcam calibrate`.
-# APRILCAM_CALIBRATION_SOURCE=./data/calibration.json
-
-# Where calibration data is saved (defaults to APRILCAM_CALIBRATION_SOURCE).
-# APRILCAM_CALIBRATION_SAVE_PATH=./data/calibration.json
+# Log directory for aprilcamd.log.
+# Auto-selected: FHS /var/log/aprilcam or XDG ~/.local/state/aprilcam.
+# APRILCAM_LOG_DIR=~/.local/state/aprilcam
 
 # Python logging level for the daemon (DEBUG, INFO, WARNING, ERROR).
 # APRILCAM_LOG_LEVEL=INFO
 
 # Pidfile path (defaults to APRILCAM_SOCKET_DIR/aprilcamd.pid).
 # APRILCAM_DAEMON_PIDFILE=/tmp/aprilcam/aprilcamd.pid
+
+# Force FHS (1) or XDG (0) directory layout regardless of euid.
+# Default ("auto"): FHS when euid == 0, XDG otherwise.
+# APRILCAM_SYSTEM=

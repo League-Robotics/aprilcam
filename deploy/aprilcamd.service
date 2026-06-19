@@ -1,0 +1,47 @@
+[Unit]
+Description=AprilCam tag-detection daemon
+After=network.target
+
+# User/group selection — choose one of the two approaches below:
+#
+# Option A (recommended): DynamicUser
+#   systemd creates a transient unprivileged user for this service.
+#   Because DynamicUser does not set euid to 0, the AprilCam config
+#   loader will not auto-select FHS paths. Add the following two lines
+#   to the [Service] section when using DynamicUser:
+#
+#     DynamicUser=yes
+#     Environment=APRILCAM_SYSTEM=1
+#
+#   APRILCAM_SYSTEM=1 tells the config loader to use FHS paths
+#   (/var/lib/aprilcam, /run/aprilcam, /var/log/aprilcam) regardless
+#   of euid, which is required so that the systemd-managed directories
+#   (StateDirectory=, RuntimeDirectory=, LogsDirectory=) are used.
+#
+# Option B: dedicated system user
+#   Create an 'aprilcam' system user and uncomment:
+#
+#     User=aprilcam
+#     Group=aprilcam
+#
+#   When running as a non-root dedicated user, also add:
+#     Environment=APRILCAM_SYSTEM=1
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/aprilcam daemon start --foreground
+Restart=on-failure
+RestartSec=5
+
+# systemd creates and owns these directories before ExecStart runs.
+# When using DynamicUser=yes, also set APRILCAM_SYSTEM=1 so that
+# the config loader selects FHS paths (DynamicUser does not use euid 0).
+ConfigurationDirectory=aprilcam
+StateDirectory=aprilcam
+RuntimeDirectory=aprilcam
+LogsDirectory=aprilcam
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

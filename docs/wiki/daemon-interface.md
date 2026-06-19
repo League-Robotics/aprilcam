@@ -40,7 +40,7 @@ python -m aprilcam.daemon       # run in the foreground
 ```
 
 The daemon will not start a second instance — it holds an exclusive
-`flock` on its pidfile. Log output goes to `<data_dir>/aprilcamd.log`.
+`flock` on its pidfile. Log output goes to `<log_dir>/aprilcamd.log`.
 
 ---
 
@@ -50,18 +50,18 @@ All paths derive from `Config` (see `src/aprilcam/config.py`). Defaults:
 
 | Path | Default |
 |------|---------|
-| gRPC control socket | `/tmp/aprilcam/control.sock` |
-| Pidfile | `/tmp/aprilcam/aprilcamd.pid` |
-| Spawn lock | `/tmp/aprilcam/aprilcamd.spawn.lock` |
+| gRPC control socket | `<socket_dir>/control.sock` |
+| Pidfile | `<socket_dir>/aprilcamd.pid` |
+| Spawn lock | `<socket_dir>/aprilcamd.spawn.lock` |
 | Per-camera directory | `<data_dir>/cameras/<cam_name>/` |
 | Per-camera calibration | `<data_dir>/cameras/<cam_name>/calibration.json` |
 | Per-camera info file | `<data_dir>/cameras/<cam_name>/info.json` |
 | Per-camera paths file | `<data_dir>/cameras/<cam_name>/paths.json` |
-| Daemon log | `<data_dir>/aprilcamd.log` |
+| Daemon log | `<log_dir>/aprilcamd.log` |
 
-`<socket_dir>` defaults to `/tmp/aprilcam/`; `<data_dir>` defaults to
-`./data/aprilcam/` resolved from the working directory. Override with
-`APRILCAM_SOCKET_DIR` and `APRILCAM_DATA_DIR`.
+`<socket_dir>`, `<data_dir>`, and `<log_dir>` are auto-selected by
+`APRILCAM_SYSTEM` (see the Configuration section below). Override individual
+paths with `APRILCAM_SOCKET_DIR`, `APRILCAM_DATA_DIR`, and `APRILCAM_LOG_DIR`.
 
 **Camera naming.** `<cam_name>` is a slug derived from the OS device name
 (e.g. `arducam-ov9782-usb-camera`), *not* `cam_<index>`. `OpenCamera`
@@ -264,17 +264,48 @@ Priority order (highest wins):
 
 | Priority | Source |
 |----------|--------|
-| 4 (highest) | Environment variables prefixed `APRILCAM_` |
+| 4 (highest) | `APRILCAM_*` environment variables |
 | 3 | `.env` file (walk up from CWD) |
 | 2 | `.aprilcam` project dotfile (walk up from CWD) |
-| 1 (lowest) | `~/.aprilcam` user dotfile |
+| 1 | `~/.aprilcam` user dotfile |
+| 0 (lowest) | `/etc/aprilcam.env`, `/etc/aprilcam/aprilcam.env` |
+
+System-wide defaults in `/etc/aprilcam.env` (or `/etc/aprilcam/aprilcam.env`)
+are loaded first and can be overridden by any higher-priority source. This is
+the recommended place to set `APRILCAM_SYSTEM=1` for a system service
+installation.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `APRILCAM_SOCKET_DIR` | `/tmp/aprilcam/` | Directory for the control socket, pidfile, and stream sockets. |
-| `APRILCAM_DATA_DIR` | `./data/aprilcam/` | Root for per-camera directories and the daemon log. |
-| `APRILCAM_LOG_LEVEL` | `INFO` | Python logging level. |
+| `APRILCAM_DATA_DIR` | FHS: `/var/lib/aprilcam` · XDG: `~/.local/share/aprilcam` | Root directory for persistent state (cameras, calibrations, playfields). |
+| `APRILCAM_SOCKET_DIR` | FHS: `/run/aprilcam` · XDG: `$XDG_RUNTIME_DIR/aprilcam` | Directory for the control socket, stream sockets, and pidfile. |
+| `APRILCAM_LOG_DIR` | FHS: `/var/log/aprilcam` · XDG: `~/.local/state/aprilcam` | Directory for `aprilcamd.log`. |
+| `APRILCAM_LOG_LEVEL` | `INFO` | Python logging level for the daemon (`DEBUG`, `INFO`, `WARNING`, `ERROR`). |
 | `APRILCAM_DAEMON_PIDFILE` | `<socket_dir>/aprilcamd.pid` | Pidfile path. |
+| `APRILCAM_DETECTION_FPS` | `10` | Detection loop frame-rate cap in frames per second. |
+| `APRILCAM_STATIC_DESKEW` | `1` | Enable homography-derived static-camera deskew (set `0` to disable). |
+| `APRILCAM_DESKEW_PX_PER_CM` | `0` | Output resolution for the deskewed view in pixels/cm (`0` = auto). |
+| `APRILCAM_UNDISTORT` | `0` | Apply lens undistortion before deskew warp when intrinsics are present. |
+| `APRILCAM_MOVEMENT_THRESHOLD_PX` | `0` | Movement-invalidation threshold in source pixels (`0` = auto). |
+| `APRILCAM_SYSTEM` | `auto` | Force FHS (`1`) or XDG (`0`) directory layout regardless of euid. Auto selects FHS when `euid == 0`. Set to `1` when using `DynamicUser=yes` in systemd. |
+
+### Directory Layout
+
+AprilCam auto-selects between two directory layouts based on whether it is
+running as root (`euid == 0`) or `APRILCAM_SYSTEM=1` is set.
+
+| Path | FHS (root / `APRILCAM_SYSTEM=1`) | XDG (user) |
+|------|-----------------------------------|------------|
+| Data | `/var/lib/aprilcam` | `~/.local/share/aprilcam` |
+| Socket / runtime | `/run/aprilcam` | `$XDG_RUNTIME_DIR/aprilcam` |
+| Logs | `/var/log/aprilcam` | `~/.local/state/aprilcam` |
+| Config (read-only) | `/etc/aprilcam/aprilcam.env` | `~/.aprilcam` |
+
+When running under systemd with `DynamicUser=yes`, the daemon is not root but
+systemd creates the FHS directories via `StateDirectory=`, `RuntimeDirectory=`,
+and `LogsDirectory=`. Set `APRILCAM_SYSTEM=1` (in the unit's `Environment=`
+line or in `/etc/aprilcam.env`) so the config loader uses the FHS paths that
+systemd prepared.
 
 ---
 

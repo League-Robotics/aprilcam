@@ -46,6 +46,20 @@ for obj in objects:
 
 Then call `list_cameras` → `open_camera` → `start_detection` → `get_tags`.
 
+Run `aprilcam --agent` (or `aprilcam --agent robot` for the robot API guide)
+to print this guide to stdout from any shell context.
+
+## Directory Layout
+
+AprilCam uses FHS directories when running as root and XDG directories
+for non-root use. See `aprilcam config` for the current resolved paths.
+
+| Concern | System (root) | Developer (non-root) | Override |
+|---------|--------------|----------------------|---------|
+| Data (persistent) | `/var/lib/aprilcam` | `~/.local/share/aprilcam` | `APRILCAM_DATA_DIR` |
+| Runtime (sockets) | `/run/aprilcam` | `$XDG_RUNTIME_DIR/aprilcam` | `APRILCAM_SOCKET_DIR` |
+| Logs | `/var/log/aprilcam` | `~/.local/state/aprilcam` | `APRILCAM_LOG_DIR` |
+
 ## Core Concepts
 
 ### Cameras

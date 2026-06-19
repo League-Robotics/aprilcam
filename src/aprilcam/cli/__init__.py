@@ -69,6 +69,8 @@ def _get_version():
 
 
 def _print_help():
+    from ..config import CONFIG_VARS
+
     print(f"aprilcam {_get_version()}")
     print()
     print("usage: aprilcam <command> [options]")
@@ -80,6 +82,31 @@ def _print_help():
         print(f"  {name:<12} {info['help']}")
     print()
     print("Run 'aprilcam <command> --help' for command-specific options.")
+    print()
+    print("flags:")
+    print("  --agent [NAME]    Print the AI-agent instructions guide (NAME: agent [default], robot)")
+    print()
+    print("Configuration:")
+    print("  Source precedence (lowest to highest):")
+    print("    /etc/aprilcam.env")
+    print("    /etc/aprilcam/aprilcam.env")
+    print("    ~/.aprilcam")
+    print("    .aprilcam  (walk up from CWD)")
+    print("    .env       (walk up from CWD, via dotenv)")
+    print("    APRILCAM_* environment variables  (highest)")
+    print()
+    print("  Run 'aprilcam config' to see all resolved paths and current values.")
+    print()
+    print("Environment variables:")
+    header_key = "VARIABLE"
+    header_default = "DEFAULT"
+    header_desc = "DESCRIPTION"
+    print(f"  {header_key:<36}{header_default:<32}{header_desc}")
+    for var in CONFIG_VARS:
+        key = var["key"]
+        default = var["default"]
+        description = var["description"]
+        print(f"  {key:<36}{default:<32}{description}")
 
 
 def main(argv=None):
@@ -92,6 +119,20 @@ def main(argv=None):
 
     if args[0] in ("-V", "--version"):
         print(f"aprilcam {_get_version()}")
+        sys.exit(0)
+
+    if args[0] == "--agent":
+        guide_name = args[1] if len(args) > 1 else "agent"
+        from aprilcam.guides import read_guide
+        content = read_guide(guide_name)
+        if content is None:
+            available = "agent, robot"
+            print(
+                f"aprilcam: unknown guide '{guide_name}'. Available: {available}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(content)
         sys.exit(0)
 
     command = args[0]
