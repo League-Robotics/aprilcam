@@ -1,16 +1,16 @@
 ---
 id: '013'
 title: FHS/XDG Directories, /etc Config Sourcing, --help & --agent
-status: planning-docs
+status: done
 branch: sprint/013-fhs-xdg-directories-etc-config-sourcing-help-agent
 use-cases:
-  - SUC-001
-  - SUC-002
-  - SUC-003
-  - SUC-004
-  - SUC-005
+- SUC-001
+- SUC-002
+- SUC-003
+- SUC-004
+- SUC-005
 issues:
-  - plan-fhs-xdg-directory-layout-etc-config-sourcing-self-documenting-help-and-agent.md
+- plan-fhs-xdg-directory-layout-etc-config-sourcing-self-documenting-help-and-agent.md
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
 
