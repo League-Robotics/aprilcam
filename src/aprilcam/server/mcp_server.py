@@ -4320,19 +4320,19 @@ async def clear_live_overlay(camera_id: str) -> list[TextContent]:
 # for clients that do not support the Resources protocol.
 # ---------------------------------------------------------------------------
 
-_PACKAGE_DIR = Path(__file__).parent.parent  # src/aprilcam/
+from aprilcam.guides import read_guide
 
 
 @server.resource("aprilcam://docs/robot-api")
 def _resource_robot_api() -> str:
     """Robot Direct API guide — DaemonControl, publish_overlay, tag stream."""
-    return (_PACKAGE_DIR / "ROBOT_API_GUIDE.md").read_text()
+    return read_guide("robot")
 
 
 @server.resource("aprilcam://docs/agent-guide")
 def _resource_agent_guide() -> str:
     """AprilCam Agent Guide — MCP tool overview and quick-start examples."""
-    return (_PACKAGE_DIR / "AGENT_GUIDE.md").read_text()
+    return read_guide("agent")
 
 
 @server.tool()
@@ -4356,7 +4356,7 @@ async def get_robot_api_guide() -> list[TextContent]:
     equivalent Python API you can hand off to a robot program so it can
     operate autonomously without MCP at runtime.
     """
-    return [TextContent(type="text", text=(_PACKAGE_DIR / "ROBOT_API_GUIDE.md").read_text())]
+    return [TextContent(type="text", text=read_guide("robot"))]
 
 
 # ---------------------------------------------------------------------------

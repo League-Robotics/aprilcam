@@ -1,12 +1,12 @@
 ---
-id: "004"
-title: "--agent flag in CLI and read_guide() helper in guides.py"
-status: open
+id: '004'
+title: --agent flag in CLI and read_guide() helper in guides.py
+status: done
 use-cases:
-  - SUC-005
+- SUC-005
 depends-on: []
-github-issue: ""
-issue: ""
+github-issue: ''
+issue: ''
 completes_issue: false
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
@@ -114,19 +114,19 @@ to print this guide to stdout from any shell context.
 
 ## Acceptance Criteria
 
-- [ ] `src/aprilcam/guides.py` exists with `read_guide(name)` returning the
+- [x] `src/aprilcam/guides.py` exists with `read_guide(name)` returning the
       correct file content for `"agent"` and `"robot"`.
-- [ ] `read_guide("unknown")` returns `None`.
-- [ ] `aprilcam --agent` prints `AGENT_GUIDE.md` to stdout and exits 0.
-- [ ] `aprilcam --agent robot` prints `ROBOT_API_GUIDE.md` to stdout and exits 0.
-- [ ] `aprilcam --agent unknown` prints an error to stderr and exits non-zero.
-- [ ] `aprilcam --help` lists `--agent` in the flags/options section.
-- [ ] `mcp_server.py` guide resources and the `get_robot_api_guide` tool use
+- [x] `read_guide("unknown")` returns `None`.
+- [x] `aprilcam --agent` prints `AGENT_GUIDE.md` to stdout and exits 0.
+- [x] `aprilcam --agent robot` prints `ROBOT_API_GUIDE.md` to stdout and exits 0.
+- [x] `aprilcam --agent unknown` prints an error to stderr and exits non-zero.
+- [x] `aprilcam --help` lists `--agent` in the flags/options section.
+- [x] `mcp_server.py` guide resources and the `get_robot_api_guide` tool use
       `read_guide()` (no inline `.read_text()` for guide files).
-- [ ] `AGENT_GUIDE.md` contains a "Directory Layout" section with the FHS/XDG
+- [x] `AGENT_GUIDE.md` contains a "Directory Layout" section with the FHS/XDG
       table.
-- [ ] `AGENT_GUIDE.md` mentions `aprilcam --agent`.
-- [ ] `uv run pytest tests/test_cli_dispatch.py` passes.
+- [x] `AGENT_GUIDE.md` mentions `aprilcam --agent`.
+- [x] `uv run pytest tests/test_cli_dispatch.py` passes.
 
 ## Implementation Plan
 

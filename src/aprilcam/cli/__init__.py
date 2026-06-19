@@ -83,6 +83,9 @@ def _print_help():
     print()
     print("Run 'aprilcam <command> --help' for command-specific options.")
     print()
+    print("flags:")
+    print("  --agent [NAME]    Print the AI-agent instructions guide (NAME: agent [default], robot)")
+    print()
     print("Configuration:")
     print("  Source precedence (lowest to highest):")
     print("    /etc/aprilcam.env")
@@ -116,6 +119,20 @@ def main(argv=None):
 
     if args[0] in ("-V", "--version"):
         print(f"aprilcam {_get_version()}")
+        sys.exit(0)
+
+    if args[0] == "--agent":
+        guide_name = args[1] if len(args) > 1 else "agent"
+        from aprilcam.guides import read_guide
+        content = read_guide(guide_name)
+        if content is None:
+            available = "agent, robot"
+            print(
+                f"aprilcam: unknown guide '{guide_name}'. Available: {available}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(content)
         sys.exit(0)
 
     command = args[0]
