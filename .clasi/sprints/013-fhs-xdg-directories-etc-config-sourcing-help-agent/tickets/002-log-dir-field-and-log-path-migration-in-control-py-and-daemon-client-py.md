@@ -1,14 +1,14 @@
 ---
-id: "002"
-title: "log_dir field and log-path migration in control.py and daemon/client.py"
-status: open
+id: '002'
+title: log_dir field and log-path migration in control.py and daemon/client.py
+status: done
 use-cases:
-  - SUC-001
-  - SUC-002
+- SUC-001
+- SUC-002
 depends-on:
-  - "001"
-github-issue: ""
-issue: ""
+- '001'
+github-issue: ''
+issue: ''
 completes_issue: false
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
@@ -57,13 +57,13 @@ constructs a `Config` object directly. Keep it.
 
 ## Acceptance Criteria
 
-- [ ] `client/control.py` opens `aprilcamd.log` under `config.log_dir`, not
+- [x] `client/control.py` opens `aprilcamd.log` under `config.log_dir`, not
       `config.data_dir`.
-- [ ] `daemon/client.py` opens `aprilcamd.log` under `config.log_dir`, not
+- [x] `daemon/client.py` opens `aprilcamd.log` under `config.log_dir`, not
       `config.data_dir`.
-- [ ] No other references to `config.data_dir / "aprilcamd.log"` remain in
+- [x] No other references to `config.data_dir / "aprilcamd.log"` remain in
       the codebase.
-- [ ] `uv run pytest` passes (no regressions).
+- [x] `uv run pytest` passes (no regressions).
 
 ## Implementation Plan
 
