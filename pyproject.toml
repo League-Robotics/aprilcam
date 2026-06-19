@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aprilcam"
-version = "0.20260619.7"
+version = "0.20260619.8"
 description = "MCP server and CLI for camera management, AprilTag/ArUco detection, playfield homography, and image processing"
 authors = [
   { name = "Eric Busboom" }
