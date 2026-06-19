@@ -84,11 +84,17 @@ def _bind_unix_socket(path: Path, *, backlog: int = 5) -> Optional[socket.socket
 
 
 def _bind_tcp_socket(*, backlog: int = 5) -> Optional[socket.socket]:
-    """Bind a TCP stream socket on an OS-assigned ephemeral port."""
+    """Bind a TCP stream socket on all interfaces, OS-assigned ephemeral port.
+
+    Binds to ``0.0.0.0`` so remote clients on the LAN can connect when the
+    daemon is running on a Pi or other remote host.  Ephemeral port allocation
+    is unchanged — the daemon publishes the assigned port via the ``StreamEndpoint``
+    gRPC message so clients always know which port to connect to.
+    """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("127.0.0.1", 0))
+        sock.bind(("0.0.0.0", 0))
         sock.listen(backlog)
         return sock
     except OSError as exc:

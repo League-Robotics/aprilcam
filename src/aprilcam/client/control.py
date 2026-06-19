@@ -348,6 +348,16 @@ class DaemonControl:
                 pass
         return result
 
+    def _stream_host(self) -> str:
+        """Return the host to use for TCP stream socket connections.
+
+        When the ``DaemonControl`` is connected via a Unix socket the stream
+        socket is also local, so ``"localhost"`` is correct.  When connected
+        via TCP (``_unix_path is None``), remote stream sockets are on the same
+        host as the gRPC endpoint, so ``self._host`` must be forwarded.
+        """
+        return "localhost" if self._unix_path is not None else self._host
+
     def get_image_stream(
         self, cam_name: str, max_hz: int = 20
     ) -> "ImageStreamConsumer":
@@ -357,7 +367,9 @@ class DaemonControl:
             aprilcam_pb2.StreamRequest(cam_name=cam_name, max_hz=max_hz)
         )
         endpoint = StreamEndpoint.from_proto(resp)
-        consumer = ImageStreamConsumer(endpoint, cam_name=cam_name)
+        consumer = ImageStreamConsumer(
+            endpoint, cam_name=cam_name, host=self._stream_host()
+        )
         consumer.connect()
         return consumer
 
@@ -370,7 +382,7 @@ class DaemonControl:
             aprilcam_pb2.StreamRequest(cam_name=cam_name, max_hz=max_hz)
         )
         endpoint = StreamEndpoint.from_proto(resp)
-        consumer = TagStreamConsumer(endpoint)
+        consumer = TagStreamConsumer(endpoint, host=self._stream_host())
         consumer.connect()
         return consumer
 

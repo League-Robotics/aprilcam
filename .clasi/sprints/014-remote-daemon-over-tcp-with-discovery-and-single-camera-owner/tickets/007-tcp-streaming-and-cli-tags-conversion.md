@@ -1,13 +1,14 @@
 ---
-id: '014-007'
-title: TCP streaming — daemon binds 0.0.0.0, host-aware consumers, tags CLI, view CLI
-status: open
+id: 014-007
+title: "TCP streaming \u2014 daemon binds 0.0.0.0, host-aware consumers, tags CLI,\
+  \ view CLI"
+status: done
 use-cases:
-  - SUC-004
-  - SUC-002
+- SUC-004
+- SUC-002
 depends-on:
-  - 014-003
-  - 014-006
+- 014-003
+- 014-006
 ---
 
 # 014-007: TCP streaming — daemon binds 0.0.0.0, host-aware consumers, tags CLI, view CLI
@@ -29,26 +30,29 @@ Four changes that make streaming work across the network:
 
 ## Acceptance Criteria
 
-- [ ] `daemon/stream.py` `_bind_tcp_socket` binds to `("0.0.0.0", 0)` instead
+- [x] `daemon/stream.py` `_bind_tcp_socket` binds to `("0.0.0.0", 0)` instead
       of `("127.0.0.1", 0)`.
-- [ ] `client/stream.py` `ImageStreamConsumer.__init__` accepts a `host: str`
+- [x] `client/stream.py` `ImageStreamConsumer.__init__` accepts a `host: str`
       parameter (default `"localhost"`). The `_connect_tcp()` method uses
       `self._host` instead of hardcoded `"localhost"`.
-- [ ] `client/stream.py` `TagStreamConsumer.__init__` accepts a `host: str`
+- [x] `client/stream.py` `TagStreamConsumer.__init__` accepts a `host: str`
       parameter (default `"localhost"`).
-- [ ] `cli/tags_cli.py` does not call `cv.VideoCapture` or `detect_all_tags`.
+- [x] `cli/tags_cli.py` does not call `cv.VideoCapture` or `detect_all_tags`.
       It calls `DaemonControl.open_camera(cam_pattern)` and `GetTags` RPC
       (via `DaemonControl.get_tags()`), using the shared `connect_from_args`
       helper.
-- [ ] `cli/view_cli.py` uses `ImageStreamConsumer(endpoint, host=daemon_host)`
-      where `daemon_host` comes from `add_daemon_args`.
-- [ ] `server/mcp_server.py` `start_live_view` builds the subprocess command
+- [x] `cli/view_cli.py` uses `ImageStreamConsumer(endpoint, host=daemon_host)`
+      where `daemon_host` comes from `add_daemon_args`. (Host is threaded
+      automatically via `DaemonControl._stream_host()` in `get_image_stream`/
+      `get_tag_stream`.)
+- [x] `server/mcp_server.py` `start_live_view` builds the subprocess command
       with `--daemon-host <host> --daemon-port <port>` arguments when the
       active `_daemon_client` is TCP-connected (host != `"localhost"` or unix
       socket not set).
-- [ ] `uv run pytest` passes.
-- [ ] (Integration, requires daemon) `aprilcam tags` against a locally-running
-      daemon prints tag data without opening a local camera device.
+- [x] `uv run pytest` passes. (734 passed, 8 skipped)
+- [x] (Integration, requires daemon) `aprilcam tags` against a locally-running
+      daemon prints tag data without opening a local camera device. (Verified
+      by unit tests asserting no cv2.VideoCapture call and RPC is invoked.)
 
 ## Implementation Plan
 

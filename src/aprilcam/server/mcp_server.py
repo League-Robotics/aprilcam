@@ -1734,8 +1734,19 @@ def _handle_start_live_view(
         cam_name: str = info.get("cam_name", camera_id)
 
         # Spawn the viewer as a detached process; it subscribes to the daemon.
+        # When connected via TCP, forward the daemon address so the subprocess
+        # can reach the same remote daemon rather than trying localhost.
+        cmd = [sys.executable, "-m", "aprilcam", "view", cam_name]
+        try:
+            dc = _ensure_daemon_client()
+            if dc._unix_path is None:
+                # TCP connection — viewer needs explicit host/port
+                cmd += ["--daemon-host", dc._host, "--daemon-port", str(dc._port)]
+        except Exception:
+            pass  # no daemon client yet; viewer will use its own discovery
+
         subprocess.Popen(
-            [sys.executable, "-m", "aprilcam", "view", cam_name],
+            cmd,
             start_new_session=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
