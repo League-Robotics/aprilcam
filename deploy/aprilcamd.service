@@ -1,45 +1,40 @@
 [Unit]
 Description=AprilCam tag-detection daemon
-After=network.target
-
-# User/group selection — choose one of the two approaches below:
-#
-# Option A (recommended): DynamicUser
-#   systemd creates a transient unprivileged user for this service.
-#   Because DynamicUser does not set euid to 0, the AprilCam config
-#   loader will not auto-select FHS paths. Add the following two lines
-#   to the [Service] section when using DynamicUser:
-#
-#     DynamicUser=yes
-#     Environment=APRILCAM_SYSTEM=1
-#
-#   APRILCAM_SYSTEM=1 tells the config loader to use FHS paths
-#   (/var/lib/aprilcam, /run/aprilcam, /var/log/aprilcam) regardless
-#   of euid, which is required so that the systemd-managed directories
-#   (StateDirectory=, RuntimeDirectory=, LogsDirectory=) are used.
-#
-# Option B: dedicated system user
-#   Create an 'aprilcam' system user and uncomment:
-#
-#     User=aprilcam
-#     Group=aprilcam
-#
-#   When running as a non-root dedicated user, also add:
-#     Environment=APRILCAM_SYSTEM=1
+After=network-online.target avahi-daemon.service
+Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/aprilcam daemon start --foreground
-Restart=on-failure
-RestartSec=5
+User=eric
+SupplementaryGroups=video
 
-# systemd creates and owns these directories before ExecStart runs.
-# When using DynamicUser=yes, also set APRILCAM_SYSTEM=1 so that
-# the config loader selects FHS paths (DynamicUser does not use euid 0).
+# systemd creates and manages these directories before ExecStart runs.
+# Paths resolved to:
+#   ConfigurationDirectory → /etc/aprilcam   (or ~/.config/aprilcam when --user)
+#   StateDirectory         → /var/lib/aprilcam
+#   RuntimeDirectory       → /run/aprilcam
+#   LogsDirectory          → /var/log/aprilcam
 ConfigurationDirectory=aprilcam
 StateDirectory=aprilcam
 RuntimeDirectory=aprilcam
 LogsDirectory=aprilcam
+
+# APRILCAM_DATA_DIR points to the user's persistent data (cameras, playfields).
+# APRILCAM_SOCKET_DIR is the runtime dir managed by systemd (ephemeral).
+Environment=APRILCAM_DATA_DIR=/home/eric/aprilcam-data
+Environment=APRILCAM_SOCKET_DIR=/run/aprilcam
+
+# Run the daemon in the foreground so systemd captures output via journald.
+# --tcp   : bind gRPC on all interfaces (port 5280) for remote MCP clients.
+# --unix  : also bind a Unix socket under APRILCAM_SOCKET_DIR for on-box CLI.
+ExecStart=/home/eric/.local/share/pipx/venvs/aprilcam/bin/python \
+    -m aprilcam.daemon \
+    --tcp --tcp-port 5280 \
+    --unix
+
+Restart=on-failure
+RestartSec=5
+
 StandardOutput=journal
 StandardError=journal
 

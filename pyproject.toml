@@ -82,6 +82,9 @@ aprilcam = ["AGENT_GUIDE.md", "ROBOT_API_GUIDE.md"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "integration: end-to-end tests that start real daemon/hardware processes (deselect with -m 'not integration')",
+]
 
 [dependency-groups]
 dev = [
