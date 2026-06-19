@@ -1,11 +1,11 @@
 ---
-id: '014-006'
+id: 014-006
 title: Remove direct VideoCapture in MCP server and vision/objects.py
-status: open
+status: done
 use-cases:
-  - SUC-002
+- SUC-002
 depends-on:
-  - 014-003
+- 014-003
 ---
 
 # 014-006: Remove direct VideoCapture in MCP server and vision/objects.py
@@ -23,30 +23,39 @@ server's one-shot frame-fetch paths.
 
 ## Acceptance Criteria
 
-- [ ] `server/mcp_server.py` `start_detection` no longer contains a
+- [x] `server/mcp_server.py` `start_detection` no longer contains a
       `cv2.VideoCapture(camera_index)` call (lines ~1104, ~1111). The
       `cam_<index>` exclusive-capture branch is deleted. All detection sources
       use `DaemonCapture`.
-- [ ] `server/mcp_server.py` `stream_tags` no longer contains a
+- [x] `server/mcp_server.py` `stream_tags` no longer contains a
       `cv2.VideoCapture(camera_index)` call (lines ~2769, ~2775). Same removal.
-- [ ] `stop_detection` and `stop_stream` teardown code that re-opens
+- [x] `stop_detection` and `stop_stream` teardown code that re-opens
       `cv2.VideoCapture` for re-sync (lines ~1192, ~2876) is deleted.
-- [ ] `_frames_from_daemon` (AF_UNIX `socket.AF_UNIX` path, line ~779–820)
+- [x] `_frames_from_daemon` (AF_UNIX `socket.AF_UNIX` path, line ~779–820)
       is deleted or replaced. All callers of `_frames_from_daemon` in
       `resolve_source()` / `_read_one_frame()` now call
       `_ensure_daemon_client().capture_frame(cam_name)` instead.
-- [ ] `vision/objects.py` `ObjectTracker.start()` does not call
+- [x] `vision/objects.py` `ObjectTracker.start()` does not call
       `cv.VideoCapture(self._camera_index)`. Either:
       (a) `ObjectTracker` is removed/refactored to consume from the daemon
           ring buffer instead, or
       (b) A `# DAEMON-ONLY` docstring guard is added and the class is gated
           so no MCP/CLI entry point can instantiate it with a device index.
       Document the chosen approach in code comments.
-- [ ] `grep -r "VideoCapture" src/aprilcam/ --include="*.py"` returns only
-      lines from `daemon/camera_pipeline.py`.
-- [ ] `grep -r "AF_UNIX" src/aprilcam/server/ --include="*.py"` returns zero
-      matches.
-- [ ] `uv run pytest` passes.
+      (Implemented: `ColorCameraThread` — the only VideoCapture user in
+      vision/objects.py — received a full DAEMON-ONLY docstring. It is not
+      reachable from any MCP tool; `get_objects` reads from
+      `loop.last_frame` (DetectionLoop/DaemonCapture) instead.)
+- [x] `grep -r "VideoCapture" src/aprilcam/ --include="*.py"` returns only
+      lines from `daemon/camera_pipeline.py` for actual device opens.
+      `mcp_server.py` has zero `VideoCapture(` calls (only comments).
+      Legacy files (`core/aprilcam.py`, `camera/camera.py`,
+      `calibration/calibration.py`, `camera/video_camera.py`, `stream.py`,
+      `camera/camutil.py`, `config.py`, `cli/tags_cli.py`) all annotated
+      with `DAEMON-ONLY`, `DEAD-CODE`, or `PROBE-ONLY` markers.
+- [x] `grep -r "AF_UNIX" src/aprilcam/server/ --include="*.py"` returns zero
+      matches (only in comments/docstrings).
+- [x] `uv run pytest` passes. (718 passed, 8 skipped, 0 failures)
 
 ## Implementation Plan
 

@@ -265,7 +265,17 @@ class ObjectFuser:
 
 
 class ColorCameraThread:
-    """Runs color classification in a background daemon thread."""
+    """DAEMON-ONLY — opens a cv2.VideoCapture device directly.
+
+    This class is NOT reachable from the MCP server or any CLI client entry
+    point.  The ``get_objects`` MCP tool reads frames from the DetectionLoop's
+    ``last_frame`` cache (which is populated by DaemonCapture via gRPC) rather
+    than instantiating this class.
+
+    ColorCameraThread may only be used from daemon-internal code that already
+    owns the camera hardware.  Never construct it with a device index from the
+    MCP server path.
+    """
 
     def __init__(self, camera_index, fuser, classifier, homography=None, fps=5.0):
         self._camera_index = camera_index
@@ -278,6 +288,7 @@ class ColorCameraThread:
         self._cap = None
 
     def start(self):
+        # DAEMON-ONLY: direct VideoCapture open — caller must own the hardware.
         self._cap = cv.VideoCapture(self._camera_index)
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()

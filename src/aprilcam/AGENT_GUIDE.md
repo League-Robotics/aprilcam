@@ -64,8 +64,13 @@ for non-root use. See `aprilcam config` for the current resolved paths.
 
 ### Cameras
 - **Index**: Integer (0, 1, 2...) identifying a camera device.
-- **camera_id**: Handle string returned by `open_camera` (e.g., `cam_0`).
-- Cameras are opened by index or by name pattern (substring match).
+- **camera_id**: Opaque handle string returned by `open_camera` (e.g., the
+  camera's name slug such as `"arducam-ov9782-usb-camera"`).  The handle is
+  typically the camera's device name slug, not a raw index.
+- Cameras are opened by calling `open_camera(index=N)` or
+  `open_camera(pattern="<name>")` — the daemon opens the hardware and returns
+  a handle.  `cam_<index>` style handles are no longer supported as direct
+  device openers; always use `open_camera()` to get a valid daemon handle.
 - Screen capture is also available as a camera source (`source="screen"`).
 
 ### Playfields

@@ -477,10 +477,19 @@ def resolve_source(source_id: str) -> np.ndarray:
 
 
 def _read_one_frame(camera_id: str) -> np.ndarray:
-    """Read a single decoded BGR frame from the daemon data socket for *camera_id*."""
-    for frame in _frames_from_daemon(camera_id, 1):
-        return frame
-    raise RuntimeError(f"No frame available from daemon for camera '{camera_id}'")
+    """Fetch a single BGR frame from the daemon via gRPC CaptureFrame.
+
+    This replaces the former AF_UNIX data-socket path.  The daemon is the
+    sole opener of camera hardware; the MCP server never calls
+    cv2.VideoCapture(device_index) directly.
+    """
+    client = _ensure_daemon_client()
+    info = _cam_info.get(camera_id)
+    cam_name = info.get("cam_name") if info else camera_id
+    frame = client.capture_frame(cam_name)
+    if frame is None:
+        raise RuntimeError(f"No frame available from daemon for camera '{camera_id}'")
+    return frame
 
 
 def format_image_output(
@@ -809,42 +818,22 @@ def _handle_capture_frame(
 
 
 def _frames_from_daemon(camera_id: str, count: int):
-    """Yield up to *count* decoded BGR frames from the daemon data socket.
+    """Yield up to *count* BGR frames from the daemon via gRPC CaptureFrame.
 
-    Connects to <socket_dir>/<camera_id>/data.sock, reads msgpack frames,
-    and yields numpy arrays.  Closes the socket when done or on error.
+    Replaces the former AF_UNIX data-socket iterator.  The daemon is the
+    sole opener of camera hardware; no cv2.VideoCapture(device_index) call
+    is made here.
     """
-    import socket as _socket
-    import numpy as np
-    import cv2 as cv
-    from aprilcam.daemon.protocol import read_frame
-
+    client = _ensure_daemon_client()
     info = _cam_info.get(camera_id)
-    if info is None:
-        return
-
-    sock_path = info.get("data_socket")
-    if not sock_path:
-        return
-
-    sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-    try:
-        sock.connect(sock_path)
-        for _ in range(count):
-            try:
-                msg = read_frame(sock)
-            except ConnectionError:
-                break
-            if msg.frame_jpeg:
-                buf = np.frombuffer(bytes(msg.frame_jpeg), dtype=np.uint8)
-                frame = cv.imdecode(buf, cv.IMREAD_COLOR)
-                if frame is not None:
-                    yield frame
-    finally:
+    cam_name = info.get("cam_name") if info else camera_id
+    for _ in range(count):
         try:
-            sock.close()
-        except OSError:
-            pass
+            frame = client.capture_frame(cam_name)
+            if frame is not None:
+                yield frame
+        except Exception:
+            break
 
 
 def _handle_create_playfield(
@@ -1054,20 +1043,22 @@ def _handle_start_detection(
     robot_tag_id: Optional[int] = None,
     gripper_offset_cm: float = 14.0,
 ) -> dict:
-    """Core logic for start_detection — returns status dict or error dict."""
+    """Core logic for start_detection — returns status dict or error dict.
+
+    All camera sources are daemon-owned.  Direct cv2.VideoCapture(device_index)
+    calls are prohibited here; the daemon's CameraPipeline is the sole camera
+    opener.  DaemonCapture wraps gRPC CaptureFrame so DetectionLoop can call
+    .read() as usual.
+    """
     try:
         if source_id in detection_registry:
             return {"error": f"Detection already running on '{source_id}'"}
-
-        import cv2
 
         # Resolve source to a capture object and optional playfield data
         cap = None
         homography = None
         playfield_poly = None
-        camera_id: str | None = None  # the registry handle to re-open on stop
-        camera_index: int | None = None  # real device index (if applicable)
-        exclusive_cap = None  # set when we open our own exclusive camera
+        camera_id: str | None = None
 
         try:
             pf_entry = playfield_registry.get(source_id)
@@ -1097,35 +1088,6 @@ def _handle_start_detection(
                 if _assoc_poly is not None:
                     playfield_poly = _assoc_poly
 
-        # For real cameras (cam_N handles), open an exclusive capture to
-        # avoid frame contention with other MCP tools reading the same handle.
-        if camera_id and camera_id.startswith("cam_"):
-            try:
-                camera_index = int(camera_id.split("_", 1)[1])
-            except (ValueError, IndexError):
-                camera_index = None
-
-            if camera_index is not None:
-                # Release the shared camera so the detection loop gets exclusive access
-                try:
-                    registry.close(camera_id)
-                except KeyError:
-                    pass
-
-                exclusive_cap = cv2.VideoCapture(camera_index)
-                if exclusive_cap.isOpened():
-                    cap = exclusive_cap
-                else:
-                    # Re-open shared camera on failure
-                    exclusive_cap = None
-                    try:
-                        shared_cap = cv2.VideoCapture(camera_index)
-                        if shared_cap.isOpened():
-                            registry.open(shared_cap, handle=camera_id)
-                            cap = registry.get(camera_id)
-                    except Exception:
-                        pass
-
         # Daemon-owned cameras have None in the registry; wrap with DaemonCapture
         # so DetectionLoop can call .read() via gRPC.
         if cap is None and camera_id is not None:
@@ -1136,7 +1098,7 @@ def _handle_start_detection(
                 return {"error": f"Cannot reach daemon for camera '{camera_id}': {exc}"}
 
         cam = AprilCam(
-            index=camera_index if camera_index is not None else 0,
+            index=0,
             backend=None,
             speed_alpha=0.3,
             family=family,
@@ -1145,7 +1107,7 @@ def _handle_start_detection(
             use_clahe=use_clahe,
             use_sharpen=use_sharpen,
             headless=True,
-            cap=cv2.VideoCapture(),
+            cap=None,
             homography=homography,
             playfield_poly_init=playfield_poly,
         )
@@ -1169,10 +1131,8 @@ def _handle_start_detection(
             robot_tag_id=robot_tag_id,
             gripper_offset_cm=gripper_offset_cm,
         )
-        # Remember state so stop_detection can re-open the shared camera
+        # Store camera_id so stop_detection can reference it if needed
         detection_registry[source_id]._camera_id = camera_id  # type: ignore[attr-defined]
-        detection_registry[source_id]._camera_index = camera_index  # type: ignore[attr-defined]
-        detection_registry[source_id]._exclusive_cap = exclusive_cap  # type: ignore[attr-defined]
 
         return {"source_id": source_id, "status": "started"}
     except Exception as exc:
@@ -1180,31 +1140,17 @@ def _handle_start_detection(
 
 
 def _handle_stop_detection(source_id: str) -> dict:
-    """Core logic for stop_detection — returns status dict or error dict."""
+    """Core logic for stop_detection — returns status dict or error dict.
+
+    Daemon-owned cameras need no client-side camera release; the daemon
+    holds the hardware.  This teardown only stops the DetectionLoop.
+    """
     try:
         entry = detection_registry.pop(source_id, None)
         if entry is None:
             return {"error": f"No detection running on '{source_id}'"}
 
         entry.loop.stop()
-
-        # Release the exclusive capture and re-open the shared camera
-        exclusive_cap = getattr(entry, "_exclusive_cap", None)
-        if exclusive_cap is not None:
-            try:
-                exclusive_cap.release()
-            except Exception:
-                pass
-        camera_id = getattr(entry, "_camera_id", None)
-        camera_index = getattr(entry, "_camera_index", 0)
-        if camera_id is not None:
-            try:
-                import cv2
-                shared_cap = cv2.VideoCapture(camera_index)
-                if shared_cap.isOpened():
-                    registry.open(shared_cap, handle=camera_id)
-            except Exception:
-                pass
 
         return {"source_id": source_id, "status": "stopped"}
     except Exception as exc:
@@ -2869,15 +2815,14 @@ async def stream_tags(
                 {"error": f"Detection already running on '{source_id}'"}
             ))]
 
-        import cv2
-
-        # Resolve source to a capture object and optional playfield data
+        # Resolve source to a capture object and optional playfield data.
+        # All camera sources are daemon-owned; no direct cv2.VideoCapture(device)
+        # call is made here.  DaemonCapture wraps gRPC CaptureFrame so
+        # DetectionLoop can call .read() as usual.
         cap = None
         homography = None
         playfield_poly = None
         camera_id: str | None = None
-        camera_index: int | None = None
-        exclusive_cap = None
 
         try:
             pf_entry = playfield_registry.get(source_id)
@@ -2910,32 +2855,6 @@ async def stream_tags(
                 if _assoc_poly is not None:
                     playfield_poly = _assoc_poly
 
-        # For real cameras (cam_N handles), open an exclusive capture
-        if camera_id and camera_id.startswith("cam_"):
-            try:
-                camera_index = int(camera_id.split("_", 1)[1])
-            except (ValueError, IndexError):
-                camera_index = None
-
-            if camera_index is not None:
-                try:
-                    registry.close(camera_id)
-                except KeyError:
-                    pass
-
-                exclusive_cap = cv2.VideoCapture(camera_index)
-                if exclusive_cap.isOpened():
-                    cap = exclusive_cap
-                else:
-                    exclusive_cap = None
-                    try:
-                        shared_cap = cv2.VideoCapture(camera_index)
-                        if shared_cap.isOpened():
-                            registry.open(shared_cap, handle=camera_id)
-                            cap = registry.get(camera_id)
-                    except Exception:
-                        pass
-
         # Daemon-owned cameras have None in the registry; wrap with DaemonCapture
         if cap is None and camera_id is not None:
             try:
@@ -2947,7 +2866,7 @@ async def stream_tags(
                 ))]
 
         cam = AprilCam(
-            index=camera_index if camera_index is not None else 0,
+            index=0,
             backend=None,
             speed_alpha=0.3,
             family=family,
@@ -2956,7 +2875,7 @@ async def stream_tags(
             use_clahe=False,
             use_sharpen=False,
             headless=True,
-            cap=cv2.VideoCapture(),
+            cap=None,
             homography=homography,
             playfield_poly_init=playfield_poly,
         )
@@ -2981,9 +2900,8 @@ async def stream_tags(
             robot_tag_id=robot_tag_id,
             gripper_offset_cm=gripper_offset_cm,
         )
+        # Store camera_id so stop_stream can reference it if needed
         detection_registry[source_id]._camera_id = camera_id  # type: ignore[attr-defined]
-        detection_registry[source_id]._camera_index = camera_index  # type: ignore[attr-defined]
-        detection_registry[source_id]._exclusive_cap = exclusive_cap  # type: ignore[attr-defined]
 
         return [TextContent(type="text", text=json.dumps(
             {"stream_id": source_id, "operations": operations, "status": "started"}
@@ -3017,24 +2935,8 @@ async def stop_stream(source_id: str) -> list[TextContent]:
             ))]
 
         entry.loop.stop()
-
-        # Release the exclusive capture and re-open the shared camera
-        exclusive_cap = getattr(entry, "_exclusive_cap", None)
-        if exclusive_cap is not None:
-            try:
-                exclusive_cap.release()
-            except Exception:
-                pass
-        camera_id = getattr(entry, "_camera_id", None)
-        camera_index = getattr(entry, "_camera_index", 0)
-        if camera_id is not None:
-            try:
-                import cv2
-                shared_cap = cv2.VideoCapture(camera_index)
-                if shared_cap.isOpened():
-                    registry.open(shared_cap, handle=camera_id)
-            except Exception:
-                pass
+        # Daemon-owned cameras need no client-side release; the daemon holds
+        # the hardware.
 
         return [TextContent(type="text", text=json.dumps(
             {"stream_id": source_id, "status": "stopped"}

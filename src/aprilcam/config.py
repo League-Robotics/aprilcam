@@ -82,6 +82,11 @@ class AppConfig:
         - backend can be one of: None/"auto", "avfoundation", "v4l2", "msmf", "dshow".
         - Falls back to the first available camera if none specified.
         Returns an opened VideoCapture or None on failure.
+
+        DEAD-CODE from MCP path: the MCP server never calls Config.get_camera().
+        Camera devices are opened exclusively by the daemon's CameraPipeline.
+        This method remains for direct CLI / programmatic use outside the daemon
+        architecture.
         """
         import cv2 as cv  # noqa: PLC0415
         from .camera.camutil import (  # noqa: PLC0415

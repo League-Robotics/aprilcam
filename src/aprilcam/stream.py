@@ -3,6 +3,11 @@
 Provides :func:`detect_tags`, the primary library interface for opening
 a camera, loading homography, and yielding tag records per frame.
 Also provides :func:`detect_objects` for standalone object detection.
+
+DEAD-CODE from MCP path: this module opens cv2.VideoCapture directly and is
+NOT reachable from the MCP server or daemon client tools.  It exists for
+standalone programmatic/CLI use only.  The daemon's CameraPipeline is the
+sole camera opener for the MCP architecture.
 """
 
 from __future__ import annotations

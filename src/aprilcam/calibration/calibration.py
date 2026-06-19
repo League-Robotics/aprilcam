@@ -1579,6 +1579,9 @@ def calibrate(
     """
     own_cap = False
     if isinstance(camera, int):
+        # DEAD-CODE from MCP path: the MCP server's calibrate_playfield tool
+        # passes a DaemonCapture (not an int), so this branch is unreachable
+        # from MCP clients.  It remains for direct programmatic / CLI use.
         cap = cv.VideoCapture(camera)
         cam_index = camera
         own_cap = True

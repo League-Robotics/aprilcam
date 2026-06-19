@@ -129,6 +129,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"ERROR: no connected camera matched '{args.camera}'")
             return 1
 
+    # DEAD-CODE from MCP path: this CLI tool opens VideoCapture directly.
+    # It is a standalone diagnostic/demo command, not reachable from the
+    # MCP server.  The daemon's CameraPipeline is the sole camera opener
+    # in the MCP architecture.
     cap = cv.VideoCapture(cam_index)
     if not cap.isOpened():
         print(f"ERROR: could not open camera '{args.camera}' (os index {cam_index})")
