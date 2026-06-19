@@ -1,18 +1,18 @@
 ---
-id: "006"
-title: "Deploy artifacts and docs update"
-status: open
+id: '006'
+title: Deploy artifacts and docs update
+status: done
 use-cases:
-  - SUC-001
-  - SUC-002
-  - SUC-003
-  - SUC-004
+- SUC-001
+- SUC-002
+- SUC-003
+- SUC-004
 depends-on:
-  - "001"
-  - "002"
-  - "003"
-github-issue: ""
-issue: ""
+- '001'
+- '002'
+- '003'
+github-issue: ''
+issue: ''
 completes_issue: false
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
@@ -110,19 +110,19 @@ issue.
 
 ## Acceptance Criteria
 
-- [ ] `deploy/aprilcamd.service` exists with `ConfigurationDirectory=aprilcam`,
+- [x] `deploy/aprilcamd.service` exists with `ConfigurationDirectory=aprilcam`,
       `StateDirectory=aprilcam`, `RuntimeDirectory=aprilcam`,
       `LogsDirectory=aprilcam`, and `StandardOutput=journal`.
-- [ ] The service file includes a comment explaining `DynamicUser` + `APRILCAM_SYSTEM=1`.
-- [ ] `.env.example` has commented entries for `APRILCAM_LOG_DIR` and
+- [x] The service file includes a comment explaining `DynamicUser` + `APRILCAM_SYSTEM=1`.
+- [x] `.env.example` has commented entries for `APRILCAM_LOG_DIR` and
       `APRILCAM_SYSTEM`.
-- [ ] `.env.example` comments for `APRILCAM_DATA_DIR` and `APRILCAM_SOCKET_DIR`
+- [x] `.env.example` comments for `APRILCAM_DATA_DIR` and `APRILCAM_SOCKET_DIR`
       describe auto-selection.
-- [ ] `.aprilcam` loading-priority comment includes the `/etc` sources.
-- [ ] `docs/wiki/daemon-interface.md` precedence table includes the `/etc` row.
-- [ ] `docs/wiki/daemon-interface.md` variable table includes `APRILCAM_LOG_DIR`
+- [x] `.aprilcam` loading-priority comment includes the `/etc` sources.
+- [x] `docs/wiki/daemon-interface.md` precedence table includes the `/etc` row.
+- [x] `docs/wiki/daemon-interface.md` variable table includes `APRILCAM_LOG_DIR`
       and `APRILCAM_SYSTEM`.
-- [ ] `uv run pytest` passes (no code changes; this ticket is docs/config only).
+- [x] `uv run pytest` passes (no code changes; this ticket is docs/config only).
 
 ## Implementation Plan
 
