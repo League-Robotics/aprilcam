@@ -1,10 +1,10 @@
 ---
-id: '014-001'
-title: EnumerateCameras RPC — proto addition and regeneration
-status: open
+id: 014-001
+title: "EnumerateCameras RPC \u2014 proto addition and regeneration"
+status: done
 use-cases:
-  - SUC-001
-  - SUC-002
+- SUC-001
+- SUC-002
 depends-on: []
 ---
 
@@ -23,19 +23,19 @@ hardware devices and returns them.
 
 ## Acceptance Criteria
 
-- [ ] `proto/aprilcam.proto` contains `CameraDevice` message with fields
+- [x] `proto/aprilcam.proto` contains `CameraDevice` message with fields
       `index` (int32), `name` (string), `slug` (string).
-- [ ] `proto/aprilcam.proto` contains `EnumerateCamerasResponse` message
+- [x] `proto/aprilcam.proto` contains `EnumerateCamerasResponse` message
       with `repeated CameraDevice cameras`.
-- [ ] `proto/aprilcam.proto` contains `rpc EnumerateCameras(Empty) returns
+- [x] `proto/aprilcam.proto` contains `rpc EnumerateCameras(Empty) returns
       (EnumerateCamerasResponse)` in the `AprilCam` service.
-- [ ] `src/aprilcam/proto/aprilcam_pb2.py` and `aprilcam_pb2_grpc.py` are
+- [x] `src/aprilcam/proto/aprilcam_pb2.py` and `aprilcam_pb2_grpc.py` are
       regenerated and committed.
-- [ ] `client/control.py` has a new `enumerate_cameras()` method that calls
+- [x] `client/control.py` has a new `enumerate_cameras()` method that calls
       the stub and returns `list[CameraDevice]` (using the existing
       `CameraInfo`-style Pydantic model or a new `CameraDevice` model from
       `client/models.py`).
-- [ ] `uv run pytest` passes (no regressions from proto regen).
+- [x] `uv run pytest` passes (no regressions from proto regen).
 
 ## Implementation Plan
 

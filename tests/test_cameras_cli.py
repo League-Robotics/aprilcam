@@ -1,185 +1,184 @@
-"""Tests for aprilcam.cli.cameras_cli — registry-merged camera listing (011-003).
+"""Tests for aprilcam.cli.cameras_cli — daemon-based camera listing (014-002).
 
-These tests mock the live device list and use a temporary registry so no real
-camera hardware is required.
+The cameras CLI now routes enumeration through the daemon (EnumerateCameras RPC)
+instead of probing local hardware.  These tests mock the DaemonControl so no
+real camera hardware or daemon process is required.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from aprilcam.camera.camutil import CameraInfo
-from aprilcam.camera.registry import CameraRecord, CameraRegistry
+from aprilcam.client.models import CameraDevice
 from aprilcam.cli import cameras_cli
 
 
-def _seed_registry(cameras_dir: Path) -> None:
-    """Seed a registry with one connected + one disconnected camera record."""
-    reg = CameraRegistry(cameras_dir, adopt=False)
-    reg.upsert(
-        CameraRecord(
-            unique_id="avf:CONNECTED",
-            enum=1,
-            dir="connected-cam",
-            name="Connected Cam",
-        ),
-        save=False,
-    )
-    reg.upsert(
-        CameraRecord(
-            unique_id="avf:OFFLINE",
-            enum=2,
-            dir="offline-cam",
-            name="Offline Cam",
-        ),
-        save=True,
-    )
+def _make_dc(devices: list[CameraDevice]) -> MagicMock:
+    """Return a mock DaemonControl whose enumerate_cameras() returns *devices*."""
+    dc = MagicMock()
+    dc.enumerate_cameras.return_value = devices
+    return dc
 
 
-def test_cameras_cli_lists_connected_and_disconnected(tmp_path, monkeypatch, capsys):
-    """The listing shows both connected and disconnected cameras.
+def _patch_connect(dc):
+    """Return a context manager that patches connect_from_args to return *dc*."""
+    return patch("aprilcam.cli.cameras_cli.connect_from_args", return_value=dc)
 
-    Exactly ONE number is printed per camera — its stable enumeration number.
-    The volatile OS index is NOT shown in the default listing. The disconnected
-    camera is grayed-out/offline. Both keep their enum numbers.
-    """
-    cameras_dir = tmp_path / "cameras"
-    cameras_dir.mkdir(parents=True)
-    _seed_registry(cameras_dir)
 
-    # Live list: only the connected camera is present, at OS index 3.
-    live = [
-        CameraInfo(
-            index=3,
-            name="Connected Cam (AVFOUNDATION)",
-            device_name="Connected Cam",
-            unique_id="avf:CONNECTED",
-        )
+def _patch_config():
+    """Return a context manager that patches Config.load to return a MagicMock."""
+    return patch("aprilcam.cli.cameras_cli.Config")
+
+
+def test_cameras_cli_lists_devices_from_daemon(monkeypatch, capsys):
+    """The listing shows cameras returned by the daemon."""
+    devices = [
+        CameraDevice(index=0, name="FaceTime HD Camera", slug="facetime-hd-camera"),
+        CameraDevice(index=1, name="OV9782 Global Shutter", slug="ov9782-global-shutter"),
     ]
-    monkeypatch.setattr(cameras_cli, "list_cameras", lambda *a, **k: live)
+    dc = _make_dc(devices)
 
-    # Point Config at our temp data dir so the CLI registry resolves there.
-    cfg = type("Cfg", (), {"cameras_dir": cameras_dir})()
-    monkeypatch.setattr(cameras_cli.Config, "load", classmethod(lambda cls, *a, **k: cfg))
     monkeypatch.setattr(
-        cameras_cli.AppConfig, "load", classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})())
+        cameras_cli.AppConfig,
+        "load",
+        classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})()),
     )
-    # Force ANSI styling so the dim style is emitted for assertion.
-    monkeypatch.setenv("FORCE_COLOR", "1")
 
-    rc = cameras_cli.main(["--quiet"])
-    out = capsys.readouterr().out
+    with _patch_config() as mock_cfg_cls, _patch_connect(dc):
+        mock_cfg_cls.load.return_value = MagicMock()
+        rc = cameras_cli.main([])
+        out = capsys.readouterr().out
 
     assert rc == 0
-    # Both cameras appear with their enumeration numbers.
-    assert "Connected Cam" in out
-    assert "Offline Cam" in out
-    # Enumeration numbers are printed (one per camera). The connected row's
-    # number is rendered bold (ANSI), so it is not byte-contiguous with the
-    # name; the offline row is a single dim run and stays contiguous.
-    assert "  1  " in out
-    assert "2  Offline Cam" in out
-    # The volatile OS index is NOT shown in the default listing.
-    assert "[3]" not in out
-    assert "os index" not in out.lower()
-    # Disconnected camera is marked offline.
-    assert "offline" in out.lower()
+    assert "FaceTime HD Camera" in out
+    assert "OV9782 Global Shutter" in out
 
 
-def test_cameras_cli_details_shows_os_index(tmp_path, monkeypatch, capsys):
-    """The OS index is shown only under --details, never by default."""
-    cameras_dir = tmp_path / "cameras"
-    cameras_dir.mkdir(parents=True)
-    _seed_registry(cameras_dir)
+def test_cameras_cli_empty_list(monkeypatch, capsys):
+    """When the daemon returns no devices, the output says none found."""
+    dc = _make_dc([])
 
-    live = [
-        CameraInfo(
-            index=3,
-            name="Connected Cam",
-            device_name="Connected Cam",
-            unique_id="avf:CONNECTED",
-        )
-    ]
-    monkeypatch.setattr(cameras_cli, "list_cameras", lambda *a, **k: live)
-    cfg = type("Cfg", (), {"cameras_dir": cameras_dir})()
-    monkeypatch.setattr(cameras_cli.Config, "load", classmethod(lambda cls, *a, **k: cfg))
     monkeypatch.setattr(
-        cameras_cli.AppConfig, "load", classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})())
+        cameras_cli.AppConfig,
+        "load",
+        classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})()),
     )
 
-    rc = cameras_cli.main(["--quiet", "--details"])
-    out = capsys.readouterr().out
+    with _patch_config() as mock_cfg_cls, _patch_connect(dc):
+        mock_cfg_cls.load.return_value = MagicMock()
+        rc = cameras_cli.main([])
+        out = capsys.readouterr().out
+
     assert rc == 0
-    # --details reveals the OS index for debugging.
-    assert "os index 3" in out.lower()
+    assert "none found" in out.lower()
 
 
-def test_cameras_cli_registers_new_connected_camera(tmp_path, monkeypatch, capsys):
-    """A connected camera not yet in the registry gets a fresh enum number."""
-    cameras_dir = tmp_path / "cameras"
-    cameras_dir.mkdir(parents=True)
-
-    live = [
-        CameraInfo(
-            index=0,
-            name="Brand New Cam",
-            device_name="Brand New Cam",
-            unique_id="avf:NEW",
-        )
+def test_cameras_cli_details_shows_slug(monkeypatch, capsys):
+    """The slug is shown only under --details."""
+    devices = [
+        CameraDevice(index=0, name="FaceTime HD Camera", slug="facetime-hd-camera"),
     ]
-    monkeypatch.setattr(cameras_cli, "list_cameras", lambda *a, **k: live)
+    dc = _make_dc(devices)
 
-    cfg = type("Cfg", (), {"cameras_dir": cameras_dir})()
-    monkeypatch.setattr(cameras_cli.Config, "load", classmethod(lambda cls, *a, **k: cfg))
     monkeypatch.setattr(
-        cameras_cli.AppConfig, "load", classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})())
+        cameras_cli.AppConfig,
+        "load",
+        classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})()),
     )
 
-    rc = cameras_cli.main(["--quiet"])
-    out = capsys.readouterr().out
+    with _patch_config() as mock_cfg_cls, _patch_connect(dc):
+        mock_cfg_cls.load.return_value = MagicMock()
+        rc = cameras_cli.main(["--details"])
+        out = capsys.readouterr().out
+
     assert rc == 0
-    # One number is printed — the enumeration number, not the OS index.
-    assert "Brand New Cam" in out
-    assert "1  Brand New Cam" in out
-    assert "[0]" not in out
-
-    # The registry now persists the new camera with enum #1.
-    reg = CameraRegistry(cameras_dir, adopt=False)
-    rec = reg.get("avf:NEW")
-    assert rec is not None
-    assert rec.enum == 1
+    assert "facetime-hd-camera" in out
 
 
-def test_cameras_cli_pattern_uses_connected_only(tmp_path, monkeypatch, capsys):
-    """The pattern selector operates on connected cameras only."""
-    cameras_dir = tmp_path / "cameras"
-    cameras_dir.mkdir(parents=True)
-    _seed_registry(cameras_dir)
-
-    live = [
-        CameraInfo(
-            index=3,
-            name="Connected Cam",
-            device_name="Connected Cam",
-            unique_id="avf:CONNECTED",
-        )
+def test_cameras_cli_no_details_no_slug(monkeypatch, capsys):
+    """The slug is NOT shown without --details."""
+    devices = [
+        CameraDevice(index=0, name="FaceTime HD Camera", slug="facetime-hd-camera"),
     ]
-    monkeypatch.setattr(cameras_cli, "list_cameras", lambda *a, **k: live)
-    cfg = type("Cfg", (), {"cameras_dir": cameras_dir})()
-    monkeypatch.setattr(cameras_cli.Config, "load", classmethod(lambda cls, *a, **k: cfg))
+    dc = _make_dc(devices)
+
     monkeypatch.setattr(
-        cameras_cli.AppConfig, "load", classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})())
+        cameras_cli.AppConfig,
+        "load",
+        classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})()),
     )
 
-    # An offline camera name must NOT match the pattern selector.
-    rc = cameras_cli.main(["--quiet", "--pattern", "Offline"])
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "No camera matched pattern 'Offline'." in out
+    with _patch_config() as mock_cfg_cls, _patch_connect(dc):
+        mock_cfg_cls.load.return_value = MagicMock()
+        rc = cameras_cli.main([])
+        out = capsys.readouterr().out
 
-    # A connected camera name matches and suggests its index.
-    rc = cameras_cli.main(["--quiet", "--pattern", "Connected"])
-    out = capsys.readouterr().out
-    assert "Suggested index by pattern 'Connected': 3" in out
+    assert rc == 0
+    assert "facetime-hd-camera" not in out
+
+
+def test_cameras_cli_pattern_matches(monkeypatch, capsys):
+    """The pattern selector matches on camera name (case-insensitive)."""
+    devices = [
+        CameraDevice(index=0, name="FaceTime HD Camera", slug="facetime-hd-camera"),
+        CameraDevice(index=1, name="OV9782 Global Shutter", slug="ov9782-global-shutter"),
+    ]
+    dc = _make_dc(devices)
+
+    monkeypatch.setattr(
+        cameras_cli.AppConfig,
+        "load",
+        classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})()),
+    )
+
+    with _patch_config() as mock_cfg_cls, _patch_connect(dc):
+        mock_cfg_cls.load.return_value = MagicMock()
+        rc = cameras_cli.main(["--pattern", "global shutter"])
+        out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "global shutter" in out.lower()
+    assert "index 1" in out.lower()
+
+
+def test_cameras_cli_pattern_no_match(monkeypatch, capsys):
+    """No match is reported when the pattern doesn't match any camera."""
+    devices = [
+        CameraDevice(index=0, name="FaceTime HD Camera", slug="facetime-hd-camera"),
+    ]
+    dc = _make_dc(devices)
+
+    monkeypatch.setattr(
+        cameras_cli.AppConfig,
+        "load",
+        classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})()),
+    )
+
+    with _patch_config() as mock_cfg_cls, _patch_connect(dc):
+        mock_cfg_cls.load.return_value = MagicMock()
+        rc = cameras_cli.main(["--pattern", "OV9782"])
+        out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "No camera matched pattern 'OV9782'." in out
+
+
+def test_cameras_cli_daemon_error(monkeypatch, capsys):
+    """When the daemon is unreachable, the CLI returns exit code 1 with an error message."""
+    monkeypatch.setattr(
+        cameras_cli.AppConfig,
+        "load",
+        classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})()),
+    )
+
+    with _patch_config() as mock_cfg_cls, \
+         patch("aprilcam.cli.cameras_cli.connect_from_args", side_effect=RuntimeError("daemon not running")):
+        mock_cfg_cls.load.return_value = MagicMock()
+        rc = cameras_cli.main([])
+        out = capsys.readouterr().out
+
+    assert rc == 1
+    assert "daemon" in out.lower()

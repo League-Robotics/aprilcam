@@ -235,3 +235,66 @@ class PlayfieldDefinitionRegistry:
         if not names:
             return None
         return self._defs[names[0]]
+
+    def clear(self) -> None:
+        """Remove all definitions from the registry.
+
+        Called by the MCP server before re-populating from a ``ListPlayfields``
+        RPC response (e.g. when switching daemon targets via ``connect_daemon``).
+        """
+        self._defs.clear()
+        _log.debug("PlayfieldDefinitionRegistry cleared")
+
+    def add_from_dict(self, name: str, d: dict) -> None:
+        """Add or replace a definition parsed from a JSON blob dict.
+
+        This is the RPC-side companion to :meth:`load_all`: instead of reading a
+        file from disk, the caller provides the parsed JSON dict received from a
+        ``ListPlayfields`` ``PlayfieldEntry.json_blob`` field.
+
+        The ``name`` argument is the canonical slug (the ``PlayfieldEntry.name``
+        field returned by the daemon, which equals the file stem).  If *d* does
+        not contain a top-level ``"name"`` key it is injected from *name* so the
+        resulting :class:`PlayfieldDefinition` is self-identifying.
+
+        Parameters
+        ----------
+        name:
+            Canonical slug for the playfield (e.g. ``"main-playfield"``).
+        d:
+            Parsed dict with the same structure as a playfield JSON file
+            (``"playfield"`` block with ``width_cm``/``height_cm``/``origin``,
+            plus optional ``"april_tags"``, ``"aruco_tags"``, etc.).
+
+        Raises
+        ------
+        ValueError
+            If *d* is missing required ``"playfield"`` geometry keys.
+        """
+        d_with_name = dict(d)
+        # Alternatively, build directly without writing a file:
+        pf_meta = d_with_name.get("playfield", {})
+        try:
+            width_cm = float(pf_meta["width_cm"])
+            height_cm = float(pf_meta["height_cm"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Playfield dict missing required geometry fields (width_cm, height_cm): {exc}"
+            ) from exc
+
+        origin = str(pf_meta.get("origin", ""))
+        display_name = str(pf_meta.get("display_name", d_with_name.get("display_name", name)))
+
+        defn = PlayfieldDefinition(
+            name=name,
+            display_name=display_name,
+            width_cm=width_cm,
+            height_cm=height_cm,
+            origin=origin,
+            april_tags=list(d_with_name.get("april_tags", []) or []),
+            aruco_tags=list(d_with_name.get("aruco_tags", []) or []),
+            rectangles=list(d_with_name.get("rectangles", []) or []),
+            dots=list(d_with_name.get("dots", []) or []),
+        )
+        self._defs[name] = defn
+        _log.debug("PlayfieldDefinitionRegistry: added definition '%s' from dict", name)

@@ -83,6 +83,49 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
             cam_names = list(self._cameras.keys())
         return aprilcam_pb2.ListCamerasResponse(cameras=cam_names)
 
+    def EnumerateCameras(
+        self,
+        request: aprilcam_pb2.Empty,
+        context: grpc.ServicerContext,
+    ) -> aprilcam_pb2.EnumerateCamerasResponse:
+        """Probe host hardware and return all available camera devices.
+
+        Unlike ``ListCameras`` (which returns currently-open cameras), this
+        RPC calls ``camutil.list_cameras()`` to enumerate every device
+        detectable on the host.  Clients must call this RPC instead of
+        probing hardware locally; only the daemon owns camera hardware.
+        """
+        from ..camera.camutil import list_cameras
+        from ..calibration.calibration import device_name_slug
+
+        with self._cam_lock:
+            # Hold the lock while probing so we don't race with OpenCamera
+            # (brief contention; probe is local and fast in quiet mode).
+            try:
+                cams = list_cameras(
+                    max_index=10,
+                    quiet=True,
+                    detailed_names=True,
+                )
+            except Exception as exc:
+                log.exception("EnumerateCameras: hardware probe failed")
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details(f"camera enumeration failed: {exc}")
+                return aprilcam_pb2.EnumerateCamerasResponse()
+
+        devices = []
+        for cam in cams:
+            name = cam.device_name or cam.name or f"Camera {cam.index}"
+            slug = device_name_slug(name)
+            devices.append(
+                aprilcam_pb2.CameraDevice(
+                    index=cam.index,
+                    name=name,
+                    slug=slug,
+                )
+            )
+        return aprilcam_pb2.EnumerateCamerasResponse(cameras=devices)
+
     def _resolve_cam_name(self, index: int) -> str:
         """Resolve an OpenCV ``index`` to its registry per-camera dir key.
 
@@ -536,6 +579,258 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
             )
         producer.publish_overlay(request.overlay)
         return aprilcam_pb2.StatusReply(ok=True)
+
+    # ------------------------------------------------------------------
+    # File-proxy RPCs
+    # ------------------------------------------------------------------
+
+    def GetCameraConfig(
+        self,
+        request: aprilcam_pb2.CameraRequest,
+        context: grpc.ServicerContext,
+    ) -> aprilcam_pb2.JsonBlobReply:
+        """Return config.json for *cam_name* as an opaque JSON blob.
+
+        Reads ``<cameras_dir>/<cam_name>/config.json`` using
+        ``camera_config.load_camera_config``.  Returns ``present=False`` when
+        the file is absent.
+        """
+        import json as _json
+        from ..camera.camera_config import load_camera_config
+
+        cam_name = request.cam_name
+        camera_dir = self._config.cameras_dir / cam_name
+        cfg = load_camera_config(camera_dir)
+        if cfg is None:
+            return aprilcam_pb2.JsonBlobReply(json_blob="", present=False)
+        return aprilcam_pb2.JsonBlobReply(
+            json_blob=_json.dumps(cfg, indent=2, sort_keys=True),
+            present=True,
+        )
+
+    def SetCameraConfig(
+        self,
+        request: aprilcam_pb2.CameraJsonRequest,
+        context: grpc.ServicerContext,
+    ) -> aprilcam_pb2.StatusReply:
+        """Write *json_blob* to ``<cameras_dir>/<cam_name>/config.json`` atomically.
+
+        Uses ``camera_config.save_camera_config`` (write to ``.tmp`` then
+        ``os.replace``).
+        """
+        import json as _json
+        from ..camera.camera_config import save_camera_config
+
+        cam_name = request.cam_name
+        camera_dir = self._config.cameras_dir / cam_name
+        try:
+            cfg_dict = _json.loads(request.json_blob)
+        except _json.JSONDecodeError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"SetCameraConfig: invalid JSON: {exc}")
+            return aprilcam_pb2.StatusReply(ok=False, error=str(exc))
+        try:
+            save_camera_config(camera_dir, cfg_dict)
+        except Exception as exc:
+            log.exception("SetCameraConfig: write failed for %s", cam_name)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return aprilcam_pb2.StatusReply(ok=False, error=str(exc))
+        return aprilcam_pb2.StatusReply(ok=True)
+
+    def GetCalibration(
+        self,
+        request: aprilcam_pb2.CameraRequest,
+        context: grpc.ServicerContext,
+    ) -> aprilcam_pb2.JsonBlobReply:
+        """Return calibration.json for *cam_name* as an opaque JSON blob.
+
+        Reads ``<cameras_dir>/<cam_name>/calibration.json`` directly (raw JSON,
+        not parsed through ``CameraCalibration.from_dict``) so that no numpy
+        round-trip occurs at the gRPC boundary.  Returns ``present=False``
+        when the file is absent.
+        """
+        cam_name = request.cam_name
+        cal_file = self._config.cameras_dir / cam_name / "calibration.json"
+        if not cal_file.exists():
+            return aprilcam_pb2.JsonBlobReply(json_blob="", present=False)
+        try:
+            blob = cal_file.read_text(encoding="utf-8")
+        except Exception as exc:
+            log.exception("GetCalibration: read failed for %s", cam_name)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return aprilcam_pb2.JsonBlobReply(json_blob="", present=False)
+        return aprilcam_pb2.JsonBlobReply(json_blob=blob, present=True)
+
+    def SetCalibration(
+        self,
+        request: aprilcam_pb2.CameraJsonRequest,
+        context: grpc.ServicerContext,
+    ) -> aprilcam_pb2.StatusReply:
+        """Write *json_blob* to calibration.json and trigger a live pipeline reload.
+
+        Writes atomically (tmp + os.replace), then calls
+        ``pipeline.reload_calibration()`` if the camera is currently open so
+        the live detection loop picks up the new homography without a restart.
+        """
+        import json as _json
+        import os as _os
+
+        cam_name = request.cam_name
+        camera_dir = self._config.cameras_dir / cam_name
+
+        # Validate JSON before writing.
+        try:
+            _json.loads(request.json_blob)
+        except _json.JSONDecodeError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"SetCalibration: invalid JSON: {exc}")
+            return aprilcam_pb2.StatusReply(ok=False, error=str(exc))
+
+        # Atomic write.
+        try:
+            camera_dir.mkdir(parents=True, exist_ok=True)
+            cal_file = camera_dir / "calibration.json"
+            tmp = cal_file.with_suffix(".json.tmp")
+            try:
+                tmp.write_text(request.json_blob, encoding="utf-8")
+                _os.replace(tmp, cal_file)
+            finally:
+                try:
+                    if tmp.exists():
+                        tmp.unlink()
+                except OSError:
+                    pass
+        except Exception as exc:
+            log.exception("SetCalibration: write failed for %s", cam_name)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return aprilcam_pb2.StatusReply(ok=False, error=str(exc))
+
+        # Trigger live pipeline reload if camera is open.
+        with self._cam_lock:
+            pipeline = self._cameras.get(cam_name)
+        if pipeline is not None:
+            try:
+                from ..calibration.calibration import load_calibration_from_camera_dir
+                from .camera_pipeline import _apply_camera_settings
+
+                calibration = load_calibration_from_camera_dir(camera_dir)
+                if pipeline._april_cam is not None:
+                    if calibration is not None:
+                        pipeline._april_cam.homography = calibration.homography
+                        pipeline._calibration = calibration
+                        if calibration.settings:
+                            _apply_camera_settings(
+                                calibration.settings,
+                                pipeline.device_name,
+                                self._config,
+                            )
+                    else:
+                        pipeline._april_cam.homography = None
+                        pipeline._calibration = None
+            except Exception:
+                log.exception(
+                    "SetCalibration: pipeline reload failed for %s (file written OK)",
+                    cam_name,
+                )
+
+        return aprilcam_pb2.StatusReply(ok=True)
+
+    def GetPaths(
+        self,
+        request: aprilcam_pb2.CameraRequest,
+        context: grpc.ServicerContext,
+    ) -> aprilcam_pb2.JsonBlobReply:
+        """Return paths.json for *cam_name* as an opaque JSON blob.
+
+        Reads ``<cameras_dir>/<cam_name>/paths.json``.  Returns
+        ``present=False`` when the file is absent.
+        """
+        cam_name = request.cam_name
+        paths_file = self._config.cameras_dir / cam_name / "paths.json"
+        if not paths_file.exists():
+            return aprilcam_pb2.JsonBlobReply(json_blob="", present=False)
+        try:
+            blob = paths_file.read_text(encoding="utf-8")
+        except Exception as exc:
+            log.exception("GetPaths: read failed for %s", cam_name)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return aprilcam_pb2.JsonBlobReply(json_blob="", present=False)
+        return aprilcam_pb2.JsonBlobReply(json_blob=blob, present=True)
+
+    def SetPaths(
+        self,
+        request: aprilcam_pb2.CameraJsonRequest,
+        context: grpc.ServicerContext,
+    ) -> aprilcam_pb2.StatusReply:
+        """Write *json_blob* to paths.json atomically.
+
+        Writes to ``<cameras_dir>/<cam_name>/paths.json`` using
+        tmp + os.replace.
+        """
+        import json as _json
+        import os as _os
+
+        cam_name = request.cam_name
+        camera_dir = self._config.cameras_dir / cam_name
+
+        # Validate JSON before writing.
+        try:
+            _json.loads(request.json_blob)
+        except _json.JSONDecodeError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"SetPaths: invalid JSON: {exc}")
+            return aprilcam_pb2.StatusReply(ok=False, error=str(exc))
+
+        # Atomic write.
+        try:
+            camera_dir.mkdir(parents=True, exist_ok=True)
+            paths_file = camera_dir / "paths.json"
+            tmp = paths_file.with_suffix(".tmp")
+            try:
+                tmp.write_text(request.json_blob, encoding="utf-8")
+                _os.replace(tmp, paths_file)
+            finally:
+                try:
+                    if tmp.exists():
+                        tmp.unlink()
+                except OSError:
+                    pass
+        except Exception as exc:
+            log.exception("SetPaths: write failed for %s", cam_name)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return aprilcam_pb2.StatusReply(ok=False, error=str(exc))
+
+        return aprilcam_pb2.StatusReply(ok=True)
+
+    def ListPlayfields(
+        self,
+        request: aprilcam_pb2.Empty,
+        context: grpc.ServicerContext,
+    ) -> aprilcam_pb2.ListPlayfieldsResponse:
+        """Return all playfield definitions from ``config.playfields_dir``.
+
+        Scans ``<playfields_dir>/*.json`` and returns each file's raw content
+        as a ``PlayfieldEntry``.  Files that cannot be read are skipped with a
+        log warning.
+        """
+        playfields_dir = self._config.playfields_dir
+        entries: list[aprilcam_pb2.PlayfieldEntry] = []
+        if not playfields_dir.exists():
+            return aprilcam_pb2.ListPlayfieldsResponse(playfields=entries)
+        for p in sorted(playfields_dir.glob("*.json")):
+            try:
+                blob = p.read_text(encoding="utf-8")
+                entries.append(
+                    aprilcam_pb2.PlayfieldEntry(name=p.stem, json_blob=blob)
+                )
+            except Exception:
+                log.warning("ListPlayfields: skipping unreadable file %s", p)
+        return aprilcam_pb2.ListPlayfieldsResponse(playfields=entries)
 
     # ------------------------------------------------------------------
     # Internal helpers

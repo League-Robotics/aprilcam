@@ -53,7 +53,9 @@ from aprilcam.calibration.calibration import (
     CameraPosition,
     FieldSpec,
     calibrate_from_corners,
+    parse_calibration_from_dict,
 )
+from aprilcam.camera.camera_config import parse_camera_config
 from aprilcam.vision.image_processing import (
     process_detect_circles,
     process_detect_contours,
@@ -307,49 +309,75 @@ _daemon_client: Optional[DaemonControl] = None
 # info.json dicts including a "paths_file" key.
 _cam_info: dict[str, dict] = {}
 
+# Optional daemon connection overrides set by main() from argv.
+# When set, _ensure_daemon_client() uses these instead of mDNS/unix discovery.
+_daemon_host_override: Optional[str] = None
+_daemon_port_override: Optional[int] = None
+
+
+def _on_daemon_connect(client: DaemonControl) -> None:
+    """Post-connect hook: populate the playfield_def_registry via ListPlayfields RPC.
+
+    Called after a daemon connection is established (either lazily on first use
+    or explicitly via the ``connect_daemon`` tool).  Replaces any
+    ``playfield_def_registry.load_all(local_dir)`` calls that assumed local disk
+    access to the daemon's files.
+    """
+    import logging
+    _log = logging.getLogger("aprilcam")
+    try:
+        pf_reply = client.list_playfields()
+        playfield_def_registry.clear()
+        for entry in pf_reply.playfields:
+            try:
+                d = json.loads(entry.json_blob)
+                playfield_def_registry.add_from_dict(entry.name, d)
+            except Exception as exc:
+                _log.warning("Skipping playfield '%s' from ListPlayfields: %s", entry.name, exc)
+        _log.debug(
+            "_on_daemon_connect: loaded %d playfield(s) from daemon",
+            len(playfield_def_registry.list()),
+        )
+    except Exception as exc:
+        _log.warning("_on_daemon_connect: ListPlayfields RPC failed: %s", exc)
+
 
 def _ensure_daemon_client() -> DaemonControl:
-    """Return the module-level daemon client, starting the daemon if needed."""
+    """Return the module-level daemon client, connecting via resolver if needed.
+
+    Uses :func:`~aprilcam.client.discovery.resolve_daemon_target` for
+    discovery.  If ``--daemon-host`` / ``--daemon-port`` were parsed by
+    ``main()``, those override all discovery methods.
+
+    On first connection, calls :func:`_on_daemon_connect` to populate the
+    playfield definition registry via the ``ListPlayfields`` RPC.
+    """
     global _daemon_client
     if _daemon_client is None:
         config = Config.load()
-        _daemon_client = DaemonControl.connect_default(config)
+        # Build a minimal args-like proxy so resolve_daemon_target sees
+        # the CLI overrides set by main() without needing a real argparse namespace.
+        class _CliProxy:
+            daemon_host = _daemon_host_override
+            daemon_port = _daemon_port_override or config.daemon_port
+
+        _daemon_client = DaemonControl.connect_default(config, cli_args=_CliProxy())
+        _on_daemon_connect(_daemon_client)
     return _daemon_client
 
 
 # ---------------------------------------------------------------------------
-# paths.json write helper
+# paths RPC helper
 # ---------------------------------------------------------------------------
 
 
-def _get_paths_file(camera_id: str) -> Optional[Path]:
-    """Return the paths.json :class:`~pathlib.Path` for *camera_id*, or ``None``.
+def _push_paths_rpc(playfield_id: str) -> None:
+    """Push the current in-memory path list to the daemon via SetPaths RPC.
 
-    Checks ``_cam_info`` first (populated by open_camera RPC); falls back to
-    reading info.json from disk so that path tools work even when the MCP
-    server was restarted after the camera was opened.
-    """
-    info = _cam_info.get(camera_id)
-    if info is None:
-        return None
-    # Prefer paths_file if already stored; otherwise derive from camera_dir.
-    pf_str = info.get("paths_file")
-    if pf_str:
-        return Path(pf_str)
-    camera_dir = info.get("camera_dir")
-    if camera_dir:
-        return Path(camera_dir) / "paths.json"
-    return None
-
-
-def _write_paths_json(playfield_id: str) -> None:
-    """Atomically rewrite paths.json for the camera backing *playfield_id*.
-
-    Looks up the camera_id from the playfield registry, then resolves the
-    paths_file path from ``_cam_info``.  If either lookup fails (e.g. in
-    tests where the daemon is not running), the write is silently skipped.
-
-    The write is atomic: a ``.tmp`` file is written first, then renamed.
+    Looks up the camera_id from the playfield registry, then calls
+    ``SetPaths`` with the serialised path list.  If the daemon is unavailable
+    or the camera lookup fails (e.g. in tests where no daemon is running),
+    the write is silently skipped.
     """
     try:
         pf_entry = playfield_registry.get(playfield_id)
@@ -357,17 +385,11 @@ def _write_paths_json(playfield_id: str) -> None:
     except KeyError:
         return
 
-    paths_file = _get_paths_file(camera_id)
-    if paths_file is None:
-        return
-
     data = [p.to_dict() for p in path_registry.list_for(playfield_id)]
-    tmp = paths_file.with_suffix(".tmp")
     try:
-        paths_file.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps(data))
-        os.replace(tmp, paths_file)
-    except OSError:
+        client = _ensure_daemon_client()
+        client.set_paths(camera_id, json.dumps(data))
+    except Exception:
         pass  # Best-effort; do not crash the MCP handler
 
 
@@ -455,10 +477,18 @@ def resolve_source(source_id: str) -> np.ndarray:
 
 
 def _read_one_frame(camera_id: str) -> np.ndarray:
-    """Read a single decoded BGR frame from the daemon data socket for *camera_id*."""
-    for frame in _frames_from_daemon(camera_id, 1):
-        return frame
-    raise RuntimeError(f"No frame available from daemon for camera '{camera_id}'")
+    """Fetch a single BGR frame from the daemon via gRPC CaptureFrame.
+
+    The daemon is the sole opener of camera hardware; the MCP server never
+    calls cv2.VideoCapture(device_index) directly.
+    """
+    client = _ensure_daemon_client()
+    info = _cam_info.get(camera_id)
+    cam_name = info.get("cam_name") if info else camera_id
+    frame = client.capture_frame(cam_name)
+    if frame is None:
+        raise RuntimeError(f"No frame available from daemon for camera '{camera_id}'")
+    return frame
 
 
 def format_image_output(
@@ -497,14 +527,18 @@ def format_image_output(
 
 
 def _handle_list_cameras() -> list[dict]:
-    """Core logic for list_cameras — returns a list of camera info dicts."""
-    from aprilcam.camera.camutil import list_cameras as _list_cameras
+    """Core logic for list_cameras — returns a list of camera info dicts.
 
+    Calls the daemon ``EnumerateCameras`` RPC instead of probing local
+    hardware.  The daemon is the sole camera owner; clients must not probe
+    hardware directly.
+    """
     try:
-        cams = _list_cameras(max_index=10, quiet=True, detailed_names=True)
+        client = _ensure_daemon_client()
+        devices = client.enumerate_cameras()
         return [
-            {"index": c.index, "name": c.name, "backend": c.backend, "device_name": c.device_name}
-            for c in cams
+            {"index": d.index, "name": d.name, "slug": d.slug}
+            for d in devices
         ]
     except Exception:
         return []  # empty array, not an error
@@ -549,16 +583,8 @@ def _handle_open_camera(
 
         # Delegate to daemon via gRPC — no direct cv.VideoCapture here
         client = _ensure_daemon_client()
-        cam_name, camera_dir = client.open_camera(idx)
+        cam_name, _camera_dir_unused = client.open_camera(idx)
         handle = cam_name
-
-        # Use the daemon-returned camera_dir (absolute path) to build file paths.
-        # This avoids CWD-relative Config.load() path mismatches when the MCP
-        # server runs from a different directory than the daemon.
-        info: dict = {
-            "camera_dir": camera_dir,
-            "paths_file": str(Path(camera_dir) / "paths.json"),
-        }
 
         # Store a sentinel (None) in the registry so other code that checks
         # "is this camera_id registered?" still works.  Close any stale entry first.
@@ -569,83 +595,93 @@ def _handle_open_camera(
                 pass
         registry.open(None, handle=handle)
 
-        # Cache info.json data for path tools
-        _cam_info[handle] = info
+        # Cache minimal info for this camera (cam_name stored for view subprocess etc.)
+        _cam_info[handle] = {"cam_name": cam_name}
 
-        # Write an empty paths.json to clear any stale state from a prior session
-        paths_file_str = info.get("paths_file")
-        if paths_file_str:
-            paths_file = Path(paths_file_str)
-            tmp = paths_file.with_suffix(".tmp")
-            try:
-                paths_file.parent.mkdir(parents=True, exist_ok=True)
-                tmp.write_text("[]")
-                os.replace(tmp, paths_file)
-            except OSError:
-                pass
+        # Clear any stale paths in the daemon's paths.json via RPC.
+        try:
+            client.set_paths(cam_name, "[]")
+        except Exception:
+            pass  # Best-effort; daemon may not have a paths file yet
 
-        # --- Auto-rehydrate playfield entry from disk ---
+        # --- Auto-rehydrate playfield entry via RPCs ---
         result_extra: dict = {}
         try:
-            camera_dir = Path(info.get("camera_dir", ""))
-            if camera_dir:
-                # Load the playfield-definition registry from the daemon's
-                # ACTUAL data dir, derived from the absolute camera_dir
-                # (<data_dir>/cameras/<cam_name>), rather than a CWD-relative
-                # Config.load().  The registry backs list_playfields /
-                # get_playfield / where; loading it here makes those tools work
-                # even when the MCP server's working directory differs from the
-                # daemon's (the common multi-agent case).  load_all is
-                # idempotent (replace-by-name), so re-loading on each open is safe.
+            # Fetch config and calibration from the daemon (no local file reads).
+            cfg_reply = client.get_camera_config(cam_name)
+            cam_cfg = parse_camera_config(json.loads(cfg_reply.json_blob)) if cfg_reply.present else {}
+
+            if cam_cfg and "playfield" in cam_cfg:
+                pf_slug = cam_cfg["playfield"]
                 try:
-                    _pf_dir = camera_dir.parent.parent / "playfields"
-                    if _pf_dir.is_dir():
-                        playfield_def_registry.load_all(_pf_dir)
-                except Exception as _reg_exc:
-                    import logging
-                    logging.getLogger("aprilcam").warning(
-                        "Playfield registry reload from %s failed: %s",
-                        camera_dir, _reg_exc,
-                    )
+                    pf_def = playfield_def_registry.get(pf_slug)
+                except KeyError:
+                    pf_def = None
 
-                from aprilcam.camera.camera_config import load_camera_config
-                from aprilcam.calibration.calibration import load_calibration_from_camera_dir
+                if pf_def is not None:
+                    cal_reply = client.get_calibration(cam_name)
+                    if cal_reply.present:
+                        try:
+                            cal_dict = json.loads(cal_reply.json_blob)
+                            # Overlay config-owned fields (device_name, resolution, etc.)
+                            cal = parse_calibration_from_dict(cal_dict)
+                            if "device_name" in cam_cfg:
+                                cal.device_name = cam_cfg["device_name"]
+                            if "resolution" in cam_cfg:
+                                cal.resolution = tuple(cam_cfg["resolution"])
+                            if "settings" in cam_cfg:
+                                cal.settings = cam_cfg["settings"]
+                            if "static_marker_ids" in cam_cfg:
+                                cal.static_marker_ids = [str(s) for s in cam_cfg["static_marker_ids"]]
+                            if "camera_position" in cam_cfg:
+                                from aprilcam.calibration.calibration import CameraPosition as _CP
+                                cal.camera_position = _CP(**cam_cfg["camera_position"])
+                        except Exception:
+                            cal = None
+                    else:
+                        cal = None
 
-                cam_cfg = load_camera_config(camera_dir)
-                if cam_cfg and "playfield" in cam_cfg:
-                    pf_slug = cam_cfg["playfield"]
-                    try:
-                        pf_def = playfield_def_registry.get(pf_slug)
-                    except KeyError:
-                        pf_def = None
+                    if cal is not None and cal.homography is not None:
+                        # Check provenance: is calibration stale?
+                        # Replicates the logic from load_calibration_from_camera_dir.
+                        _stale = False
+                        if cal.calibrated_playfield is None:
+                            _stale = True  # legacy record (no provenance)
+                        elif cal.calibrated_playfield != pf_slug:
+                            _stale = True  # slug mismatch
+                        if not _stale:
+                            _TOL = 0.01  # cm
+                            if abs(cal.playfield_width_cm - pf_def.width_cm) > _TOL:
+                                _stale = True
+                            elif abs(cal.playfield_height_cm - pf_def.height_cm) > _TOL:
+                                _stale = True
+                        if _stale:
+                            cal.calibration_stale = True  # type: ignore[attr-defined]
 
-                    if pf_def is not None:
-                        cal = load_calibration_from_camera_dir(camera_dir, cam_cfg, pf_def)
-                        if cal is not None and cal.homography is not None:
-                            # Guard: don't overwrite an existing PlayfieldEntry for this camera
-                            existing_pid = playfield_registry.find_by_camera(handle)
-                            if existing_pid is None:
-                                pf = Playfield(detect_inverted=True, proc_width=0)
-                                from aprilcam.calibration.geometry import corner_pixels_from_homography
-                                poly = corner_pixels_from_homography(
-                                    cal.homography, pf_def.width_cm, pf_def.height_cm
-                                )
-                                pf._poly = poly  # type: ignore[attr-defined]
-                                pf_entry = PlayfieldEntry(
-                                    playfield_id=f"pf_{handle}",
-                                    camera_id=handle,
-                                    playfield=pf,
-                                    field_spec=FieldSpec(pf_def.width_cm, pf_def.height_cm, "cm"),
-                                    homography=cal.homography,
-                                    tag1_origin_cm=(0.0, 0.0),
-                                )
-                                playfield_registry.register(pf_entry)
-                                result_extra = {
-                                    "playfield_id": f"pf_{handle}",
-                                    "playfield_name": pf_slug,
-                                }
-                                if getattr(cal, "calibration_stale", False):
-                                    result_extra["calibration_stale"] = True
+                        # Guard: don't overwrite an existing PlayfieldEntry for this camera
+                        existing_pid = playfield_registry.find_by_camera(handle)
+                        if existing_pid is None:
+                            pf = Playfield(detect_inverted=True, proc_width=0)
+                            from aprilcam.calibration.geometry import corner_pixels_from_homography
+                            poly = corner_pixels_from_homography(
+                                cal.homography, pf_def.width_cm, pf_def.height_cm
+                            )
+                            pf._poly = poly  # type: ignore[attr-defined]
+                            pf_entry = PlayfieldEntry(
+                                playfield_id=f"pf_{handle}",
+                                camera_id=handle,
+                                playfield=pf,
+                                field_spec=FieldSpec(pf_def.width_cm, pf_def.height_cm, "cm"),
+                                homography=cal.homography,
+                                tag1_origin_cm=(0.0, 0.0),
+                            )
+                            playfield_registry.register(pf_entry)
+                            result_extra = {
+                                "playfield_id": f"pf_{handle}",
+                                "playfield_name": pf_slug,
+                            }
+                            if getattr(cal, "calibration_stale", False):
+                                result_extra["calibration_stale"] = True
         except Exception as _rh_exc:
             import logging
             logging.getLogger("aprilcam").warning("Playfield rehydration failed: %s", _rh_exc)
@@ -679,20 +715,24 @@ def _handle_set_camera_playfield(camera_id: str, playfield: str) -> dict:
         names = ", ".join(available) if available else "(none loaded)"
         return {"error": f"Playfield '{playfield}' not found. Available: [{names}]"}
 
-    # Resolve camera_dir from _cam_info
-    info = _cam_info.get(camera_id)
-    if info is None:
-        return {"error": f"No camera info found for '{camera_id}' — was it opened via open_camera?"}
-    camera_dir_str = info.get("camera_dir")
-    if not camera_dir_str:
-        return {"error": f"camera_dir not available for '{camera_id}'"}
+    # Use RPCs: read existing config, update the playfield key, write back.
+    try:
+        client = _ensure_daemon_client()
+        cfg_reply = client.get_camera_config(camera_id)
+        existing_cfg = parse_camera_config(json.loads(cfg_reply.json_blob)) if cfg_reply.present else {}
+    except Exception as exc:
+        return {"error": f"Could not get camera config from daemon: {exc}"}
 
-    camera_dir = Path(camera_dir_str)
+    updated_cfg = dict(existing_cfg)
+    updated_cfg["playfield"] = playfield
 
-    # Write config.json atomically
-    from aprilcam.camera.camera_config import save_camera_config
+    try:
+        reply = client.set_camera_config(camera_id, json.dumps(updated_cfg))
+        if not reply.ok:
+            return {"error": "set_camera_config RPC returned ok=False"}
+    except Exception as exc:
+        return {"error": f"Could not set camera config on daemon: {exc}"}
 
-    save_camera_config(camera_dir, {"playfield": playfield})
     return {
         "camera_id": camera_id,
         "playfield": playfield,
@@ -777,42 +817,21 @@ def _handle_capture_frame(
 
 
 def _frames_from_daemon(camera_id: str, count: int):
-    """Yield up to *count* decoded BGR frames from the daemon data socket.
+    """Yield up to *count* BGR frames from the daemon via gRPC CaptureFrame.
 
-    Connects to <socket_dir>/<camera_id>/data.sock, reads msgpack frames,
-    and yields numpy arrays.  Closes the socket when done or on error.
+    The daemon is the sole opener of camera hardware; no cv2.VideoCapture(device_index)
+    call is made here.
     """
-    import socket as _socket
-    import numpy as np
-    import cv2 as cv
-    from aprilcam.daemon.protocol import read_frame
-
+    client = _ensure_daemon_client()
     info = _cam_info.get(camera_id)
-    if info is None:
-        return
-
-    sock_path = info.get("data_socket")
-    if not sock_path:
-        return
-
-    sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-    try:
-        sock.connect(sock_path)
-        for _ in range(count):
-            try:
-                msg = read_frame(sock)
-            except ConnectionError:
-                break
-            if msg.frame_jpeg:
-                buf = np.frombuffer(bytes(msg.frame_jpeg), dtype=np.uint8)
-                frame = cv.imdecode(buf, cv.IMREAD_COLOR)
-                if frame is not None:
-                    yield frame
-    finally:
+    cam_name = info.get("cam_name") if info else camera_id
+    for _ in range(count):
         try:
-            sock.close()
-        except OSError:
-            pass
+            frame = client.capture_frame(cam_name)
+            if frame is not None:
+                yield frame
+        except Exception:
+            break
 
 
 def _handle_create_playfield(
@@ -836,40 +855,34 @@ def _handle_create_playfield(
 
         poly = pf.get_polygon()
 
-        # Fallback: if tag-based detection failed, try the stored camera calibration.
-        # A calibrated camera already has a homography; project the four field corners
-        # from world space back to pixel space to build the polygon.
+        # Fallback: if tag-based detection failed, try the stored camera calibration
+        # via GetCalibration RPC (no local file access).
         stored_cal = None
         stored_H = None
         stored_field_w = None
         stored_field_h = None
         if poly is None:
             try:
-                from aprilcam.calibration.calibration import (
-                    load_calibration_from_camera_dir,
-                )
-                info = _cam_info.get(camera_id, {})
-                _camera_dir = info.get("camera_dir", "")
-                cam_dir = Path(_camera_dir) if _camera_dir else None
-                cal = load_calibration_from_camera_dir(cam_dir) if cam_dir is not None else None
-                if cal is not None and cal.homography is not None:
-                    # Field dimensions the stored homography was calibrated
-                    # against — sourced from the linked playfield definition via
-                    # the loaded calibration, never a hardcoded default.
-                    fw = cal.playfield_width_cm
-                    fh = cal.playfield_height_cm
-                    # Invert H to project world corners → pixel corners
-                    H_inv = np.linalg.inv(cal.homography)
-                    world_corners = np.array([[0,0],[fw,0],[fw,fh],[0,fh]], dtype=np.float64)
-                    px_corners = []
-                    for wx, wy in world_corners:
-                        v = H_inv @ np.array([wx, wy, 1.0])
-                        px_corners.append([v[0]/v[2], v[1]/v[2]])
-                    poly = np.array(px_corners, dtype=np.float32)
-                    stored_cal = cal
-                    stored_H = cal.homography
-                    stored_field_w = fw
-                    stored_field_h = fh
+                _client = _ensure_daemon_client()
+                cal_reply = _client.get_calibration(camera_id)
+                if cal_reply.present:
+                    cal_dict = json.loads(cal_reply.json_blob)
+                    cal = parse_calibration_from_dict(cal_dict)
+                    if cal is not None and cal.homography is not None:
+                        fw = cal.playfield_width_cm
+                        fh = cal.playfield_height_cm
+                        # Invert H to project world corners → pixel corners
+                        H_inv = np.linalg.inv(cal.homography)
+                        world_corners = np.array([[0,0],[fw,0],[fw,fh],[0,fh]], dtype=np.float64)
+                        px_corners = []
+                        for wx, wy in world_corners:
+                            v = H_inv @ np.array([wx, wy, 1.0])
+                            px_corners.append([v[0]/v[2], v[1]/v[2]])
+                        poly = np.array(px_corners, dtype=np.float32)
+                        stored_cal = cal
+                        stored_H = cal.homography
+                        stored_field_w = fw
+                        stored_field_h = fh
             except Exception:
                 pass
 
@@ -978,49 +991,34 @@ def _handle_calibrate_playfield(
         entry.field_spec = field_spec
         entry.homography = H
 
-        # Persist calibration into the daemon's per-camera directory.
-        # camera_dir is returned by the daemon at open_camera time, so it is
-        # always an absolute path regardless of the MCP server's CWD.
-        per_camera_path: str | None = None
+        # Persist calibration via SetCalibration RPC (daemon writes the file).
         try:
             camera_id = entry.camera_id
-            cap = registry.get(camera_id)
-            import cv2
-            cap_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            cap_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-            from aprilcam.camera.camutil import get_device_name
-            from aprilcam.calibration.calibration import (
-                CameraCalibration,
-                save_calibration_to_camera_dir,
+            from aprilcam.calibration.calibration import CameraCalibration
+
+            cal = CameraCalibration(
+                device_name=camera_id,
+                resolution=(0, 0),
+                homography=H,
             )
+            # Prefer real device_name from _cam_info if available.
+            cam_name = _cam_info.get(camera_id, {}).get("cam_name", camera_id)
+            cal.device_name = cam_name
 
-            # Resolve device name from camera index
-            cam_idx: int | None = None
-            if camera_id.startswith("cam_"):
-                try:
-                    cam_idx = int(camera_id.split("_", 1)[1])
-                except (ValueError, IndexError):
-                    pass
-            dev_name = get_device_name(cam_idx) if cam_idx is not None else None
-
-            camera_dir_str = _cam_info.get(camera_id, {}).get("camera_dir", "")
-            if dev_name and cap_w and cap_h and camera_dir_str:
-                cal = CameraCalibration(
-                    device_name=dev_name,
-                    resolution=(cap_w, cap_h),
-                    homography=H,
+            _client = _ensure_daemon_client()
+            cal_dict = cal.to_dict()
+            cal_dict["playfield_width_cm"] = field_spec.width_cm
+            cal_dict["playfield_height_cm"] = field_spec.height_cm
+            set_reply = _client.set_calibration(cam_name, json.dumps(cal_dict))
+            if not set_reply.ok:
+                import logging
+                logging.getLogger("aprilcam").warning(
+                    "SetCalibration RPC returned ok=False for camera '%s'", cam_name
                 )
-                pc_path = save_calibration_to_camera_dir(
-                    cal,
-                    camera_dir_str,
-                    field_width_cm=field_spec.width_cm,
-                    field_height_cm=field_spec.height_cm,
-                )
-                per_camera_path = str(pc_path)
         except Exception as _persist_exc:
             import logging
-            logging.getLogger("aprilcam").warning("Failed to persist calibration: %s", _persist_exc)
+            logging.getLogger("aprilcam").warning("Failed to persist calibration via RPC: %s", _persist_exc)
 
         result = {
             "playfield_id": playfield_id,
@@ -1043,20 +1041,22 @@ def _handle_start_detection(
     robot_tag_id: Optional[int] = None,
     gripper_offset_cm: float = 14.0,
 ) -> dict:
-    """Core logic for start_detection — returns status dict or error dict."""
+    """Core logic for start_detection — returns status dict or error dict.
+
+    All camera sources are daemon-owned.  Direct cv2.VideoCapture(device_index)
+    calls are prohibited here; the daemon's CameraPipeline is the sole camera
+    opener.  DaemonCapture wraps gRPC CaptureFrame so DetectionLoop can call
+    .read() as usual.
+    """
     try:
         if source_id in detection_registry:
             return {"error": f"Detection already running on '{source_id}'"}
-
-        import cv2
 
         # Resolve source to a capture object and optional playfield data
         cap = None
         homography = None
         playfield_poly = None
-        camera_id: str | None = None  # the registry handle to re-open on stop
-        camera_index: int | None = None  # real device index (if applicable)
-        exclusive_cap = None  # set when we open our own exclusive camera
+        camera_id: str | None = None
 
         try:
             pf_entry = playfield_registry.get(source_id)
@@ -1086,35 +1086,6 @@ def _handle_start_detection(
                 if _assoc_poly is not None:
                     playfield_poly = _assoc_poly
 
-        # For real cameras (cam_N handles), open an exclusive capture to
-        # avoid frame contention with other MCP tools reading the same handle.
-        if camera_id and camera_id.startswith("cam_"):
-            try:
-                camera_index = int(camera_id.split("_", 1)[1])
-            except (ValueError, IndexError):
-                camera_index = None
-
-            if camera_index is not None:
-                # Release the shared camera so the detection loop gets exclusive access
-                try:
-                    registry.close(camera_id)
-                except KeyError:
-                    pass
-
-                exclusive_cap = cv2.VideoCapture(camera_index)
-                if exclusive_cap.isOpened():
-                    cap = exclusive_cap
-                else:
-                    # Re-open shared camera on failure
-                    exclusive_cap = None
-                    try:
-                        shared_cap = cv2.VideoCapture(camera_index)
-                        if shared_cap.isOpened():
-                            registry.open(shared_cap, handle=camera_id)
-                            cap = registry.get(camera_id)
-                    except Exception:
-                        pass
-
         # Daemon-owned cameras have None in the registry; wrap with DaemonCapture
         # so DetectionLoop can call .read() via gRPC.
         if cap is None and camera_id is not None:
@@ -1125,7 +1096,7 @@ def _handle_start_detection(
                 return {"error": f"Cannot reach daemon for camera '{camera_id}': {exc}"}
 
         cam = AprilCam(
-            index=camera_index if camera_index is not None else 0,
+            index=0,
             backend=None,
             speed_alpha=0.3,
             family=family,
@@ -1134,7 +1105,7 @@ def _handle_start_detection(
             use_clahe=use_clahe,
             use_sharpen=use_sharpen,
             headless=True,
-            cap=cv2.VideoCapture(),
+            cap=None,
             homography=homography,
             playfield_poly_init=playfield_poly,
         )
@@ -1158,10 +1129,8 @@ def _handle_start_detection(
             robot_tag_id=robot_tag_id,
             gripper_offset_cm=gripper_offset_cm,
         )
-        # Remember state so stop_detection can re-open the shared camera
+        # Store camera_id so stop_detection can reference it if needed
         detection_registry[source_id]._camera_id = camera_id  # type: ignore[attr-defined]
-        detection_registry[source_id]._camera_index = camera_index  # type: ignore[attr-defined]
-        detection_registry[source_id]._exclusive_cap = exclusive_cap  # type: ignore[attr-defined]
 
         return {"source_id": source_id, "status": "started"}
     except Exception as exc:
@@ -1169,31 +1138,17 @@ def _handle_start_detection(
 
 
 def _handle_stop_detection(source_id: str) -> dict:
-    """Core logic for stop_detection — returns status dict or error dict."""
+    """Core logic for stop_detection — returns status dict or error dict.
+
+    Daemon-owned cameras need no client-side camera release; the daemon
+    holds the hardware.  This teardown only stops the DetectionLoop.
+    """
     try:
         entry = detection_registry.pop(source_id, None)
         if entry is None:
             return {"error": f"No detection running on '{source_id}'"}
 
         entry.loop.stop()
-
-        # Release the exclusive capture and re-open the shared camera
-        exclusive_cap = getattr(entry, "_exclusive_cap", None)
-        if exclusive_cap is not None:
-            try:
-                exclusive_cap.release()
-            except Exception:
-                pass
-        camera_id = getattr(entry, "_camera_id", None)
-        camera_index = getattr(entry, "_camera_index", 0)
-        if camera_id is not None:
-            try:
-                import cv2
-                shared_cap = cv2.VideoCapture(camera_index)
-                if shared_cap.isOpened():
-                    registry.open(shared_cap, handle=camera_id)
-            except Exception:
-                pass
 
         return {"source_id": source_id, "status": "stopped"}
     except Exception as exc:
@@ -1777,8 +1732,19 @@ def _handle_start_live_view(
         cam_name: str = info.get("cam_name", camera_id)
 
         # Spawn the viewer as a detached process; it subscribes to the daemon.
+        # When connected via TCP, forward the daemon address so the subprocess
+        # can reach the same remote daemon rather than trying localhost.
+        cmd = [sys.executable, "-m", "aprilcam", "view", cam_name]
+        try:
+            dc = _ensure_daemon_client()
+            if dc._unix_path is None:
+                # TCP connection — viewer needs explicit host/port
+                cmd += ["--daemon-host", dc._host, "--daemon-port", str(dc._port)]
+        except Exception:
+            pass  # no daemon client yet; viewer will use its own discovery
+
         subprocess.Popen(
-            [sys.executable, "-m", "aprilcam", "view", cam_name],
+            cmd,
             start_new_session=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -1846,10 +1812,11 @@ def _image_result_to_mcp(result: dict) -> list[TextContent | ImageContent]:
 
 @server.tool()
 async def get_version() -> list[TextContent]:
-    """Return the aprilcam package version.
+    """Return the aprilcam package version and active daemon connection target.
 
     Returns:
-        A JSON object with ``version`` (str).
+        A JSON object with ``version`` (str), ``active_daemon_host`` (str or
+        null when not connected), and ``active_daemon_port`` (int or null).
     """
     from importlib.metadata import version as _pkg_version
 
@@ -1857,7 +1824,134 @@ async def get_version() -> list[TextContent]:
         ver = _pkg_version("aprilcam")
     except Exception:
         ver = "unknown"
-    return [TextContent(type="text", text=json.dumps({"version": ver}))]
+
+    active_host: Optional[str] = None
+    active_port: Optional[int] = None
+    if _daemon_client is not None:
+        if _daemon_client._unix_path:
+            active_host = f"unix:{_daemon_client._unix_path}"
+            active_port = None
+        else:
+            active_host = _daemon_client._host
+            active_port = _daemon_client._port
+
+    return [TextContent(type="text", text=json.dumps({
+        "version": ver,
+        "active_daemon_host": active_host,
+        "active_daemon_port": active_port,
+    }))]
+
+
+@server.tool()
+async def connect_daemon(
+    host: Optional[str] = None,
+    port: int = 5280,
+    local: bool = False,
+) -> list[TextContent]:
+    """Switch the MCP server's daemon connection to a new target.
+
+    Tears down all active detection loops, live views, camera registrations,
+    and playfield/path/frame state, then reconnects to the specified target.
+
+    Args:
+        host: Hostname or IP of the daemon.  When ``None`` (default), runs
+            mDNS discovery (``resolve_daemon_target``).  Ignored when *local*
+            is ``True``.
+        port: TCP port (default 5280).  Ignored when *local* is ``True``.
+        local: When ``True``, force a Unix-socket connection to the local
+            daemon regardless of *host* / *port*.
+
+    Returns:
+        On success: ``{"target": "<host>:<port>|unix:<path>",
+        "cameras": [{"index":..,"name":..,"slug":..},...]}`` listing the new
+        daemon's available hardware cameras.
+        On error: ``{"error": "<message>"}``.
+    """
+    global _daemon_client
+    import logging
+    _log = logging.getLogger("aprilcam")
+
+    # --- Tear down session state ---
+    # 1. Stop all detection loops.
+    for _det_src in list(detection_registry.keys()):
+        try:
+            detection_registry[_det_src].loop.stop()
+        except Exception:
+            pass
+    detection_registry.clear()
+
+    # 2. Stop all live views.
+    for _lv_entry in list(live_view_registry.values()):
+        try:
+            _lv_entry.process.stop()
+        except Exception:
+            pass
+    live_view_registry.clear()
+
+    # 3. Release all cameras.
+    registry.close_all()
+    _cam_info.clear()
+
+    # 4. Clear playfield/path/frame/composite registries.
+    playfield_registry._playfields.clear()
+    path_registry._paths.clear()
+    frame_registry.clear()
+    composite_manager._composites.clear()
+
+    # 5. Close old gRPC channel.
+    if _daemon_client is not None:
+        try:
+            _daemon_client.close()
+        except Exception:
+            pass
+        _daemon_client = None
+
+    # --- Connect to new target ---
+    try:
+        if local:
+            config = Config.load()
+            dc = DaemonControl(unix_path=str(config.socket_dir / "control.sock"))
+            dc.connect()
+        elif host is None:
+            # Re-run discovery via resolver.
+            config = Config.load()
+            from aprilcam.client.discovery import resolve_daemon_target
+
+            class _DiscoveryProxy:
+                daemon_host = None
+                daemon_port = port
+
+            _h, _p, _unix = resolve_daemon_target(config, _DiscoveryProxy())
+            dc = DaemonControl(unix_path=_unix, host=_h, port=_p)
+            dc.connect()
+        else:
+            dc = DaemonControl(host=host, port=port)
+            dc.connect()
+
+        # Probe the connection.
+        dc.list_cameras()
+        _daemon_client = dc
+    except Exception as exc:
+        return [TextContent(type="text", text=json.dumps({"error": f"Cannot connect to daemon: {exc}"}))]
+
+    # Populate playfield registry from new daemon.
+    _on_daemon_connect(_daemon_client)
+
+    # Report target.
+    if _daemon_client._unix_path:
+        target = f"unix:{_daemon_client._unix_path}"
+    else:
+        target = f"{_daemon_client._host}:{_daemon_client._port}"
+
+    # Enumerate cameras on new daemon.
+    cameras: list[dict] = []
+    try:
+        devices = _daemon_client.enumerate_cameras()
+        cameras = [{"index": d.index, "name": d.name, "slug": d.slug} for d in devices]
+    except Exception as exc:
+        _log.warning("connect_daemon: EnumerateCameras failed: %s", exc)
+
+    return [TextContent(type="text", text=json.dumps({"target": target, "cameras": cameras}))]
 
 
 @server.tool()
@@ -2081,24 +2175,24 @@ async def calibrate_playfield(
             ))]
 
         camera_id = entry.camera_id
-        camera_dir_str = _cam_info.get(camera_id, {}).get("camera_dir", "")
-        if not camera_dir_str:
-            return [TextContent(type="text", text=json.dumps(
-                {"error": f"No camera_dir recorded for camera '{camera_id}'"}
-            ))]
-
-        camera_dir = Path(camera_dir_str)
-        camera_slug = camera_dir.name  # slug == dir name
+        # The camera slug is the camera_id itself (the daemon returns it as cam_name).
+        camera_slug = camera_id
 
         try:
             from aprilcam.calibration.calibration import (
                 calibrate_from_playfield_def,
                 PlayfieldConfigError,
             )
-            cap = DaemonCapture(_ensure_daemon_client(), camera_id)
+            client = _ensure_daemon_client()
+
+            # Fetch config from daemon (no local disk read).
+            cfg_reply = client.get_camera_config(camera_id)
+            cam_cfg = parse_camera_config(json.loads(cfg_reply.json_blob)) if cfg_reply.present else {}
+
+            cap = DaemonCapture(client, camera_id)
             cal = calibrate_from_playfield_def(
                 cap=cap,
-                camera_dir=camera_dir,
+                camera_dir=None,  # no local file access
                 camera_slug=camera_slug,
                 playfield_def_registry=playfield_def_registry,
                 camera_position=CameraPosition(
@@ -2106,7 +2200,25 @@ async def calibrate_playfield(
                     y_offset=camera_y_offset_cm,
                     height=camera_height_cm,
                 ),
+                camera_config=cam_cfg,  # pre-loaded via RPC
+                skip_save=True,          # MCP server persists via RPC below
             )
+
+            # Persist calibration via SetCalibration RPC (daemon writes the file).
+            cal_dict = cal.to_dict()
+            cal_json = json.dumps(cal_dict)
+            set_reply = client.set_calibration(camera_id, cal_json)
+            if not set_reply.ok:
+                import logging
+                logging.getLogger("aprilcam").warning(
+                    "SetCalibration RPC returned ok=False for camera '%s'", camera_id
+                )
+
+            # Persist updated config (with merged resolution/device_name) via RPC.
+            merged_cfg = getattr(cal, "_merged_config", None)
+            if merged_cfg is not None:
+                client.set_camera_config(camera_id, json.dumps(merged_cfg))
+
         except PlayfieldConfigError as exc:
             return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
         except Exception as exc:
@@ -2712,15 +2824,14 @@ async def stream_tags(
                 {"error": f"Detection already running on '{source_id}'"}
             ))]
 
-        import cv2
-
-        # Resolve source to a capture object and optional playfield data
+        # Resolve source to a capture object and optional playfield data.
+        # All camera sources are daemon-owned; no direct cv2.VideoCapture(device)
+        # call is made here.  DaemonCapture wraps gRPC CaptureFrame so
+        # DetectionLoop can call .read() as usual.
         cap = None
         homography = None
         playfield_poly = None
         camera_id: str | None = None
-        camera_index: int | None = None
-        exclusive_cap = None
 
         try:
             pf_entry = playfield_registry.get(source_id)
@@ -2753,32 +2864,6 @@ async def stream_tags(
                 if _assoc_poly is not None:
                     playfield_poly = _assoc_poly
 
-        # For real cameras (cam_N handles), open an exclusive capture
-        if camera_id and camera_id.startswith("cam_"):
-            try:
-                camera_index = int(camera_id.split("_", 1)[1])
-            except (ValueError, IndexError):
-                camera_index = None
-
-            if camera_index is not None:
-                try:
-                    registry.close(camera_id)
-                except KeyError:
-                    pass
-
-                exclusive_cap = cv2.VideoCapture(camera_index)
-                if exclusive_cap.isOpened():
-                    cap = exclusive_cap
-                else:
-                    exclusive_cap = None
-                    try:
-                        shared_cap = cv2.VideoCapture(camera_index)
-                        if shared_cap.isOpened():
-                            registry.open(shared_cap, handle=camera_id)
-                            cap = registry.get(camera_id)
-                    except Exception:
-                        pass
-
         # Daemon-owned cameras have None in the registry; wrap with DaemonCapture
         if cap is None and camera_id is not None:
             try:
@@ -2790,7 +2875,7 @@ async def stream_tags(
                 ))]
 
         cam = AprilCam(
-            index=camera_index if camera_index is not None else 0,
+            index=0,
             backend=None,
             speed_alpha=0.3,
             family=family,
@@ -2799,7 +2884,7 @@ async def stream_tags(
             use_clahe=False,
             use_sharpen=False,
             headless=True,
-            cap=cv2.VideoCapture(),
+            cap=None,
             homography=homography,
             playfield_poly_init=playfield_poly,
         )
@@ -2824,9 +2909,8 @@ async def stream_tags(
             robot_tag_id=robot_tag_id,
             gripper_offset_cm=gripper_offset_cm,
         )
+        # Store camera_id so stop_stream can reference it if needed
         detection_registry[source_id]._camera_id = camera_id  # type: ignore[attr-defined]
-        detection_registry[source_id]._camera_index = camera_index  # type: ignore[attr-defined]
-        detection_registry[source_id]._exclusive_cap = exclusive_cap  # type: ignore[attr-defined]
 
         return [TextContent(type="text", text=json.dumps(
             {"stream_id": source_id, "operations": operations, "status": "started"}
@@ -2860,24 +2944,8 @@ async def stop_stream(source_id: str) -> list[TextContent]:
             ))]
 
         entry.loop.stop()
-
-        # Release the exclusive capture and re-open the shared camera
-        exclusive_cap = getattr(entry, "_exclusive_cap", None)
-        if exclusive_cap is not None:
-            try:
-                exclusive_cap.release()
-            except Exception:
-                pass
-        camera_id = getattr(entry, "_camera_id", None)
-        camera_index = getattr(entry, "_camera_index", 0)
-        if camera_id is not None:
-            try:
-                import cv2
-                shared_cap = cv2.VideoCapture(camera_index)
-                if shared_cap.isOpened():
-                    registry.open(shared_cap, handle=camera_id)
-            except Exception:
-                pass
+        # Daemon-owned cameras need no client-side release; the daemon holds
+        # the hardware.
 
         return [TextContent(type="text", text=json.dumps(
             {"stream_id": source_id, "status": "stopped"}
@@ -3606,9 +3674,9 @@ def _handle_create_path(playfield_id: str, waypoints_json: str, name: str = "") 
 
     path = path_registry.create(playfield_id, waypoints, name=name)
 
-    # Persist current path list to paths.json so the live view subscriber
-    # can reload it without IPC.
-    _write_paths_json(playfield_id)
+    # Push current path list to daemon via SetPaths RPC so the live view
+    # subscriber can reload it without IPC.
+    _push_paths_rpc(playfield_id)
 
     return {"path_id": path.path_id}
 
@@ -3619,8 +3687,8 @@ def _handle_delete_path(path_id: str) -> dict:
     if deleted is None:
         return {"error": f"Unknown path_id '{path_id}'"}
 
-    # Persist updated path list to paths.json.
-    _write_paths_json(deleted.playfield_id)
+    # Push updated path list to daemon.
+    _push_paths_rpc(deleted.playfield_id)
 
     return {"deleted": True, "path_id": path_id}
 
@@ -3643,8 +3711,8 @@ def _handle_clear_paths(playfield_id: str) -> dict:
         return {"error": f"Unknown playfield_id '{playfield_id}'"}
     cleared = path_registry.clear_for(playfield_id)
 
-    # Persist empty path list to paths.json.
-    _write_paths_json(playfield_id)
+    # Push empty path list to daemon.
+    _push_paths_rpc(playfield_id)
 
     return {"cleared": cleared}
 
@@ -4372,10 +4440,28 @@ def main(argv: list[str] | None = None) -> None:
     due to an exception.
 
     Args:
-        argv: Unused; accepted for CLI entry-point compatibility.
+        argv: Optional argument list (defaults to ``sys.argv[1:]``).
+            Supports ``--daemon-host HOST`` and ``--daemon-port PORT``
+            to override daemon discovery.
     """
-    cfg = Config.load()
-    playfield_def_registry.load_all(cfg.playfields_dir)
+    import argparse
+    from aprilcam.cli._daemon import add_daemon_args
+
+    global _daemon_host_override, _daemon_port_override
+
+    parser = argparse.ArgumentParser(
+        prog="aprilcam mcp",
+        description="Run the AprilCam MCP server on stdio transport.",
+        add_help=False,  # don't interfere with MCP stdio protocol
+    )
+    add_daemon_args(parser)
+    # Parse only the known args so that any MCP-specific flags pass through
+    known, _unknown = parser.parse_known_args(argv if argv is not None else sys.argv[1:])
+    if known.daemon_host:
+        _daemon_host_override = known.daemon_host
+    if known.daemon_port:
+        _daemon_port_override = known.daemon_port
+
     try:
         server.run(transport="stdio")
     finally:

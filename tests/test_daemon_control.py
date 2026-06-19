@@ -254,3 +254,85 @@ class TestDaemonControlGetTag:
     def test_get_tag_empty_frame_returns_none(self):
         dc = self._dc_with_tag_ids([])
         assert dc.get_tag("cam-0", 1) is None
+
+
+# ---------------------------------------------------------------------------
+# Regression: gRPC .local hostname resolution (Defect B — 014-010)
+#
+# gRPC's c-ares resolver does not perform multicast DNS, so .local hostnames
+# that the OS resolves fine via mDNS/Bonjour fail inside gRPC.  The fix
+# resolves the host to a numeric IP via socket.getaddrinfo() before building
+# the gRPC target string.
+# ---------------------------------------------------------------------------
+
+
+class TestResolveHostToIp:
+    """DaemonControl._resolve_host_to_ip() resolves hostnames via the OS resolver."""
+
+    def test_dotlocal_hostname_resolved_to_ip(self, monkeypatch):
+        """.local hostnames are resolved to a numeric IP via socket.getaddrinfo."""
+        import socket
+        from aprilcam.client.control import DaemonControl
+
+        mock_results = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.42", 5280))
+        ]
+        monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **kw: mock_results)
+
+        ip = DaemonControl._resolve_host_to_ip("vidar.local", 5280)
+        assert ip == "192.168.1.42"
+
+    def test_numeric_ip_passes_through_unchanged(self, monkeypatch):
+        """A numeric IPv4 address is returned without calling getaddrinfo."""
+        import socket
+        from aprilcam.client.control import DaemonControl
+
+        called = []
+        monkeypatch.setattr(
+            socket, "getaddrinfo", lambda *a, **kw: called.append(a) or []
+        )
+
+        ip = DaemonControl._resolve_host_to_ip("10.0.0.5", 5280)
+        assert ip == "10.0.0.5"
+        assert not called, "getaddrinfo must not be called for numeric IPs"
+
+    def test_resolution_failure_raises_os_error(self, monkeypatch):
+        """When getaddrinfo fails, a clear OSError is raised."""
+        import socket
+        from aprilcam.client.control import DaemonControl
+
+        def _fail(*a, **kw):
+            raise OSError("Domain name not found")
+
+        monkeypatch.setattr(socket, "getaddrinfo", _fail)
+
+        with pytest.raises(OSError, match="Cannot resolve host"):
+            DaemonControl._resolve_host_to_ip("unknown.local", 5280)
+
+    def test_connect_uses_resolved_ip_in_grpc_target(self, monkeypatch):
+        """connect() passes the resolved numeric IP to grpc.insecure_channel."""
+        import socket
+        import grpc
+        from aprilcam.client.control import DaemonControl
+
+        mock_results = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.42", 5280))
+        ]
+        monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **kw: mock_results)
+
+        captured_targets = []
+        original_insecure_channel = grpc.insecure_channel
+
+        def _mock_channel(target, *a, **kw):
+            captured_targets.append(target)
+            return MagicMock()
+
+        monkeypatch.setattr(grpc, "insecure_channel", _mock_channel)
+
+        dc = DaemonControl(host="vidar.local", port=5280)
+        dc.connect()
+
+        assert len(captured_targets) == 1
+        assert captured_targets[0] == "192.168.1.42:5280", (
+            f"Expected IP-based gRPC target, got: {captured_targets[0]}"
+        )

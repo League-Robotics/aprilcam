@@ -1,13 +1,13 @@
 ---
-id: '014-005'
-title: MCP server — wire file-proxy RPCs and remove local disk access
-status: open
+id: 014-005
+title: "MCP server \u2014 wire file-proxy RPCs and remove local disk access"
+status: done
 use-cases:
-  - SUC-005
-  - SUC-003
+- SUC-005
+- SUC-003
 depends-on:
-  - 014-003
-  - 014-004
+- 014-003
+- 014-004
 ---
 
 # 014-005: MCP server — wire file-proxy RPCs and remove local disk access
@@ -24,28 +24,28 @@ Update `server/mcp_server.py` (and `server/web_server.py` where applicable) to:
 
 ## Acceptance Criteria
 
-- [ ] `calibration/calibration.py` has a new `parse_calibration_from_dict(d: dict)`
+- [x] `calibration/calibration.py` has a new `parse_calibration_from_dict(d: dict)`
       function (pure, no I/O) that accepts the JSON blob dict and returns a
       `CameraCalibration` object. It reuses the existing `CameraCalibration.from_dict`.
-- [ ] `camera/camera_config.py` has a new `parse_camera_config(d: dict) -> dict`
+- [x] `camera/camera_config.py` has a new `parse_camera_config(d: dict) -> dict`
       function (trivially returns the dict; validates required keys).
-- [ ] `_handle_open_camera` in `mcp_server.py` calls `GetCalibration` and
+- [x] `_handle_open_camera` in `mcp_server.py` calls `GetCalibration` and
       `GetCameraConfig` RPCs instead of using `_cam_info["camera_dir"]` to
       read local files.
-- [ ] `calibrate_playfield` tool calls `SetCalibration` RPC to persist the
+- [x] `calibrate_playfield` tool calls `SetCalibration` RPC to persist the
       calibration result instead of writing a local file.
-- [ ] `set_camera_playfield` tool calls `SetCameraConfig` RPC.
-- [ ] Path tools (`create_path`, `list_paths`, `delete_path`, `clear_paths`)
+- [x] `set_camera_playfield` tool calls `SetCameraConfig` RPC.
+- [x] Path tools (`create_path`, `list_paths`, `delete_path`, `clear_paths`)
       call `GetPaths`/`SetPaths` RPCs.
-- [ ] On daemon connect (inside `_ensure_daemon_client()` or a new
+- [x] On daemon connect (inside `_ensure_daemon_client()` or a new
       `_on_daemon_connect()` hook): call `ListPlayfields` RPC and populate
       the `playfield_def_registry` module-level object. This replaces
       `playfield_def_registry.load_all(config.playfields_dir)` (which assumed
       local disk access to the daemon's files).
-- [ ] `grep -n "camera_dir\|paths_file" src/aprilcam/server/mcp_server.py`
+- [x] `grep -n "camera_dir\|paths_file" src/aprilcam/server/mcp_server.py`
       returns zero references that assume a local-disk path to daemon files.
-- [ ] `uv run pytest` passes.
-- [ ] (Optional, if time permits) `web_server.py` updated consistently.
+- [x] `uv run pytest` passes.
+- [x] (Optional, if time permits) `web_server.py` updated consistently (no local-disk refs found).
 
 ## Implementation Plan
 

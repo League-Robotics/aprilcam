@@ -347,3 +347,104 @@ def test_make_grpc_server_no_transports(tmp_path: Path) -> None:
         assert isinstance(server, grpc.Server)
     finally:
         server.stop(grace=0)
+
+
+# ── Tests: EnumerateCameras ───────────────────────────────────────────────────
+
+
+def test_enumerate_cameras_returns_devices(tmp_path: Path, monkeypatch) -> None:
+    """EnumerateCameras calls list_cameras and returns CameraDevice protos."""
+    from aprilcam.camera.camutil import CameraInfo as _CameraInfo
+
+    fake_cams = [
+        _CameraInfo(index=0, name="FaceTime HD Camera (AVFOUNDATION)", device_name="FaceTime HD Camera"),
+        _CameraInfo(index=1, name="OV9782 Global Shutter (AVFOUNDATION)", device_name="OV9782 Global Shutter"),
+    ]
+    monkeypatch.setattr(
+        "aprilcam.camera.camutil.list_cameras",
+        lambda *a, **k: fake_cams,
+    )
+
+    servicer = _make_servicer(tmp_path=tmp_path)
+    response = servicer.EnumerateCameras(aprilcam_pb2.Empty(), _mock_context())
+
+    assert len(response.cameras) == 2
+    assert response.cameras[0].index == 0
+    assert response.cameras[0].name == "FaceTime HD Camera"
+    assert response.cameras[0].slug  # non-empty slug
+
+    assert response.cameras[1].index == 1
+    assert response.cameras[1].name == "OV9782 Global Shutter"
+
+
+def test_enumerate_cameras_slug_is_slugified(tmp_path: Path, monkeypatch) -> None:
+    """EnumerateCameras produces a filesystem-safe slug for each device."""
+    from aprilcam.camera.camutil import CameraInfo as _CameraInfo
+
+    monkeypatch.setattr(
+        "aprilcam.camera.camutil.list_cameras",
+        lambda *a, **k: [
+            _CameraInfo(index=0, name="Arducam OV9782 USB Camera", device_name="Arducam OV9782 USB Camera"),
+        ],
+    )
+
+    servicer = _make_servicer(tmp_path=tmp_path)
+    response = servicer.EnumerateCameras(aprilcam_pb2.Empty(), _mock_context())
+
+    assert len(response.cameras) == 1
+    slug = response.cameras[0].slug
+    # Slug must be lowercase, no spaces, no parentheses
+    assert slug == slug.lower()
+    assert " " not in slug
+    assert "(" not in slug
+
+
+def test_enumerate_cameras_empty(tmp_path: Path, monkeypatch) -> None:
+    """EnumerateCameras returns an empty list when no cameras are found."""
+    monkeypatch.setattr(
+        "aprilcam.camera.camutil.list_cameras",
+        lambda *a, **k: [],
+    )
+
+    servicer = _make_servicer(tmp_path=tmp_path)
+    response = servicer.EnumerateCameras(aprilcam_pb2.Empty(), _mock_context())
+
+    assert len(response.cameras) == 0
+
+
+def test_enumerate_cameras_probe_failure(tmp_path: Path, monkeypatch) -> None:
+    """EnumerateCameras returns INTERNAL status when the probe raises."""
+    monkeypatch.setattr(
+        "aprilcam.camera.camutil.list_cameras",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("OpenCV error")),
+    )
+
+    servicer = _make_servicer(tmp_path=tmp_path)
+    ctx = _mock_context()
+    response = servicer.EnumerateCameras(aprilcam_pb2.Empty(), ctx)
+
+    ctx.set_code.assert_called_once_with(grpc.StatusCode.INTERNAL)
+    assert len(response.cameras) == 0
+
+
+def test_enumerate_cameras_uses_device_name_over_name(tmp_path: Path, monkeypatch) -> None:
+    """When device_name is set, it is preferred over name for the proto message."""
+    from aprilcam.camera.camutil import CameraInfo as _CameraInfo
+
+    monkeypatch.setattr(
+        "aprilcam.camera.camutil.list_cameras",
+        lambda *a, **k: [
+            _CameraInfo(
+                index=2,
+                name="OV9782 Global Shutter (AVFOUNDATION)",
+                device_name="OV9782 Global Shutter",
+            ),
+        ],
+    )
+
+    servicer = _make_servicer(tmp_path=tmp_path)
+    response = servicer.EnumerateCameras(aprilcam_pb2.Empty(), _mock_context())
+
+    # device_name wins over name (which includes backend suffix)
+    assert response.cameras[0].name == "OV9782 Global Shutter"
+    assert "AVFOUNDATION" not in response.cameras[0].name

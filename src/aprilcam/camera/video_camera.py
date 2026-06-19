@@ -51,7 +51,11 @@ class VideoCamera(Camera):
         return self._path
 
     def open(self) -> None:
-        """Open the video file for reading."""
+        """Open the video file for reading.
+
+        DEAD-CODE from MCP path: the MCP server never opens video files
+        directly.  VideoCamera is used only for offline/test playback.
+        """
         if self.is_open:
             return
         cap = cv.VideoCapture(str(self._path))

@@ -33,9 +33,14 @@ def _seed(cameras_dir, uid="avf:0xA", name="Brio 501"):
 class _FakeDC:
     """Minimal DaemonControl stand-in recording the index it was asked to open."""
 
-    def __init__(self):
+    def __init__(self, devices=None):
         self.opened_index = None
         self.closed = False
+        self._devices = devices or []
+
+    def enumerate_cameras(self):
+        """Return pre-configured device list instead of probing hardware."""
+        return self._devices
 
     def open_camera(self, index):
         self.opened_index = index
@@ -62,9 +67,11 @@ def test_view_resolves_enum_number_to_live_index(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         "aprilcam.config.Config.load", classmethod(lambda cls, *a, **k: cfg)
     )
+    # view_cli imports connect_from_args locally inside main(); patch at the
+    # source module so the local import sees the mock.
     monkeypatch.setattr(
-        "aprilcam.client.control.DaemonControl.connect_default",
-        classmethod(lambda cls, *a, **k: fake_dc),
+        "aprilcam.cli._daemon.connect_from_args",
+        lambda config, args: fake_dc,
     )
     # The camera with enum #1 is currently connected at OS index 7.
     monkeypatch.setattr(
@@ -90,9 +97,11 @@ def test_view_unknown_enum_number_errors(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         "aprilcam.config.Config.load", classmethod(lambda cls, *a, **k: cfg)
     )
+    # view_cli imports connect_from_args locally inside main(); patch at the
+    # source module so the local import sees the mock.
     monkeypatch.setattr(
-        "aprilcam.client.control.DaemonControl.connect_default",
-        classmethod(lambda cls, *a, **k: fake_dc),
+        "aprilcam.cli._daemon.connect_from_args",
+        lambda config, args: fake_dc,
     )
     monkeypatch.setattr(
         "aprilcam.camera.identity.resolve_all",
@@ -164,21 +173,20 @@ def test_calibrate_numeric_spec_is_enumeration_number(tmp_path, monkeypatch, cap
         (),
         {"data_dir": tmp_path, "cameras_dir": cameras_dir},
     )()
-    fake_dc = _FakeDC()
+
+    # Enumerate cameras via daemon — camera is at OS index 4.
+    from aprilcam.client.models import CameraDevice
+
+    fake_dc = _FakeDC(devices=[
+        CameraDevice(index=4, name="Brio 501", slug="brio-501"),
+    ])
     monkeypatch.setattr(
         "aprilcam.config.Config.load", classmethod(lambda cls, *a, **k: cfg)
     )
+    # calibrate_cli now calls connect_from_args; patch it at the module level.
     monkeypatch.setattr(
-        "aprilcam.client.control.DaemonControl.connect_default",
-        classmethod(lambda cls, *a, **k: fake_dc),
-    )
-    # Live device list (camutil) — the camera is at OS index 4.
-    from aprilcam.camera.camutil import CameraInfo
-
-    monkeypatch.setattr(
-        calibrate_cli,
-        "list_cameras",
-        lambda *a, **k: [CameraInfo(index=4, name="Brio 501", device_name="Brio 501")],
+        "aprilcam.cli.calibrate_cli.connect_from_args",
+        lambda config, args: fake_dc,
     )
     # Enumeration #1 is connected at OS index 4.
     monkeypatch.setattr(
@@ -206,20 +214,20 @@ def test_calibrate_unknown_enumeration_number_skips(tmp_path, monkeypatch, capsy
         (),
         {"data_dir": tmp_path, "cameras_dir": cameras_dir},
     )()
-    fake_dc = _FakeDC()
+
+    # Enumerate cameras via daemon — camera is at OS index 4.
+    from aprilcam.client.models import CameraDevice
+
+    fake_dc = _FakeDC(devices=[
+        CameraDevice(index=4, name="Brio 501", slug="brio-501"),
+    ])
     monkeypatch.setattr(
         "aprilcam.config.Config.load", classmethod(lambda cls, *a, **k: cfg)
     )
+    # calibrate_cli now calls connect_from_args; patch it at the module level.
     monkeypatch.setattr(
-        "aprilcam.client.control.DaemonControl.connect_default",
-        classmethod(lambda cls, *a, **k: fake_dc),
-    )
-    from aprilcam.camera.camutil import CameraInfo
-
-    monkeypatch.setattr(
-        calibrate_cli,
-        "list_cameras",
-        lambda *a, **k: [CameraInfo(index=4, name="Brio 501", device_name="Brio 501")],
+        "aprilcam.cli.calibrate_cli.connect_from_args",
+        lambda config, args: fake_dc,
     )
     monkeypatch.setattr(
         "aprilcam.camera.identity.resolve_all",

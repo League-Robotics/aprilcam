@@ -120,6 +120,9 @@ class Camera:
         backends = [self._backend] if self._backend is not None else default_backends()
         cap: Optional[cv.VideoCapture] = None
         for be in backends:
+            # DAEMON-ONLY: Camera objects are only instantiated by the daemon's
+            # CameraPipeline.  The MCP server never constructs Camera directly;
+            # it talks to the daemon via gRPC instead.
             c = cv.VideoCapture(self._index, be)
             if c.isOpened():
                 cap = c

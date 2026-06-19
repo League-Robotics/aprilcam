@@ -1,123 +1,36 @@
 from __future__ import annotations
 
 import argparse
-from typing import Dict, List, Optional
+from typing import List, Optional
 
-from ..camera.camutil import (
-    CameraInfo,
-    list_cameras,
-    default_backends,
-    select_camera_by_pattern,
-    macos_avfoundation_device_names,
-)
-from ..camera.identity import CameraIdentity, resolve_identity
-from ..camera.registry import CameraRecord, CameraRegistry
 from ..config import AppConfig, Config
-
-
-def _live_identity_by_uid(cams: List[CameraInfo]) -> Dict[str, CameraInfo]:
-    """Map ``unique_id`` → live ``CameraInfo`` for the connected cameras.
-
-    Each live camera's stable identity is resolved (using any identity fields
-    already attached by ``list_cameras``, else re-resolving from the index) so
-    it can be matched against persisted registry records by ``unique_id``.
-    """
-    by_uid: Dict[str, CameraInfo] = {}
-    for cam in cams:
-        uid = cam.unique_id
-        if not uid:
-            try:
-                ident = resolve_identity(cam.index, name=cam.device_name or cam.name)
-                uid = ident.unique_id
-                cam.unique_id = uid
-            except Exception:
-                uid = None
-        if uid:
-            by_uid.setdefault(uid, cam)
-    return by_uid
-
-
-def _render_registry(
-    records: List[CameraRecord],
-    live_by_uid: Dict[str, CameraInfo],
-    *,
-    details: bool = False,
-) -> None:
-    """Print every registered camera with its enumeration number.
-
-    Exactly ONE number is printed per camera: its **enumeration number** — the
-    stable, user-facing handle a user types into ``aprilcam view`` /
-    ``aprilcam calibrate`` to select that camera. The volatile OS index is no
-    longer shown by default; it appears (in brackets) only under ``--details``
-    for debugging.
-
-    ``records`` only ever contains cameras that have actually connected at
-    least once (the registry no longer fabricates entries for never-connected
-    on-disk dirs — ticket 011-003). Previously-connected-but-now-disconnected
-    cameras are rendered grayed-out (ANSI dim, via ``rich``) and marked
-    offline. Records are ordered by enumeration number so the numbers stay
-    stable in the listing.
-    """
-    from rich.console import Console
-    from rich.text import Text
-
-    console = Console()
-
-    def _sort_key(rec: CameraRecord):
-        return (rec.enum is None, rec.enum if rec.enum is not None else 0)
-
-    sorted_records = sorted(records, key=_sort_key)
-    # Right-align the enumeration number column based on the widest number.
-    width = max(
-        (len(str(r.enum)) for r in sorted_records if r.enum is not None),
-        default=1,
-    )
-
-    for rec in sorted_records:
-        live = live_by_uid.get(rec.unique_id)
-        enum = rec.enum if rec.enum is not None else "?"
-        name = rec.name or rec.dir or rec.unique_id
-        num = f"{enum!s:>{width}}"
-        if live is not None:
-            line = Text()
-            line.append(f"  {num}  ", style="bold")
-            line.append(str(name))
-            if details:
-                line.append(f"  [os index {live.index}]", style="dim")
-            console.print(line)
-        else:
-            line = Text(f"  {num}  {name} (offline)", style="dim")
-            console.print(line)
+from ..client.control import DaemonControl
+from ._daemon import add_daemon_args, connect_from_args
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="cameras",
         description=(
-            "List cameras from the persistent registry. Each camera shows ONE "
-            "number — its stable enumeration number, which is the number you "
-            "type into `aprilcam view` / `aprilcam calibrate` to select it. "
-            "Previously-seen cameras that are now disconnected are shown "
-            "grayed-out as offline while retaining their enumeration number. "
-            "Use --details to also show the volatile OS index. Identity is "
-            "keyed on a "
-            "stable hardware id; for cameras without a serial/UUID the id is "
-            "derived from the USB location path, so moving such a camera to a "
-            "different USB port may make it appear as a new camera. On macOS, "
-            "AVFoundation is only probed for indices 0-1; use CAP_ANY to find "
-            "additional devices."
+            "List cameras available on the daemon host. The daemon probes the "
+            "hardware; no local camera probe is performed by this command. "
+            "Use `aprilcam daemon start` to ensure the daemon is running."
         ),
     )
-    parser.add_argument("--max-cams", type=int, default=10, help="Maximum camera indices to probe (default: 10)")
-    parser.add_argument("--backend", type=str, choices=["auto", "avfoundation", "v4l2", "msmf", "dshow"], default="auto")
-    parser.add_argument("--pattern", type=str, help="Pattern to match camera name (overrides .env CAMERA)")
-    parser.add_argument("--quiet", action="store_true", default=True, help="Reduce OpenCV logging noise (default: on)")
-    parser.add_argument("--verbose", action="store_true", help="Show OpenCV warnings during camera probing")
-    parser.add_argument("--details", action="store_true", help="Show the volatile OS index alongside each camera; on macOS also use ffmpeg avfoundation names if available")
-    parser.add_argument("--stop-after-failures", type=int, default=4, help="Per-backend consecutive failure cutoff to reduce noise (default 4)")
+    parser.add_argument(
+        "--pattern",
+        type=str,
+        help="Pattern to match camera name (overrides .env CAMERA)",
+    )
+    parser.add_argument(
+        "--details",
+        action="store_true",
+        help="Show extra details (slug) alongside each camera",
+    )
+    add_daemon_args(parser)
     args = parser.parse_args(argv)
 
-    # Attempt to read .env for CAMERA pattern; tolerant to missing guard in this tool
+    # Attempt to read .env for CAMERA pattern; tolerant to missing guard
     pattern = None
     try:
         cfg = AppConfig.load()
@@ -127,88 +40,34 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.pattern:
         pattern = args.pattern
 
-    if args.verbose:
-        args.quiet = False
-    # Quiet logging if requested
-    if args.quiet:
-        try:
-            import cv2 as cv
-            if hasattr(cv, "utils") and hasattr(cv.utils, "logging"):
-                cv.utils.logging.setLogLevel(cv.utils.logging.LOG_LEVEL_ERROR)
-        except Exception:
-            pass
-
-    be_map = {
-        "auto": None,
-        "avfoundation": 1200,
-        "v4l2": 200,
-        "msmf": 1400,
-        "dshow": 700,
-    }
-    be = be_map.get(args.backend)
-    backends = default_backends() if be is None else [be]
-    # For avfoundation, probing many indices can be noisy; if default, reduce
-    max_probe = args.max_cams
-    if args.backend == "avfoundation" and args.max_cams == 10:
-        max_probe = 2
-
-    cams = list_cameras(max_probe, backends=backends, stop_after_failures=int(args.stop_after_failures), quiet=bool(args.quiet), detailed_names=bool(args.details))
-    live_by_uid = _live_identity_by_uid(cams)
-
-    # Merge the live device list with the persistent registry so previously-
-    # connected cameras still appear (grayed out) with their stable enumeration
-    # numbers. The registry holds only cameras that have connected at least
-    # once; it does not fabricate entries for never-connected on-disk dirs.
-    records: List[CameraRecord] = []
+    # Enumerate cameras via the daemon — no local hardware probe
     try:
         config = Config.load()
-        registry = CameraRegistry(config.cameras_dir)
-        # Register any connected camera not yet known so it gets an enum number.
-        # Build the identity from the camera's already-resolved unique_id (the
-        # same key used in ``live_by_uid``) so the new record matches the live
-        # camera and is rendered as connected, not offline.
-        for uid, cam in live_by_uid.items():
-            if uid not in registry:
-                try:
-                    registry.resolve(
-                        CameraIdentity(
-                            unique_id=uid,
-                            reason="cli_live",
-                            is_fallback=False,
-                            vid=cam.vid,
-                            pid=cam.pid,
-                            serial=cam.serial,
-                            location=cam.location,
-                            name=cam.device_name or cam.name,
-                        )
-                    )
-                except Exception:
-                    pass
-        records = list(registry.records())
-    except Exception:
-        records = []
+        dc = connect_from_args(config, args)
+        devices = dc.enumerate_cameras()
+    except Exception as exc:
+        print(f"Error: could not contact daemon: {exc}")
+        print("Make sure the daemon is running: aprilcam daemon start")
+        return 1
 
     print("Cameras:")
-    if records:
-        _render_registry(records, live_by_uid, details=bool(args.details))
-    else:
-        # Fallback: no registry available — list the live devices directly.
-        av_names = macos_avfoundation_device_names() if args.details else {}
-        for c in cams:
-            if av_names and c.backend == "AVFOUNDATION" and c.index in av_names:
-                label = f"[{c.index}] {av_names[c.index]} (index {c.index}, AVFOUNDATION)"
+    if devices:
+        for dev in devices:
+            if args.details:
+                print(f"  [{dev.index}] {dev.name}  (slug: {dev.slug})")
             else:
-                label = f"[{c.index}] {c.name}"
-            print(f"  {label}")
-        if not cams:
-            print("  (none found)")
-
-    # The pattern selector operates on connected cameras only.
-    chosen = select_camera_by_pattern(pattern, cams) if pattern else None
-    if chosen is not None:
-        print(f"Suggested index by pattern '{pattern}': {chosen}")
+                print(f"  [{dev.index}] {dev.name}")
     else:
-        if pattern:
+        print("  (none found)")
+
+    # Pattern match on name if requested
+    if pattern:
+        matched = [d for d in devices if pattern.lower() in d.name.lower()]
+        if matched:
+            print(
+                f"Matched pattern '{pattern}': index {matched[0].index} ({matched[0].name})"
+            )
+        else:
             print(f"No camera matched pattern '{pattern}'.")
 
     return 0

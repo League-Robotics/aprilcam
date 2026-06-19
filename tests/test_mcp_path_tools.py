@@ -240,21 +240,24 @@ def test_clear_paths_unknown_playfield(isolated_registries):
 # ---------------------------------------------------------------------------
 
 
-def test_path_tools_write_paths_json(isolated_registries, tmp_path, monkeypatch):
-    """After create_path, paths.json is written with JSON matching the registry state.
+def test_path_tools_push_paths_rpc(isolated_registries, monkeypatch):
+    """After path mutations, _push_paths_rpc is called with the playfield's camera_id.
 
-    The test wires a temporary paths.json into _cam_info so that
-    _write_paths_json() can resolve the file path without a live daemon.
+    Now that the MCP server persists path state via the SetPaths gRPC RPC
+    (not local file writes), this test mocks _push_paths_rpc and verifies
+    it is called with the correct camera_id for create, delete, and clear.
     """
     pf_reg, path_reg = isolated_registries
 
-    # Wire a fake camera entry in _cam_info pointing at a temp paths.json
-    paths_file = tmp_path / "cam_0" / "paths.json"
-    paths_file.parent.mkdir(parents=True, exist_ok=True)
-    fake_info = {"cam_name": "cam_0", "paths_file": str(paths_file)}
-    monkeypatch.setitem(mcp_server._cam_info, "cam_0", fake_info)
+    # Track _push_paths_rpc calls.
+    push_calls: list[str] = []
 
-    # Register the playfield (camera_id == "cam_0" to match the _cam_info key)
+    def _fake_push_paths_rpc(playfield_id: str) -> None:
+        push_calls.append(playfield_id)
+
+    monkeypatch.setattr(mcp_server, "_push_paths_rpc", _fake_push_paths_rpc)
+
+    # Register the playfield.
     entry = PlayfieldEntry(
         playfield_id="pf_cam_0",
         camera_id="cam_0",
@@ -262,24 +265,20 @@ def test_path_tools_write_paths_json(isolated_registries, tmp_path, monkeypatch)
     )
     pf_reg.register(entry)
 
-    # create_path should write paths.json
+    # create_path should call _push_paths_rpc once.
+    push_calls.clear()
     result = _handle_create_path("pf_cam_0", _make_waypoint_json())
     assert "path_id" in result
+    assert push_calls == ["pf_cam_0"], "create_path must call _push_paths_rpc"
 
-    assert paths_file.exists(), "paths.json was not written by create_path"
-    written = json.loads(paths_file.read_text())
-    assert isinstance(written, list)
-    assert len(written) == 1
-    assert written[0]["path_id"] == "path_000"
-
-    # delete_path should rewrite paths.json (now empty)
+    # delete_path should call _push_paths_rpc once.
+    push_calls.clear()
     _handle_delete_path("path_000")
-    written_after_delete = json.loads(paths_file.read_text())
-    assert written_after_delete == []
+    assert push_calls == ["pf_cam_0"], "delete_path must call _push_paths_rpc"
 
-    # Add two paths then clear_paths — file should reflect cleared state
+    # clear_paths should call _push_paths_rpc once.
     _handle_create_path("pf_cam_0", _make_waypoint_json())
     _handle_create_path("pf_cam_0", _make_waypoint_json({"x": 50.0}))
+    push_calls.clear()
     _handle_clear_paths("pf_cam_0")
-    written_after_clear = json.loads(paths_file.read_text())
-    assert written_after_clear == []
+    assert push_calls == ["pf_cam_0"], "clear_paths must call _push_paths_rpc"

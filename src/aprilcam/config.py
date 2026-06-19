@@ -82,6 +82,11 @@ class AppConfig:
         - backend can be one of: None/"auto", "avfoundation", "v4l2", "msmf", "dshow".
         - Falls back to the first available camera if none specified.
         Returns an opened VideoCapture or None on failure.
+
+        DEAD-CODE from MCP path: the MCP server never calls Config.get_camera().
+        Camera devices are opened exclusively by the daemon's CameraPipeline.
+        This method remains for direct CLI / programmatic use outside the daemon
+        architecture.
         """
         import cv2 as cv  # noqa: PLC0415
         from .camera.camutil import (  # noqa: PLC0415
@@ -248,6 +253,20 @@ CONFIG_VARS: list[dict] = [
         "default": "auto",
         "description": "Force FHS directory layout (1) or XDG (0); auto selects by euid.",
     },
+    {
+        "key": "APRILCAM_DAEMON_HOST",
+        "default": "(unset — auto-discover via local Unix socket or mDNS)",
+        "description": (
+            "Hostname or IP of the AprilCam daemon for TCP gRPC connections. "
+            "When set, mDNS discovery is skipped entirely. "
+            "Use this to point clients at a remote Pi daemon."
+        ),
+    },
+    {
+        "key": "APRILCAM_DAEMON_PORT",
+        "default": "5280",
+        "description": "TCP port the AprilCam daemon's gRPC server listens on.",
+    },
 ]
 
 
@@ -308,9 +327,25 @@ def _default_dirs() -> tuple[Path, Path, Path]:
             Path("/var/log/aprilcam"),
         )
     # XDG paths with fallbacks
+    import tempfile as _tempfile
+
     uid = _os.getuid()
     data = Path(_os.environ.get("XDG_DATA_HOME", "") or Path.home() / ".local/share") / "aprilcam"
-    run = Path(_os.environ.get("XDG_RUNTIME_DIR", "") or f"/run/user/{uid}") / "aprilcam"
+
+    # XDG_RUNTIME_DIR: use env var if set, else use /run/user/<uid> only when
+    # that directory already exists (Linux + systemd-logind), otherwise fall
+    # back to a writable per-user temp directory so macOS and headless systems
+    # don't crash trying to create dirs under the read-only /run mount.
+    xdg_runtime_env = _os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    if xdg_runtime_env:
+        run = Path(xdg_runtime_env) / "aprilcam"
+    else:
+        linux_runtime = Path(f"/run/user/{uid}")
+        if linux_runtime.is_dir():
+            run = linux_runtime / "aprilcam"
+        else:
+            run = Path(_tempfile.gettempdir()) / f"aprilcam-{uid}"
+
     log = Path(_os.environ.get("XDG_STATE_HOME", "") or Path.home() / ".local/state") / "aprilcam"
     return data, run, log
 
@@ -371,6 +406,14 @@ class Config:
     # Movement-invalidation threshold in source pixels.  0 means "use
     # geometry.DEFAULT_MOVEMENT_THRESHOLD_PX" (APRILCAM_MOVEMENT_THRESHOLD_PX).
     movement_threshold_px: float = 0.0
+
+    # --- Remote daemon connection (sprint 014) ---
+    # Hostname or IP of the AprilCam daemon for TCP gRPC connections.
+    # When set (via APRILCAM_DAEMON_HOST), mDNS discovery is skipped.
+    # None means "auto-discover via local Unix socket or mDNS".
+    daemon_host: Optional[str] = None
+    # TCP port the daemon's gRPC server listens on (APRILCAM_DAEMON_PORT).
+    daemon_port: int = 5280
 
     @property
     def cameras_dir(self) -> Path:
@@ -460,6 +503,17 @@ class Config:
             except (ValueError, TypeError):
                 return default
 
+        # Parse daemon_host — None when unset (triggers mDNS / local unix probe)
+        _daemon_host_raw = sources.get("APRILCAM_DAEMON_HOST", "").strip()
+        _daemon_host: Optional[str] = _daemon_host_raw if _daemon_host_raw else None
+
+        # Parse daemon_port — default 5280
+        _daemon_port_raw = sources.get("APRILCAM_DAEMON_PORT", "5280")
+        try:
+            _daemon_port = int(_daemon_port_raw)
+        except (ValueError, TypeError):
+            _daemon_port = 5280
+
         cfg = cls(
             data_dir=data_dir,
             socket_dir=socket_dir,
@@ -474,6 +528,8 @@ class Config:
             deskew_px_per_cm=_float("APRILCAM_DESKEW_PX_PER_CM", 0.0),
             undistort=_bool("APRILCAM_UNDISTORT", False),
             movement_threshold_px=_float("APRILCAM_MOVEMENT_THRESHOLD_PX", 0.0),
+            daemon_host=_daemon_host,
+            daemon_port=_daemon_port,
         )
 
         # Ensure runtime directories exist; guarded to emit an actionable message

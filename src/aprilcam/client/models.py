@@ -217,6 +217,28 @@ class CameraInfo(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# CameraDevice
+# ---------------------------------------------------------------------------
+
+
+class CameraDevice(BaseModel):
+    """An available (not necessarily open) hardware camera device."""
+
+    index: int
+    name: str
+    slug: str
+
+    @classmethod
+    def from_proto(cls, msg: "aprilcam_pb2.CameraDevice") -> "CameraDevice":
+        """Construct a CameraDevice from a protobuf CameraDevice message."""
+        return cls(
+            index=int(msg.index),
+            name=str(msg.name),
+            slug=str(msg.slug),
+        )
+
+
+# ---------------------------------------------------------------------------
 # PathRecord
 # ---------------------------------------------------------------------------
 

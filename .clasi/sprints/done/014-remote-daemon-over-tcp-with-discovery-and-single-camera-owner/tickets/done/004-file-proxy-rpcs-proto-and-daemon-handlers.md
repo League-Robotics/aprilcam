@@ -1,11 +1,11 @@
 ---
-id: '014-004'
-title: File-proxy RPCs — proto additions, regen, and daemon handlers
-status: open
+id: 014-004
+title: "File-proxy RPCs \u2014 proto additions, regen, and daemon handlers"
+status: done
 use-cases:
-  - SUC-005
+- SUC-005
 depends-on:
-  - 014-001
+- 014-001
 ---
 
 # 014-004: File-proxy RPCs — proto additions, regen, and daemon handlers
@@ -23,7 +23,7 @@ fields so that existing `to_dict`/`from_dict` helpers are reused unchanged.
 
 ## Acceptance Criteria
 
-- [ ] `proto/aprilcam.proto` contains:
+- [x] `proto/aprilcam.proto` contains:
   - `message CameraRequest { string cam_name = 1; }`
   - `message JsonBlobReply { string json_blob = 1; bool present = 2; }`
   - `message CameraJsonRequest { string cam_name = 1; string json_blob = 2; }`
@@ -37,8 +37,8 @@ fields so that existing `to_dict`/`from_dict` helpers are reused unchanged.
   - `rpc SetPaths(CameraJsonRequest) returns (StatusReply)`
   - `rpc ListPlayfields(Empty) returns (ListPlayfieldsResponse)`
   - (Note: `StatusReply` may already exist; reuse it or add it.)
-- [ ] `src/aprilcam/proto/aprilcam_pb2*.py` regenerated and committed.
-- [ ] `daemon/grpc_server.py` implements all seven handlers:
+- [x] `src/aprilcam/proto/aprilcam_pb2*.py` regenerated and committed.
+- [x] `daemon/grpc_server.py` implements all seven handlers:
   - `GetCameraConfig`: read `<cameras_dir>/<cam_name>/config.json` using
     `camera_config.load_camera_config(camera_dir)`, serialize to JSON string.
     Returns `present=False` if file absent.
@@ -53,12 +53,12 @@ fields so that existing `to_dict`/`from_dict` helpers are reused unchanged.
   - `SetPaths`: atomically write `paths.json`.
   - `ListPlayfields`: scan `config.playfields_dir / "*.json"` and return each
     as a `PlayfieldEntry`.
-- [ ] Each handler resolves `camera_dir` from `cam_name` using the camera
+- [x] Each handler resolves `camera_dir` from `cam_name` using the camera
       registry (same pattern as `OpenCamera` handler).
-- [ ] Handlers use atomic write: write to `.tmp` then `os.replace`.
-- [ ] `client/control.py` has stub methods for all seven RPCs returning
+- [x] Handlers use atomic write: write to `.tmp` then `os.replace`.
+- [x] `client/control.py` has stub methods for all seven RPCs returning
       raw `JsonBlobReply` / `ListPlayfieldsResponse` (MCP parsing happens in 005).
-- [ ] `uv run pytest` passes.
+- [x] `uv run pytest` passes.
 
 ## Implementation Plan
 

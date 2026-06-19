@@ -63,9 +63,28 @@ class ImageStreamConsumer:
         consumer.close()
     """
 
-    def __init__(self, endpoint: StreamEndpoint, *, cam_name: str = "") -> None:
+    def __init__(
+        self,
+        endpoint: StreamEndpoint,
+        *,
+        cam_name: str = "",
+        host: str = "localhost",
+    ) -> None:
+        """
+        Args:
+            endpoint: Stream endpoint returned by the daemon (socket_path or
+                tcp_port).
+            cam_name: Camera name for logging / model construction.
+            host: Hostname or IP of the daemon.  Used when connecting via TCP
+                (``endpoint.tcp_port`` is set).  Defaults to ``"localhost"``
+                for backward compatibility with Unix-socket-only setups.
+                Pass the resolved daemon host (``dc._host``) when the
+                ``DaemonControl`` is TCP-connected so a remote Mac/Pi client
+                reaches the correct machine.
+        """
         self._endpoint = endpoint
         self._cam_name = cam_name
+        self._host = host
         self._sock: socket.socket | None = None
 
     def connect(self) -> "ImageStreamConsumer":
@@ -77,7 +96,7 @@ class ImageStreamConsumer:
             sock.connect(self._endpoint.socket_path)
         elif self._endpoint.tcp_port:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(("localhost", self._endpoint.tcp_port))
+            sock.connect((self._host, self._endpoint.tcp_port))
         else:
             raise ValueError(
                 "StreamEndpoint has neither socket_path nor tcp_port"
@@ -180,8 +199,18 @@ class TagStreamConsumer:
         consumer.close()
     """
 
-    def __init__(self, endpoint: StreamEndpoint) -> None:
+    def __init__(self, endpoint: StreamEndpoint, *, host: str = "localhost") -> None:
+        """
+        Args:
+            endpoint: Stream endpoint returned by the daemon (socket_path or
+                tcp_port).
+            host: Hostname or IP of the daemon.  Used when connecting via TCP.
+                Defaults to ``"localhost"`` for backward compatibility.
+                Pass the resolved daemon host (``dc._host``) when the
+                ``DaemonControl`` is TCP-connected.
+        """
         self._endpoint = endpoint
+        self._host = host
         self._sock: socket.socket | None = None
 
     def connect(self) -> "TagStreamConsumer":
@@ -193,7 +222,7 @@ class TagStreamConsumer:
             sock.connect(self._endpoint.socket_path)
         elif self._endpoint.tcp_port:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(("localhost", self._endpoint.tcp_port))
+            sock.connect((self._host, self._endpoint.tcp_port))
         else:
             raise ValueError(
                 "StreamEndpoint has neither socket_path nor tcp_port"

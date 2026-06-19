@@ -473,7 +473,14 @@ class AprilCam:
 
     # ---------- core loop ----------
     def _init_capture(self) -> Optional[cv.VideoCapture]:
-        """Open the capture device or use the provided cap; apply size hints."""
+        """Open the capture device or use the provided cap; apply size hints.
+
+        DAEMON-ONLY path: called only from AprilCam.run(), which is the
+        daemon's full interactive loop.  The MCP server never calls run();
+        it drives detection via DetectionLoop + process_frame() instead,
+        so this VideoCapture(device_index) open is never reached from the
+        MCP/CLI-client path.
+        """
         if self.cap is None:
             self.cap = cv.VideoCapture(int(self.index), 0 if self.backend is None else int(self.backend))
         if not self.cap or not self.cap.isOpened():
@@ -690,6 +697,9 @@ class AprilCam:
         _sq_detector = _SD()
 
         # Open color camera at startup if specified (avoids USB contention on each 'd')
+        # DAEMON-ONLY path: this is inside run(), the daemon's interactive loop.
+        # The MCP server never calls run(), so this VideoCapture open is not
+        # reachable from the MCP/CLI-client path.
         _color_cap = None
         _color_cal = None
         if color_camera is not None:

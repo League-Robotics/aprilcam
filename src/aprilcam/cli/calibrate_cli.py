@@ -20,9 +20,10 @@ import cv2 as cv
 import grpc
 import numpy as np
 
-from ..camera.camutil import list_cameras, select_camera_by_pattern
+from ..camera.camutil import CameraInfo, select_camera_by_pattern
 from ..config import Config
 from ..client.control import DaemonControl
+from ._daemon import add_daemon_args, connect_from_args
 
 
 def _warmup_capture(dc: DaemonControl, cam_name: str, count: int = 10, timeout: float = 5.0) -> None:
@@ -136,11 +137,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="With exactly 2 cameras: calibrate the first as primary (ArUco corners), "
              "then calibrate the second using the first camera's homography as reference.",
     )
+    add_daemon_args(parser)
     args = parser.parse_args(argv)
 
-    # Start (or connect to) the daemon
+    # Connect to the daemon via the shared resolver
     config = Config.load()
-    dc = DaemonControl.connect_default(config)
+    dc = connect_from_args(config, args)
 
     # cameras_dir is <data_dir>/cameras — each camera has its own subdir
     if args.output:
@@ -154,9 +156,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     _playfields_dir = getattr(config, "playfields_dir", None) or (config.data_dir / "playfields")
     playfield_def_registry.load_all(_playfields_dir)
 
-    # Resolve which cameras to calibrate
+    # Resolve which cameras to calibrate — enumerate via daemon (no local probe)
     camera_indices: list[tuple[int, str]] = []  # (index, label)
-    available = list_cameras()
+
+    # Enumerate available cameras through the daemon so no local hardware probe
+    # is performed by the client.  Convert CameraDevice to CameraInfo so that
+    # select_camera_by_pattern (which takes List[CameraInfo]) still works.
+    try:
+        _devices = dc.enumerate_cameras()
+    except Exception as exc:
+        print(f"Warning: could not enumerate cameras from daemon: {exc}")
+        _devices = []
+    available: list[CameraInfo] = [
+        CameraInfo(index=d.index, name=d.name, device_name=d.name)
+        for d in _devices
+    ]
 
     if args.cameras:
         from ..camera.identity import resolve_all

@@ -49,6 +49,37 @@ def load_camera_config(camera_dir: Path | str) -> Optional[dict]:
         return None
 
 
+def parse_camera_config(d: dict) -> dict:
+    """Validate and return a camera config dict from a ``GetCameraConfig`` RPC blob.
+
+    This is a pure (no I/O) companion to :func:`load_camera_config` for the MCP
+    server side: the daemon returns ``config.json`` content as a JSON blob via
+    gRPC, the MCP server calls ``json.loads()`` on the blob, then calls this
+    function to obtain a usable dict.
+
+    Currently performs no structural validation beyond type-checking that *d* is
+    a dict.  Returns *d* unchanged; callers may read any key they expect.
+
+    Parameters
+    ----------
+    d:
+        Parsed JSON dict exactly as it appears in ``config.json`` on disk.
+
+    Returns
+    -------
+    dict
+        The same dict (validated and returned as-is).
+
+    Raises
+    ------
+    TypeError
+        If *d* is not a dict.
+    """
+    if not isinstance(d, dict):
+        raise TypeError(f"Expected dict, got {type(d).__name__}")
+    return d
+
+
 def save_camera_config(camera_dir: Path | str, config_dict: dict) -> Path:
     """Write *config_dict* to ``<camera_dir>/config.json`` atomically.
 

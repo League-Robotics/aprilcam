@@ -64,8 +64,13 @@ for non-root use. See `aprilcam config` for the current resolved paths.
 
 ### Cameras
 - **Index**: Integer (0, 1, 2...) identifying a camera device.
-- **camera_id**: Handle string returned by `open_camera` (e.g., `cam_0`).
-- Cameras are opened by index or by name pattern (substring match).
+- **camera_id**: Opaque handle string returned by `open_camera` (e.g., the
+  camera's name slug such as `"arducam-ov9782-usb-camera"`).  The handle is
+  typically the camera's device name slug, not a raw index.
+- Cameras are opened by calling `open_camera(index=N)` or
+  `open_camera(pattern="<name>")` — the daemon opens the hardware and returns
+  a handle.  `cam_<index>` style handles are no longer supported as direct
+  device openers; always use `open_camera()` to get a valid daemon handle.
 - Screen capture is also available as a camera source (`source="screen"`).
 
 ### Playfields
@@ -251,6 +256,20 @@ cap.release()
 ### Live View (web UI)
 - `start_live_view(source_id, annotate?)` → `{view_id, url}`
 - `stop_live_view(view_id)` → confirmation
+
+### Server / Daemon Management
+- `get_version()` → `{version, active_daemon_host, active_daemon_port}` — package
+  version plus the host/port (or `unix:<path>`) of the currently connected daemon.
+  `active_daemon_host` and `active_daemon_port` are `null` when no daemon is
+  connected yet.
+- `connect_daemon(host?, port?, local?)` → `{target, cameras}` — switch the MCP
+  server's live daemon connection at runtime without restarting the MCP process.
+  Tears down all open cameras, detection loops, and session state, then reconnects
+  to the specified target.  Arguments:
+  - `host` (str, optional) — hostname or IP; omit for mDNS auto-discovery.
+  - `port` (int, default 5280) — TCP port.
+  - `local` (bool, default false) — force Unix-socket connection to the local daemon.
+  On success returns the resolved target string and a list of available cameras.
 
 ## Common Workflows
 

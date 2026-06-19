@@ -1,17 +1,17 @@
 ---
 id: '014'
 title: Remote Daemon over TCP with Discovery and Single Camera Owner
-status: planning-docs
+status: done
 branch: sprint/014-remote-daemon-over-tcp-with-discovery-and-single-camera-owner
 use-cases:
-  - SUC-001
-  - SUC-002
-  - SUC-003
-  - SUC-004
-  - SUC-005
-  - SUC-006
+- SUC-001
+- SUC-002
+- SUC-003
+- SUC-004
+- SUC-005
+- SUC-006
 issues:
-  - plan-daemon-runs-on-a-remote-raspberry-pi-every-client-discovers-it-and-connects-over-tcp.md
+- plan-daemon-runs-on-a-remote-raspberry-pi-every-client-discovers-it-and-connects-over-tcp.md
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
 

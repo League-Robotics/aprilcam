@@ -1,12 +1,12 @@
 ---
-id: '014-002'
+id: 014-002
 title: EnumerateCameras daemon handler and convert CLI/MCP to use it
-status: open
+status: done
 use-cases:
-  - SUC-001
-  - SUC-002
+- SUC-001
+- SUC-002
 depends-on:
-  - 014-001
+- 014-001
 ---
 
 # 014-002: EnumerateCameras daemon handler and convert CLI/MCP to use it
@@ -20,22 +20,22 @@ code probes camera hardware directly for enumeration.
 
 ## Acceptance Criteria
 
-- [ ] `daemon/grpc_server.py` has an `EnumerateCameras` handler that calls
+- [x] `daemon/grpc_server.py` has an `EnumerateCameras` handler that calls
       `camutil.list_cameras()` and returns a `EnumerateCamerasResponse`.
-- [ ] `server/mcp_server.py` `_handle_list_cameras()` (around line 499) calls
+- [x] `server/mcp_server.py` `_handle_list_cameras()` (around line 499) calls
       `client.enumerate_cameras()` RPC instead of `camutil.list_cameras()`.
       The function must still return the same dict structure as before.
-- [ ] `cli/cameras_cli.py` replaces the local `list_cameras(...)` call
+- [x] `cli/cameras_cli.py` replaces the local `list_cameras(...)` call
       (~line 155) with a `DaemonControl` connection + `enumerate_cameras()` RPC.
       The command connects via shared `cli/_daemon.py` helper (see ticket 003).
       For this ticket, a temporary direct connection is acceptable if ticket 003
       is not yet merged; refactor to use the shared helper when 003 lands.
-- [ ] `cli/calibrate_cli.py` camera selection (~line 159) calls
+- [x] `cli/calibrate_cli.py` camera selection (~line 159) calls
       `enumerate_cameras()` RPC instead of local `list_cameras()`.
-- [ ] `grep -n "camutil.list_cameras\|from.*camutil.*import.*list_cameras"
+- [x] `grep -n "camutil.list_cameras\|from.*camutil.*import.*list_cameras"
       src/aprilcam/server/mcp_server.py src/aprilcam/cli/cameras_cli.py
       src/aprilcam/cli/calibrate_cli.py` returns zero matches.
-- [ ] `uv run pytest` passes.
+- [x] `uv run pytest` passes.
 
 ## Implementation Plan
 

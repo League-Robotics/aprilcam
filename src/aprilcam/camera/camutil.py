@@ -189,6 +189,10 @@ def list_cameras(max_index: int = 10, backends: Optional[List[int]] = None, stop
             if backend_failures.get(be, 0) >= max(1, int(stop_after_failures)) and idx > 1:
                 continue
             with _SilenceStderr(quiet):
+                # PROBE-ONLY: brief open to check name/availability, then
+                # released immediately.  This is camera enumeration, not
+                # sustained capture.  The daemon's CameraPipeline is the sole
+                # sustained camera opener.
                 cap = cv.VideoCapture(idx, be)
                 try:
                     if cap.isOpened():

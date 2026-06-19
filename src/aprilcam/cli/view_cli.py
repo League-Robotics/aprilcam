@@ -364,8 +364,10 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=None,
         metavar="N",
-        help="TCP port the daemon is listening on",
+        help="TCP port the daemon is listening on (deprecated: prefer --daemon-port)",
     )
+    from aprilcam.cli._daemon import add_daemon_args, connect_from_args
+    add_daemon_args(parser)
     args = parser.parse_args(argv)
 
     import numpy as np
@@ -383,9 +385,13 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     config = Config.load()
-    dc = DaemonControl.connect_default(
-        config, unix_path=args.unix_path, tcp_port=args.tcp_port
-    )
+    # Support legacy --unix-path/--tcp-port flags alongside the new --daemon-host/--daemon-port.
+    # If the legacy flags are set, they take precedence for backward compatibility.
+    if args.unix_path:
+        from aprilcam.client.control import DaemonControl as _DC
+        dc = _DC.connect_default(config, unix_path=args.unix_path, tcp_port=args.tcp_port)
+    else:
+        dc = connect_from_args(config, args)
 
     cam_name: Optional[str] = None
     cam_index: Optional[int] = None

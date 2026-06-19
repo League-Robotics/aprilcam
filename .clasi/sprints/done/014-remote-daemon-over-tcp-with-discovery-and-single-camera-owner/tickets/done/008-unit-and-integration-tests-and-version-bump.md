@@ -1,20 +1,20 @@
 ---
-id: '014-008'
+id: 014-008
 title: Unit and integration tests, verification grep, and version bump
-status: open
+status: done
 use-cases:
-  - SUC-001
-  - SUC-002
-  - SUC-003
-  - SUC-004
-  - SUC-005
+- SUC-001
+- SUC-002
+- SUC-003
+- SUC-004
+- SUC-005
 depends-on:
-  - 014-002
-  - 014-003
-  - 014-004
-  - 014-005
-  - 014-006
-  - 014-007
+- 014-002
+- 014-003
+- 014-004
+- 014-005
+- 014-006
+- 014-007
 ---
 
 # 014-008: Unit and integration tests, verification grep, and version bump
@@ -28,30 +28,30 @@ version.
 
 ## Acceptance Criteria
 
-- [ ] `tests/test_discovery.py` covers all four resolver branches (explicit,
+- [x] `tests/test_discovery.py` covers all four resolver branches (explicit,
       env/config, local unix, mDNS 0/1/N). Already added in ticket 003; verify
       it is complete here.
-- [ ] `tests/test_daemon_control_no_spawn.py` (or added to existing tests):
+- [x] `tests/test_daemon_control_no_spawn.py` (or added to existing tests):
       `DaemonControl.connect_default` with an unreachable target raises
       `DaemonNotFoundError` and does NOT call `subprocess.Popen`.
-- [ ] `tests/test_file_proxy_rpcs.py`: round-trip tests for each file-proxy
+- [x] `tests/test_file_proxy_rpcs.py`: round-trip tests for each file-proxy
       RPC handler (GetCalibration/SetCalibration, GetCameraConfig/SetCameraConfig,
       GetPaths/SetPaths, ListPlayfields) using a temp directory — no live daemon
       required.
-- [ ] `tests/test_connect_daemon.py` (or added to existing): mock-based test
+- [x] `tests/test_connect_daemon.py` (or added to existing): mock-based test
       that `connect_daemon()` tears down session state before reconnecting
       (checks that all registry clear methods are called).
-- [ ] `tests/test_stream_consumer_host.py` (or added to existing): assert
+- [x] `tests/test_stream_consumer_host.py` (or added to existing): assert
       `ImageStreamConsumer` uses the provided `host` for TCP connect
       (mock `socket.connect`).
-- [ ] **Verification greps (all must pass):**
+- [x] **Verification greps (all must pass):**
   - `grep -r "VideoCapture" src/aprilcam/ --include="*.py" | grep -v "camera_pipeline.py"` → zero output.
   - `grep -r "AF_UNIX" src/aprilcam/server/ --include="*.py"` → zero output.
   - `grep -r "subprocess.Popen" src/aprilcam/client/control.py` → zero output.
   - `grep -rn "camera_dir\|paths_file" src/aprilcam/server/mcp_server.py | grep -v "^\s*#"` → zero output.
   - `grep -n "camutil.list_cameras\|from.*camutil.*import.*list_cameras" src/aprilcam/server/mcp_server.py src/aprilcam/cli/cameras_cli.py src/aprilcam/cli/calibrate_cli.py` → zero output.
-- [ ] `uv run pytest` passes with exit code 0.
-- [ ] Version bumped in `pyproject.toml` per project convention
+- [x] `uv run pytest` passes with exit code 0.
+- [x] Version bumped in `pyproject.toml` per project convention
       (`0.YYYYMMDD.N` where N increments from the last build today).
 
 ## Implementation Plan

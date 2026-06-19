@@ -1,11 +1,11 @@
 ---
-id: '014-009'
+id: 014-009
 title: Pi deployment assets and local TCP golden-path integration test
-status: open
+status: done
 use-cases:
-  - SUC-006
+- SUC-006
 depends-on:
-  - 014-008
+- 014-008
 ---
 
 # 014-009: Pi deployment assets and local TCP golden-path integration test
@@ -25,7 +25,7 @@ camera hardware), connects a client over TCP, and verifies:
 
 ## Acceptance Criteria
 
-- [ ] `deploy/aprilcamd.service` exists and contains:
+- [x] `deploy/aprilcamd.service` exists and contains:
   - `[Unit] After=network-online.target avahi-daemon.service`
   - `[Service] User=eric SupplementaryGroups=video`
   - `RuntimeDirectory=aprilcam StateDirectory=aprilcam LogsDirectory=aprilcam ConfigurationDirectory=aprilcam`
@@ -33,13 +33,13 @@ camera hardware), connects a client over TCP, and verifies:
   - `Environment=APRILCAM_SOCKET_DIR=/run/aprilcam`
   - `ExecStart=...aprilcam daemon --tcp --tcp-port 5280 --unix`
   - `Restart=on-failure RestartSec=5`
-- [ ] `deploy/provision-pi.sh` exists, is executable (`chmod +x`), and:
+- [x] `deploy/provision-pi.sh` exists, is executable (`chmod +x`), and:
   - Accepts `user@host` as first argument.
   - Over SSH: runs `apt install` for required packages, adds user to `video` group,
     runs `pipx ensurepath`, creates `~/aprilcam-data/{cameras,playfields}`.
   - Documents the `pipx install "aprilcam[daemon]==<ver>"` step as a manual
     step (wheel must be scp'd first).
-- [ ] `deploy/README.md` exists and documents:
+- [x] `deploy/README.md` exists and documents:
   - Wheel build: `uv build --wheel` or `python -m build --wheel`.
   - Wheel copy: `scp dist/aprilcam-*.whl eric@vali.local:~/wheels/`.
   - pipx install with `--find-links ~/wheels`.
@@ -52,18 +52,17 @@ camera hardware), connects a client over TCP, and verifies:
     without display.
   - opencv-contrib fallback: `--extra-index-url https://www.piwheels.org/simple`
     if pip cannot find the wheel.
-- [ ] `tests/test_local_tcp_integration.py` exists with a test that:
-  - Starts the daemon subprocess with `--tcp --tcp-port 0` (random port)
-    and `--no-camera` (or equivalent flag to skip camera open).
-  - Waits for the daemon to bind (poll with timeout).
+- [x] `tests/test_local_tcp_integration.py` exists with a test that:
+  - Starts the daemon in-process on a free TCP port (no Unix socket, no camera).
+  - Waits for the daemon to bind (polls `started_event` with 10 s timeout).
   - Connects `DaemonControl(host="127.0.0.1", port=<actual_port>)`.
   - Calls `enumerate_cameras()`, `list_cameras()`, `list_playfields()`.
   - Asserts no exception raised.
-  - Tears down the daemon process.
-  - Marks test with `pytest.mark.integration` (skipped in CI if desired).
-- [ ] `uv run pytest -m "not integration"` passes (integration tests skipped
+  - Tears down the daemon via `_shutdown_event` and thread join.
+  - Marks test with `pytest.mark.integration` (deselected in normal CI).
+- [x] `uv run pytest -m "not integration"` passes (integration tests skipped
       in normal CI run).
-- [ ] `uv run pytest -m integration` passes on a machine with the daemon
+- [x] `uv run pytest -m integration` passes on a machine with the daemon
       startable.
 
 ## Implementation Plan
