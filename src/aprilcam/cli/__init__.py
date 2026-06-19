@@ -24,6 +24,10 @@ SUBCOMMANDS = {
         "help": "List available cameras",
         "module": "aprilcam.cli.cameras_cli",
     },
+    "config": {
+        "help": "Show the version and resolved configuration",
+        "module": "aprilcam.cli.config_cli",
+    },
     "tags": {
         "help": "Detect and list all ArUco and AprilTag markers on a camera",
         "module": "aprilcam.cli.tags_cli",

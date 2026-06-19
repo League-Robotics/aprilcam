@@ -42,6 +42,6 @@ def test_non_daemon_command_reraises_module_error(monkeypatch):
 
 def test_all_heavy_subcommands_are_marked():
     """Every subcommand except the pure-client ones is flagged daemon-only."""
-    client_only = {"init", "tool"}
+    client_only = {"init", "tool", "config"}
     expected = set(cli.SUBCOMMANDS) - client_only
     assert cli.DAEMON_COMMANDS == expected
