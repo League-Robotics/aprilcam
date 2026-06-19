@@ -1,11 +1,13 @@
 ---
-id: "004"
-title: "Rewrite web_server.py as direct daemon client"
-status: open
-use-cases: [SUC-004]
-depends-on: ["003"]
-github-issue: ""
-issue: ""
+id: '004'
+title: Rewrite web_server.py as direct daemon client
+status: done
+use-cases:
+- SUC-004
+depends-on:
+- '003'
+github-issue: ''
+issue: ''
 completes_issue: false
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
@@ -30,11 +32,11 @@ at all.
 
 ## Acceptance Criteria
 
-- [ ] `web_server.py` contains no `from aprilcam.server.mcp_server import ...` line.
-- [ ] `web_server.py` contains no `import cv2` line.
-- [ ] `import aprilcam.server.web_server` succeeds with cv2 monkeypatched to raise
+- [x] `web_server.py` contains no `from aprilcam.server.mcp_server import ...` line.
+- [x] `web_server.py` contains no `import cv2` line.
+- [x] `import aprilcam.server.web_server` succeeds with cv2 monkeypatched to raise
   `ImportError`.
-- [ ] HTTP endpoints exist and respond correctly (tested against a mock
+- [x] HTTP endpoints exist and respond correctly (tested against a mock
   `DaemonControl`):
   - `POST /api/list_cameras` → calls `client.enumerate_cameras()`
   - `POST /api/tags` (body: `{source_id}`) → calls `client.get_tags(cam_name)`
@@ -43,11 +45,11 @@ at all.
   - `GET /api/frame` (query: `source_id`) → calls `client.capture_frame()`, returns
     JPEG bytes with `Content-Type: image/jpeg` (no decode, no re-encode)
   - `POST /api/overlay` → calls `client.publish_overlay(...)`
-- [ ] WebSocket endpoint `WS /ws/tags` subscribes to `GetTagStream`, receives
+- [x] WebSocket endpoint `WS /ws/tags` subscribes to `GetTagStream`, receives
   `TagFrame` messages, and forwards them as JSON to the browser client.
-- [ ] `GET /` API discovery endpoint returns the updated tool list (deleted tools
+- [x] `GET /` API discovery endpoint returns the updated tool list (deleted tools
   absent).
-- [ ] `uv run pytest` green.
+- [x] `uv run pytest` green.
 
 ## Implementation Plan
 
