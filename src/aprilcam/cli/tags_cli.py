@@ -79,8 +79,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         description="Detect ArUco and AprilTag markers on a camera and print locations.",
     )
     parser.add_argument(
-        "camera", type=int,
-        help="Camera index to use",
+        "camera", metavar="CAMERA",
+        help="Camera name or number (the # shown by `aprilcam cameras`)",
     )
     parser.add_argument(
         "--frames", type=int, default=30,
@@ -90,13 +90,45 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     import cv2 as cv
     from ..calibration.homography import detect_all_tags
-    from ..camera.camutil import get_device_name
+    from ..camera.camutil import (
+        get_device_name,
+        list_cameras,
+        select_camera_by_pattern,
+    )
     from ..calibration.calibration import device_name_slug
+    from ..camera.identity import resolve_all
+    from ..camera.registry import (
+        CameraRegistry,
+        CameraSelectError,
+        resolve_enum_to_index,
+    )
     from ..config import Config
 
-    cap = cv.VideoCapture(args.camera)
+    config = Config.load()
+
+    # The CAMERA argument is the stable enumeration number printed by
+    # `aprilcam cameras` (or a name) — NOT a raw OpenCV device index. Resolve it
+    # to the OS index the camera is *currently* connected at, mirroring
+    # `aprilcam view`, so the number the user sees in the listing is the number
+    # they type here.
+    try:
+        enum_no = int(args.camera)
+        registry = CameraRegistry(config.cameras_dir)
+        try:
+            cam_index = resolve_enum_to_index(enum_no, registry, resolve_all())
+        except CameraSelectError as exc:
+            print(f"ERROR: {exc}")
+            return 1
+    except ValueError:
+        # Not a number — treat it as a name pattern against connected cameras.
+        cam_index = select_camera_by_pattern(args.camera, list_cameras(quiet=True))
+        if cam_index is None:
+            print(f"ERROR: no connected camera matched '{args.camera}'")
+            return 1
+
+    cap = cv.VideoCapture(cam_index)
     if not cap.isOpened():
-        print(f"ERROR: could not open camera {args.camera}")
+        print(f"ERROR: could not open camera '{args.camera}' (os index {cam_index})")
         return 1
 
     time.sleep(0.3)
@@ -113,8 +145,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     H: Optional[np.ndarray] = None
     cam_label = f"Camera {args.camera}"
     try:
-        config = Config.load()
-        device = get_device_name(args.camera)
+        device = get_device_name(cam_index)
         if device:
             cam_name = device_name_slug(device)
             cam_label = device
