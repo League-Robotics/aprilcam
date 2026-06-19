@@ -67,9 +67,11 @@ def test_view_resolves_enum_number_to_live_index(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         "aprilcam.config.Config.load", classmethod(lambda cls, *a, **k: cfg)
     )
+    # view_cli imports connect_from_args locally inside main(); patch at the
+    # source module so the local import sees the mock.
     monkeypatch.setattr(
-        "aprilcam.client.control.DaemonControl.connect_default",
-        classmethod(lambda cls, *a, **k: fake_dc),
+        "aprilcam.cli._daemon.connect_from_args",
+        lambda config, args: fake_dc,
     )
     # The camera with enum #1 is currently connected at OS index 7.
     monkeypatch.setattr(
@@ -95,9 +97,11 @@ def test_view_unknown_enum_number_errors(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(
         "aprilcam.config.Config.load", classmethod(lambda cls, *a, **k: cfg)
     )
+    # view_cli imports connect_from_args locally inside main(); patch at the
+    # source module so the local import sees the mock.
     monkeypatch.setattr(
-        "aprilcam.client.control.DaemonControl.connect_default",
-        classmethod(lambda cls, *a, **k: fake_dc),
+        "aprilcam.cli._daemon.connect_from_args",
+        lambda config, args: fake_dc,
     )
     monkeypatch.setattr(
         "aprilcam.camera.identity.resolve_all",
@@ -179,9 +183,10 @@ def test_calibrate_numeric_spec_is_enumeration_number(tmp_path, monkeypatch, cap
     monkeypatch.setattr(
         "aprilcam.config.Config.load", classmethod(lambda cls, *a, **k: cfg)
     )
+    # calibrate_cli now calls connect_from_args; patch it at the module level.
     monkeypatch.setattr(
-        "aprilcam.client.control.DaemonControl.connect_default",
-        classmethod(lambda cls, *a, **k: fake_dc),
+        "aprilcam.cli.calibrate_cli.connect_from_args",
+        lambda config, args: fake_dc,
     )
     # Enumeration #1 is connected at OS index 4.
     monkeypatch.setattr(
@@ -219,9 +224,10 @@ def test_calibrate_unknown_enumeration_number_skips(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(
         "aprilcam.config.Config.load", classmethod(lambda cls, *a, **k: cfg)
     )
+    # calibrate_cli now calls connect_from_args; patch it at the module level.
     monkeypatch.setattr(
-        "aprilcam.client.control.DaemonControl.connect_default",
-        classmethod(lambda cls, *a, **k: fake_dc),
+        "aprilcam.cli.calibrate_cli.connect_from_args",
+        lambda config, args: fake_dc,
     )
     monkeypatch.setattr(
         "aprilcam.camera.identity.resolve_all",

@@ -1,6 +1,7 @@
 """CLI subcommand: aprilcam web — Start the HTTP/WebSocket server."""
 
 import argparse
+from aprilcam.cli._daemon import add_daemon_args
 
 
 def main(argv=None):
@@ -10,6 +11,7 @@ def main(argv=None):
     )
     parser.add_argument("--port", type=int, default=17439, help="Port to listen on (default: 17439)")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to (default: 0.0.0.0)")
+    add_daemon_args(parser)
     args = parser.parse_args(argv)
 
     import uvicorn

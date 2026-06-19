@@ -248,6 +248,20 @@ CONFIG_VARS: list[dict] = [
         "default": "auto",
         "description": "Force FHS directory layout (1) or XDG (0); auto selects by euid.",
     },
+    {
+        "key": "APRILCAM_DAEMON_HOST",
+        "default": "(unset — auto-discover via local Unix socket or mDNS)",
+        "description": (
+            "Hostname or IP of the AprilCam daemon for TCP gRPC connections. "
+            "When set, mDNS discovery is skipped entirely. "
+            "Use this to point clients at a remote Pi daemon."
+        ),
+    },
+    {
+        "key": "APRILCAM_DAEMON_PORT",
+        "default": "5280",
+        "description": "TCP port the AprilCam daemon's gRPC server listens on.",
+    },
 ]
 
 
@@ -372,6 +386,14 @@ class Config:
     # geometry.DEFAULT_MOVEMENT_THRESHOLD_PX" (APRILCAM_MOVEMENT_THRESHOLD_PX).
     movement_threshold_px: float = 0.0
 
+    # --- Remote daemon connection (sprint 014) ---
+    # Hostname or IP of the AprilCam daemon for TCP gRPC connections.
+    # When set (via APRILCAM_DAEMON_HOST), mDNS discovery is skipped.
+    # None means "auto-discover via local Unix socket or mDNS".
+    daemon_host: Optional[str] = None
+    # TCP port the daemon's gRPC server listens on (APRILCAM_DAEMON_PORT).
+    daemon_port: int = 5280
+
     @property
     def cameras_dir(self) -> Path:
         """Directory containing one subdirectory per camera keyed by slug."""
@@ -460,6 +482,17 @@ class Config:
             except (ValueError, TypeError):
                 return default
 
+        # Parse daemon_host — None when unset (triggers mDNS / local unix probe)
+        _daemon_host_raw = sources.get("APRILCAM_DAEMON_HOST", "").strip()
+        _daemon_host: Optional[str] = _daemon_host_raw if _daemon_host_raw else None
+
+        # Parse daemon_port — default 5280
+        _daemon_port_raw = sources.get("APRILCAM_DAEMON_PORT", "5280")
+        try:
+            _daemon_port = int(_daemon_port_raw)
+        except (ValueError, TypeError):
+            _daemon_port = 5280
+
         cfg = cls(
             data_dir=data_dir,
             socket_dir=socket_dir,
@@ -474,6 +507,8 @@ class Config:
             deskew_px_per_cm=_float("APRILCAM_DESKEW_PX_PER_CM", 0.0),
             undistort=_bool("APRILCAM_UNDISTORT", False),
             movement_threshold_px=_float("APRILCAM_MOVEMENT_THRESHOLD_PX", 0.0),
+            daemon_host=_daemon_host,
+            daemon_port=_daemon_port,
         )
 
         # Ensure runtime directories exist; guarded to emit an actionable message

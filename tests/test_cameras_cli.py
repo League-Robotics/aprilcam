@@ -23,6 +23,16 @@ def _make_dc(devices: list[CameraDevice]) -> MagicMock:
     return dc
 
 
+def _patch_connect(dc):
+    """Return a context manager that patches connect_from_args to return *dc*."""
+    return patch("aprilcam.cli.cameras_cli.connect_from_args", return_value=dc)
+
+
+def _patch_config():
+    """Return a context manager that patches Config.load to return a MagicMock."""
+    return patch("aprilcam.cli.cameras_cli.Config")
+
+
 def test_cameras_cli_lists_devices_from_daemon(monkeypatch, capsys):
     """The listing shows cameras returned by the daemon."""
     devices = [
@@ -37,11 +47,8 @@ def test_cameras_cli_lists_devices_from_daemon(monkeypatch, capsys):
         classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})()),
     )
 
-    with patch("aprilcam.cli.cameras_cli.Config") as mock_cfg_cls, \
-         patch("aprilcam.cli.cameras_cli.DaemonControl") as mock_dc_cls:
+    with _patch_config() as mock_cfg_cls, _patch_connect(dc):
         mock_cfg_cls.load.return_value = MagicMock()
-        mock_dc_cls.connect_default.return_value = dc
-
         rc = cameras_cli.main([])
         out = capsys.readouterr().out
 
@@ -60,11 +67,8 @@ def test_cameras_cli_empty_list(monkeypatch, capsys):
         classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})()),
     )
 
-    with patch("aprilcam.cli.cameras_cli.Config") as mock_cfg_cls, \
-         patch("aprilcam.cli.cameras_cli.DaemonControl") as mock_dc_cls:
+    with _patch_config() as mock_cfg_cls, _patch_connect(dc):
         mock_cfg_cls.load.return_value = MagicMock()
-        mock_dc_cls.connect_default.return_value = dc
-
         rc = cameras_cli.main([])
         out = capsys.readouterr().out
 
@@ -85,11 +89,8 @@ def test_cameras_cli_details_shows_slug(monkeypatch, capsys):
         classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})()),
     )
 
-    with patch("aprilcam.cli.cameras_cli.Config") as mock_cfg_cls, \
-         patch("aprilcam.cli.cameras_cli.DaemonControl") as mock_dc_cls:
+    with _patch_config() as mock_cfg_cls, _patch_connect(dc):
         mock_cfg_cls.load.return_value = MagicMock()
-        mock_dc_cls.connect_default.return_value = dc
-
         rc = cameras_cli.main(["--details"])
         out = capsys.readouterr().out
 
@@ -110,11 +111,8 @@ def test_cameras_cli_no_details_no_slug(monkeypatch, capsys):
         classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})()),
     )
 
-    with patch("aprilcam.cli.cameras_cli.Config") as mock_cfg_cls, \
-         patch("aprilcam.cli.cameras_cli.DaemonControl") as mock_dc_cls:
+    with _patch_config() as mock_cfg_cls, _patch_connect(dc):
         mock_cfg_cls.load.return_value = MagicMock()
-        mock_dc_cls.connect_default.return_value = dc
-
         rc = cameras_cli.main([])
         out = capsys.readouterr().out
 
@@ -136,11 +134,8 @@ def test_cameras_cli_pattern_matches(monkeypatch, capsys):
         classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})()),
     )
 
-    with patch("aprilcam.cli.cameras_cli.Config") as mock_cfg_cls, \
-         patch("aprilcam.cli.cameras_cli.DaemonControl") as mock_dc_cls:
+    with _patch_config() as mock_cfg_cls, _patch_connect(dc):
         mock_cfg_cls.load.return_value = MagicMock()
-        mock_dc_cls.connect_default.return_value = dc
-
         rc = cameras_cli.main(["--pattern", "global shutter"])
         out = capsys.readouterr().out
 
@@ -162,11 +157,8 @@ def test_cameras_cli_pattern_no_match(monkeypatch, capsys):
         classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})()),
     )
 
-    with patch("aprilcam.cli.cameras_cli.Config") as mock_cfg_cls, \
-         patch("aprilcam.cli.cameras_cli.DaemonControl") as mock_dc_cls:
+    with _patch_config() as mock_cfg_cls, _patch_connect(dc):
         mock_cfg_cls.load.return_value = MagicMock()
-        mock_dc_cls.connect_default.return_value = dc
-
         rc = cameras_cli.main(["--pattern", "OV9782"])
         out = capsys.readouterr().out
 
@@ -182,11 +174,9 @@ def test_cameras_cli_daemon_error(monkeypatch, capsys):
         classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})()),
     )
 
-    with patch("aprilcam.cli.cameras_cli.Config") as mock_cfg_cls, \
-         patch("aprilcam.cli.cameras_cli.DaemonControl") as mock_dc_cls:
+    with _patch_config() as mock_cfg_cls, \
+         patch("aprilcam.cli.cameras_cli.connect_from_args", side_effect=RuntimeError("daemon not running")):
         mock_cfg_cls.load.return_value = MagicMock()
-        mock_dc_cls.connect_default.side_effect = RuntimeError("daemon not running")
-
         rc = cameras_cli.main([])
         out = capsys.readouterr().out
 

@@ -5,6 +5,7 @@ from typing import List, Optional
 
 from ..config import AppConfig, Config
 from ..client.control import DaemonControl
+from ._daemon import add_daemon_args, connect_from_args
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -26,6 +27,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Show extra details (slug) alongside each camera",
     )
+    add_daemon_args(parser)
     args = parser.parse_args(argv)
 
     # Attempt to read .env for CAMERA pattern; tolerant to missing guard
@@ -41,7 +43,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Enumerate cameras via the daemon — no local hardware probe
     try:
         config = Config.load()
-        dc = DaemonControl.connect_default(config)
+        dc = connect_from_args(config, args)
         devices = dc.enumerate_cameras()
     except Exception as exc:
         print(f"Error: could not contact daemon: {exc}")

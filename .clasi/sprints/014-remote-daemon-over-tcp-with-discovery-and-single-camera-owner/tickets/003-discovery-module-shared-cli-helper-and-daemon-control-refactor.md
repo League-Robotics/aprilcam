@@ -1,12 +1,12 @@
 ---
-id: '014-003'
+id: 014-003
 title: client/discovery.py, shared cli/_daemon.py, and DaemonControl no-spawn refactor
-status: open
+status: done
 use-cases:
-  - SUC-001
-  - SUC-003
+- SUC-001
+- SUC-003
 depends-on:
-  - 014-001
+- 014-001
 ---
 
 # 014-003: client/discovery.py, shared cli/_daemon.py, and DaemonControl no-spawn refactor
@@ -29,7 +29,7 @@ auto-discovering path to the daemon:
 
 ## Acceptance Criteria
 
-- [ ] `src/aprilcam/client/discovery.py` exists with:
+- [x] `src/aprilcam/client/discovery.py` exists with:
   - `DaemonInfo` dataclass: `name`, `host`, `port`, `addresses`.
   - `discover_daemons(timeout=1.0) -> list[DaemonInfo]` using zeroconf
     `ServiceBrowser` on `_aprilcam._tcp.local.`. Returns `[]` if `zeroconf`
@@ -40,35 +40,35 @@ auto-discovering path to the daemon:
     2. `config.daemon_host` / `APRILCAM_DAEMON_HOST`
     3. Local unix socket probe (never spawn)
     4. mDNS browse: 1 → auto; >1 → error with list; 0 → hard error
-- [ ] `src/aprilcam/cli/_daemon.py` exists with:
+- [x] `src/aprilcam/cli/_daemon.py` exists with:
   - `add_daemon_args(parser)` — adds `--daemon-host`/`--daemon-port` argparse group.
   - `connect_from_args(config, args) -> DaemonControl` — calls
     `resolve_daemon_target` and returns a connected `DaemonControl`.
-- [ ] `client/control.py` `connect_default()` no longer contains a
+- [x] `client/control.py` `connect_default()` no longer contains a
     `subprocess.Popen` call. On failure to connect, it raises
     `DaemonNotFoundError` (new exception in `aprilcam/errors.py`) with message:
     "no aprilcam daemon found — start one (`systemctl start aprilcamd` /
     `aprilcam daemon start`) or set `APRILCAM_DAEMON_HOST`."
-- [ ] `DaemonNotFoundError` is a subclass of `RuntimeError` in `errors.py`.
-- [ ] `config.py` has `daemon_host: str | None = None` and `daemon_port: int = 5280`
+- [x] `DaemonNotFoundError` is a subclass of `RuntimeError` in `errors.py`.
+- [x] `config.py` has `daemon_host: str | None = None` and `daemon_port: int = 5280`
     fields, read from `APRILCAM_DAEMON_HOST` and `APRILCAM_DAEMON_PORT`.
-- [ ] `CONFIG_VARS` in `config.py` has entries for `APRILCAM_DAEMON_HOST` and
+- [x] `CONFIG_VARS` in `config.py` has entries for `APRILCAM_DAEMON_HOST` and
     `APRILCAM_DAEMON_PORT` (activate stubs from Sprint 013 if present, or add now).
-- [ ] `pyproject.toml` base `dependencies` includes `"zeroconf>=0.131"`. It is
+- [x] `pyproject.toml` base `dependencies` includes `"zeroconf>=0.131"`. It is
     removed from the `daemon` extra.
-- [ ] `mcp_server.py:main()` parses `--daemon-host`/`--daemon-port` from argv
+- [x] `mcp_server.py:main()` parses `--daemon-host`/`--daemon-port` from argv
     and passes them (or stores them on the config) before starting the MCP server.
-- [ ] All CLI commands that connect to the daemon (`cameras`, `tags`, `calibrate`,
+- [x] All CLI commands that connect to the daemon (`cameras`, `tags`, `calibrate`,
     `view`, `web`, `daemon`) call `add_daemon_args` and `connect_from_args`.
     (For commands not yet updated in this ticket, at minimum add the args group;
     refactor the connection call in the relevant workstream tickets.)
-- [ ] Unit tests in `tests/test_discovery.py`:
+- [x] Unit tests in `tests/test_discovery.py`:
   - Mock `discover_daemons` to return 0, 1, and >1 results; assert
     `resolve_daemon_target` behavior matches the precedence spec.
   - Assert `DaemonControl.connect_default` raises `DaemonNotFoundError`
     (not spawns) when the daemon is unreachable.
   - Assert `APRILCAM_DAEMON_HOST` env var bypasses mDNS.
-- [ ] `uv run pytest` passes.
+- [x] `uv run pytest` passes.
 
 ## Implementation Plan
 

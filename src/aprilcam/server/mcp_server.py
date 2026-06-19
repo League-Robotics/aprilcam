@@ -307,13 +307,29 @@ _daemon_client: Optional[DaemonControl] = None
 # info.json dicts including a "paths_file" key.
 _cam_info: dict[str, dict] = {}
 
+# Optional daemon connection overrides set by main() from argv.
+# When set, _ensure_daemon_client() uses these instead of mDNS/unix discovery.
+_daemon_host_override: Optional[str] = None
+_daemon_port_override: Optional[int] = None
+
 
 def _ensure_daemon_client() -> DaemonControl:
-    """Return the module-level daemon client, starting the daemon if needed."""
+    """Return the module-level daemon client, connecting via resolver if needed.
+
+    Uses :func:`~aprilcam.client.discovery.resolve_daemon_target` for
+    discovery.  If ``--daemon-host`` / ``--daemon-port`` were parsed by
+    ``main()``, those override all discovery methods.
+    """
     global _daemon_client
     if _daemon_client is None:
         config = Config.load()
-        _daemon_client = DaemonControl.connect_default(config)
+        # Build a minimal args-like proxy so resolve_daemon_target sees
+        # the CLI overrides set by main() without needing a real argparse namespace.
+        class _CliProxy:
+            daemon_host = _daemon_host_override
+            daemon_port = _daemon_port_override or config.daemon_port
+
+        _daemon_client = DaemonControl.connect_default(config, cli_args=_CliProxy())
     return _daemon_client
 
 
@@ -4376,8 +4392,28 @@ def main(argv: list[str] | None = None) -> None:
     due to an exception.
 
     Args:
-        argv: Unused; accepted for CLI entry-point compatibility.
+        argv: Optional argument list (defaults to ``sys.argv[1:]``).
+            Supports ``--daemon-host HOST`` and ``--daemon-port PORT``
+            to override daemon discovery.
     """
+    import argparse
+    from aprilcam.cli._daemon import add_daemon_args
+
+    global _daemon_host_override, _daemon_port_override
+
+    parser = argparse.ArgumentParser(
+        prog="aprilcam mcp",
+        description="Run the AprilCam MCP server on stdio transport.",
+        add_help=False,  # don't interfere with MCP stdio protocol
+    )
+    add_daemon_args(parser)
+    # Parse only the known args so that any MCP-specific flags pass through
+    known, _unknown = parser.parse_known_args(argv if argv is not None else sys.argv[1:])
+    if known.daemon_host:
+        _daemon_host_override = known.daemon_host
+    if known.daemon_port:
+        _daemon_port_override = known.daemon_port
+
     cfg = Config.load()
     playfield_def_registry.load_all(cfg.playfields_dir)
     try:

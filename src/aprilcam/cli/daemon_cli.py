@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
+import time
 from typing import Optional
 
 
@@ -16,6 +18,43 @@ def _read_pid(config) -> Optional[int]:
         return None
 
 
+def _probe_daemon(resolved_unix: str) -> bool:
+    """Return True when a daemon is already listening on the Unix socket."""
+    from aprilcam.client.control import DaemonControl
+    dc_probe = DaemonControl(unix_path=resolved_unix)
+    dc_probe.connect()
+    try:
+        dc_probe.list_cameras()
+        return True
+    except Exception:
+        return False
+    finally:
+        dc_probe.close()
+
+
+def _spawn_daemon(config, log_level: Optional[str] = None) -> None:
+    """Spawn the daemon as a detached background process.
+
+    This is the **only** place in the client code that calls
+    ``subprocess.Popen`` to launch the daemon.  All other connection paths
+    (``DaemonControl.connect_default``, ``connect_from_args``, etc.) must
+    NOT spawn processes — they either connect to a running daemon or raise
+    :class:`~aprilcam.errors.DaemonNotFoundError`.
+    """
+    config.log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = open(config.log_dir / "aprilcamd.log", "a")  # noqa: WPS515
+    env = os.environ.copy()
+    if log_level:
+        env["APRILCAM_LOG_LEVEL"] = log_level
+    subprocess.Popen(
+        [sys.executable, "-m", "aprilcam.daemon"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=log_file,
+        env=env,
+    )
+
+
 def _cmd_start(
     config,
     verbosity: int = 0,
@@ -23,7 +62,11 @@ def _cmd_start(
     unix_path: Optional[str] = None,
     tcp_port: Optional[int] = None,
 ) -> int:
-    """Ensure the daemon is running (auto-spawn if needed)."""
+    """Ensure the daemon is running, spawning it if needed.
+
+    This is the ONE place that is explicitly allowed to spawn the daemon.
+    All other client paths connect or raise DaemonNotFoundError.
+    """
     foreground = verbosity > 0 and not detach
 
     if foreground:
@@ -43,21 +86,24 @@ def _cmd_start(
     resolved_unix = unix_path or str(config.socket_dir / "control.sock")
 
     # Check if daemon is already up before spawning
-    dc_probe = DaemonControl(unix_path=resolved_unix)
-    dc_probe.connect()
-    already_up = False
-    try:
-        dc_probe.list_cameras()
-        already_up = True
-    except Exception:
-        pass
-    finally:
-        dc_probe.close()
+    already_up = _probe_daemon(resolved_unix)
 
-    log_level = "DEBUG" if verbosity >= 2 else "INFO" if verbosity == 1 else None
-    dc = DaemonControl.connect_default(
-        config, log_level=log_level, unix_path=unix_path, tcp_port=tcp_port
-    )
+    if not already_up:
+        log_level = "DEBUG" if verbosity >= 2 else "INFO" if verbosity == 1 else None
+        _spawn_daemon(config, log_level=log_level)
+
+        # Poll until the daemon is ready (OpenCV + gRPC can take 10+ s cold start)
+        deadline = time.monotonic() + 20.0
+        started = False
+        while time.monotonic() < deadline:
+            time.sleep(0.1)
+            if _probe_daemon(resolved_unix):
+                started = True
+                break
+        if not started:
+            print("ERROR: aprilcamd did not start within 20 seconds.", file=sys.stderr)
+            return 1
+
     pid = _read_pid(config)
     pid_str = f"  pid {pid}" if pid else ""
 
@@ -66,6 +112,9 @@ def _cmd_start(
     else:
         print(f"daemon started{pid_str}  (control socket: {resolved_unix})")
 
+    # List open cameras
+    dc = DaemonControl(unix_path=resolved_unix)
+    dc.connect()
     try:
         cameras = dc.list_cameras()
         if cameras:
@@ -236,6 +285,8 @@ def _cmd_restart(
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    from aprilcam.cli._daemon import add_daemon_args
+
     parser = argparse.ArgumentParser(
         prog="aprilcam daemon",
         description="Manage the AprilCam daemon process",
@@ -272,6 +323,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             metavar="N",
             help="TCP port the daemon is/will be listening on",
         )
+        add_daemon_args(p)
 
     for name, help_text in [
         ("status", "Show daemon status and open cameras"),
@@ -291,6 +343,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             metavar="N",
             help="TCP port the daemon is listening on",
         )
+        add_daemon_args(p)
 
     args = parser.parse_args(argv)
 

@@ -6,18 +6,14 @@ Proto-generated types are confined to this module.
 
 from __future__ import annotations
 
-import fcntl
-import os
-import subprocess
-import sys
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
 import grpc
 
 from aprilcam.client._imaging import require_cv2
+from aprilcam.errors import DaemonNotFoundError
 
 from aprilcam.proto import aprilcam_pb2, aprilcam_pb2_grpc
 from aprilcam.client.models import (
@@ -76,82 +72,99 @@ class DaemonControl:
         log_level: str | None = None,
         unix_path: str | None = None,
         tcp_port: int | None = None,
+        cli_args=None,
     ) -> "DaemonControl":
-        """Return a connected DaemonControl, spawning the daemon if needed.
+        """Return a connected DaemonControl using auto-discovery.
 
-        Mirrors the behaviour of the legacy ``ensure_running()`` function:
+        This method **never spawns a daemon process**.  The daemon must already
+        be running.  Use ``aprilcam daemon start`` or
+        ``systemctl start aprilcamd`` to start it first.
 
-        1. Build the gRPC target from *unix_path* / *tcp_port* or the
-           defaults derived from *config*.
-        2. Attempt an immediate gRPC probe (``ListCameras``).  If it
-           succeeds, return the connected instance.
-        3. Acquire a spawn lock, re-probe, then spawn
-           ``python -m aprilcam.daemon`` as a detached background process.
-        4. Poll every 50 ms for up to 5 seconds; raise on timeout.
+        Resolution precedence (delegated to
+        :func:`~aprilcam.client.discovery.resolve_daemon_target`):
 
-        *log_level* overrides ``APRILCAM_LOG_LEVEL`` for the spawned process.
+        1. *unix_path* / *tcp_port* keyword arguments (explicit override,
+           mirrors old call-site interface — still supported for backward
+           compatibility with existing callers that pass these directly).
+        2. *cli_args* ``daemon_host`` / ``daemon_port`` attributes.
+        3. ``config.daemon_host`` / ``APRILCAM_DAEMON_HOST`` env var.
+        4. Local Unix socket probe (default: ``<socket_dir>/control.sock``).
+        5. mDNS browse on ``_aprilcam._tcp.local.``.
+
+        Args:
+            config: Loaded :class:`~aprilcam.config.Config` instance.
+            log_level: Unused (kept for backward-compatible call sites).
+            unix_path: Explicit Unix socket path — skips all discovery.
+            tcp_port: Explicit TCP port — used with ``config.daemon_host``
+                or ``localhost`` when *unix_path* is also provided but fails.
+            cli_args: Argparse namespace with optional ``daemon_host`` and
+                ``daemon_port`` attributes (from
+                :func:`~aprilcam.cli._daemon.add_daemon_args`).
+
+        Returns:
+            A connected :class:`DaemonControl` instance.
+
+        Raises:
+            DaemonNotFoundError: When no reachable daemon is found via any
+                resolution method.
         """
-        resolved_unix = unix_path or str(config.socket_dir / "control.sock")
-        resolved_port = tcp_port  # may be None — only used if unix fails
-
-        def _try_connect() -> "DaemonControl | None":
-            dc = cls(unix_path=resolved_unix)
+        # If an explicit unix_path or tcp_port was passed (old call-site
+        # compatibility), build a synthetic cli_args-like object so the
+        # resolver sees an explicit override without going through mDNS.
+        if unix_path is not None:
+            # Explicit Unix socket — connect directly, no discovery.
+            dc = cls(unix_path=unix_path)
             dc.connect()
             try:
                 dc.list_cameras()
                 return dc
-            except grpc.RpcError:
+            except grpc.RpcError as exc:
                 dc.close()
-                return None
-            except Exception:
+                raise DaemonNotFoundError(
+                    f"Daemon at unix:{unix_path} is unreachable: {exc}. "
+                    "Start the daemon with `aprilcam daemon start` or "
+                    "`systemctl start aprilcamd`, or set APRILCAM_DAEMON_HOST."
+                ) from exc
+            except Exception as exc:
                 dc.close()
-                return None
+                raise DaemonNotFoundError(
+                    f"Daemon at unix:{unix_path} is unreachable: {exc}. "
+                    "Start the daemon with `aprilcam daemon start` or "
+                    "`systemctl start aprilcamd`, or set APRILCAM_DAEMON_HOST."
+                ) from exc
 
-        # Fast path: daemon already running
-        result = _try_connect()
-        if result is not None:
-            return result
+        # Build a minimal args proxy that resolve_daemon_target understands
+        class _Args:
+            daemon_host = None
+            daemon_port = tcp_port or config.daemon_port
 
-        # Spawn lock: prevent two callers from starting the daemon simultaneously
-        lock_path = config.socket_dir / "aprilcamd.spawn.lock"
-        config.socket_dir.mkdir(parents=True, exist_ok=True)
-        lock_file = open(lock_path, "w")  # noqa: WPS515  (kept open for flock)
+        _proxy_args = cli_args if cli_args is not None else _Args()
+
+        from aprilcam.client.discovery import resolve_daemon_target
+
+        host, port, resolved_unix = resolve_daemon_target(config, _proxy_args)
+
+        dc = cls(unix_path=resolved_unix, host=host, port=port)
+        dc.connect()
         try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-
-            # Re-probe after acquiring the lock (another caller may have spawned)
-            result = _try_connect()
-            if result is not None:
-                return result
-
-            # Spawn the daemon
-            config.log_dir.mkdir(parents=True, exist_ok=True)
-            log_file = open(config.log_dir / "aprilcamd.log", "a")  # noqa: WPS515
-            env = os.environ.copy()
-            if log_level:
-                env["APRILCAM_LOG_LEVEL"] = log_level
-            subprocess.Popen(
-                [sys.executable, "-m", "aprilcam.daemon"],
-                start_new_session=True,
-                stdout=subprocess.DEVNULL,
-                stderr=log_file,
-                env=env,
-            )
-
-            # Poll until the daemon is ready.  OpenCV + gRPC module loading
-            # can take 10+ seconds on a cold start, so allow 20 seconds.
-            deadline = time.monotonic() + 20.0
-            while time.monotonic() < deadline:
-                time.sleep(0.1)
-                result = _try_connect()
-                if result is not None:
-                    return result
-
-            raise RuntimeError("aprilcamd did not start within 20 seconds")
-
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            lock_file.close()
+            dc.list_cameras()
+            return dc
+        except grpc.RpcError as exc:
+            dc.close()
+            target = f"unix:{resolved_unix}" if resolved_unix else f"{host}:{port}"
+            raise DaemonNotFoundError(
+                f"Daemon at {target} is unreachable: {exc}. "
+                "Start the daemon with `aprilcam daemon start` or "
+                "`systemctl start aprilcamd`, or set APRILCAM_DAEMON_HOST."
+            ) from exc
+        except Exception as exc:
+            dc.close()
+            target = f"unix:{resolved_unix}" if resolved_unix else f"{host}:{port}"
+            raise DaemonNotFoundError(
+                f"Daemon at {target} is unreachable: {exc}. "
+                "Start the daemon with `aprilcam daemon start` or "
+                "`systemctl start aprilcamd`, or set APRILCAM_DAEMON_HOST."
+            ) from exc
 
     def connect(self) -> "DaemonControl":
         """Open the gRPC channel and create the stub.

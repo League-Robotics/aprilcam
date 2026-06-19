@@ -23,6 +23,7 @@ import numpy as np
 from ..camera.camutil import CameraInfo, select_camera_by_pattern
 from ..config import Config
 from ..client.control import DaemonControl
+from ._daemon import add_daemon_args, connect_from_args
 
 
 def _warmup_capture(dc: DaemonControl, cam_name: str, count: int = 10, timeout: float = 5.0) -> None:
@@ -136,11 +137,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="With exactly 2 cameras: calibrate the first as primary (ArUco corners), "
              "then calibrate the second using the first camera's homography as reference.",
     )
+    add_daemon_args(parser)
     args = parser.parse_args(argv)
 
-    # Start (or connect to) the daemon
+    # Connect to the daemon via the shared resolver
     config = Config.load()
-    dc = DaemonControl.connect_default(config)
+    dc = connect_from_args(config, args)
 
     # cameras_dir is <data_dir>/cameras — each camera has its own subdir
     if args.output:

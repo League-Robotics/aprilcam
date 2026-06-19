@@ -74,6 +74,8 @@ def _print_table(
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    from ..cli._daemon import add_daemon_args
+
     parser = argparse.ArgumentParser(
         prog="aprilcam tags",
         description="Detect ArUco and AprilTag markers on a camera and print locations.",
@@ -86,6 +88,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--frames", type=int, default=30,
         help="Number of frames to accumulate detections over (default: 30)",
     )
+    add_daemon_args(parser)
     args = parser.parse_args(argv)
 
     import cv2 as cv
