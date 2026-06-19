@@ -1,45 +1,3 @@
----
-id: '007'
-title: Tests for FHS/XDG defaults, /etc precedence, log_dir, CONFIG_VARS coverage,
-  and version bump
-status: done
-use-cases:
-- SUC-001
-- SUC-002
-- SUC-003
-- SUC-004
-- SUC-005
-depends-on:
-- '001'
-- '002'
-- '003'
-- '004'
-- '005'
-- '006'
-github-issue: ''
-issue: ''
-completes_issue: true
----
-<!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
-
-# Tests for FHS/XDG defaults, /etc precedence, log_dir, CONFIG_VARS coverage, and version bump
-
-## Description
-
-Write all new tests for this sprint and update existing tests broken by the
-default-path changes in Ticket 001. Run the full suite to confirm no
-regressions. Then bump the version.
-
-**Part A — Update `tests/test_config_loader.py`:**
-
-`test_config_load_defaults` (line 74) asserts the old cwd-relative and `/tmp`
-defaults. Replace these assertions with ones for XDG paths (monkeypatching
-`os.geteuid` to return a non-zero uid and unsetting XDG env vars to get the
-`~/.local/share/aprilcam` etc. fallbacks). Keep the test structure the same.
-
-**Part B — New file `tests/test_config_fhs_xdg.py`:**
-
-```python
 """Tests for FHS/XDG directory selection and /etc config sourcing (Sprint 013)."""
 import os
 from pathlib import Path
@@ -115,6 +73,14 @@ def test_etc_aprilcam_env_loaded_at_lowest_priority(tmp_path, monkeypatch):
 
     monkeypatch.setattr(config_mod, "_parse_dotfile", fake_parse)
     monkeypatch.delenv("APRILCAM_LOG_LEVEL", raising=False)
+    # Ensure dirs are writable
+    monkeypatch.setenv("APRILCAM_SOCKET_DIR", str(tmp_path / "sock"))
+    monkeypatch.setenv("APRILCAM_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("APRILCAM_LOG_DIR", str(tmp_path / "log"))
+    # Use a fake home so ~/.aprilcam is not picked up
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
 
     cfg = Config.load(start=tmp_path)
     assert cfg.log_level == "WARNING"
@@ -137,6 +103,9 @@ def test_user_dotfile_overrides_etc(tmp_path, monkeypatch):
     fake_home.mkdir()
     (fake_home / ".aprilcam").write_text("APRILCAM_LOG_LEVEL=DEBUG\n")
     monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    monkeypatch.setenv("APRILCAM_SOCKET_DIR", str(tmp_path / "sock"))
+    monkeypatch.setenv("APRILCAM_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("APRILCAM_LOG_DIR", str(tmp_path / "log"))
 
     cfg = Config.load(start=tmp_path)
     assert cfg.log_level == "DEBUG"
@@ -154,6 +123,9 @@ def test_env_var_overrides_etc(tmp_path, monkeypatch):
 
     monkeypatch.setattr(config_mod, "_parse_dotfile", fake_parse)
     monkeypatch.setenv("APRILCAM_LOG_LEVEL", "ERROR")
+    monkeypatch.setenv("APRILCAM_SOCKET_DIR", str(tmp_path / "sock"))
+    monkeypatch.setenv("APRILCAM_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("APRILCAM_LOG_DIR", str(tmp_path / "log"))
 
     cfg = Config.load(start=tmp_path)
     assert cfg.log_level == "ERROR"
@@ -168,6 +140,9 @@ def test_config_has_log_dir(tmp_path, monkeypatch):
     for k in list(os.environ):
         if k.startswith("APRILCAM_"):
             monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg_data"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "xdg_run"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg_state"))
     cfg = Config.load(start=tmp_path)
     assert hasattr(cfg, "log_dir")
     assert isinstance(cfg.log_dir, Path)
@@ -176,6 +151,8 @@ def test_config_has_log_dir(tmp_path, monkeypatch):
 def test_aprilcam_log_dir_env_sets_log_dir(tmp_path, monkeypatch):
     log_path = tmp_path / "mylogs"
     monkeypatch.setenv("APRILCAM_LOG_DIR", str(log_path))
+    monkeypatch.setenv("APRILCAM_SOCKET_DIR", str(tmp_path / "sock"))
+    monkeypatch.setenv("APRILCAM_DATA_DIR", str(tmp_path / "data"))
     cfg = Config.load(start=tmp_path)
     assert cfg.log_dir == log_path
 
@@ -210,86 +187,3 @@ def test_config_vars_have_required_fields():
         assert "default" in entry, f"Missing 'default' in {entry}"
         assert "description" in entry, f"Missing 'description' in {entry}"
         assert entry["description"].strip(), f"Empty description for {entry['key']}"
-```
-
-**Part C — CLI smoke tests (add to `tests/test_cli_dispatch.py` or a new
-`tests/test_cli_agent.py`):**
-
-```python
-import subprocess, sys
-
-def test_agent_flag_prints_content():
-    result = subprocess.run(
-        [sys.executable, "-m", "aprilcam", "--agent"],
-        capture_output=True, text=True,
-    )
-    assert result.returncode == 0
-    assert len(result.stdout) > 100  # non-trivial content
-
-def test_agent_robot_flag():
-    result = subprocess.run(
-        [sys.executable, "-m", "aprilcam", "--agent", "robot"],
-        capture_output=True, text=True,
-    )
-    assert result.returncode == 0
-    assert len(result.stdout) > 100
-
-def test_agent_unknown_exits_nonzero():
-    result = subprocess.run(
-        [sys.executable, "-m", "aprilcam", "--agent", "nosuchguide"],
-        capture_output=True, text=True,
-    )
-    assert result.returncode != 0
-```
-
-**Part D — Version bump:**
-
-After all tests pass, run:
-```
-dotconfig version bump
-```
-Then commit the version change with message:
-```
-chore: bump version
-```
-
-## Acceptance Criteria
-
-- [x] `tests/test_config_fhs_xdg.py` exists and all tests pass.
-- [x] `tests/test_config_loader.py::test_config_load_defaults` is updated
-      to reflect XDG defaults and passes.
-- [x] CLI `--agent` smoke tests pass.
-- [x] `uv run pytest` (full suite) exits 0 with no errors or failures.
-- [x] Version bumped in `pyproject.toml` (format `0.YYYYMMDD.N`).
-- [x] Version bump committed as `chore: bump version`.
-
-## Implementation Plan
-
-### Approach
-
-Tests only (plus the version bump). No production code changes.
-
-Suggested order:
-1. Update `test_config_load_defaults` in `tests/test_config_loader.py`.
-2. Create `tests/test_config_fhs_xdg.py`.
-3. Add CLI smoke tests.
-4. Run `uv run pytest` — fix any failures.
-5. `dotconfig version bump` + commit.
-
-### Files to create/modify
-
-- `tests/test_config_loader.py` — update `test_config_load_defaults` and
-  `test_socket_dir_created_if_missing` (which may also need updating if the
-  default socket_dir assertion changes).
-- `tests/test_config_fhs_xdg.py` — new file.
-- `tests/test_cli_dispatch.py` or `tests/test_cli_agent.py` — add
-  `--agent` smoke tests.
-- `pyproject.toml` — version bump (via `dotconfig version bump`).
-
-### Testing plan
-
-This ticket IS the testing. Run `uv run pytest -v` as final verification.
-
-### Documentation updates
-
-None.
