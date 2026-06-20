@@ -13,8 +13,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import cv2 as cv
 import numpy as np
+
+# OpenCV is needed only by the calibrate_* workflow functions (daemon/admin
+# paths). The data layer used by cv2-free thin clients — CameraCalibration,
+# FieldSpec, CameraPosition, parse_calibration_from_dict, to_camera_json, the
+# load/save helpers — does not touch cv2. Import it lazily so the MCP server,
+# web hub, and view client can import this module without OpenCV installed; the
+# cv.VideoCapture type hints are strings under `from __future__ import
+# annotations`, so they never evaluate at import time.
+try:
+    import cv2 as cv
+except ModuleNotFoundError:  # pragma: no cover - exercised only on thin installs
+    cv = None  # type: ignore[assignment]
 
 _log = logging.getLogger(__name__)
 

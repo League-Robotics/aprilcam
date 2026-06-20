@@ -531,16 +531,24 @@ def _handle_open_camera(
         # Resolve index from pattern or default
         idx: int
         if pattern is not None:
-            from aprilcam.camera.camutil import (
-                list_cameras as _list_cameras,
-                select_camera_by_pattern,
+            # Resolve the pattern through the daemon's enumerate — the daemon is
+            # the sole owner of camera hardware, so the MCP server must never
+            # probe locally (that pulled in OpenCV via camutil and broke
+            # open_camera on the cv2-free thin-client install). Match the pattern
+            # against the device name and slug, case-insensitively.
+            client = _ensure_daemon_client()
+            try:
+                devices = list(client.enumerate_cameras())
+            except Exception as exc:
+                return {"error": f"Could not enumerate cameras: {exc}"}
+            pl = pattern.lower()
+            match = next(
+                (d for d in devices if pl in d.name.lower() or pl in d.slug.lower()),
+                None,
             )
-
-            cams = _list_cameras(max_index=10, quiet=True)
-            resolved = select_camera_by_pattern(pattern, cams)
-            if resolved is None:
+            if match is None:
                 return {"error": f"No camera matching pattern '{pattern}'"}
-            idx = resolved
+            idx = match.index
         elif index is not None:
             # `index` is the PERSISTENT enumeration handle (what list_cameras
             # returns and `aprilcam cameras` shows), not the OS probe index.
