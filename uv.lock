@@ -79,6 +79,7 @@ version = "0.20260619.11"
 source = { editable = "." }
 dependencies = [
     { name = "grpcio" },
+    { name = "mcp" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pillow" },
@@ -94,7 +95,6 @@ daemon = [
     { name = "cv2-enumerate-cameras" },
     { name = "fpdf2" },
     { name = "grpcio-reflection" },
-    { name = "mcp" },
     { name = "msgpack" },
     { name = "mss" },
     { name = "opencv-contrib-python" },
@@ -136,7 +136,7 @@ requires-dist = [
     { name = "ipykernel", marker = "extra == 'dev'", specifier = ">=7.2.0" },
     { name = "ipython", marker = "extra == 'dev'", specifier = ">=8.39.0" },
     { name = "jupyter", marker = "extra == 'dev'", specifier = ">=1.1.1" },
-    { name = "mcp", marker = "extra == 'daemon'", specifier = ">=1.0" },
+    { name = "mcp", specifier = ">=1.0" },
     { name = "msgpack", marker = "extra == 'daemon'", specifier = ">=1.0" },
     { name = "mss", marker = "extra == 'daemon'", specifier = ">=9.0" },
     { name = "numpy", specifier = ">=1.23" },

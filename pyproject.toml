@@ -27,7 +27,9 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-# Base dependencies: lightweight gRPC client stack only.
+# Base dependencies: lightweight gRPC client stack + MCP server framework.
+# The MCP server, web hub, and view client are opencv-free thin clients that
+# ship in the base install, so the MCP SDK belongs here (not the daemon extra).
 # Heavy server/vision deps go in the optional extras below.
 dependencies = [
   "grpcio>=1.60",
@@ -38,6 +40,7 @@ dependencies = [
   "rich>=13.0",
   "zeroconf>=0.131",
   "pillow>=10.0",
+  "mcp>=1.0",
 ]
 
 [project.urls]
@@ -51,7 +54,6 @@ imaging = []
 daemon = [
   "opencv-contrib-python>=4.8",
   "mss>=9.0",
-  "mcp>=1.0",
   "websockets>=12.0",
   "fpdf2>=2.7",
   "cv2-enumerate-cameras>=1.3",
