@@ -1,11 +1,18 @@
-"""Starlette web application with REST API endpoints mirroring MCP tools.
+"""Starlette web application — thin HTTP/WS bridge over AprilCam daemon RPCs.
 
-Provides a ``create_app()`` factory that returns a Starlette ``Application``
-with:
+Provides a ``create_app()`` factory that returns a Starlette application with:
 
-- ``GET /`` — API discovery endpoint returning available tools and usage info.
-- ``POST /api/<tool_name>`` — REST endpoints that delegate to the existing
-  ``_handle_*`` functions in ``mcp_server.py``.
+- ``GET /`` — API discovery endpoint (HTML UI or JSON, content-negotiated).
+- ``POST /api/list_cameras`` — enumerate available hardware cameras.
+- ``POST /api/tags`` — latest tag frame from the daemon.
+- ``POST /api/objects`` — current object detections from the daemon.
+- ``POST /api/where`` — natural-language location query.
+- ``GET /api/frame`` — raw JPEG passthrough from the daemon.
+- ``POST /api/overlay`` — push overlay elements to the daemon.
+- ``WS /ws/tags`` — live tag stream from ``GetTagStream``.
+
+Each route is a 1:1 mapping of one daemon RPC.  No pixel work, no cv2,
+no MCP-tool indirection.  The daemon is the sole vision authority.
 
 This module does NOT start a server itself; use ``uvicorn`` or the CLI
 subcommand (see ``cli.py``) to run the app.
@@ -13,276 +20,134 @@ subcommand (see ``cli.py``) to run the app.
 
 from __future__ import annotations
 
-import base64
+import asyncio
 import json
+import contextlib
 from importlib.metadata import version as _pkg_version
 from typing import Any
-
-import asyncio
 
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
-from starlette.routing import Mount, Route, WebSocketRoute
+from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from aprilcam.server.mcp_server import detection_registry, server as _mcp_server
-from aprilcam.server.mcp_server import (
-    _handle_list_cameras,
-    _handle_open_camera,
-    _handle_close_camera,
-    _handle_capture_frame,
-    _handle_create_playfield,
-    _handle_calibrate_playfield,
-    _handle_get_playfield_info,
-    _handle_start_detection,
-    _handle_stop_detection,
-    _handle_get_tags,
-    _handle_get_tag_history,
-    _handle_get_objects,
-    _handle_get_frame,
-    _handle_start_live_view,
-    _handle_stop_live_view,
-)
-
-# ---------------------------------------------------------------------------
-# API endpoint metadata (used for discovery and routing)
-# ---------------------------------------------------------------------------
-
-_TOOL_SPECS: list[dict[str, Any]] = [
-    {
-        "name": "list_cameras",
-        "path": "/api/list_cameras",
-        "method": "POST",
-        "description": "Enumerate available cameras with names and indices.",
-        "parameters": [],
-        "returns": "array of {index, name, backend}",
-    },
-    {
-        "name": "open_camera",
-        "path": "/api/open_camera",
-        "method": "POST",
-        "description": "Open a camera by index, name pattern, or source type.",
-        "parameters": [
-            {"name": "index", "type": "integer", "default": None, "description": "Camera index (0-based)"},
-            {"name": "pattern", "type": "string", "default": None, "description": "Substring to match camera name"},
-            {"name": "source", "type": "string", "default": None, "description": "Special source type, e.g. 'screen'"},
-            {"name": "backend", "type": "string", "default": None, "description": "OpenCV backend constant name"},
-        ],
-        "returns": "{camera_id} or {error}",
-    },
-    {
-        "name": "close_camera",
-        "path": "/api/close_camera",
-        "method": "POST",
-        "description": "Close an open camera and release its resources.",
-        "parameters": [
-            {"name": "camera_id", "type": "string", "default": None, "description": "Handle returned by open_camera (required)"},
-        ],
-        "returns": "{status: 'closed'} or {error}",
-    },
-    {
-        "name": "capture_frame",
-        "path": "/api/capture_frame",
-        "method": "POST",
-        "description": "Capture a single frame from a camera or playfield.",
-        "parameters": [
-            {"name": "camera_id", "type": "string", "default": None, "description": "Camera or playfield handle (required)"},
-            {"name": "format", "type": "string", "default": "base64", "description": "'base64' (JSON) or 'file' (binary JPEG)"},
-            {"name": "quality", "type": "integer", "default": 85, "description": "JPEG quality 1-100"},
-        ],
-        "returns": "JSON with base64 data, or binary JPEG (Content-Type: image/jpeg)",
-    },
-    {
-        "name": "create_playfield",
-        "path": "/api/create_playfield",
-        "method": "POST",
-        "description": "Detect ArUco corner markers and create a playfield for deskewing.",
-        "parameters": [
-            {"name": "camera_id", "type": "string", "default": None, "description": "Camera handle (required)"},
-            {"name": "max_frames", "type": "integer", "default": 30, "description": "Max frames to try for corner detection"},
-        ],
-        "returns": "{playfield_id, corners, ...} or {error}",
-    },
-    {
-        "name": "get_playfield_info",
-        "path": "/api/get_playfield_info",
-        "method": "POST",
-        "description": "Get information about a registered playfield.",
-        "parameters": [
-            {"name": "playfield_id", "type": "string", "default": None, "description": "Playfield handle (required)"},
-        ],
-        "returns": "{playfield_id, camera_id, corners, calibrated, ...} or {error}",
-    },
-    {
-        "name": "start_detection",
-        "path": "/api/start_detection",
-        "method": "POST",
-        "description": "Start a persistent AprilTag/ArUco detection loop on a source.",
-        "parameters": [
-            {"name": "source_id", "type": "string", "default": None, "description": "Camera or playfield handle (required)"},
-            {"name": "family", "type": "string", "default": "36h11", "description": "Tag family: '36h11' or 'aruco4x4'"},
-            {"name": "proc_width", "type": "integer", "default": 0, "description": "Processing width (0 = no downscale)"},
-            {"name": "detect_interval", "type": "integer", "default": 1, "description": "Detect every N-th frame"},
-            {"name": "use_clahe", "type": "boolean", "default": False, "description": "Apply CLAHE contrast enhancement"},
-            {"name": "use_sharpen", "type": "boolean", "default": False, "description": "Apply sharpening filter"},
-        ],
-        "returns": "{source_id, status: 'started'} or {error}",
-    },
-    {
-        "name": "stop_detection",
-        "path": "/api/stop_detection",
-        "method": "POST",
-        "description": "Stop a running detection loop.",
-        "parameters": [
-            {"name": "source_id", "type": "string", "default": None, "description": "Source handle (required)"},
-        ],
-        "returns": "{source_id, status: 'stopped'} or {error}",
-    },
-    {
-        "name": "get_tags",
-        "path": "/api/get_tags",
-        "method": "POST",
-        "description": "Get the latest detected tags from a running detection loop.",
-        "parameters": [
-            {"name": "source_id", "type": "string", "default": None, "description": "Source handle (required)"},
-        ],
-        "returns": "{source_id, frame, tags: [...]} or {error}",
-    },
-    {
-        "name": "get_tag_history",
-        "path": "/api/get_tag_history",
-        "method": "POST",
-        "description": "Get the last N frames of tag records from the ring buffer.",
-        "parameters": [
-            {"name": "source_id", "type": "string", "default": None, "description": "Source handle (required)"},
-            {"name": "num_frames", "type": "integer", "default": 30, "description": "Number of frames to return"},
-        ],
-        "returns": "{source_id, frames: [...]} or {error}",
-    },
-    {
-        "name": "get_objects",
-        "path": "/api/get_objects",
-        "method": "POST",
-        "description": "Detect non-tag objects (cubes, etc.) from a running detection loop.",
-        "parameters": [
-            {"name": "source_id", "type": "string", "default": None, "description": "Source handle (required)"},
-        ],
-        "returns": "{source_id, objects: [...]} or {error}",
-    },
-    {
-        "name": "get_frame",
-        "path": "/api/get_frame",
-        "method": "POST",
-        "description": "Capture a frame from a camera or playfield, optionally with tag overlays.",
-        "parameters": [
-            {"name": "source_id", "type": "string", "default": None, "description": "Camera or playfield handle (required)"},
-            {"name": "format", "type": "string", "default": "base64", "description": "'base64' (JSON) or 'file' (binary JPEG)"},
-            {"name": "quality", "type": "integer", "default": 85, "description": "JPEG quality 1-100"},
-            {"name": "annotate", "type": "boolean", "default": False, "description": "Draw tag overlays (corners, IDs, world coords) on the frame"},
-        ],
-        "returns": "JSON with base64 data, or binary JPEG (Content-Type: image/jpeg)",
-    },
-    {
-        "name": "start_live_view",
-        "path": "/api/start_live_view",
-        "method": "POST",
-        "description": "Start a live camera view with tag detection overlay.",
-        "parameters": [
-            {"name": "camera_id", "type": "string", "default": None, "description": "Camera handle (required)"},
-            {"name": "deskew", "type": "boolean", "default": True, "description": "Apply playfield deskew if available"},
-            {"name": "family", "type": "string", "default": "36h11", "description": "Tag family: '36h11' or 'aruco4x4'"},
-            {"name": "proc_width", "type": "integer", "default": 0, "description": "Processing width (0 = no downscale)"},
-            {"name": "use_clahe", "type": "boolean", "default": False, "description": "Apply CLAHE contrast enhancement"},
-            {"name": "use_sharpen", "type": "boolean", "default": False, "description": "Apply sharpening filter"},
-        ],
-        "returns": "{view_id, camera_id, status: 'started'} or {error}",
-    },
-    {
-        "name": "stop_live_view",
-        "path": "/api/stop_live_view",
-        "method": "POST",
-        "description": "Stop a running live view.",
-        "parameters": [
-            {"name": "view_id", "type": "string", "default": None, "description": "View handle (required)"},
-        ],
-        "returns": "{view_id, status: 'stopped'} or {error}",
-    },
-]
-
-# Map tool name -> handler function
-_HANDLERS: dict[str, Any] = {
-    "list_cameras": _handle_list_cameras,
-    "open_camera": _handle_open_camera,
-    "close_camera": _handle_close_camera,
-    "capture_frame": _handle_capture_frame,
-    "create_playfield": _handle_create_playfield,
-    "calibrate_playfield": _handle_calibrate_playfield,
-    "get_playfield_info": _handle_get_playfield_info,
-    "start_detection": _handle_start_detection,
-    "stop_detection": _handle_stop_detection,
-    "get_tags": _handle_get_tags,
-    "get_tag_history": _handle_get_tag_history,
-    "get_objects": _handle_get_objects,
-    "get_frame": _handle_get_frame,
-    "start_live_view": _handle_start_live_view,
-    "stop_live_view": _handle_stop_live_view,
-}
-
-# Image-returning tools that may produce binary JPEG responses
-_IMAGE_TOOLS = {"capture_frame", "get_frame"}
+from aprilcam.client.control import DaemonControl
+from aprilcam.client.discovery import resolve_daemon_target
 
 
 # ---------------------------------------------------------------------------
-# Response helpers
+# Daemon client singleton (stored in app state)
+# ---------------------------------------------------------------------------
+
+
+def _make_client(host: str, port: int, unix_path: str | None) -> DaemonControl:
+    """Construct and connect a DaemonControl.  Raises on failure."""
+    dc = DaemonControl(unix_path=unix_path, host=host, port=port)
+    dc.connect()
+    return dc
+
+
+def _get_client(app: Starlette) -> DaemonControl:
+    """Return the shared DaemonControl from app state.
+
+    Connects lazily on first call; subsequent calls reuse the channel.
+    Raises RuntimeError when no daemon is reachable.
+    """
+    dc: DaemonControl | None = getattr(app.state, "daemon_client", None)
+    if dc is None:
+        raise RuntimeError(
+            "Daemon client not initialised — daemon unreachable at startup."
+        )
+    return dc
+
+
+# ---------------------------------------------------------------------------
+# Serialisation helpers
+# ---------------------------------------------------------------------------
+
+
+def _tag_record_to_dict(tag: Any) -> dict:
+    """Convert a TagRecord (Pydantic model or dict) to a JSON-safe dict."""
+    if isinstance(tag, dict):
+        d = tag
+    else:
+        d = tag.model_dump()
+
+    def _list(v: Any) -> list | None:
+        if v is None:
+            return None
+        return list(v)
+
+    return {
+        "id": d["id"],
+        "center_px": _list(d.get("center_px")),
+        "corners_px": [_list(c) for c in (d.get("corners_px") or [])],
+        "orientation_yaw": d.get("yaw"),
+        "world_xy": _list(d.get("world_xy")),
+        "in_playfield": d.get("in_playfield", False),
+        "vel_px": _list(d.get("vel_px")),
+        "speed_px": d.get("speed_px"),
+        "vel_world": _list(d.get("vel_world")),
+        "speed_world": d.get("speed_world"),
+        "heading_rad": d.get("heading_rad"),
+        "age": d.get("age", 0.0),
+    }
+
+
+def _tag_frame_to_dict(frame: Any) -> dict:
+    """Convert a TagFrame (Pydantic model) to a JSON-safe dict."""
+    d = frame.model_dump() if hasattr(frame, "model_dump") else frame
+    return {
+        "frame": d.get("frame_id", 0),
+        "ts_mono_ns": d.get("ts_mono_ns", 0),
+        "ts_wall_ms": d.get("ts_wall_ms", 0),
+        "tags": [_tag_record_to_dict(t) for t in d.get("tags", [])],
+        "fps": d.get("fps", 0.0),
+        "field_width_cm": d.get("field_width_cm", 0.0),
+        "field_height_cm": d.get("field_height_cm", 0.0),
+        "origin_x": d.get("origin_x", 0.0),
+        "origin_y": d.get("origin_y", 0.0),
+    }
+
+
+def _objects_response_to_dict(resp: Any) -> dict:
+    """Convert a GetObjectsResponse proto to a JSON-safe dict."""
+    objects = []
+    for obj in resp.objects:
+        world_xy = (
+            [float(obj.wx), float(obj.wy)]
+            if (obj.wx != 0.0 or obj.wy != 0.0)
+            else None
+        )
+        objects.append({
+            "center_px": [float(obj.cx_px), float(obj.cy_px)],
+            "world_xy": world_xy,
+            "color": obj.color,
+            "bbox": [int(obj.x_bbox), int(obj.y_bbox), int(obj.w_bbox), int(obj.h_bbox)],
+            "area_px": float(obj.area_px),
+            "object_type": obj.object_type,
+            "confidence": float(obj.confidence),
+        })
+    return {"objects": objects}
+
+
+# ---------------------------------------------------------------------------
+# Error response helper
 # ---------------------------------------------------------------------------
 
 
 def _error_response(message: str, status_code: int = 400) -> JSONResponse:
-    """Return a JSON error response."""
     return JSONResponse({"error": message}, status_code=status_code)
 
 
-def _image_or_json(result: dict) -> Response:
-    """Convert an image handler result to either binary JPEG or JSON.
-
-    If the result has ``type: "file"``, read the file and return binary
-    JPEG with the appropriate Content-Type.  If ``type: "image"``, return
-    the base64-encoded data as JSON.  Errors are returned as JSON with
-    the appropriate status code.
-    """
-    rtype = result.get("type")
-
-    if rtype == "error":
-        return _error_response(result.get("error", "Unknown error"), 400)
-
-    if rtype == "file":
-        path = result["path"]
-        try:
-            with open(path, "rb") as f:
-                data = f.read()
-            return Response(content=data, media_type="image/jpeg")
-        except Exception as exc:
-            return _error_response(f"Failed to read image file: {exc}", 500)
-
-    # Default: base64 JSON
-    return JSONResponse(result)
-
-
 # ---------------------------------------------------------------------------
-# HTML UI builder
+# HTML UI builder  (self-contained; no external assets)
 # ---------------------------------------------------------------------------
 
 
 def _build_html_ui() -> str:
-    """Return a self-contained HTML page with embedded CSS and JavaScript.
-
-    The single-page app provides:
-    - A source selector that lists available cameras.
-    - A live image stream polled from ``/api/get_frame``.
-    - A real-time tag table fed by a WebSocket at ``/ws/tags/{source_id}``.
-    - A status bar showing connection state and frame rate.
-    """
+    """Return a self-contained HTML page with embedded CSS and JavaScript."""
     return """\
 <!DOCTYPE html>
 <html lang="en">
@@ -340,9 +205,6 @@ def _build_html_ui() -> str:
   <h1>AprilCam Live</h1>
   <div class="controls">
     <select id="cameraSelect" disabled><option>Loading cameras...</option></select>
-    <span class="field-label">W</span><input type="number" id="fieldWidth" value="102" step="0.1" title="Playfield width in cm">
-    <span class="field-label">H</span><input type="number" id="fieldHeight" value="89" step="0.1" title="Playfield height in cm">
-    <span class="field-label">cm</span>
     <button id="startBtn" disabled>View</button>
   </div>
 </header>
@@ -354,17 +216,12 @@ def _build_html_ui() -> str:
   <div class="panel tags-panel">
     <h2>Detected Tags</h2>
     <table>
-      <thead><tr><th>ID</th><th>Center X</th><th>Center Y</th><th>Orientation</th><th>Speed</th><th>World X</th><th>World Y</th></tr></thead>
+      <thead><tr><th>ID</th><th>X</th><th>Y</th><th>Yaw</th><th>Speed</th><th>WX</th><th>WY</th></tr></thead>
       <tbody id="tagBody"><tr><td colspan="7">No data</td></tr></tbody>
     </table>
   </div>
   <div class="panel urls-panel">
     <h2>Connection URLs</h2>
-    <div class="url-row">
-      <span class="url-label">MCP SSE:</span>
-      <span class="url-link" id="urlMcp"></span>
-      <span class="url-copied" id="copiedMcp">copied!</span>
-    </div>
     <div class="url-row">
       <span class="url-label">REST API:</span>
       <span class="url-link" id="urlApi"></span>
@@ -401,14 +258,12 @@ def _build_html_ui() -> str:
   const wsLabel = document.getElementById("wsLabel");
   const srcLabel = document.getElementById("srcLabel");
 
-  let sourceId = null;   // currently viewed source (camera or playfield)
+  let sourceId = null;
   let frameTimer = null;
   let ws = null;
   let frameCount = 0;
   let fpsTimer = null;
-  var knownTags = {};  // id -> {data, active}
-  // Track server-side resources — these persist across UI switches
-  var activeSources = {};  // cameraIndex -> {cameraId, sourceId, calibrated}
+  var knownTags = {};
 
   function renderTagTable() {
     var ids = Object.keys(knownTags).map(Number).sort(function(a, b) { return a - b; });
@@ -422,7 +277,7 @@ def _build_html_ui() -> str:
       var style = entry.active ? "" : " style='opacity:0.4'";
       var cx = t.center_px ? t.center_px[0].toFixed(1) : "--";
       var cy = t.center_px ? t.center_px[1].toFixed(1) : "--";
-      var ori = t.orientation_yaw != null ? (t.orientation_yaw * 180 / Math.PI).toFixed(1) + "\u00b0" : "--";
+      var ori = t.orientation_yaw != null ? (t.orientation_yaw * 180 / Math.PI).toFixed(1) + "°" : "--";
       var spd = t.speed_px != null ? t.speed_px.toFixed(1) + " px/s" : "--";
       var wx = t.world_xy ? t.world_xy[0].toFixed(1) : "--";
       var wy = t.world_xy ? t.world_xy[1].toFixed(1) : "--";
@@ -430,18 +285,12 @@ def _build_html_ui() -> str:
     }).join("");
   }
 
-  async function api(tool, params) {
-    const resp = await fetch("/api/" + tool, {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(params || {})
-    });
-    return resp.json();
-  }
-
   async function loadCameras() {
     try {
-      const cams = await api("list_cameras");
+      const resp = await fetch("/api/list_cameras", {method: "POST",
+        headers: {"Content-Type": "application/json"}, body: "{}"});
+      const data = await resp.json();
+      const cams = data.cameras || [];
       cameraSelect.innerHTML = "";
       if (!cams.length) {
         cameraSelect.innerHTML = "<option>No cameras found</option>";
@@ -449,76 +298,26 @@ def _build_html_ui() -> str:
       }
       cams.forEach(function(c) {
         const opt = document.createElement("option");
-        opt.value = c.index;
+        opt.value = c.slug || c.name;
         opt.textContent = c.name || ("Camera " + c.index);
         cameraSelect.appendChild(opt);
       });
       cameraSelect.disabled = false;
       startBtn.disabled = false;
     } catch(e) {
-      cameraSelect.innerHTML = "<option>Error loading cameras</option>";
+      cameraSelect.innerHTML = "<option>Error: " + e.message + "</option>";
     }
   }
 
-  startBtn.addEventListener("click", async function() {
-    startBtn.disabled = true;
-    const idx = parseInt(cameraSelect.value, 10);
-    try {
-      // Stop current UI streams (but don't tear down server resources)
-      disconnectUI();
-
-      // Check if this camera is already set up
-      var entry = activeSources[idx];
-      if (entry) {
-        // Already open — just switch the UI to this source
-        sourceId = entry.sourceId;
-        srcLabel.textContent = entry.label;
-        knownTags = {};
-        startFramePolling();
-        connectWebSocket();
-        startBtn.disabled = false;
-        return;
-      }
-
-      // First time — open camera, create playfield, calibrate, start detection
-      srcLabel.textContent = "opening camera...";
-      const openRes = await api("open_camera", {index: idx});
-      if (openRes.error) { alert("Open camera error: " + openRes.error); startBtn.disabled = false; return; }
-      var camId = openRes.camera_id;
-      var srcId = camId;
-      var label = camId;
-
-      srcLabel.textContent = "detecting corners...";
-      const pfRes = await api("create_playfield", {camera_id: camId});
-      if (pfRes.playfield_id) {
-        srcId = pfRes.playfield_id;
-        var fw = parseFloat(document.getElementById("fieldWidth").value) || 102;
-        var fh = parseFloat(document.getElementById("fieldHeight").value) || 89;
-        srcLabel.textContent = "calibrating...";
-        var calRes = await api("calibrate_playfield", {
-          playfield_id: srcId, width: fw, height: fh, units: "cm"
-        });
-        if (calRes.calibrated) {
-          label = srcId + " (" + calRes.width_cm + "x" + calRes.height_cm + " cm)";
-        } else {
-          label = srcId + " (deskewed, no calibration)";
-        }
-      } else {
-        label = srcId + " (no playfield)";
-      }
-
-      const detRes = await api("start_detection", {source_id: srcId});
-      if (detRes.error) { alert("Start detection error: " + detRes.error); startBtn.disabled = false; return; }
-
-      // Remember this source so switching back is instant
-      activeSources[idx] = { cameraId: camId, sourceId: srcId, label: label };
-      sourceId = srcId;
-      srcLabel.textContent = label;
-      knownTags = {};
-      startFramePolling();
-      connectWebSocket();
-      startBtn.disabled = false;
-    } catch(e) { alert("Error: " + e.message); startBtn.disabled = false; }
+  startBtn.addEventListener("click", function() {
+    if (ws) { ws.close(); ws = null; }
+    if (frameTimer) { clearTimeout(frameTimer); frameTimer = null; }
+    if (fpsTimer) { clearInterval(fpsTimer); fpsTimer = null; }
+    sourceId = cameraSelect.value;
+    srcLabel.textContent = sourceId;
+    knownTags = {};
+    startFramePolling();
+    connectWebSocket();
   });
 
   function startFramePolling() {
@@ -532,14 +331,15 @@ def _build_html_ui() -> str:
     async function poll() {
       if (!sourceId) return;
       try {
-        const res = await api("get_frame", {source_id: sourceId, format: "base64", annotate: true});
-        if (res.error) {
-          frameDot.className = "dot err";
-          fpsLabel.textContent = res.error;
-        } else if (res.data) {
-          liveImg.src = "data:image/jpeg;base64," + res.data;
+        const res = await fetch("/api/frame?source_id=" + encodeURIComponent(sourceId));
+        if (res.ok && res.headers.get("content-type") === "image/jpeg") {
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          liveImg.src = url;
           frameCount++;
           frameDot.className = "dot ok";
+        } else {
+          frameDot.className = "dot err";
         }
       } catch(e) { frameDot.className = "dot err"; fpsLabel.textContent = e.message; }
       if (sourceId) frameTimer = setTimeout(poll, 500);
@@ -550,7 +350,7 @@ def _build_html_ui() -> str:
   function connectWebSocket() {
     if (!sourceId) return;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    ws = new WebSocket(proto + "//" + location.host + "/ws/tags/" + sourceId);
+    ws = new WebSocket(proto + "//" + location.host + "/ws/tags?source_id=" + encodeURIComponent(sourceId));
     ws.onopen = function() { wsDot.className = "dot ok"; wsLabel.textContent = "connected"; };
     ws.onclose = function() { wsDot.className = "dot"; wsLabel.textContent = "disconnected"; };
     ws.onerror = function() { wsDot.className = "dot err"; wsLabel.textContent = "error"; };
@@ -559,35 +359,18 @@ def _build_html_ui() -> str:
         const msg = JSON.parse(evt.data);
         if (msg.error) { tagBody.innerHTML = "<tr><td colspan='7'>" + msg.error + "</td></tr>"; return; }
         const tags = msg.tags || [];
-        // Mark all known tags inactive, then re-activate those in this frame
         Object.keys(knownTags).forEach(function(id) { knownTags[id].active = false; });
-        tags.forEach(function(t) {
-          knownTags[t.id] = { data: t, active: true };
-        });
+        tags.forEach(function(t) { knownTags[t.id] = { data: t, active: true }; });
         renderTagTable();
       } catch(e) {}
     };
   }
 
-  function disconnectUI() {
-    // Stop local polling/WebSocket only — server resources stay alive
-    if (frameTimer) { clearTimeout(frameTimer); frameTimer = null; }
-    if (fpsTimer) { clearInterval(fpsTimer); fpsTimer = null; }
-    if (ws) { ws.close(); ws = null; }
-    sourceId = null;
-    frameDot.className = "dot";
-    fpsLabel.textContent = "--";
-    wsDot.className = "dot";
-    wsLabel.textContent = "disconnected";
-  }
-
-  // --- Connection URLs with click-to-copy ---
   var base = location.protocol + "//" + location.host;
   var wsProto = location.protocol === "https:" ? "wss:" : "ws:";
   var urls = {
-    Mcp: base + "/mcp/sse",
     Api: base + "/api/",
-    Ws: wsProto + "//" + location.host + "/ws/tags/<source_id>",
+    Ws: wsProto + "//" + location.host + "/ws/tags?source_id=<cam>",
     Discovery: base + "/"
   };
   Object.keys(urls).forEach(function(key) {
@@ -611,18 +394,82 @@ def _build_html_ui() -> str:
 
 
 # ---------------------------------------------------------------------------
+# API tool specs for the discovery endpoint
+# ---------------------------------------------------------------------------
+
+
+_TOOL_SPECS: list[dict[str, Any]] = [
+    {
+        "name": "list_cameras",
+        "path": "/api/list_cameras",
+        "method": "POST",
+        "description": "Enumerate available hardware cameras (calls daemon EnumerateCameras).",
+        "parameters": [],
+        "returns": "{cameras: [{index, name, slug}]}",
+    },
+    {
+        "name": "tags",
+        "path": "/api/tags",
+        "method": "POST",
+        "description": "Get the latest detected tags from the daemon for a camera.",
+        "parameters": [
+            {"name": "source_id", "type": "string", "description": "Camera name (required)"},
+        ],
+        "returns": "{frame, tags: [...]}",
+    },
+    {
+        "name": "objects",
+        "path": "/api/objects",
+        "method": "POST",
+        "description": "Get current non-tag object detections from the daemon.",
+        "parameters": [
+            {"name": "source_id", "type": "string", "description": "Camera name (required)"},
+        ],
+        "returns": "{objects: [...]}",
+    },
+    {
+        "name": "where",
+        "path": "/api/where",
+        "method": "POST",
+        "description": "Resolve a natural-language location query via the daemon.",
+        "parameters": [
+            {"name": "query", "type": "string", "description": "Natural-language query (required)"},
+            {"name": "source_id", "type": "string", "description": "Optional camera name for live data"},
+        ],
+        "returns": "{status, tokens, matches: [...]}",
+    },
+    {
+        "name": "frame",
+        "path": "/api/frame",
+        "method": "GET",
+        "description": "Capture a raw JPEG frame from the daemon (passthrough, no re-encode).",
+        "parameters": [
+            {"name": "source_id", "type": "string", "description": "Camera name (query param, required)"},
+        ],
+        "returns": "Binary JPEG with Content-Type: image/jpeg",
+    },
+    {
+        "name": "overlay",
+        "path": "/api/overlay",
+        "method": "POST",
+        "description": "Push overlay elements to the daemon for a camera.",
+        "parameters": [
+            {"name": "source_id", "type": "string", "description": "Camera name (required)"},
+            {"name": "elements", "type": "array", "description": "List of overlay element dicts"},
+            {"name": "ttl", "type": "number", "description": "Seconds before overlay expires (default 1.0)"},
+        ],
+        "returns": "{status: 'ok'} or {error}",
+    },
+]
+
+
+# ---------------------------------------------------------------------------
 # Endpoint handlers
 # ---------------------------------------------------------------------------
 
 
 async def _discovery(request: Request) -> Response:
-    """GET / — return API discovery document or HTML UI.
-
-    Content negotiation: if the ``Accept`` header explicitly contains
-    ``text/html``, return the single-page web UI.  For everything else
-    (``application/json``, ``*/*``, missing header) return the JSON
-    discovery document to preserve backwards compatibility.
-    """
+    """GET / — return the HTML UI or JSON discovery document."""
     accept = request.headers.get("accept", "")
     if "text/html" in accept:
         return HTMLResponse(_build_html_ui())
@@ -636,103 +483,183 @@ async def _discovery(request: Request) -> Response:
         "server": "aprilcam",
         "version": ver,
         "usage": (
-            "POST JSON to /api/<tool_name> with the documented parameters. "
-            "Image endpoints return base64 JSON by default; set format='file' "
-            "to receive binary JPEG with Content-Type: image/jpeg. "
-            "Error responses have {\"error\": \"...\"}. "
-            "MCP clients can connect via SSE at /mcp/sse (all 35+ tools available)."
+            "POST JSON to /api/<endpoint> with the documented parameters. "
+            "GET /api/frame?source_id=<name> for JPEG frames. "
+            "WS /ws/tags?source_id=<name> for live tag stream. "
+            "Error responses have {\"error\": \"...\"}."
         ),
         "endpoints": _TOOL_SPECS,
     })
 
 
-async def _dispatch(request: Request) -> Response:
-    """POST /api/<tool_name> — dispatch to the corresponding handler."""
-    tool_name = request.path_params["tool_name"]
-
-    handler = _HANDLERS.get(tool_name)
-    if handler is None:
-        return _error_response(f"Unknown tool: '{tool_name}'", 404)
-
-    # Parse JSON body (empty body is fine for no-param tools)
+async def handle_list_cameras(request: Request) -> JSONResponse:
+    """POST /api/list_cameras — enumerate hardware cameras via daemon."""
     try:
-        body = await request.body()
-        params: dict[str, Any] = json.loads(body) if body else {}
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        return _error_response(f"Invalid JSON body: {exc}", 400)
-
-    if not isinstance(params, dict):
-        return _error_response("Request body must be a JSON object", 400)
-
-    # Call the handler
-    try:
-        result = handler(**params)
-    except TypeError as exc:
-        # Bad parameter names or types
-        return _error_response(f"Bad parameters: {exc}", 400)
+        dc = _get_client(request.app)
+        cameras = dc.enumerate_cameras()
+        return JSONResponse({
+            "cameras": [
+                {"index": c.index, "name": c.name, "slug": c.slug}
+                for c in cameras
+            ]
+        })
     except Exception as exc:
-        return _error_response(f"Internal error: {exc}", 500)
+        return _error_response(str(exc), 503)
 
-    # Check for error in result dict
-    if isinstance(result, dict) and "error" in result and result.get("type") != "error":
-        return _error_response(result["error"], 400)
 
-    # Image-returning tools get special handling
-    if tool_name in _IMAGE_TOOLS and isinstance(result, dict):
-        return _image_or_json(result)
+async def handle_tags(request: Request) -> JSONResponse:
+    """POST /api/tags — latest tag frame for a camera."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    source_id: str = body.get("source_id", "")
+    if not source_id:
+        return _error_response("source_id is required", 400)
+    try:
+        dc = _get_client(request.app)
+        frame = dc.get_tags(source_id)
+        result = _tag_frame_to_dict(frame)
+        result["source_id"] = source_id
+        return JSONResponse(result)
+    except Exception as exc:
+        return _error_response(str(exc), 503)
 
-    # Standard JSON response
-    return JSONResponse(result)
+
+async def handle_objects(request: Request) -> JSONResponse:
+    """POST /api/objects — current object detections for a camera."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    source_id: str = body.get("source_id", "")
+    if not source_id:
+        return _error_response("source_id is required", 400)
+    try:
+        dc = _get_client(request.app)
+        resp = dc.get_objects(source_id)
+        result = _objects_response_to_dict(resp)
+        result["source_id"] = source_id
+        return JSONResponse(result)
+    except Exception as exc:
+        return _error_response(str(exc), 503)
+
+
+async def handle_where(request: Request) -> JSONResponse:
+    """POST /api/where — natural-language location query via daemon."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    query: str = body.get("query", "")
+    source_id: str = body.get("source_id", "")
+    if not query:
+        return _error_response("query is required", 400)
+    try:
+        dc = _get_client(request.app)
+        result = dc.where_is(query=query, cam_name=source_id)
+        return JSONResponse(result)
+    except Exception as exc:
+        return _error_response(str(exc), 503)
+
+
+async def handle_frame(request: Request) -> Response:
+    """GET /api/frame?source_id=<name> — raw JPEG passthrough from daemon."""
+    source_id: str = request.query_params.get("source_id", "")
+    if not source_id:
+        return _error_response("source_id query param is required", 400)
+    try:
+        dc = _get_client(request.app)
+        jpeg: bytes = dc.capture_frame_jpeg(source_id)
+        return Response(content=jpeg, media_type="image/jpeg")
+    except Exception as exc:
+        return _error_response(str(exc), 503)
+
+
+async def handle_overlay(request: Request) -> JSONResponse:
+    """POST /api/overlay — push overlay elements to the daemon."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    source_id: str = body.get("source_id", "")
+    elements: list = body.get("elements", [])
+    ttl: float = float(body.get("ttl", 1.0))
+    if not source_id:
+        return _error_response("source_id is required", 400)
+    try:
+        dc = _get_client(request.app)
+        ok = dc.publish_overlay(cam_name=source_id, elements=elements, ttl=ttl)
+        return JSONResponse({"status": "ok", "accepted": ok})
+    except Exception as exc:
+        return _error_response(str(exc), 503)
 
 
 # ---------------------------------------------------------------------------
-# WebSocket endpoint
+# WebSocket endpoint — WS /ws/tags?source_id=<name>
 # ---------------------------------------------------------------------------
 
 
 async def ws_tags(websocket: WebSocket) -> None:
-    """Stream tag detections over WebSocket for a given source.
+    """Stream tag detections over WebSocket.
 
-    Connect to ``/ws/tags/{source_id}`` to receive a JSON message per
-    frame containing ``source_id``, ``timestamp``, ``frame_index``, and
-    ``tags``.  Messages are only sent when a new frame is available
-    (based on ``frame_index``).  If no detection loop is running on the
-    requested source, the server sends an error message and closes the
-    connection.
+    Connect to ``/ws/tags?source_id=<name>`` to receive one JSON message per
+    tag frame containing ``source_id``, ``frame``, ``ts_mono_ns``,
+    ``ts_wall_ms``, ``tags``, and playfield metadata.
+
+    The daemon ``GetTagStream`` RPC returns a ``TagStreamConsumer`` (synchronous
+    socket-based reader).  We run each blocking ``consumer.read()`` call in a
+    thread executor so the asyncio event loop is not blocked.
     """
-    source_id: str = websocket.path_params["source_id"]
     await websocket.accept()
-
-    entry = detection_registry.get(source_id)
-    if entry is None:
-        await websocket.send_json({
-            "error": f"No detection loop running on source '{source_id}'"
-        })
+    source_id: str = websocket.query_params.get("source_id", "")
+    if not source_id:
+        await websocket.send_json({"error": "source_id query param required"})
         await websocket.close(code=1008)
         return
 
-    last_frame_index: int = -1
+    try:
+        dc = _get_client(websocket.app)
+    except Exception as exc:
+        await websocket.send_json({"error": f"Daemon unavailable: {exc}"})
+        await websocket.close(code=1011)
+        return
+
+    try:
+        consumer = dc.get_tag_stream(source_id)
+    except Exception as exc:
+        await websocket.send_json({"error": f"Cannot open tag stream: {exc}"})
+        await websocket.close(code=1011)
+        return
+
+    loop = asyncio.get_event_loop()
+
+    def _read_one():
+        """Blocking read on the stream socket — runs in a thread."""
+        return consumer.read()
+
     try:
         while True:
-            # Re-check registry in case detection was stopped while connected
-            entry = detection_registry.get(source_id)
-            if entry is None:
-                await websocket.send_json({
-                    "error": f"Detection loop on source '{source_id}' has stopped"
-                })
-                await websocket.close(code=1001)
-                return
+            try:
+                msg = await loop.run_in_executor(None, _read_one)
+            except EOFError:
+                # Stream closed by daemon
+                break
+            except Exception as exc:
+                await websocket.send_json({"error": str(exc)})
+                break
 
-            frame = entry.ring_buffer.get_latest()
-            if frame is not None and frame.frame_index != last_frame_index:
-                last_frame_index = frame.frame_index
-                msg = frame.to_dict()
-                msg["source_id"] = source_id
-                await websocket.send_json(msg)
-
-            await asyncio.sleep(0.033)  # ~30 fps
+            # msg is a TagFrame or OverlayFrame; only forward TagFrames
+            from aprilcam.client.models import TagFrame as _TagFrame
+            if isinstance(msg, _TagFrame):
+                payload = _tag_frame_to_dict(msg)
+                payload["source_id"] = source_id
+                await websocket.send_text(json.dumps(payload))
+            # OverlayFrame messages are daemon→viewer; skip forwarding to browser
     except WebSocketDisconnect:
         pass
+    finally:
+        consumer.close()
 
 
 # ---------------------------------------------------------------------------
@@ -740,24 +667,71 @@ async def ws_tags(websocket: WebSocket) -> None:
 # ---------------------------------------------------------------------------
 
 
-def create_app() -> Starlette:
+def create_app(
+    daemon_host: str | None = None,
+    daemon_port: int | None = None,
+    daemon_unix: str | None = None,
+) -> Starlette:
     """Create and return the Starlette application.
+
+    Connection parameters override auto-discovery when provided.
+    A DaemonControl singleton is created on startup and stored in
+    ``app.state.daemon_client``.
 
     Usage::
 
         app = create_app()
-        # Run with: uvicorn aprilcam.web_server:app
+        # Run with: uvicorn aprilcam.server.web_server:app --factory
     """
-    # Build the MCP SSE sub-application.  Do NOT pass mount_path here —
-    # the Mount("/mcp", ...) below sets ASGI root_path, which the SSE
-    # transport uses to build the client POST URL.  Passing mount_path
-    # to sse_app() would double-prefix it (e.g. /mcp/mcp/messages/).
-    mcp_sse = _mcp_server.sse_app()
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: Starlette):  # type: ignore[type-arg]
+        """Connect to the daemon on startup; close on shutdown."""
+        dc: DaemonControl | None = None
+
+        if daemon_unix or daemon_host:
+            # Explicit coordinates — skip discovery
+            host = daemon_host or "localhost"
+            port = daemon_port or 5280
+            try:
+                dc = _make_client(host, port, daemon_unix)
+            except Exception as exc:
+                import warnings
+                warnings.warn(
+                    f"AprilCam daemon unreachable at startup: {exc}",
+                    stacklevel=1,
+                )
+        else:
+            # Auto-discovery via Config + resolve_daemon_target
+            try:
+                from aprilcam.config import Config
+                config = Config.load()
+                h, p, u = resolve_daemon_target(config)
+                dc = _make_client(h, p, u)
+            except Exception as exc:
+                import warnings
+                warnings.warn(
+                    f"AprilCam daemon unreachable at startup: {exc}",
+                    stacklevel=1,
+                )
+
+        app.state.daemon_client = dc
+        try:
+            yield
+        finally:
+            if dc is not None:
+                dc.close()
+            app.state.daemon_client = None
 
     routes = [
         Route("/", _discovery, methods=["GET"]),
-        Route("/api/{tool_name}", _dispatch, methods=["POST"]),
-        WebSocketRoute("/ws/tags/{source_id}", ws_tags),
-        Mount("/mcp", app=mcp_sse),
+        Route("/api/list_cameras", handle_list_cameras, methods=["POST"]),
+        Route("/api/tags", handle_tags, methods=["POST"]),
+        Route("/api/objects", handle_objects, methods=["POST"]),
+        Route("/api/where", handle_where, methods=["POST"]),
+        Route("/api/frame", handle_frame, methods=["GET"]),
+        Route("/api/overlay", handle_overlay, methods=["POST"]),
+        WebSocketRoute("/ws/tags", ws_tags),
     ]
-    return Starlette(routes=routes)
+
+    return Starlette(routes=routes, lifespan=lifespan)

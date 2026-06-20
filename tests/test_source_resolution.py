@@ -1,4 +1,4 @@
-"""Tests for _resolve_source_playfield + the server golden-path instructions.
+"""Tests for _lookup_playfield_for_source + the server golden-path instructions.
 
 The resolver lets world-coordinate tools accept either a playfield_id or a
 camera_id (auto-resolving the camera's associated playfield).
@@ -8,7 +8,7 @@ from aprilcam.server.mcp_server import PlayfieldEntry, PlayfieldRegistry
 
 
 def _entry(playfield_id="pf_cam", camera_id="cam"):
-    # _resolve_source_playfield only uses playfield_id/camera_id, so a plain
+    # _lookup_playfield_for_source only uses playfield_id/camera_id, so a plain
     # object() stands in for the Playfield.
     return PlayfieldEntry(playfield_id=playfield_id, camera_id=camera_id, playfield=object())
 
@@ -18,7 +18,7 @@ def test_resolve_by_playfield_id(monkeypatch):
     e = _entry()
     reg.register(e)
     monkeypatch.setattr(mcp_server, "playfield_registry", reg)
-    assert mcp_server._resolve_source_playfield("pf_cam") is e
+    assert mcp_server._lookup_playfield_for_source("pf_cam") is e
 
 
 def test_resolve_by_camera_id(monkeypatch):
@@ -27,7 +27,7 @@ def test_resolve_by_camera_id(monkeypatch):
     reg.register(e)
     monkeypatch.setattr(mcp_server, "playfield_registry", reg)
     # Passing the camera handle still resolves the associated playfield.
-    assert mcp_server._resolve_source_playfield("cam") is e
+    assert mcp_server._lookup_playfield_for_source("cam") is e
 
 
 def test_resolve_via_explicit_camera_id_arg(monkeypatch):
@@ -36,12 +36,12 @@ def test_resolve_via_explicit_camera_id_arg(monkeypatch):
     reg.register(e)
     monkeypatch.setattr(mcp_server, "playfield_registry", reg)
     # source_id is unknown, but the camera_id arg points at the playfield.
-    assert mcp_server._resolve_source_playfield("something-else", camera_id="cam") is e
+    assert mcp_server._lookup_playfield_for_source("something-else", camera_id="cam") is e
 
 
 def test_resolve_unknown_returns_none(monkeypatch):
     monkeypatch.setattr(mcp_server, "playfield_registry", PlayfieldRegistry())
-    assert mcp_server._resolve_source_playfield("nope") is None
+    assert mcp_server._lookup_playfield_for_source("nope") is None
 
 
 def test_server_instructions_document_golden_path():

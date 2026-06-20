@@ -12,8 +12,7 @@ def require_cv2():
         import cv2  # noqa: PLC0415
     except ModuleNotFoundError as exc:
         raise RuntimeError(
-            "Decoding camera frames requires OpenCV. "
-            "Install it with `pip install 'aprilcam[imaging]'` "
-            "(or `aprilcam[daemon]`)."
+            "This operation requires OpenCV. "
+            "Install it with `pip install 'aprilcam[daemon]'`."
         ) from exc
     return cv2

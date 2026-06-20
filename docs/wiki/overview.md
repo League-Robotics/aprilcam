@@ -17,8 +17,10 @@ A single long-running **daemon** (`aprilcamd`) owns the cameras, runs
 detection, and serves per-frame data. Two front ends sit on top of it:
 
 - **MCP server** (`aprilcam mcp`) — tools for AI agents to open cameras,
-  create playfields, query tags, and run image-processing operations over
-  the Model Context Protocol.
+  create playfields, query tags, capture raw frames, and look up playfield
+  features over the Model Context Protocol. Vision processing (detection,
+  homography, deskew) runs exclusively in the daemon; the MCP server is a
+  thin client that returns perception results and raw frames only.
 - **Direct gRPC client** (`DaemonControl`) — a low-latency Python API for
   robot control loops that read tags and draw live overlays at 5–50 Hz.
 

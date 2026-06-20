@@ -41,10 +41,9 @@ from aprilcam.server.mcp_server import (
     PlayfieldEntry,
     PlayfieldRegistry,
     CameraRegistry,
-    DaemonCapture,
-    FieldSpec,
     _get_playfield_origin,
 )
+from aprilcam.calibration.calibration import FieldSpec
 from aprilcam.core.playfield import PlayfieldBoundary as Playfield
 from aprilcam.core.playfield_def import PlayfieldDefinitionRegistry
 

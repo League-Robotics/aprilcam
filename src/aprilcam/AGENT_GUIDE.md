@@ -230,23 +230,12 @@ cap.release()
 - `get_tag_history(source_id, num_frames?)` → ring buffer frames
 - `stream_tags(source_id)` → SSE stream of tag updates
 
-### Image Processing
+### Image Capture
 - `get_frame(source_id, format?, quality?, annotate?)` → raw frame
-- `crop_region(source_id, x, y, w, h)` → cropped image
-- `detect_lines(source_id)` → line segments
-- `detect_circles(source_id)` → circles with centers/radii
-- `detect_contours(source_id)` → contour polygons
-- `detect_motion(source_id)` → motion regions
-- `detect_qr_codes(source_id)` → decoded QR data
-- `apply_transform(source_id, operation, ...)` → transformed image
-
-### Frame Model (batch processing)
-- `create_frame(source_id)` / `create_frame_from_image(path)` → `{frame_id}`
-- `process_frame(frame_id, operations)` → processed frame
-- `get_frame_image(frame_id)` → image data
-- `save_frame(frame_id, path)` → saved file path
-- `release_frame(frame_id)` → confirmation
-- `list_frames()` → active frames
+  (base64 or temp file). The MCP server and web hub are **thin clients**;
+  they return raw frames and perception results only. Consumers that
+  need pixel-level processing should fetch a frame and use their own
+  libraries — OpenCV is a daemon-only dependency.
 
 ### Multi-Camera Compositing
 - `create_composite(name, sources)` → `{composite_id}`

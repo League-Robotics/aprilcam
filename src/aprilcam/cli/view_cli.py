@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import math
 import os
@@ -13,6 +14,9 @@ import time
 import tkinter as tk
 from pathlib import Path
 from typing import Optional
+
+import numpy as np  # numpy-only: corner coordinate math and array ops
+from PIL import Image, ImageDraw, ImageTk
 
 
 class CollapsibleFrame(tk.Frame):
@@ -104,29 +108,33 @@ class CollapsibleFrame(tk.Frame):
                 self._on_expand()
 
 
-_OBJ_BGR: dict[str, tuple[int, int, int]] = {
+_OBJ_RGB: dict[str, tuple[int, int, int]] = {
     "black":   (80,  80,  80),
-    "red":     (0,   0,   220),
-    "orange":  (0,   128, 255),
-    "yellow":  (0,   220, 220),
+    "red":     (220, 0,   0),
+    "orange":  (255, 128, 0),
+    "yellow":  (220, 220, 0),
     "green":   (0,   200, 0),
-    "blue":    (220, 100, 0),
+    "blue":    (0,   100, 220),
     "purple":  (180, 0,   180),
     "magenta": (200, 0,   200),
 }
 
 
 def _draw_object_boxes(img: "np.ndarray", objects: list) -> None:
-    import cv2 as _cv
+    """Draw colored bounding boxes on a BGR numpy frame using Pillow ImageDraw."""
+    # Convert BGR numpy array to RGB PIL Image for drawing, then write back
+    pil_img = Image.fromarray(img[:, :, ::-1])  # numpy-only: BGR->RGB channel flip
+    draw = ImageDraw.Draw(pil_img)
     for obj in objects:
         x, y, w, h = obj.bbox
-        bgr = _OBJ_BGR.get(obj.color, (180, 180, 180))
-        _cv.rectangle(img, (x, y), (x + w, y + h), bgr, 2)
+        rgb = _OBJ_RGB.get(obj.color, (180, 180, 180))
+        draw.rectangle([x, y, x + w, y + h], outline=rgb, width=2)
         label = obj.color
         if obj.world_xy is not None:
             label += f" ({obj.world_xy[0]:.0f},{obj.world_xy[1]:.0f})"
-        _cv.putText(img, label, (x, max(y - 4, 12)),
-                    _cv.FONT_HERSHEY_SIMPLEX, 0.45, bgr, 1, _cv.LINE_AA)
+        draw.text((x, max(y - 14, 0)), label, fill=rgb)
+    # Write drawn pixels back into the BGR numpy array in place
+    img[:, :, :] = np.asarray(pil_img)[:, :, ::-1]  # numpy-only: RGB->BGR channel flip
 
 
 def _tag_record_to_dict(tag_record) -> dict:
@@ -157,20 +165,19 @@ def _tag_record_to_dict(tag_record) -> dict:
 
 def _tag_dict_to_aprilcam(tag_dict: dict):
     """Convert a TagRecord dict into an AprilTag object."""
-    import numpy as np
     from aprilcam.core.models import AprilTag
 
     corners_raw = tag_dict.get("corners_px", [[0, 0]] * 4)
-    corners_px = np.array(corners_raw, dtype=np.float32)
+    corners_px = np.array(corners_raw, dtype=np.float32)  # numpy-only: corner coords array
 
     center_raw = tag_dict.get("center_px", [0.0, 0.0])
     center_px = (float(center_raw[0]), float(center_raw[1]))
 
-    c = corners_px.mean(axis=0)
+    c = corners_px.mean(axis=0)  # numpy-only: centroid computation
     p0, p1 = corners_px[0], corners_px[1]
     top_mid = (p0 + p1) / 2.0
     n = top_mid - c
-    n_norm = float(np.linalg.norm(n))
+    n_norm = float(np.linalg.norm(n))  # numpy-only: vector norm
     if n_norm > 1e-6:
         top_dir_px = (float(n[0]) / n_norm, float(n[1]) / n_norm)
     else:
@@ -215,12 +222,28 @@ def _load_paths(paths_file: Path) -> dict:
     return {}
 
 
-def _decode_frame(frame_bytes, np, cv):
-    if isinstance(frame_bytes, (bytes, bytearray)):
-        buf = np.frombuffer(frame_bytes, dtype=np.uint8)
-    else:
-        buf = np.array(frame_bytes, dtype=np.uint8)
-    return cv.imdecode(buf, cv.IMREAD_COLOR)
+def _point_in_rect_poly(poly: "np.ndarray", x: float, y: float) -> bool:
+    """Return True if (x, y) is inside the convex quadrilateral *poly*.
+
+    *poly* is a (4, 2) float32 array of vertices in order.  For the axis-
+    aligned inset rectangles used in object detection this is equivalent to a
+    simple bounds check, but the winding-number algorithm handles any convex
+    quad correctly.
+
+    This is a pure-numpy replacement for the OpenCV pointPolygonTest function.
+    """
+    # numpy-only: winding-number point-in-polygon (cross-product sign test)
+    n = len(poly)
+    inside = True
+    for i in range(n):
+        ax, ay = poly[i]
+        bx, by = poly[(i + 1) % n]
+        # Cross product (B-A) x (P-A): positive = left of edge, negative = right
+        cross = (bx - ax) * (y - ay) - (by - ay) * (x - ax)
+        if cross < 0:
+            inside = False
+            break
+    return inside
 
 
 # ── Tag panel formatting ─────────────────────────────────────────────────────
@@ -370,9 +393,6 @@ def main(argv: list[str] | None = None) -> int:
     add_daemon_args(parser)
     args = parser.parse_args(argv)
 
-    import numpy as np
-    import cv2 as cv
-
     from aprilcam.config import Config
     from aprilcam.client.control import DaemonControl
     from aprilcam.core.playfield import PlayfieldBoundary
@@ -507,7 +527,7 @@ def main(argv: list[str] | None = None) -> int:
         if tag_frame is not None and tag_frame.playfield_corners:
             raw_corners = tag_frame.playfield_corners
             if len(raw_corners) == 4:
-                poly = np.array([[c[0], c[1]] for c in raw_corners], dtype=np.float32)
+                poly = np.array([[c[0], c[1]] for c in raw_corners], dtype=np.float32)  # numpy-only: polygon coords
                 boundary.polygon = poly
                 boundary._poly = poly
                 display._update_deskew(frame_bgr)
@@ -515,7 +535,7 @@ def main(argv: list[str] | None = None) -> int:
         homography: Optional[np.ndarray] = None
         if tag_frame is not None and tag_frame.homography is not None:
             try:
-                homography = np.array(tag_frame.homography, dtype=np.float64)
+                homography = np.array(tag_frame.homography, dtype=np.float64)  # numpy-only: 3x3 homography matrix
                 if homography.shape != (3, 3):
                     homography = None
             except Exception:
@@ -569,21 +589,21 @@ def main(argv: list[str] | None = None) -> int:
                 # Build containment polygon from the disp frame dimensions.
                 # boundary._poly is in original camera coords which may not match
                 # the deskewed disp frame, so we use the frame bounds instead.
-                dh_f, dw_f = disp.shape[:2]
+                dh_f, dw_f = disp.shape[:2]  # numpy-only: read frame dimensions
                 INSET = 60
-                shrunk_poly = np.array([
+                shrunk_poly_pts = np.array([  # numpy-only: polygon corner coords
                     [INSET, INSET],
                     [dw_f - INSET, INSET],
                     [dw_f - INSET, dh_f - INSET],
                     [INSET, dh_f - INSET],
-                ], dtype=np.float32).reshape(-1, 1, 2)
+                ], dtype=np.float32)
 
                 from dataclasses import replace as _dc_replace
                 raw_objs = color_clf.classify(disp, homography=homography)
                 detected = []
                 for obj in raw_objs:
                     cx, cy = obj.center_px
-                    if cv.pointPolygonTest(shrunk_poly, (float(cx), float(cy)), False) < 0:
+                    if not _point_in_rect_poly(shrunk_poly_pts, float(cx), float(cy)):
                         continue
                     x, y, bw, bh = obj.bbox
                     aspect = max(bw, bh) / max(min(bw, bh), 1)
@@ -613,7 +633,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # Compute initial canvas height from the first display frame's aspect ratio
-    _dh, _dw = first_disp.shape[:2]
+    _dh, _dw = first_disp.shape[:2]  # numpy-only: read frame dimensions
     _display_h = int(round(_dh * _DISPLAY_W / _dw))
 
     frame_queue: queue.Queue = queue.Queue(maxsize=2)
@@ -661,7 +681,6 @@ def main(argv: list[str] | None = None) -> int:
 
     # ── Build tkinter window ──────────────────────────────────────────────
     import tkinter.font as tkfont
-    from PIL import Image, ImageTk
 
     root = tk.Tk()
     root.title(f"aprilcam view — {cam_name}")
@@ -995,9 +1014,11 @@ def main(argv: list[str] | None = None) -> int:
             return
 
         # Scale to fixed display width, maintaining aspect ratio
-        fh, fw = frame_bgr.shape[:2]
+        fh, fw = frame_bgr.shape[:2]  # numpy-only: read array shape
         dh = int(round(fh * _DISPLAY_W / fw))
-        frame_disp = cv.resize(frame_bgr, (_DISPLAY_W, dh), interpolation=cv.INTER_AREA)
+        # Resize via Pillow (no OpenCV); input is BGR numpy, output is RGB PIL Image
+        pil_frame = Image.fromarray(frame_bgr[:, :, ::-1])  # numpy-only: BGR->RGB flip
+        frame_disp = pil_frame.resize((_DISPLAY_W, dh), Image.LANCZOS)
 
         # Resize canvas + window if the display height changed (e.g. homography engaged)
         if abs(dh - canvas.winfo_height()) > 2:
@@ -1006,8 +1027,7 @@ def main(argv: list[str] | None = None) -> int:
             _locked_w = _DISPLAY_W + right_frame.winfo_reqwidth()
             root.geometry(f"{_locked_w}x{root.winfo_reqheight()}")
 
-        rgb = cv.cvtColor(frame_disp, cv.COLOR_BGR2RGB)
-        photo = ImageTk.PhotoImage(Image.fromarray(rgb))
+        photo = ImageTk.PhotoImage(frame_disp)
         canvas.itemconfig(img_item, image=photo)
         canvas._photo_ref = photo
 

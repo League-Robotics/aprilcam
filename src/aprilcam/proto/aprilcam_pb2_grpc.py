@@ -88,6 +88,11 @@ class AprilCamStub(object):
                 request_serializer=aprilcam__pb2.WhereRequest.SerializeToString,
                 response_deserializer=aprilcam__pb2.WhereResponse.FromString,
                 _registered_method=True)
+        self.GetObjects = channel.unary_unary(
+                '/aprilcam.AprilCam/GetObjects',
+                request_serializer=aprilcam__pb2.CameraRequest.SerializeToString,
+                response_deserializer=aprilcam__pb2.GetObjectsResponse.FromString,
+                _registered_method=True)
         self.GetImageStream = channel.unary_unary(
                 '/aprilcam.AprilCam/GetImageStream',
                 request_serializer=aprilcam__pb2.StreamRequest.SerializeToString,
@@ -210,6 +215,13 @@ class AprilCamServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetObjects(self, request, context):
+        """One-shot object detection on a live camera frame
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def GetImageStream(self, request, context):
         """Stream discovery — allocates a socket/port pair on demand
         """
@@ -325,6 +337,11 @@ def add_AprilCamServicer_to_server(servicer, server):
                     servicer.WhereIs,
                     request_deserializer=aprilcam__pb2.WhereRequest.FromString,
                     response_serializer=aprilcam__pb2.WhereResponse.SerializeToString,
+            ),
+            'GetObjects': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetObjects,
+                    request_deserializer=aprilcam__pb2.CameraRequest.FromString,
+                    response_serializer=aprilcam__pb2.GetObjectsResponse.SerializeToString,
             ),
             'GetImageStream': grpc.unary_unary_rpc_method_handler(
                     servicer.GetImageStream,
@@ -651,6 +668,33 @@ class AprilCam(object):
             '/aprilcam.AprilCam/WhereIs',
             aprilcam__pb2.WhereRequest.SerializeToString,
             aprilcam__pb2.WhereResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetObjects(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.AprilCam/GetObjects',
+            aprilcam__pb2.CameraRequest.SerializeToString,
+            aprilcam__pb2.GetObjectsResponse.FromString,
             options,
             channel_credentials,
             insecure,

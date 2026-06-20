@@ -8,13 +8,14 @@ Wire framing: 4-byte big-endian uint32 length prefix + protobuf payload.
 
 from __future__ import annotations
 
+import io
 import socket
 import struct
 from typing import Iterator, Union
 
 import numpy as np
+from PIL import Image
 
-from aprilcam.client._imaging import require_cv2
 from aprilcam.client.models import ImageFrame, StreamEndpoint, TagFrame
 from aprilcam.proto import aprilcam_pb2
 
@@ -130,14 +131,17 @@ class ImageStreamConsumer:
         return int(msg.frame_id), bytes(msg.jpeg)
 
     def read(self) -> np.ndarray:
-        """Read one frame and return a BGR ``np.ndarray``."""
+        """Read one frame and return an RGB ``np.ndarray``.
+
+        Uses Pillow for JPEG decoding so that no OpenCV dependency is required
+        in the base (client-only) install.  The returned array is RGB, not BGR.
+        """
         _, jpeg = self.read_raw()
-        buf = np.frombuffer(jpeg, dtype=np.uint8)
-        cv2 = require_cv2()
-        frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-        if frame is None:
-            raise RuntimeError("Failed to decode JPEG frame from stream")
-        return frame
+        try:
+            img = Image.open(io.BytesIO(jpeg)).convert("RGB")
+        except Exception as exc:
+            raise RuntimeError(f"Failed to decode JPEG frame from stream: {exc}") from exc
+        return np.asarray(img)
 
     def read_image_frame(self) -> ImageFrame:
         """Read one frame and return a full ``ImageFrame`` Pydantic model."""

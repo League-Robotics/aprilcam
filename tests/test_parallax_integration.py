@@ -423,29 +423,60 @@ def test_calibrate_playfield_response_includes_camera_height_cm(tmp_path, monkey
 def _make_detection_entry_with_tags(
     source_id: str,
     tags: list[dict],
-) -> MagicMock:
-    """Create a mock DetectionEntry whose ring_buffer returns *tags*."""
-    from aprilcam.server.mcp_server import DetectionEntry
+) -> object:
+    """Create a DaemonStreamEntry whose history deque contains *tags*.
 
-    frame_record = MagicMock()
-    frame_record.to_dict.return_value = {
-        "frame": 1,
-        "timestamp": 1000.0,
-        "tags": tags,
-        "source_id": source_id,
+    Tags must be convertible to TagFrame.model_dump() format (uses yaw,
+    not orientation_yaw; tuples for center_px/corners_px/world_xy).
+    """
+    from collections import deque
+    from aprilcam.server.mcp_server import DaemonStreamEntry
+
+    # Convert list-format fields to tuple format as model_dump() returns.
+    def _tag_to_model_dump(t: dict) -> dict:
+        tag = dict(t)
+        if "world_xy" in tag and isinstance(tag["world_xy"], list):
+            tag["world_xy"] = tuple(tag["world_xy"])
+        if "center_px" in tag and isinstance(tag["center_px"], list):
+            tag["center_px"] = tuple(tag["center_px"])
+        if "corners_px" in tag and isinstance(tag["corners_px"], list):
+            tag["corners_px"] = [tuple(c) if isinstance(c, list) else c
+                                 for c in tag["corners_px"]]
+        # orientation_yaw -> yaw for model_dump format
+        if "orientation_yaw" in tag and "yaw" not in tag:
+            tag["yaw"] = tag.pop("orientation_yaw")
+        elif "yaw" not in tag:
+            tag.setdefault("yaw", 0.0)
+        return tag
+
+    frame_dump = {
+        "frame_id": 1,
+        "ts_mono_ns": 0,
+        "ts_wall_ms": 1000,
+        "tags": [_tag_to_model_dump(t) for t in tags],
+        "homography": None,
+        "playfield_corners": [],
+        "fps": 30.0,
+        "field_width_cm": 0.0,
+        "field_height_cm": 0.0,
+        "origin_x": 0.0,
+        "origin_y": 0.0,
     }
 
-    ring_buffer = MagicMock()
-    ring_buffer.get_latest.return_value = frame_record
+    h: deque = deque(maxlen=300)
+    h.appendleft(frame_dump)
 
-    entry = MagicMock(spec=DetectionEntry)
-    entry.ring_buffer = ring_buffer
-    entry.robot_tag_id = None
-    return entry
+    consumer = MagicMock()
+    return DaemonStreamEntry(
+        source_id=source_id,
+        consumer=consumer,
+        history=h,
+        robot_tag_id=None,
+    )
 
 
 def test_get_tags_returns_world_xy_unchanged():
-    """get_tags returns world_xy exactly as stored in ring buffer (pipeline pre-corrected)."""
+    """get_tags returns world_xy exactly as stored in history deque (pipeline pre-corrected)."""
     import asyncio
     from aprilcam.server import mcp_server
     from aprilcam.server.mcp_server import detection_registry

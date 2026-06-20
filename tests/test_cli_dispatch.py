@@ -22,13 +22,13 @@ def test_daemon_command_missing_dep_prints_hint(monkeypatch, capsys):
     """A daemon subcommand with the stack absent exits 1 with an install hint."""
     monkeypatch.setattr(importlib, "import_module", _raise_missing)
 
+    # `daemon` is a genuine daemon-only command (still in DAEMON_COMMANDS).
     with pytest.raises(SystemExit) as exc_info:
-        cli.main(["mcp"])
+        cli.main(["daemon"])
 
     assert exc_info.value.code == 1
     err = capsys.readouterr().err
     assert "aprilcam[daemon]" in err
-    assert "mcp" in err  # names the missing module
     assert "Traceback" not in err  # no raw traceback
 
 
@@ -42,10 +42,13 @@ def test_non_daemon_command_reraises_module_error(monkeypatch):
 
 
 def test_all_heavy_subcommands_are_marked():
-    """Every subcommand except the pure-client ones is flagged daemon-only."""
-    client_only = {"init", "tool", "config"}
-    expected = set(cli.SUBCOMMANDS) - client_only
-    assert cli.DAEMON_COMMANDS == expected
+    """Only the genuinely opencv/daemon-requiring commands are in DAEMON_COMMANDS.
+
+    Since ticket 015-006, `cameras`, `tags`, `view`, `mcp`, and `web` are
+    opencv-free thin clients — they no longer print the "[daemon]" hint.
+    Only `daemon`, `taggen`, and `calibrate` remain in DAEMON_COMMANDS.
+    """
+    assert cli.DAEMON_COMMANDS == frozenset({"daemon", "taggen", "calibrate"})
 
 
 # ---------------------------------------------------------------------------
