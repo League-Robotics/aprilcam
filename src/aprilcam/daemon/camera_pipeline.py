@@ -241,7 +241,11 @@ class CameraPipeline:
                 # handlers / hangs against the event loop); the daemon uses its
                 # plain, battle-tested V4L2 path.
                 dev = libcam.loopback_index(self.index)
-                cap = cv.VideoCapture(dev)
+                # Force the plain V4L2 backend: with CAP_ANY, OpenCV picks its
+                # GStreamer backend for /dev/video* — which re-introduces
+                # GStreamer inside the gRPC daemon and core-dumps. CAP_V4L2 reads
+                # the loopback device directly via ioctls, no GStreamer.
+                cap = cv.VideoCapture(dev, cv.CAP_V4L2)
                 if not cap.isOpened():
                     raise RuntimeError(
                         f"CameraPipeline: failed to open v4l2loopback /dev/video{dev} "
