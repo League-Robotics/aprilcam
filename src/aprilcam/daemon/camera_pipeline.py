@@ -220,9 +220,8 @@ class CameraPipeline:
         except Exception:
             self._tag_heights = {}
 
-        # Open camera. On a Raspberry Pi the CSI cameras are captured through a
-        # libcamera GStreamer pipeline (OpenCV CAP_GSTREAMER); on USB/macOS the
-        # plain V4L2/AVFoundation index path is used.
+        # Open camera. On a Raspberry Pi the CSI cameras come from libcamera;
+        # on USB/macOS the plain V4L2/AVFoundation index path is used.
         from ..camera import libcam
         try:
             _is_libcam = libcam.backend_enabled()
@@ -235,15 +234,32 @@ class CameraPipeline:
                 raise RuntimeError(
                     f"CameraPipeline: libcamera has no camera at index {self.index}"
                 )
-            pipeline_str = libcam.gst_pipeline(lc.camera_id)
-            cap = cv.VideoCapture(pipeline_str, cv.CAP_GSTREAMER)
-            if not cap.isOpened():
-                raise RuntimeError(
-                    f"CameraPipeline: failed to open libcamera camera "
-                    f"'{lc.camera_id}' via GStreamer (is the camera free? "
-                    f"another process — e.g. camera_ros — may hold it)"
-                )
-            self._cap = cap
+            if libcam.capture_mode() == "loopback":
+                # Read the v4l2loopback device fed by the out-of-process
+                # libcamerasrc bridge. This keeps GStreamer/libcamera OUT of the
+                # gRPC daemon (in-process gst+libcamera segfaults via gRPC fork
+                # handlers / hangs against the event loop); the daemon uses its
+                # plain, battle-tested V4L2 path.
+                dev = libcam.loopback_index(self.index)
+                cap = cv.VideoCapture(dev)
+                if not cap.isOpened():
+                    raise RuntimeError(
+                        f"CameraPipeline: failed to open v4l2loopback /dev/video{dev} "
+                        f"for libcamera camera '{lc.camera_id}' — is the bridge "
+                        f"feeding it (gst libcamerasrc -> v4l2sink)?"
+                    )
+                self._cap = cap
+                for _ in range(3):  # drain warm-up frames
+                    cap.read()
+            else:
+                pipeline_str = libcam.gst_pipeline(lc.camera_id)
+                cap = cv.VideoCapture(pipeline_str, cv.CAP_GSTREAMER)
+                if not cap.isOpened():
+                    raise RuntimeError(
+                        f"CameraPipeline: failed to open libcamera camera "
+                        f"'{lc.camera_id}' via GStreamer"
+                    )
+                self._cap = cap
             # No UVC/v4l2 control application for libcamera; exposure/gain are
             # driven by the libcamera IPA (and libcamera controls if needed).
         else:

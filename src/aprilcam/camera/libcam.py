@@ -145,6 +145,31 @@ def capture_size() -> tuple[int, int, int]:
     return w, h, fps
 
 
+def capture_mode() -> str:
+    """How the daemon captures libcamera frames: ``loopback`` (default) or ``gst``.
+
+    ``loopback`` reads a ``v4l2loopback`` device fed by an out-of-process
+    ``libcamerasrc`` bridge — the daemon uses its plain V4L2 path, so no
+    GStreamer/libcamera runs inside the gRPC daemon (in-process gst+libcamera
+    segfaults via gRPC's fork handlers and hangs against its event loop).
+
+    ``gst`` opens ``libcamerasrc`` directly via OpenCV CAP_GSTREAMER — fine for
+    a standalone script, but unstable inside the daemon; kept for completeness.
+    """
+    return os.environ.get("APRILCAM_LIBCAM_CAPTURE", "loopback").strip().lower()
+
+
+def loopback_index(position: int) -> int:
+    """V4L2 loopback device index for the camera at *position* (0-based).
+
+    Defaults to ``70 + position`` (``/dev/video70``, ``/dev/video71`` …),
+    matching the bridge setup; override the base with
+    ``APRILCAM_LIBCAM_LOOPBACK_BASE``.
+    """
+    base = int(os.environ.get("APRILCAM_LIBCAM_LOOPBACK_BASE", "70") or 70)
+    return base + position
+
+
 def gst_pipeline(
     camera_id: str,
     width: Optional[int] = None,
