@@ -50,6 +50,11 @@ def _read_length_prefixed(sock: socket.socket) -> bytes:
 # ---------------------------------------------------------------------------
 
 
+def _host_is_local(host: str) -> bool:
+    """True when *host* refers to this machine (so a unix socket is usable)."""
+    return host in ("", "localhost", "127.0.0.1", "::1")
+
+
 class ImageStreamConsumer:
     """Reads length-prefixed protobuf ``ImageFrame`` messages from a stream socket.
 
@@ -92,12 +97,17 @@ class ImageStreamConsumer:
         """Open the stream socket.  Idempotent."""
         if self._sock is not None:
             return self
-        if self._endpoint.socket_path:
+        # Prefer the unix socket only when the daemon is local; a remote daemon's
+        # unix path is on *its* filesystem and unreachable, so use TCP there.
+        if self._endpoint.socket_path and _host_is_local(self._host):
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.connect(self._endpoint.socket_path)
         elif self._endpoint.tcp_port:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((self._host, self._endpoint.tcp_port))
+        elif self._endpoint.socket_path:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(self._endpoint.socket_path)
         else:
             raise ValueError(
                 "StreamEndpoint has neither socket_path nor tcp_port"
@@ -221,12 +231,17 @@ class TagStreamConsumer:
         """Open the stream socket.  Idempotent."""
         if self._sock is not None:
             return self
-        if self._endpoint.socket_path:
+        # Prefer the unix socket only when the daemon is local; a remote daemon's
+        # unix path is on *its* filesystem and unreachable, so use TCP there.
+        if self._endpoint.socket_path and _host_is_local(self._host):
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             sock.connect(self._endpoint.socket_path)
         elif self._endpoint.tcp_port:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((self._host, self._endpoint.tcp_port))
+        elif self._endpoint.socket_path:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(self._endpoint.socket_path)
         else:
             raise ValueError(
                 "StreamEndpoint has neither socket_path nor tcp_port"
