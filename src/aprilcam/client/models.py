@@ -222,11 +222,17 @@ class CameraInfo(BaseModel):
 
 
 class CameraDevice(BaseModel):
-    """An available (not necessarily open) hardware camera device."""
+    """An available (not necessarily open) hardware camera device.
+
+    ``index`` is the unstable OS probe index (used internally to open the
+    device); ``enum`` is the persistent enumeration number — the stable,
+    user-facing handle that every command should display and accept.
+    """
 
     index: int
     name: str
     slug: str
+    enum: int = 0
 
     @classmethod
     def from_proto(cls, msg: "aprilcam_pb2.CameraDevice") -> "CameraDevice":
@@ -235,6 +241,7 @@ class CameraDevice(BaseModel):
             index=int(msg.index),
             name=str(msg.name),
             slug=str(msg.slug),
+            enum=int(getattr(msg, "enum", 0) or 0),
         )
 
 

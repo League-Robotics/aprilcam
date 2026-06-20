@@ -97,6 +97,8 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
         """
         from ..camera.camutil import list_cameras
         from ..calibration.calibration import device_name_slug
+        from ..camera.identity import resolve_all
+        from ..camera.registry import CameraRegistry
 
         with self._cam_lock:
             # Hold the lock while probing so we don't race with OpenCamera
@@ -113,15 +115,37 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
                 context.set_details(f"camera enumeration failed: {exc}")
                 return aprilcam_pb2.EnumerateCamerasResponse()
 
+            # Resolve each device's persistent enumeration number from the
+            # registry so clients display/accept a STABLE handle. The OS
+            # ``index`` changes on plug/unplug; ``enum`` does not. Done under
+            # the same lock as the probe so we don't race OpenCamera.
+            try:
+                identities = resolve_all()
+            except Exception:
+                log.exception("EnumerateCameras: identity resolution failed")
+                identities = {}
+            registry = CameraRegistry(self._config.cameras_dir)
+
         devices = []
         for cam in cams:
             name = cam.device_name or cam.name or f"Camera {cam.index}"
             slug = device_name_slug(name)
+            enum_no = 0
+            identity = identities.get(cam.index)
+            if identity is not None:
+                try:
+                    record = registry.resolve(identity)
+                    enum_no = int(record.enum or 0)
+                except Exception:
+                    log.exception(
+                        "EnumerateCameras: enum resolve failed for index %s", cam.index
+                    )
             devices.append(
                 aprilcam_pb2.CameraDevice(
                     index=cam.index,
                     name=name,
                     slug=slug,
+                    enum=enum_no,
                 )
             )
         return aprilcam_pb2.EnumerateCamerasResponse(cameras=devices)

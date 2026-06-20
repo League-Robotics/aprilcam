@@ -495,8 +495,12 @@ def _handle_list_cameras() -> list[dict]:
     try:
         client = _ensure_daemon_client()
         devices = client.enumerate_cameras()
+        # Expose the PERSISTENT enumeration number as ``index`` — it is the
+        # stable, user-facing handle (matches ``aprilcam cameras`` and the live
+        # view), and is what ``open_camera(index=...)`` accepts. The unstable OS
+        # probe index is intentionally not surfaced to MCP clients.
         return [
-            {"index": d.index, "name": d.name, "slug": d.slug}
+            {"index": (d.enum or d.index), "name": d.name, "slug": d.slug}
             for d in devices
         ]
     except Exception:
@@ -538,7 +542,28 @@ def _handle_open_camera(
                 return {"error": f"No camera matching pattern '{pattern}'"}
             idx = resolved
         elif index is not None:
-            idx = index
+            # `index` is the PERSISTENT enumeration handle (what list_cameras
+            # returns and `aprilcam cameras` shows), not the OS probe index.
+            # Resolve it to the live OS index via the daemon's enumerate so the
+            # number is stable across plug/unplug.
+            client = _ensure_daemon_client()
+            try:
+                devices = list(client.enumerate_cameras())
+            except Exception:
+                devices = []
+            match = next((d for d in devices if getattr(d, "enum", 0) == index), None)
+            if match is None:
+                # Then a raw OS index match (never-registered devices, enum == 0)
+                match = next((d for d in devices if d.index == index), None)
+            if match is not None:
+                idx = match.index
+            elif devices:
+                # Devices are listed but none carry that handle — genuinely unknown.
+                return {"error": f"No camera with handle {index}"}
+            else:
+                # Enumerate unavailable — best-effort: treat the number as a raw
+                # OS index and let the daemon's OpenCamera validate it.
+                idx = index
         else:
             idx = 0
 
@@ -1684,12 +1709,15 @@ async def connect_daemon(
 
 @server.tool()
 async def list_cameras() -> list[TextContent]:
-    """List available cameras by probing indices 0 through 9.
+    """List available cameras with their stable enumeration handles.
 
     Returns:
         A JSON array of camera objects, each with ``index`` (int),
-        ``name`` (str), and ``backend`` (str). Returns an empty
-        array if no cameras are found or an error occurs.
+        ``name`` (str), and ``slug`` (str). The ``index`` is the
+        PERSISTENT enumeration number — a stable handle that does not
+        change when cameras are plugged/unplugged — and is the value to
+        pass to ``open_camera(index=...)``. Returns an empty array if no
+        cameras are found or an error occurs.
     """
     result = _handle_list_cameras()
     return [TextContent(type="text", text=json.dumps(result))]
@@ -1725,7 +1753,9 @@ async def open_camera(
     (e.g. ``"arducam-ov9782-usb-camera"``), not a UUID.
 
     Args:
-        index: Camera device index (default 0 if nothing else is specified).
+        index: Persistent camera enumeration number (the stable handle shown by
+            ``list_cameras`` / ``aprilcam cameras``, NOT the OS probe index;
+            default 0 if nothing else is specified).
         pattern: Substring to match against camera names (e.g. ``"FaceTime"``).
         source: Set to ``"screen"`` to capture the desktop instead of a camera.
         backend: OpenCV backend constant name (e.g. ``"CAP_AVFOUNDATION"``).

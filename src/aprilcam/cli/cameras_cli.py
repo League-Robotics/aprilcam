@@ -50,13 +50,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("Make sure the daemon is running: aprilcam daemon start")
         return 1
 
+    # The bracketed number is the PERSISTENT enumeration handle (stable across
+    # plug/unplug) — the same number accepted by ``aprilcam view/tags/calibrate``
+    # and shown in the live view. The unstable OS probe index is only shown
+    # under --details for debugging.
     print("Cameras:")
     if devices:
         for dev in devices:
+            num = dev.enum or dev.index
             if args.details:
-                print(f"  [{dev.index}] {dev.name}  (slug: {dev.slug})")
+                print(
+                    f"  [{num}] {dev.name}  (slug: {dev.slug}, os-index: {dev.index})"
+                )
             else:
-                print(f"  [{dev.index}] {dev.name}")
+                print(f"  [{num}] {dev.name}")
     else:
         print("  (none found)")
 
@@ -64,8 +71,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if pattern:
         matched = [d for d in devices if pattern.lower() in d.name.lower()]
         if matched:
+            m = matched[0]
             print(
-                f"Matched pattern '{pattern}': index {matched[0].index} ({matched[0].name})"
+                f"Matched pattern '{pattern}': camera {m.enum or m.index} ({m.name})"
             )
         else:
             print(f"No camera matched pattern '{pattern}'.")

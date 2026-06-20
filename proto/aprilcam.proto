@@ -58,9 +58,10 @@ message ListCamerasResponse {
 }
 
 message CameraDevice {
-  int32  index = 1;  // device index (e.g. 0, 1, 2)
+  int32  index = 1;  // OS probe index (UNSTABLE — changes on plug/unplug; for internal open only)
   string name  = 2;  // human-readable name (e.g. "OV9782 1")
   string slug  = 3;  // URL-safe identifier (e.g. "ov9782-1")
+  int32  enum  = 4;  // persistent enumeration number — the stable, user-facing camera handle
 }
 
 message EnumerateCamerasResponse {

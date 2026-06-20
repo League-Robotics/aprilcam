@@ -171,6 +171,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         CameraInfo(index=d.index, name=d.name, device_name=d.name)
         for d in _devices
     ]
+    # Map OS index -> persistent enumeration number so we display the stable,
+    # user-facing handle (never the volatile OS index).
+    enum_by_index: dict[int, int] = {d.index: d.enum for d in _devices}
 
     if args.cameras:
         from ..camera.identity import resolve_all
@@ -235,7 +238,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Output: {cameras_dir}")
     print(f"Cameras to calibrate: {len(camera_indices)}")
     for idx, label in camera_indices:
-        print(f"  [{idx}] {label}")
+        print(f"  [{enum_by_index.get(idx) or idx}] {label}")
     print()
 
     from ..calibration.calibration import (

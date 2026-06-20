@@ -123,8 +123,8 @@ def test_cameras_cli_no_details_no_slug(monkeypatch, capsys):
 def test_cameras_cli_pattern_matches(monkeypatch, capsys):
     """The pattern selector matches on camera name (case-insensitive)."""
     devices = [
-        CameraDevice(index=0, name="FaceTime HD Camera", slug="facetime-hd-camera"),
-        CameraDevice(index=1, name="OV9782 Global Shutter", slug="ov9782-global-shutter"),
+        CameraDevice(index=0, name="FaceTime HD Camera", slug="facetime-hd-camera", enum=1),
+        CameraDevice(index=1, name="OV9782 Global Shutter", slug="ov9782-global-shutter", enum=3),
     ]
     dc = _make_dc(devices)
 
@@ -141,7 +141,8 @@ def test_cameras_cli_pattern_matches(monkeypatch, capsys):
 
     assert rc == 0
     assert "global shutter" in out.lower()
-    assert "index 1" in out.lower()
+    # The reported number is the persistent enumeration handle, not the OS index.
+    assert "camera 3" in out.lower()
 
 
 def test_cameras_cli_pattern_no_match(monkeypatch, capsys):
