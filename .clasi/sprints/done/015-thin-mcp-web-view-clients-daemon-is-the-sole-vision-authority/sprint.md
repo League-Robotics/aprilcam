@@ -1,9 +1,16 @@
 ---
 id: '015'
-title: "Thin MCP/web/view Clients — Daemon Is the Sole Vision Authority"
-status: planning-docs
+title: "Thin MCP/web/view Clients \u2014 Daemon Is the Sole Vision Authority"
+status: done
 branch: sprint/015-thin-mcp-web-view-clients-daemon-is-the-sole-vision-authority
-use-cases: [SUC-001, SUC-002, SUC-003, SUC-004, SUC-005, SUC-006, SUC-007]
+use-cases:
+- SUC-001
+- SUC-002
+- SUC-003
+- SUC-004
+- SUC-005
+- SUC-006
+- SUC-007
 issues: []
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
