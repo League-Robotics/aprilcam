@@ -8,7 +8,7 @@ Transport flags
 --tcp  / --no-tcp       Enable/disable the TCP transport (default: enabled).
 --tcp-port N            TCP port to bind (default: 5280).
 --unix-path PATH        Filesystem path for the Unix socket
-                        (default: /tmp/aprilcam/control.sock).
+                        (default: <socket_dir>/control.sock).
 """
 
 import argparse
@@ -16,7 +16,7 @@ import logging
 import sys
 
 from aprilcam.config import Config
-from aprilcam.daemon.server import DaemonServer, _DEFAULT_TCP_PORT, _DEFAULT_UNIX_PATH
+from aprilcam.daemon.server import DaemonServer, _DEFAULT_TCP_PORT
 
 
 def _parse_args(argv=None):
@@ -59,9 +59,9 @@ def _parse_args(argv=None):
     )
     parser.add_argument(
         "--unix-path",
-        default=_DEFAULT_UNIX_PATH,
+        default=None,
         metavar="PATH",
-        help=f"Unix socket path (default: {_DEFAULT_UNIX_PATH})",
+        help="Unix socket path (default: <socket_dir>/control.sock)",
     )
     return parser.parse_args(argv)
 
@@ -83,11 +83,17 @@ def main(argv=None):
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
+    # Default the Unix socket path to the configured socket_dir so the daemon,
+    # its client probe, and the pidfile all agree (the hardcoded
+    # _DEFAULT_UNIX_PATH only matched config.socket_dir before _default_dirs()
+    # moved the runtime dir to $TMPDIR/aprilcam-<uid> on macOS).
+    unix_path = args.unix_path or str(config.socket_dir / "control.sock")
+
     DaemonServer(
         config,
         unix_enabled=args.unix_enabled,
         tcp_enabled=args.tcp_enabled,
-        unix_path=args.unix_path,
+        unix_path=unix_path,
         tcp_port=args.tcp_port,
     ).run()
 

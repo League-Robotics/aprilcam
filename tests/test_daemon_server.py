@@ -195,15 +195,20 @@ def test_pidfile_lock_prevents_duplicate(tmp_config: Config, caplog):
 
 
 def test_main_parse_args_defaults():
-    """Default args have both transports enabled and standard port/path."""
+    """Default args have both transports enabled and standard port.
+
+    ``unix_path`` defaults to ``None`` so that ``main()`` can resolve it from
+    ``config.socket_dir`` at runtime (the daemon, its client probe, and the
+    pidfile must all agree on the socket path — see daemon/__main__.py).
+    """
     from aprilcam.daemon.__main__ import _parse_args
-    from aprilcam.daemon.server import _DEFAULT_TCP_PORT, _DEFAULT_UNIX_PATH
+    from aprilcam.daemon.server import _DEFAULT_TCP_PORT
 
     args = _parse_args([])
     assert args.unix_enabled is True
     assert args.tcp_enabled is True
     assert args.tcp_port == _DEFAULT_TCP_PORT
-    assert args.unix_path == _DEFAULT_UNIX_PATH
+    assert args.unix_path is None
 
 
 def test_main_parse_args_no_unix():
