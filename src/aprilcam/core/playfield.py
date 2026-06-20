@@ -3,10 +3,27 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Optional, Tuple, List, Dict
+from typing import Any, Optional, Tuple, List, Dict
 
-import cv2 as cv
 import numpy as np
+
+# cv2 is an optional heavy dependency.  It is imported lazily inside methods
+# that actually need it (corner detection, deskew) so that this module — and
+# any class that merely holds a PlayfieldBoundary reference — can be imported
+# in a base (cv2-free) install.  The name ``cv`` is resolved on first use via
+# _get_cv2() below.
+
+
+def _get_cv2():
+    """Return the cv2 module, raising RuntimeError with an install hint if absent."""
+    try:
+        import cv2 as _cv  # noqa: PLC0415
+        return _cv
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "This operation requires OpenCV. "
+            "Install it with `pip install 'aprilcam[daemon]'`."
+        ) from exc
 from .models import AprilTag, AprilTagFlow, world_yaw
 
 log = logging.getLogger(__name__)
@@ -69,7 +86,7 @@ class PlayfieldBoundary:
     _flows: Dict[int, AprilTagFlow] = field(default_factory=dict, init=False, repr=False)
     _vel_ema: Dict[int, float] = field(default_factory=dict, init=False, repr=False)
     _last_seen: Dict[int, Tuple[float, float, float]] = field(default_factory=dict, init=False, repr=False)
-    _aruco_detector: Optional[cv.aruco.ArucoDetector] = field(default=None, init=False, repr=False)
+    _aruco_detector: Optional[Any] = field(default=None, init=False, repr=False)
     _corner_frame_count: int = field(default=0, init=False, repr=False)
 
     # Static-camera runtime state.  ``_held_static`` is the live working set of
@@ -92,7 +109,12 @@ class PlayfieldBoundary:
                 )
             except Exception:
                 self._poly = None
-        self._aruco_detector = self._build_aruco4_detector()
+        try:
+            self._aruco_detector = self._build_aruco4_detector()
+        except RuntimeError:
+            # cv2 not installed (base/client install); detector stays None.
+            # Any call to update() will raise at that point with a clear hint.
+            self._aruco_detector = None
         # Seed the static-hold working set from the stored static markers so
         # fill-in has positions to hold before any live frame.
         if self.static_markers:
@@ -158,12 +180,14 @@ class PlayfieldBoundary:
         return self._calibration_stale
 
     def _build_aruco4_detector(self):
+        cv = _get_cv2()
         d = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_4X4_50)
         p = cv.aruco.DetectorParameters()
         p.detectInvertedMarker = bool(self.detect_inverted)
         return cv.aruco.ArucoDetector(d, p)
 
     def _detect_corners(self, frame_bgr: np.ndarray, gray: Optional[np.ndarray] = None) -> Dict[int, Tuple[float, float]]:
+        cv = _get_cv2()
         h, w = frame_bgr.shape[:2]
         if gray is None:
             gray = cv.cvtColor(frame_bgr, cv.COLOR_BGR2GRAY)
@@ -356,6 +380,7 @@ class PlayfieldBoundary:
                 P = np.asarray(pts, dtype=np.float32).reshape(-1, 2)
                 c = P.mean(axis=0)
                 u, v = float(c[0]), float(c[1])
+            cv = _get_cv2()
             inside = cv.pointPolygonTest(self._poly.astype(np.float32), (u, v), False)
             return bool(inside >= 0)
         except Exception:
@@ -365,6 +390,7 @@ class PlayfieldBoundary:
         if self._poly is None:
             return
         try:
+            cv = _get_cv2()
             poly_i = self._poly.astype(int)
             cv.polylines(frame_bgr, [poly_i], True, (255, 255, 255), 2, cv.LINE_AA)
         except Exception:
@@ -402,6 +428,7 @@ class PlayfieldBoundary:
         dst = np.array(
             [[0, 0], [out_w, 0], [out_w, out_h], [0, out_h]], dtype=np.float32
         )
+        cv = _get_cv2()
         M = cv.getPerspectiveTransform(src, dst)
         return M, (out_w, out_h)
 
@@ -412,6 +439,7 @@ class PlayfieldBoundary:
         if transform is None:
             return frame_bgr
         M, (out_w, out_h) = transform
+        cv = _get_cv2()
         # Mask source to playfield polygon so outside pixels don't bleed in
         mask = np.zeros(frame_bgr.shape[:2], dtype=np.uint8)
         cv.fillConvexPoly(mask, self._poly.astype(np.int32), 255)

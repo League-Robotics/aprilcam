@@ -54,10 +54,10 @@ SUBCOMMANDS = {
 # Subcommands that depend on the optional `aprilcam[daemon]` stack (OpenCV,
 # mcp, mss, websockets, fpdf2, ...). The base install is the lightweight
 # client only, so importing these — or their lazily-loaded heavy deps — can
-# raise ModuleNotFoundError. `init` and `tool` are pure-client and omitted.
-DAEMON_COMMANDS = frozenset(
-    {"daemon", "mcp", "web", "taggen", "calibrate", "cameras", "tags", "view"}
-)
+# raise ModuleNotFoundError. `init`, `tool`, `cameras`, `tags`, `view`, `mcp`,
+# and `web` are opencv-free thin clients and are omitted here so they do not
+# falsely print the "install aprilcam[daemon]" hint.
+DAEMON_COMMANDS = frozenset({"daemon", "taggen", "calibrate"})
 
 
 def _get_version():

@@ -7,7 +7,6 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
-import cv2
 import numpy as np
 
 
@@ -89,7 +88,14 @@ def compute_cross_camera_homography(
     if len(primary_points) != len(secondary_points):
         raise ValueError("primary_points and secondary_points must have the same length")
 
-    H, mask = cv2.findHomography(secondary_points, primary_points, method=0)
+    try:
+        import cv2 as _cv2
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "compute_cross_camera_homography requires OpenCV. "
+            "Install it with `pip install 'aprilcam[daemon]'`."
+        ) from exc
+    H, mask = _cv2.findHomography(secondary_points, primary_points, method=0)
     if H is None:
         raise ValueError("Homography computation failed (degenerate point configuration)")
 
@@ -118,10 +124,17 @@ def map_tags_to_primary(
     Returns:
         List of dicts, each with keys: id, center_px, corners_px, orientation_yaw.
     """
+    try:
+        import cv2 as _cv2
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "map_tags_to_primary requires OpenCV. "
+            "Install it with `pip install 'aprilcam[daemon]'`."
+        ) from exc
     results: list[dict] = []
     for corners, _raw, tag_id in detections:
         pts = np.asarray(corners, dtype=np.float32).reshape(-1, 1, 2)
-        mapped = cv2.perspectiveTransform(pts, homography.astype(np.float64))
+        mapped = _cv2.perspectiveTransform(pts, homography.astype(np.float64))
         mapped_2d = mapped.reshape(-1, 2)
 
         center = mapped_2d.mean(axis=0)

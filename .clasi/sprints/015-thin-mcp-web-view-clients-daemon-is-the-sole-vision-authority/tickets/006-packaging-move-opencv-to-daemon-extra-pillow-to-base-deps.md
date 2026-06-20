@@ -1,11 +1,14 @@
 ---
-id: "006"
-title: "Packaging: move opencv to daemon extra, Pillow to base deps"
-status: open
-use-cases: [SUC-006]
-depends-on: ["003", "005"]
-github-issue: ""
-issue: ""
+id: '006'
+title: 'Packaging: move opencv to daemon extra, Pillow to base deps'
+status: done
+use-cases:
+- SUC-006
+depends-on:
+- '003'
+- '005'
+github-issue: ''
+issue: ''
 completes_issue: false
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
@@ -26,15 +29,15 @@ must actually be opencv-free before the packaging boundary is enforced, otherwis
 
 ## Acceptance Criteria
 
-- [ ] `pyproject.toml`: `opencv-contrib-python` appears **only** under
+- [x] `pyproject.toml`: `opencv-contrib-python` appears **only** under
   `[project.optional-dependencies.daemon]` — not in base `[project.dependencies]`
   and not in the `imaging` extra (or `imaging` extra is removed/emptied).
-- [ ] `pyproject.toml`: `pillow>=10.0` (or `Pillow>=10.0`) appears in
+- [x] `pyproject.toml`: `pillow>=10.0` (or `Pillow>=10.0`) appears in
   `[project.dependencies]` (base deps).
-- [ ] `cli/__init__.py`: `DAEMON_COMMANDS` is `frozenset({"daemon", "taggen",
+- [x] `cli/__init__.py`: `DAEMON_COMMANDS` is `frozenset({"daemon", "taggen",
   "calibrate"})` — `mcp`, `web`, `view`, `cameras`, `tags` are removed.
-- [ ] `uv run pytest` green.
-- [ ] Verify the dependency change does not break the `uv` lockfile:
+- [x] `uv run pytest` green.
+- [x] Verify the dependency change does not break the `uv` lockfile:
   run `uv lock --check` or `uv sync` and confirm no errors.
 
 ## Implementation Plan

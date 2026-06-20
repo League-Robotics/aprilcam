@@ -42,28 +42,35 @@ from aprilcam.client.control import DaemonControl
 from aprilcam.client.models import TagFrame
 from aprilcam.client.stream import TagStreamConsumer
 from aprilcam.core.playfield_def import PlayfieldDefinitionRegistry
+# CompositeManager does not import cv2 at module level (cv2 is lazy in the
+# compute/map functions).
 from aprilcam.camera.composite import (
     CompositeManager,
     compute_cross_camera_homography,
     map_tags_to_primary,
 )
 from aprilcam.server.frame import FrameEntry, FrameRegistry
-from aprilcam.calibration.homography import (
-    CORNER_ID_MAP,
-    detect_aruco_4x4,
-)
-from aprilcam.calibration.calibration import (
-    CameraPosition,
-    FieldSpec,
-    calibrate_from_corners,
-    parse_calibration_from_dict,
-)
+# calibration.homography and calibration.calibration import cv2 at module level,
+# so they are NOT imported here.  Individual functions that need them do local
+# imports inside their bodies.  See _require_cv2_calibration() below.
 from aprilcam.camera.camera_config import parse_camera_config
 from aprilcam.errors import CameraError, CameraNotFoundError, CameraInUseError
 from aprilcam.core.models import AprilTag
 from aprilcam.core.playfield import PlayfieldBoundary as Playfield
 from aprilcam.server import paths as paths_module
 from aprilcam.server.paths import PathRegistry, Waypoint
+
+
+def _require_cv2() -> Any:
+    """Return the cv2 module or raise RuntimeError with an install hint."""
+    try:
+        import cv2 as _cv2  # noqa: PLC0415
+        return _cv2
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "This operation requires OpenCV. "
+            "Install it with `pip install 'aprilcam[daemon]'`."
+        ) from exc
 
 # ---------------------------------------------------------------------------
 # Camera registry
@@ -140,7 +147,7 @@ class PlayfieldEntry:
     playfield_id: str
     camera_id: str
     playfield: Playfield
-    field_spec: Optional[FieldSpec] = None
+    field_spec: Optional[Any] = None  # aprilcam.calibration.calibration.FieldSpec (lazy)
     homography: Optional[np.ndarray] = None
     tag1_origin_cm: Optional[tuple] = None  # (x, y) raw world position of tag 1
 
@@ -466,8 +473,7 @@ def format_image_output(
             ``TextContent`` with the path.
         quality: JPEG quality (0-100).
     """
-    import cv2
-
+    cv2 = _require_cv2()
     ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
     if not ok:
         raise RuntimeError("Failed to encode frame as JPEG")
@@ -512,6 +518,11 @@ def _handle_open_camera(
     backend: str | None = None,
 ) -> dict:
     """Core logic for open_camera — returns ``{"camera_id": ...}`` or ``{"error": ...}``."""
+    from aprilcam.calibration.calibration import (  # noqa: PLC0415
+        CameraPosition,
+        FieldSpec,
+        parse_calibration_from_dict,
+    )
     try:
         if source == "screen":
             from aprilcam.camera.screencap import ScreenCaptureMSS
@@ -595,8 +606,7 @@ def _handle_open_camera(
                             if "static_marker_ids" in cam_cfg:
                                 cal.static_marker_ids = [str(s) for s in cam_cfg["static_marker_ids"]]
                             if "camera_position" in cam_cfg:
-                                from aprilcam.calibration.calibration import CameraPosition as _CP
-                                cal.camera_position = _CP(**cam_cfg["camera_position"])
+                                cal.camera_position = CameraPosition(**cam_cfg["camera_position"])
                         except Exception:
                             cal = None
                     else:
@@ -763,6 +773,10 @@ def _handle_create_playfield(
     max_frames: int = 30,
 ) -> dict:
     """Core logic for create_playfield — returns result dict or error dict."""
+    from aprilcam.calibration.calibration import (  # noqa: PLC0415
+        FieldSpec,
+        parse_calibration_from_dict,
+    )
     try:
         # Validate camera exists (sentinel None is fine — daemon owns the capture)
         if camera_id not in registry._cameras:
@@ -891,6 +905,10 @@ def _handle_calibrate_playfield(
     units: str = "cm",
 ) -> dict:
     """Core logic for calibrate_playfield — returns result dict or error dict."""
+    from aprilcam.calibration.calibration import (  # noqa: PLC0415
+        FieldSpec,
+        calibrate_from_corners,
+    )
     try:
         try:
             entry = playfield_registry.get(playfield_id)
@@ -1898,7 +1916,9 @@ async def calibrate_playfield(
         camera_slug = camera_id
 
         try:
-            from aprilcam.calibration.calibration import (
+            from aprilcam.calibration.calibration import (  # noqa: PLC0415
+                CameraPosition,
+                FieldSpec,
                 calibrate_from_playfield_def,
                 PlayfieldConfigError,
             )
@@ -2026,7 +2046,8 @@ async def create_playfield_from_image(
         On error: ``{"error": "<message>"}``.
     """
     try:
-        import cv2
+        cv2 = _require_cv2()
+        from aprilcam.calibration.homography import detect_aruco_4x4  # noqa: PLC0415
 
         img = cv2.imread(image_path)
         if img is None:
@@ -2103,7 +2124,7 @@ async def deskew_image(
                 {"error": f"Unknown playfield_id '{playfield_id}'"}
             ))]
 
-        import cv2
+        cv2 = _require_cv2()
 
         img = cv2.imread(image_path)
         if img is None:
@@ -2187,7 +2208,8 @@ async def create_composite(
         "num_correspondences": ...}``.
         On error: ``{"error": "<message>"}``.
     """
-    import cv2
+    cv2 = _require_cv2()
+    from aprilcam.calibration.homography import detect_aruco_4x4  # noqa: PLC0415
 
     try:
         if correspondence_points and correspondence_points.strip():
@@ -2274,8 +2296,7 @@ def _detect_apriltags_on_frame(frame: np.ndarray) -> list[tuple[np.ndarray, np.n
     Returns a list of (corners_4x2, raw_corners, tag_id) tuples suitable
     for passing to ``map_tags_to_primary``.
     """
-    import cv2
-
+    cv2 = _require_cv2()
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
     params = cv2.aruco.DetectorParameters()
@@ -2300,8 +2321,7 @@ def render_tag_overlay(frame: np.ndarray, mapped_tags: list[dict]) -> np.ndarray
     Returns:
         Annotated BGR image.
     """
-    import cv2
-
+    cv2 = _require_cv2()
     out = frame.copy()
     for tag in mapped_tags:
         corners = np.array(tag["corners_px"], dtype=np.int32).reshape(-1, 1, 2)
@@ -3198,8 +3218,7 @@ def _detect_tags_on_frame(frame_bgr: np.ndarray, family: str = "36h11") -> list[
     *family* (default ``"36h11"``).  Each result dict contains ``id``,
     ``family``, ``center_px``, ``corners_px``, and ``orientation_yaw``.
     """
-    import cv2
-
+    cv2 = _require_cv2()
     family_map = {
         "36h11": cv2.aruco.DICT_APRILTAG_36h11,
         "25h9": cv2.aruco.DICT_APRILTAG_25h9,
@@ -3236,7 +3255,8 @@ def _detect_tags_on_frame(frame_bgr: np.ndarray, family: str = "36h11") -> list[
 
 def _detect_aruco_on_frame(frame_bgr: np.ndarray) -> list[dict]:
     """Detect 4x4 ArUco markers and return JSON-serializable results."""
-    import cv2
+    cv2 = _require_cv2()
+    from aprilcam.calibration.homography import detect_aruco_4x4  # noqa: PLC0415
 
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
     detections = detect_aruco_4x4(gray)
@@ -3410,7 +3430,7 @@ async def create_frame_from_image(
     """
     import os
 
-    import cv2
+    cv2 = _require_cv2()
 
     if not os.path.isfile(image_path):
         return [
@@ -3577,7 +3597,7 @@ async def save_frame(
     """
     import os
 
-    import cv2
+    cv2 = _require_cv2()
 
     try:
         entry = frame_registry.get(frame_id)
