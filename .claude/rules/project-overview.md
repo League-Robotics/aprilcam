@@ -35,7 +35,9 @@ perform homography, or run image-processing operations on live frames.
   host machine.
 - **Existing codebase** — the core detection, homography, and tracking
   logic already exists and must be refactored, not rewritten.
-- **Dependencies**: OpenCV (contrib), NumPy, mss, python-dotenv.
+- **Dependencies**: OpenCV (contrib) is a **daemon-only** dependency.
+  The MCP server, web hub, and CLI view client require only Pillow,
+  NumPy, mss, and python-dotenv.
   Add an MCP server framework (e.g., `mcp` Python SDK or `fastmcp`).
 
 ## High-Level Requirements
@@ -80,23 +82,27 @@ It provides homography, deskew, and tag tracking.
 - **Velocity and motion** — each tag record includes computed velocity
   (px/s and world units/s if calibrated), speed, and heading.
 
-### Image Processing Tools
+### Vision Boundary (post Sprint 015)
 
-Individual MCP tools that operate on a live frame from a camera or
-playfield. Each returns structured data and/or an image.
+**The daemon is the sole vision authority.** All OpenCV processing
+(AprilTag/ArUco detection, deskew, homography, object detection) runs
+exclusively inside the daemon process.
 
-- **detect_lines** — Hough line detection, returns line segments.
-- **detect_circles** — Hough circle detection, returns centers/radii.
-- **detect_contours** — contour detection with optional filtering,
-  returns contour polygons.
-- **detect_motion** — frame difference between current and previous
-  frame, returns motion mask or changed regions.
-- **detect_qr_codes** — QR code detection and decoding.
-- **crop_region** — crop a rectangular region, return the sub-image.
-- **apply_transform** — rotate, scale, threshold, edge-detect, or
-  apply other OpenCV transformations to the current frame.
-- **get_frame** — raw frame capture (no processing), as base64 or
-  file path.
+The MCP server, web hub (`aprilcam web`), and view client
+(`aprilcam view`) are **thin clients**: they return perception results
+(tags, objects, `where` lookups) or raw frames and do **no pixel
+processing**. Consumers that need pixel work should call `get_frame`
+to obtain a raw JPEG and process it with their own libraries.
+
+OpenCV is installed only via the `daemon` optional extra
+(`pipx install 'aprilcam[daemon]'`); the base package requires
+Pillow instead.
+
+### Frame Capture
+
+- **get_frame** — raw frame capture (no processing), returned as
+  base64 or a temp file path. Consumers that need pixel-level
+  operations fetch a frame and process it themselves.
 
 ### Multi-Camera Compositing
 
@@ -122,7 +128,8 @@ playfield. Each returns structured data and/or an image.
 ## Technology Stack
 
 - **Language**: Python ≥ 3.9
-- **Vision**: OpenCV (contrib) ≥ 4.8, NumPy ≥ 1.23
+- **Vision**: OpenCV (contrib) ≥ 4.8, NumPy ≥ 1.23 — **daemon only**;
+  Pillow ≥ 10.0 for base-install image decode (MCP server, view client)
 - **MCP**: Python MCP SDK (stdio transport; streamable HTTP later)
 - **Screen capture**: mss ≥ 9.0
 - **Config**: python-dotenv ≥ 1.0
@@ -150,10 +157,12 @@ playfield. Each returns structured data and/or an image.
    Implement start/stop detection loop, ring buffer storage, tag
    query tools (current state, history), velocity computation.
 
-5. **Sprint 5 — Image Processing Tools**
-   Implement individual image processing MCP tools: detect_lines,
+5. **Sprint 5 — Image Processing Tools** *(removed in Sprint 015)*
+   Originally implemented MCP image-processing tools (detect_lines,
    detect_circles, detect_contours, detect_motion, detect_qr_codes,
-   crop_region, apply_transform.
+   crop_region, apply_transform). These were removed in Sprint 015 when
+   vision was consolidated into the daemon. The MCP server, web hub, and
+   view client now have no OpenCV dependency.
 
 6. **Sprint 6 — Multi-Camera Compositing**
    Support multiple cameras on the same playfield, overlay tag data

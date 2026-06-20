@@ -232,14 +232,10 @@ cap.release()
 
 ### Image Capture
 - `get_frame(source_id, format?, quality?, annotate?)` → raw frame
-
-### Frame Model (batch processing)
-- `create_frame(source_id)` / `create_frame_from_image(path)` → `{frame_id}`
-- `process_frame(frame_id, operations)` → processed frame
-- `get_frame_image(frame_id)` → image data
-- `save_frame(frame_id, path)` → saved file path
-- `release_frame(frame_id)` → confirmation
-- `list_frames()` → active frames
+  (base64 or temp file). The MCP server and web hub are **thin clients**;
+  they return raw frames and perception results only. Consumers that
+  need pixel-level processing should fetch a frame and use their own
+  libraries — OpenCV is a daemon-only dependency.
 
 ### Multi-Camera Compositing
 - `create_composite(name, sources)` → `{composite_id}`
