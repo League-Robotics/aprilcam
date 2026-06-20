@@ -2953,7 +2953,8 @@ def _detect_tags_on_frame(frame_bgr: np.ndarray, family: str = "36h11") -> list[
     aruco_dict_id = family_map.get(family, cv2.aruco.DICT_APRILTAG_36h11)
     aruco_dict = cv2.aruco.getPredefinedDictionary(aruco_dict_id)
     params = cv2.aruco.DetectorParameters()
-    detector = cv2.aruco.ArucoDetector(aruco_dict, params)
+    from aprilcam.vision.aruco_compat import make_aruco_detector
+    detector = make_aruco_detector(aruco_dict, params)
 
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
     corners, ids, _ = detector.detectMarkers(gray)

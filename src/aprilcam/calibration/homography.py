@@ -13,6 +13,7 @@ import numpy as np
 from ..camera.camutil import camera_slug
 from ..config import AppConfig
 from ..camera.screencap import ScreenCaptureMSS
+from ..vision.aruco_compat import make_aruco_detector
 
 # Backward-compat re-exports: types and workflow functions now live in
 # calibration.py.  Existing imports from homography still work.
@@ -43,7 +44,7 @@ CORNER_ID_MAP = {
 def detect_aruco_4x4(gray: np.ndarray) -> List[Tuple[np.ndarray, int]]:
     dictionary = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_4X4_50)
     params = cv.aruco.DetectorParameters()
-    det = cv.aruco.ArucoDetector(dictionary, params)
+    det = make_aruco_detector(dictionary, params)
     corners, ids, _ = det.detectMarkers(gray)
     results: List[Tuple[np.ndarray, int]] = []
     if ids is not None and len(ids) > 0:
@@ -128,11 +129,11 @@ def detect_all_tags(
     """
     d36 = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_APRILTAG_36H11)
     p36 = cv.aruco.DetectorParameters()
-    det36 = cv.aruco.ArucoDetector(d36, p36)
+    det36 = make_aruco_detector(d36, p36)
 
     d4 = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_4X4_50)
     p4 = cv.aruco.DetectorParameters()
-    det4 = cv.aruco.ArucoDetector(d4, p4)
+    det4 = make_aruco_detector(d4, p4)
 
     accum: Dict[int, List[np.ndarray]] = {}
 

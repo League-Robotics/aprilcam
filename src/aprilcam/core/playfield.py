@@ -181,10 +181,11 @@ class PlayfieldBoundary:
 
     def _build_aruco4_detector(self):
         cv = _get_cv2()
+        from ..vision.aruco_compat import make_aruco_detector
         d = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_4X4_50)
         p = cv.aruco.DetectorParameters()
         p.detectInvertedMarker = bool(self.detect_inverted)
-        return cv.aruco.ArucoDetector(d, p)
+        return make_aruco_detector(d, p)
 
     def _detect_corners(self, frame_bgr: np.ndarray, gray: Optional[np.ndarray] = None) -> Dict[int, Tuple[float, float]]:
         cv = _get_cv2()

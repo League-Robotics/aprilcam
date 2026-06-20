@@ -12,6 +12,8 @@ from typing import Optional
 import cv2 as cv
 import numpy as np
 
+from ..vision.aruco_compat import make_aruco_detector
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -294,7 +296,7 @@ class TagDetector:
                 except Exception:
                     p.aprilTagMaxLineFitMse = 20.0
             p.detectInvertedMarker = bool(cfg.detect_inverted)
-            detectors.append((cv.aruco.ArucoDetector(d, p), fam))
+            detectors.append((make_aruco_detector(d, p), fam))
         return detectors
 
     @staticmethod
