@@ -55,7 +55,7 @@ This ticket runs last because it verifies the combined outcome of tickets 002-00
   wiki files referenced deleted tools.)
 - [x] `uv run pytest tests/test_015_opencv_free_clients.py` passes.
 - [x] `uv run pytest` (full suite) green.
-- [ ] Single version bump committed as the final step of the sprint.
+- [x] Single version bump committed as the final step of the sprint.
 
 ## Implementation Plan
 
