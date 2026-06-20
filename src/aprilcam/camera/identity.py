@@ -290,6 +290,23 @@ def resolve_identity(
     Never raises: on any failure it returns a :class:`CameraIdentity` whose
     ``unique_id`` is at worst the name+resolution slug.
     """
+    # libcamera backend: the libcamera camera-id path is the stable unique id.
+    try:
+        from . import libcam
+
+        if libcam.backend_enabled():
+            c = libcam.camera_for_index(index)
+            if c is not None:
+                return CameraIdentity(
+                    unique_id=c.camera_id,
+                    reason="libcamera_id",
+                    is_fallback=False,
+                    location=c.camera_id,
+                    name=c.slug,
+                )
+    except Exception:
+        pass
+
     if enum_entries is None:
         enum_entries = _enumerate_cv2()
     if profiler_entries is None:
@@ -357,6 +374,24 @@ def resolve_all(
     enumerated index, avoiding a per-camera ``system_profiler`` shell-out.
     Returns ``{index: CameraIdentity}``.
     """
+    # libcamera backend: identities come straight from the libcamera id paths.
+    try:
+        from . import libcam
+
+        if libcam.backend_enabled():
+            return {
+                c.position: CameraIdentity(
+                    unique_id=c.camera_id,
+                    reason="libcamera_id",
+                    is_fallback=False,
+                    location=c.camera_id,
+                    name=c.slug,
+                )
+                for c in libcam.list_cameras()
+            }
+    except Exception:
+        pass
+
     if enum_entries is None:
         enum_entries = _enumerate_cv2()
     if profiler_entries is None:

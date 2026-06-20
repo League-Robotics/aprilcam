@@ -220,31 +220,58 @@ class CameraPipeline:
         except Exception:
             self._tag_heights = {}
 
-        # Open camera
-        cap = cv.VideoCapture(self.index)
-        if not cap.isOpened():
-            raise RuntimeError(
-                f"CameraPipeline: failed to open camera index {self.index}"
+        # Open camera. On a Raspberry Pi the CSI cameras are captured through a
+        # libcamera GStreamer pipeline (OpenCV CAP_GSTREAMER); on USB/macOS the
+        # plain V4L2/AVFoundation index path is used.
+        from ..camera import libcam
+        try:
+            _is_libcam = libcam.backend_enabled()
+        except Exception:
+            _is_libcam = False
+
+        if _is_libcam:
+            lc = libcam.camera_for_index(self.index)
+            if lc is None:
+                raise RuntimeError(
+                    f"CameraPipeline: libcamera has no camera at index {self.index}"
+                )
+            pipeline_str = libcam.gst_pipeline(lc.camera_id)
+            cap = cv.VideoCapture(pipeline_str, cv.CAP_GSTREAMER)
+            if not cap.isOpened():
+                raise RuntimeError(
+                    f"CameraPipeline: failed to open libcamera camera "
+                    f"'{lc.camera_id}' via GStreamer (is the camera free? "
+                    f"another process — e.g. camera_ros — may hold it)"
+                )
+            self._cap = cap
+            # No UVC/v4l2 control application for libcamera; exposure/gain are
+            # driven by the libcamera IPA (and libcamera controls if needed).
+        else:
+            cap = cv.VideoCapture(self.index)
+            if not cap.isOpened():
+                raise RuntimeError(
+                    f"CameraPipeline: failed to open camera index {self.index}"
+                )
+            self._cap = cap
+
+            # Drain a few frames so AVFoundation finishes initialising its
+            # capture session before we apply UVC controls — otherwise the OS
+            # resets them.
+            for _ in range(5):
+                cap.read()
+
+            # Apply hardware settings now that the capture session is stable.
+            # Prefer settings from config.json (the authoritative source after
+            # the config/calibration split).  Fall back to calibration.settings
+            # for legacy un-migrated cameras that still carry settings there.
+            from ..camera.camera_config import load_camera_config as _load_cfg
+            _cam_cfg = _load_cfg(camera_dir)
+            _settings = (
+                (_cam_cfg.get("settings") if _cam_cfg else None)
+                or (self._calibration.settings if self._calibration is not None else None)
             )
-        self._cap = cap
-
-        # Drain a few frames so AVFoundation finishes initialising its capture
-        # session before we apply UVC controls — otherwise the OS resets them.
-        for _ in range(5):
-            cap.read()
-
-        # Apply hardware settings now that the capture session is stable.
-        # Prefer settings from config.json (the authoritative source after the
-        # config/calibration split).  Fall back to calibration.settings for
-        # legacy un-migrated cameras that still carry settings there.
-        from ..camera.camera_config import load_camera_config as _load_cfg
-        _cam_cfg = _load_cfg(camera_dir)
-        _settings = (
-            (_cam_cfg.get("settings") if _cam_cfg else None)
-            or (self._calibration.settings if self._calibration is not None else None)
-        )
-        if _settings:
-            _apply_camera_settings(_settings, device_name, self.config)
+            if _settings:
+                _apply_camera_settings(_settings, device_name, self.config)
 
         # Build AprilCam instance (headless, no display)
         homography: Optional[np.ndarray] = None

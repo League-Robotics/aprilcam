@@ -141,6 +141,28 @@ def list_cameras(max_index: int = 10, backends: Optional[List[int]] = None, stop
     Uses ``cv2-enumerate-cameras`` when available for accurate OS device
     names and ordering.  Falls back to the legacy OpenCV probe loop.
     """
+    # --- Raspberry Pi / libcamera backend ---
+    # On a Pi the CSI cameras are not V4L2-capturable; enumerate the *real*
+    # cameras via libcamera so the daemon reports exactly the physical cameras
+    # (e.g. two on a dual-CSI Pi 5), not the dozens of ISP /dev/video* nodes.
+    try:
+        from . import libcam
+
+        if libcam.backend_enabled():
+            return [
+                CameraInfo(
+                    index=c.position,
+                    name=c.friendly_name,
+                    backend="libcamera",
+                    device_name=c.slug,
+                    unique_id=c.camera_id,
+                    location=c.camera_id,
+                )
+                for c in libcam.list_cameras()
+            ]
+    except Exception:
+        pass
+
     # --- Primary path: cv2-enumerate-cameras ---
     try:
         from cv2_enumerate_cameras import enumerate_cameras
@@ -226,6 +248,17 @@ def get_device_name(index: int) -> str:
 
     Falls back to ``"camera-{index}"`` if the name cannot be determined.
     """
+    # libcamera backend: the device key is the per-camera slug.
+    try:
+        from . import libcam
+
+        if libcam.backend_enabled():
+            c = libcam.camera_for_index(index)
+            if c is not None:
+                return c.slug
+    except Exception:
+        pass
+
     try:
         from cv2_enumerate_cameras import enumerate_cameras
         avf_offset = getattr(cv, "CAP_AVFOUNDATION", 1200)
