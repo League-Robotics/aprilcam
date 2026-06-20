@@ -1,7 +1,8 @@
 ---
 title: Daemon Wire Protocol
 blurb: The gRPC control service and length-prefixed protobuf stream sockets the aprilcam daemon exposes — the wire-level contract beneath the Python client.
-order: 30
+order: 50
+updated: 2026-06-20
 tags: [daemon, grpc, protobuf, protocol]
 ---
 
@@ -21,51 +22,39 @@ implementing a client in another language. The authoritative schema is
 
 ---
 
-## Starting the Daemon
+## Starting the daemon and file paths
 
-The daemon auto-spawns when any client (`DaemonControl.connect_default`,
-the viewer, or the MCP server) first connects: the client acquires a spawn
-lock at `<socket_dir>/aprilcamd.spawn.lock`, launches
-`python -m aprilcam.daemon` as a detached background process, then probes
-the gRPC channel until it answers.
+The daemon auto-spawns when the first client connects, and can be managed with
+`aprilcam daemon start|stop|status|restart`. For the full lifecycle, the
+config/environment variables, the FHS/XDG directory layout, and systemd, see
+**[Operating the Daemon](daemon.md)**.
 
-You can also start it explicitly:
-
-```
-aprilcam daemon start          # start in the background
-aprilcam daemon status         # running/stopped, open cameras
-aprilcam daemon stop
-aprilcam daemon restart
-python -m aprilcam.daemon       # run in the foreground
-```
-
-The daemon will not start a second instance — it holds an exclusive
-`flock` on its pidfile. Log output goes to `<log_dir>/aprilcamd.log`.
-
----
-
-## File Paths
-
-All paths derive from `Config` (see `src/aprilcam/config.py`). Defaults:
+Endpoints and on-disk files this protocol references (all under `Config`-derived
+directories — see `src/aprilcam/config.py`):
 
 | Path | Default |
 |------|---------|
 | gRPC control socket | `<socket_dir>/control.sock` |
-| Pidfile | `<socket_dir>/aprilcamd.pid` |
-| Spawn lock | `<socket_dir>/aprilcamd.spawn.lock` |
+| Pidfile / spawn lock | `<socket_dir>/aprilcamd.pid` · `<socket_dir>/aprilcamd.spawn.lock` |
 | Per-camera directory | `<data_dir>/cameras/<cam_name>/` |
-| Per-camera calibration | `<data_dir>/cameras/<cam_name>/calibration.json` |
-| Per-camera info file | `<data_dir>/cameras/<cam_name>/info.json` |
-| Per-camera paths file | `<data_dir>/cameras/<cam_name>/paths.json` |
+| Per-camera config (developer-owned, static) | `<data_dir>/cameras/<cam_name>/config.json` |
+| Per-camera calibration (daemon-owned, regenerable) | `<data_dir>/cameras/<cam_name>/calibration.json` |
+| Per-camera info / paths | `<data_dir>/cameras/<cam_name>/info.json` · `paths.json` |
+| Camera registry (persistent enum) | `<data_dir>/cameras/registry.json` |
 | Daemon log | `<log_dir>/aprilcamd.log` |
 
-`<socket_dir>`, `<data_dir>`, and `<log_dir>` are auto-selected by
-`APRILCAM_SYSTEM` (see the Configuration section below). Override individual
-paths with `APRILCAM_SOCKET_DIR`, `APRILCAM_DATA_DIR`, and `APRILCAM_LOG_DIR`.
-
 **Camera naming.** `<cam_name>` is a slug derived from the OS device name
-(e.g. `arducam-ov9782-usb-camera`), *not* `cam_<index>`. `OpenCamera`
-takes an OpenCV device `index` and returns the resolved `cam_name`.
+(e.g. `arducam-ov9782-usb-camera`), *not* `cam_<index>`. `OpenCamera` takes an
+OpenCV device `index` and returns the resolved `cam_name`. The stable,
+user-facing camera handle is the **persistent enumeration number** stored in
+`registry.json` and returned by `EnumerateCameras` as `CameraDevice.enum`
+(see below) — the OS `index` changes across replug.
+
+**config.json vs calibration.json.** Static, developer-owned fields
+(`device_name`, `resolution`, UVC `settings`, `camera_position`,
+`static_marker_ids`, linked `playfield`) live in `config.json`. `calibration.json`
+is regenerable and holds only homography/geometry; it must never carry the
+config-owned keys. The daemon overlays the config-owned fields at load time.
 
 ---
 
@@ -82,17 +71,34 @@ separate socket rather than a gRPC stream.
 | RPC | Request | Response | Purpose |
 |-----|---------|----------|---------|
 | `ListCameras` | `Empty` | `ListCamerasResponse` | Names of currently-open cameras. |
+| `EnumerateCameras` | `Empty` | `EnumerateCamerasResponse{cameras[]}` | Probe host hardware; each `CameraDevice` carries `index`, `name`, `slug`, and the persistent `enum`. |
 | `OpenCamera` | `OpenCameraRequest{index}` | `OpenCameraResponse{cam_name, camera_dir}` | Open a camera by OpenCV index; idempotent if already open. |
 | `CloseCamera` | `CameraRequest{cam_name}` | `Empty` | Stop the pipeline and release the camera. |
+| `GetCameraConfig` / `SetCameraConfig` | `CameraRequest` / `CameraJsonRequest` | `JsonBlobReply` / `StatusReply` | Read/write `config.json` as an opaque JSON blob. |
+| `GetCalibration` / `SetCalibration` | `CameraRequest` / `CameraJsonRequest` | `JsonBlobReply` / `StatusReply` | Read/write `calibration.json`; `SetCalibration` triggers a live pipeline reload. |
 | `ReloadCalibration` | `CameraRequest{cam_name}` | `Empty` | Reload `calibration.json` from disk into the live pipeline. |
 | `Shutdown` | `Empty` | `Empty` | Stop all pipelines and exit the daemon. |
 | `GetCameraInfo` | `CameraRequest{cam_name}` | `CameraInfoResponse` | `cam_name`, `calibrated`, `frame_w/h`, `fps`. |
 | `CaptureFrame` | `CameraRequest{cam_name}` | `CaptureFrameResponse{jpeg}` | Most recent raw frame as JPEG bytes. |
 | `GetTags` | `CameraRequest{cam_name}` | `TagFrameResponse` | One-shot latest tag detections. |
+| `GetObjects` | `CameraRequest{cam_name}` | `GetObjectsResponse{objects[]}` | Colored non-tag objects; `wx,wy` in the same A1-centred cm frame as tags. |
 | `WhereIs` | `WhereRequest{query, cam_name}` | `WhereResponse` | Natural-language playfield feature lookup. |
 | `GetImageStream` | `StreamRequest{cam_name, max_hz}` | `StreamEndpoint` | Allocate an image stream socket on demand. |
 | `GetTagStream` | `StreamRequest{cam_name, max_hz}` | `StreamEndpoint` | Allocate a tag/overlay stream socket on demand. |
 | `PublishOverlay` | `PublishOverlayRequest{cam_name, overlay}` | `StatusReply{ok, error}` | Inject overlay elements to all tag-stream subscribers. |
+
+### CameraDevice (EnumerateCameras)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `index` | int32 | OS probe index — **unstable**, changes on plug/unplug. Used only to open the device. |
+| `name` | string | Human-readable device name. |
+| `slug` | string | URL-safe identifier (= `cam_name` / per-camera dir). |
+| `enum` | int32 | **Persistent enumeration number** — the stable, user-facing camera handle (`0` if unregistered). |
+
+`OpenCamera` still takes the OS `index`; higher layers (the CLI and the MCP
+`open_camera`) accept the `enum` and resolve it to the live `index` via
+`EnumerateCameras`.
 
 ### TagMsg fields
 
@@ -260,52 +266,15 @@ for writing paths directly from a robot program.
 
 ## Configuration
 
-Priority order (highest wins):
+All paths and tunables come from `Config` (`src/aprilcam/config.py`), resolved
+from `APRILCAM_*` environment variables, `.env`/`.aprilcam` dotfiles, and
+`/etc/aprilcam.env`, with an auto-selected FHS (root) or XDG (user) directory
+layout. The full table of variables, the priority order, the directory layout,
+and systemd deployment are documented in
+**[Operating the Daemon → Configuration](daemon.md#configuration)**.
 
-| Priority | Source |
-|----------|--------|
-| 4 (highest) | `APRILCAM_*` environment variables |
-| 3 | `.env` file (walk up from CWD) |
-| 2 | `.aprilcam` project dotfile (walk up from CWD) |
-| 1 | `~/.aprilcam` user dotfile |
-| 0 (lowest) | `/etc/aprilcam.env`, `/etc/aprilcam/aprilcam.env` |
-
-System-wide defaults in `/etc/aprilcam.env` (or `/etc/aprilcam/aprilcam.env`)
-are loaded first and can be overridden by any higher-priority source. This is
-the recommended place to set `APRILCAM_SYSTEM=1` for a system service
-installation.
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `APRILCAM_DATA_DIR` | FHS: `/var/lib/aprilcam` · XDG: `~/.local/share/aprilcam` | Root directory for persistent state (cameras, calibrations, playfields). |
-| `APRILCAM_SOCKET_DIR` | FHS: `/run/aprilcam` · XDG: `$XDG_RUNTIME_DIR/aprilcam` | Directory for the control socket, stream sockets, and pidfile. |
-| `APRILCAM_LOG_DIR` | FHS: `/var/log/aprilcam` · XDG: `~/.local/state/aprilcam` | Directory for `aprilcamd.log`. |
-| `APRILCAM_LOG_LEVEL` | `INFO` | Python logging level for the daemon (`DEBUG`, `INFO`, `WARNING`, `ERROR`). |
-| `APRILCAM_DAEMON_PIDFILE` | `<socket_dir>/aprilcamd.pid` | Pidfile path. |
-| `APRILCAM_DETECTION_FPS` | `10` | Detection loop frame-rate cap in frames per second. |
-| `APRILCAM_STATIC_DESKEW` | `1` | Enable homography-derived static-camera deskew (set `0` to disable). |
-| `APRILCAM_DESKEW_PX_PER_CM` | `0` | Output resolution for the deskewed view in pixels/cm (`0` = auto). |
-| `APRILCAM_UNDISTORT` | `0` | Apply lens undistortion before deskew warp when intrinsics are present. |
-| `APRILCAM_MOVEMENT_THRESHOLD_PX` | `0` | Movement-invalidation threshold in source pixels (`0` = auto). |
-| `APRILCAM_SYSTEM` | `auto` | Force FHS (`1`) or XDG (`0`) directory layout regardless of euid. Auto selects FHS when `euid == 0`. Set to `1` when using `DynamicUser=yes` in systemd. |
-
-### Directory Layout
-
-AprilCam auto-selects between two directory layouts based on whether it is
-running as root (`euid == 0`) or `APRILCAM_SYSTEM=1` is set.
-
-| Path | FHS (root / `APRILCAM_SYSTEM=1`) | XDG (user) |
-|------|-----------------------------------|------------|
-| Data | `/var/lib/aprilcam` | `~/.local/share/aprilcam` |
-| Socket / runtime | `/run/aprilcam` | `$XDG_RUNTIME_DIR/aprilcam` |
-| Logs | `/var/log/aprilcam` | `~/.local/state/aprilcam` |
-| Config (read-only) | `/etc/aprilcam/aprilcam.env` | `~/.aprilcam` |
-
-When running under systemd with `DynamicUser=yes`, the daemon is not root but
-systemd creates the FHS directories via `StateDirectory=`, `RuntimeDirectory=`,
-and `LogsDirectory=`. Set `APRILCAM_SYSTEM=1` (in the unit's `Environment=`
-line or in `/etc/aprilcam.env`) so the config loader uses the FHS paths that
-systemd prepared.
+> A client and the daemon **must resolve the same `APRILCAM_SOCKET_DIR`** or
+> they cannot find each other on the control socket.
 
 ---
 

@@ -1,7 +1,8 @@
 ---
 title: Robot Direct API
 blurb: High-frequency Python API for robot control loops — read tag positions and push live overlays directly over gRPC, bypassing the MCP layer.
-order: 20
+order: 30
+updated: 2026-06-20
 tags: [api, grpc, robot, python]
 ---
 
@@ -62,13 +63,23 @@ with DaemonControl.connect_default(Config.load()) as dc:
 ### Camera Management
 
 ```python
-cameras = dc.list_cameras()          # -> list[str]  e.g. ["arducam-ov9782-usb-camera"]
-cam = dc.open_camera(index=4)        # -> str cam_name   (index = OS camera number)
+cameras = dc.list_cameras()          # -> list[str]  open camera names
+devices = dc.enumerate_cameras()     # -> list[CameraDevice(index, name, slug, enum)]
+cam = dc.open_camera(index=1)        # -> str cam_name   (index = OS device index)
 info = dc.get_camera_info(cam)       # -> CameraInfo(cam_name, calibrated, frame_size, fps)
 frame = dc.capture_frame(cam)        # -> np.ndarray BGR (JPEG decoded)
 dc.reload_calibration(cam)           # reload calibration.json from disk
 dc.close_camera(cam)
 dc.shutdown()                        # stop the daemon process
+```
+
+`open_camera(index=...)` is the **low-level OS device index** at this layer
+(unlike the CLI and MCP `open_camera`, which take the persistent enumeration
+number). To open by the stable enum, resolve it through `enumerate_cameras`:
+
+```python
+dev = next(d for d in dc.enumerate_cameras() if d.enum == 3)
+cam = dc.open_camera(index=dev.index)
 ```
 
 ### One-Shot Tag Query
@@ -272,22 +283,16 @@ for msg in stream:
 
 ## Configuration
 
-`Config.load()` searches for settings in this order (highest priority first):
+`Config.load()` reads `APRILCAM_*` environment variables, `.env`/`.aprilcam`
+dotfiles (walking up from the CWD), and `/etc/aprilcam.env`, with an
+auto-selected FHS or XDG directory layout. The full variable table and the
+resolution order are in
+**[Operating the Daemon → Configuration](daemon.md#configuration)**.
 
-| Source | Example |
-|--------|---------|
-| Environment variable | `APRILCAM_DATA_DIR=/mnt/robot/data` |
-| `.env` file (walk up from CWD) | `APRILCAM_SOCKET_DIR=/run/aprilcam` |
-| `.aprilcam` dotfile (walk up from CWD) | `APRILCAM_LOG_LEVEL=DEBUG` |
-| `~/.aprilcam` user dotfile | — |
-
-Key variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `APRILCAM_SOCKET_DIR` | `/tmp/aprilcam/` | gRPC control socket and stream sockets |
-| `APRILCAM_DATA_DIR` | `./data/aprilcam/` | Camera data, calibration, paths.json |
-| `APRILCAM_LOG_LEVEL` | `INFO` | Daemon log verbosity |
+The one value a client must get right is `APRILCAM_SOCKET_DIR`: your program
+and the daemon must resolve the **same** socket directory, or `connect_default`
+won't find the daemon. When they share an environment this is automatic; set it
+explicitly only when they don't.
 
 ---
 

@@ -1,7 +1,8 @@
 ---
 title: Tag Detection Under Variable Lighting
 blurb: Why tags drop out under glare and low contrast, and the multi-scale preprocessing pipeline that recovers 11/13 tags.
-order: 40
+order: 60
+updated: 2026-06-20
 tags: [detection, lighting, opencv, tuning]
 ---
 
