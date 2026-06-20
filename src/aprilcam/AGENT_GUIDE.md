@@ -237,11 +237,6 @@ cap.release()
   need pixel-level processing should fetch a frame and use their own
   libraries — OpenCV is a daemon-only dependency.
 
-### Multi-Camera Compositing
-- `create_composite(name, sources)` → `{composite_id}`
-- `get_composite_frame(composite_id)` → merged frame
-- `get_composite_tags(composite_id)` → merged tag detections
-
 ### Live View (web UI)
 - `start_live_view(source_id, annotate?)` → `{view_id, url}`
 - `stop_live_view(view_id)` → confirmation

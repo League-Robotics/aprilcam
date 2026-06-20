@@ -17,7 +17,6 @@ import numpy as np
 import pytest
 
 from aprilcam.core.models import AprilTag, world_yaw
-from aprilcam.camera.composite import map_tags_to_primary
 
 
 def _tag_corners(center, top_dir, size=10.0):
@@ -96,13 +95,3 @@ def test_from_corners_uses_world_space_not_pixel():
     assert _angles_close(tag.orientation_yaw, math.pi / 2)
     # pixel-only would have yielded yaw 0 — confirm we did NOT get that
     assert not _angles_close(tag.orientation_yaw, 0.0)
-
-
-def test_composite_yaw_convention():
-    corners = _tag_corners((50.0, 50.0), (0.0, -1.0))  # top points image-up
-    # A y-up homography (flips image y-down to world y-up, as a real overhead
-    # calibration does): image-up -> world +Y -> +90°.
-    H_yup = np.array([[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]])
-    out = map_tags_to_primary([(corners, None, 7)], H_yup)
-    assert len(out) == 1
-    assert _angles_close(out[0]["orientation_yaw"], math.pi / 2)

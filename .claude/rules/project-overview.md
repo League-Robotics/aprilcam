@@ -104,13 +104,13 @@ Pillow instead.
   base64 or a temp file path. Consumers that need pixel-level
   operations fetch a frame and process it themselves.
 
-### Multi-Camera Compositing
+### Multi-Camera Compositing *(removed)*
 
-- Support overlaying data from multiple cameras viewing the same
-  playfield — e.g., a color camera for visual context and a global
-  shutter B&W camera for reliable tag detection at speed.
-- Tag positions extracted from the B&W camera; color information
-  from the color camera.
+Multi-camera compositing was removed after the daemon refactor — it was
+built around early low-quality cameras that are no longer used, and the
+single-camera pipeline now covers the playfield. The `create_composite`,
+`get_composite_frame`, and `get_composite_tags` MCP tools and the
+`camera/composite.py` module no longer exist.
 
 ### Tag Generation (CLI)
 
@@ -164,9 +164,10 @@ Pillow instead.
    vision was consolidated into the daemon. The MCP server, web hub, and
    view client now have no OpenCV dependency.
 
-6. **Sprint 6 — Multi-Camera Compositing**
-   Support multiple cameras on the same playfield, overlay tag data
-   from B&W camera onto color camera feed.
+6. **Sprint 6 — Multi-Camera Compositing** *(removed)*
+   Originally supported multiple cameras on the same playfield, overlaying
+   tag data from a B&W camera onto a color camera feed. Removed after the
+   daemon refactor — the cameras it was built for are no longer used.
 
 7. **Sprint 7 — Polish & Packaging**
    End-to-end testing, error handling, documentation, pipx install

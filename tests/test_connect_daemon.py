@@ -8,7 +8,6 @@ Verifies that connect_daemon() tears down all session state before reconnecting:
 - playfield_registry._playfields is cleared
 - path_registry._paths is cleared
 - frame_registry is cleared
-- composite_manager._composites is cleared
 - The old _daemon_client channel is closed
 
 Also verifies that connect_daemon() sets _daemon_client to the new connection

@@ -1,9 +1,8 @@
-"""Camera hardware abstraction, enumeration, and multi-camera support.
+"""Camera hardware abstraction and enumeration.
 
 ``Camera`` and ``VideoCamera`` require OpenCV (the ``[daemon]`` extra).  They
-are imported lazily via ``__getattr__`` so that client-side code can do
-``from aprilcam.camera.composite import CompositeManager`` (or any other
-cv2-free submodule import) without pulling in OpenCV.
+are imported lazily via ``__getattr__`` so that client-side code can import the
+cv2-free submodules of this package without pulling in OpenCV.
 
 Daemon-side code that does ``from aprilcam.camera import Camera`` still works
 transparently — the lazy import fires on first attribute access.
