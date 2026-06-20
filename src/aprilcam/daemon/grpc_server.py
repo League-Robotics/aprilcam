@@ -449,26 +449,23 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
         if calibration is not None and calibration.homography is not None:
             homography = calibration.homography
 
+            # Use the SAME A1 origin as the tag pipeline (``_a1_origin`` prefers
+            # the calibrated AprilTag-1 world position from static_markers and
+            # falls back to the field centre). The stored homography is already
+            # A1-centred, so subtracting fw/2,fh/2 here double-shifted every
+            # object by (-fw/2, -fh/2) — making object world_xy disagree with
+            # get_tags / pixel_to_world. Depends on calibration, not april_cam.
+            try:
+                origin_x, origin_y = pipeline._a1_origin()
+            except Exception:
+                pass
+
         april_cam = pipeline._april_cam
         if april_cam is not None:
             try:
                 pf_poly = april_cam.playfield.get_polygon()
             except Exception:
                 pf_poly = None
-
-            # Derive A1 origin from the calibration's field dimensions / AprilTag 1
-            # position, matching the logic used in GetTags / TagFrameResponse.
-            if calibration is not None:
-                try:
-                    from ..calibration.calibration import CameraCalibration
-
-                    fw = calibration.playfield_width_cm
-                    fh = calibration.playfield_height_cm
-                    if fw > 0 and fh > 0:
-                        origin_x = fw / 2.0
-                        origin_y = fh / 2.0
-                except Exception:
-                    pass
 
         # Detect colored objects via HSV classification.
         classifier = ColorClassifier(min_area=600, max_area=30000)

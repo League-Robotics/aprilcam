@@ -167,6 +167,47 @@ def test_get_objects_no_frame_returns_empty(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_get_objects_uses_a1_origin_not_field_centre(tmp_path: Path) -> None:
+    """Object world_xy is re-centred on the A1 origin (``pipeline._a1_origin()``),
+    matching get_tags — NOT on the field centre (fw/2, fh/2).
+
+    Regression for the double-shift bug: the stored homography is already
+    A1-centred, so subtracting fw/2,fh/2 pushed a centre object to (-fw/2,-fh/2).
+    """
+    from aprilcam.calibration.calibration import CameraCalibration
+
+    # Identity homography → raw world == pixel coords. Rect centre ≈ (230, 180).
+    frame = _make_frame_with_colored_rect(
+        color_bgr=(0, 0, 200),
+        rect_top_left=(200, 150),
+        rect_bottom_right=(260, 210),
+    )
+    cal = CameraCalibration(device_name="c", resolution=(640, 480), homography=np.eye(3))
+    cal.playfield_width_cm = 400.0    # fw/2 = 200  (the WRONG, pre-fix origin)
+    cal.playfield_height_cm = 300.0   # fh/2 = 150
+    cal.static_markers = {"apriltag:1": {"pixel": [30.0, 80.0], "world": [30.0, 80.0]}}
+
+    class _CalPipeline(_FakePipeline):
+        def _a1_origin(self):  # mirrors CameraPipeline._a1_origin
+            m = self._calibration.static_markers["apriltag:1"]
+            return (float(m["world"][0]), float(m["world"][1]))
+
+    # april_cam=None → no polygon filter, so the object is not filtered out.
+    pipeline = _CalPipeline(frame=frame, calibration=cal)
+    servicer = _make_servicer(cameras={"cam-0": pipeline}, tmp_path=tmp_path)
+
+    response = servicer.GetObjects(
+        aprilcam_pb2.CameraRequest(cam_name="cam-0"), _mock_context()
+    )
+    assert len(response.objects) >= 1
+    obj = response.objects[0]
+    # Re-centred on the A1 origin (30, 80), NOT the field centre (200, 150).
+    assert obj.wx == pytest.approx(obj.cx_px - 30.0, abs=1.5)
+    assert obj.wy == pytest.approx(obj.cy_px - 80.0, abs=1.5)
+    # Guard against a regression to the field-centre origin.
+    assert obj.wx != pytest.approx(obj.cx_px - 200.0, abs=1.5)
+
+
 def test_get_objects_polygon_filter_excludes_outside(tmp_path: Path) -> None:
     """Objects outside the (inset) playfield polygon are filtered out."""
     # Rectangle is painted in the top-left corner (40, 20) → (100, 80).
