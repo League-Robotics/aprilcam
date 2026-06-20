@@ -160,7 +160,7 @@ class ImageStreamConsumer:
     # ------------------------------------------------------------------
 
     def __iter__(self) -> Iterator[np.ndarray]:
-        """Yield BGR frames until the connection closes."""
+        """Yield RGB frames (via :meth:`read`) until the connection closes."""
         try:
             while True:
                 try:

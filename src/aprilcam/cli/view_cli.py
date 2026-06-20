@@ -459,9 +459,13 @@ def main(argv: list[str] | None = None) -> int:
         # DaemonControl is no longer needed after streams are open
         dc.close()
 
-    # Read first image frame
+    # Read first image frame.  ImageStreamConsumer.read() returns an RGB array
+    # (Pillow decode), but the entire view pipeline below — prepare_display,
+    # draw_overlays, the color classifier (BGR2LAB/HSV), _draw_object_boxes,
+    # and the final ImageTk flip — is BGR-native, so convert RGB->BGR on the
+    # way in to keep channel order consistent (fixes the red<->blue swap).
     try:
-        first_frame = image_consumer.read()
+        first_frame = image_consumer.read()[:, :, ::-1]  # numpy-only: RGB->BGR
     except (EOFError, RuntimeError) as exc:
         print(f"Error: could not read first frame: {exc}", file=sys.stderr)
         image_consumer.close()
@@ -644,7 +648,9 @@ def main(argv: list[str] | None = None) -> int:
         """Continuously read image frames and push processed results to frame_queue."""
         while not stop_event.is_set():
             try:
-                frame_bgr = image_consumer.read()
+                # read() returns RGB (Pillow decode); convert to BGR for the
+                # BGR-native display + color-classification pipeline.
+                frame_bgr = image_consumer.read()[:, :, ::-1]  # numpy-only: RGB->BGR
             except (EOFError, RuntimeError):
                 print("Image stream closed — daemon may have stopped.", file=sys.stderr)
                 stop_event.set()
