@@ -966,7 +966,9 @@ def _handle_calibrate_playfield(
             cal.device_name = cam_name
 
             _client = _ensure_daemon_client()
-            cal_dict = cal.to_dict()
+            # to_camera_json() excludes config-owned keys (device_name/resolution/
+            # static_marker_ids/...) so the daemon writes a clean calibration.json.
+            cal_dict = cal.to_camera_json()
             cal_dict["playfield_width_cm"] = field_spec.width_cm
             cal_dict["playfield_height_cm"] = field_spec.height_cm
             set_reply = _client.set_calibration(cam_name, json.dumps(cal_dict))
@@ -2002,7 +2004,9 @@ async def calibrate_playfield(
             )
 
             # Persist calibration via SetCalibration RPC (daemon writes the file).
-            cal_dict = cal.to_dict()
+            # to_camera_json() excludes config-owned keys so calibration.json
+            # stays clean (device_name/resolution/static_marker_ids live in config.json).
+            cal_dict = cal.to_camera_json()
             cal_json = json.dumps(cal_dict)
             set_reply = client.set_calibration(camera_id, cal_json)
             if not set_reply.ok:

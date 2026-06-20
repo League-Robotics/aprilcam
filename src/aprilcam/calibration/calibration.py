@@ -75,6 +75,19 @@ class CameraPosition:
     height: float = 0.0    # cm above playfield
 
 
+#: Developer-owned keys that live in ``config.json``, NOT ``calibration.json``.
+#: ``calibration.json`` is regenerable; these static fields must never be
+#: duplicated into it. Enforced by :meth:`CameraCalibration.to_camera_json` and
+#: ``save_calibration_to_camera_dir`` (and verified by test_config_calibration_split).
+CONFIG_OWNED_CALIBRATION_KEYS = (
+    "device_name",
+    "resolution",
+    "settings",
+    "camera_position",
+    "static_marker_ids",
+)
+
+
 @dataclass
 class CameraCalibration:
     """Stores everything needed to undistort + homography-transform a frame.
@@ -221,6 +234,22 @@ class CameraCalibration:
             d["calibrated_playfield"] = self.calibrated_playfield
         if self.calibrated_camera is not None:
             d["calibrated_camera"] = self.calibrated_camera
+        return d
+
+    def to_camera_json(self) -> dict:
+        """Serialize for ``<camera_dir>/calibration.json``.
+
+        Excludes the developer-owned keys that now live in ``config.json``
+        (``device_name``, ``resolution``, ``settings``, ``camera_position``,
+        ``static_marker_ids``) so the calibration file stays regenerable and
+        does not duplicate static config. This is the canonical serializer for
+        the per-camera calibration file — use it instead of :meth:`to_dict`
+        anywhere that writes ``calibration.json`` (directly or via the daemon
+        ``SetCalibration`` RPC).
+        """
+        d = self.to_dict()
+        for key in CONFIG_OWNED_CALIBRATION_KEYS:
+            d.pop(key, None)
         return d
 
     @classmethod
@@ -525,10 +554,8 @@ def save_calibration_to_camera_dir(
         except Exception:
             pass
 
-    data = cal.to_dict()
-    # Strip the 5 static fields that now live in config.json.
-    for _key in ("device_name", "resolution", "settings", "camera_position", "static_marker_ids"):
-        data.pop(_key, None)
+    # Canonical calibration.json serializer — excludes the config-owned keys.
+    data = cal.to_camera_json()
     # Add self-identifying camera slug.
     data["camera"] = Path(camera_dir).name
     data["playfield"] = {"width": field_width_cm, "height": field_height_cm}

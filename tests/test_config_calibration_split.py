@@ -161,6 +161,53 @@ def test_arducam_calibration_has_no_static_keys():
     assert data["camera"] == "arducam-ov9782-usb-camera"
 
 
+def test_to_camera_json_excludes_config_owned_keys():
+    """to_camera_json() (the canonical calibration.json serializer) drops the
+    5 config-owned keys even when the CameraCalibration carries them."""
+    from aprilcam.calibration.calibration import (
+        CONFIG_OWNED_CALIBRATION_KEYS,
+        CameraCalibration,
+    )
+
+    cal = CameraCalibration(
+        device_name="my-cam",
+        resolution=(1280, 800),
+        homography=np.eye(3),
+    )
+    cal.static_marker_ids = ["aruco_corners", "apriltag:1"]
+    cal.settings = {"controls": {"exposure-time-abs": "6"}}
+
+    # to_dict() carries them; to_camera_json() must not.
+    assert {"device_name", "resolution", "static_marker_ids", "settings"} <= set(cal.to_dict())
+    clean = cal.to_camera_json()
+    for key in CONFIG_OWNED_CALIBRATION_KEYS:
+        assert key not in clean, f"to_camera_json() leaked config-owned key '{key}'"
+    assert "homography" in clean  # regenerable calibration data is kept
+
+
+def test_save_calibration_to_camera_dir_strips_config_owned_keys(tmp_path):
+    """The on-disk writer never emits config-owned keys, even from a rich cal."""
+    from aprilcam.calibration.calibration import (
+        CameraCalibration,
+        save_calibration_to_camera_dir,
+    )
+
+    cal = CameraCalibration(
+        device_name="rich-cam",
+        resolution=(1280, 800),
+        homography=np.eye(3),
+    )
+    cal.static_marker_ids = ["aruco_corners", "apriltag:1"]
+    cal.settings = {"controls": {"gain": "2"}}
+
+    cam_dir = tmp_path / "rich-cam"
+    path = save_calibration_to_camera_dir(cal, cam_dir, 134.3, 89.3)
+    data = json.loads(path.read_text())
+    for key in ("settings", "camera_position", "device_name", "resolution", "static_marker_ids"):
+        assert key not in data, f"writer leaked config-owned key '{key}'"
+    assert data["camera"] == "rich-cam"
+
+
 def test_arducam_loads_settings_from_config():
     """load_calibration_from_camera_dir overlays settings from config onto cal."""
     if not _ARDUCAM_DIR.exists():
