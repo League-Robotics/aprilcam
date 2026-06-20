@@ -74,8 +74,17 @@ def _cam_bin() -> Optional[str]:
 
 
 def list_cameras(*, use_cache: bool = True) -> List[LibcamCamera]:
-    """Enumerate libcamera cameras via the ``cam -l`` tool (cached briefly)."""
-    if use_cache and _CACHE["cams"] is not None and (time.time() - _CACHE["ts"]) < _CACHE_TTL:
+    """Enumerate libcamera cameras via the ``cam -l`` tool.
+
+    A **non-empty** result is cached for the process lifetime — CSI cameras are
+    fixed hardware, and re-running the ``cam`` subprocess from inside the daemon
+    (whose asyncio child-watcher reaps it early) yields an empty list. Prime the
+    cache once on the main thread at startup via :func:`list_cameras`. An empty
+    result is cached only briefly so a not-yet-ready camera is retried.
+    """
+    if use_cache and _CACHE["cams"]:
+        return _CACHE["cams"]
+    if use_cache and _CACHE["cams"] == [] and (time.time() - _CACHE["ts"]) < _CACHE_TTL:
         return _CACHE["cams"]
 
     cams: List[LibcamCamera] = []

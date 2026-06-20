@@ -89,6 +89,22 @@ def main(argv=None):
     # moved the runtime dir to $TMPDIR/aprilcam-<uid> on macOS).
     unix_path = args.unix_path or str(config.socket_dir / "control.sock")
 
+    # Warm the libcamera camera list on the MAIN thread before the asyncio loop
+    # / gRPC threads start. Enumerating later (via the `cam` subprocess) from
+    # inside the running daemon gets the child reaped early by asyncio's
+    # child-watcher and yields an empty list; priming here caches the fixed CSI
+    # cameras for the process lifetime. No-op on non-libcamera hosts.
+    try:
+        from aprilcam.camera import libcam
+
+        if libcam.backend_enabled():
+            cams = libcam.list_cameras()
+            logging.getLogger("aprilcam.daemon").info(
+                "libcamera backend: %d camera(s) detected", len(cams)
+            )
+    except Exception:
+        logging.getLogger("aprilcam.daemon").exception("libcamera warm-up failed")
+
     DaemonServer(
         config,
         unix_enabled=args.unix_enabled,
