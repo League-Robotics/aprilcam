@@ -419,28 +419,57 @@ def main(argv: list[str] | None = None) -> int:
     _camera_dir: Optional[str] = None
     try:
         camera_arg = args.camera
-        try:
-            # An integer CAMERA is the stable enumeration number shown by
-            # `aprilcam cameras` — resolve it to the live OS index before
-            # opening, so the number the user types matches the listing.
-            enum_no = int(camera_arg)
-            registry = CameraRegistry(config.cameras_dir)
+
+        # --- Alpha-code resolution (e.g. "A", "FB") -------------------------
+        # TODO(host-codes): view_cli could also switch the daemon target host
+        # for remote codes (e.g. "FB" = host F, camera B).  For now we resolve
+        # the cam_index from the store and leave host switching to the
+        # connect_from_args / resolve_camera_code path already implemented in
+        # tags_cli.  To complete this: call resolve_camera_code(camera_arg,
+        # config, args) before the int() attempt below, and if it returns a
+        # result re-open dc against the resolved host.
+        from aprilcam.cli._daemon import resolve_camera_code as _resolve_code
+        _code_result = _resolve_code(camera_arg, config, args)
+        if _code_result is not None:
+            _resolved_host, cam_index = _code_result
+            if _resolved_host:
+                # Remote host code: reconnect to the right daemon.
+                dc.close()
+                from aprilcam.cli._daemon import connect_from_args as _cfa
+                try:
+                    dc = _cfa(config, args)
+                except Exception as exc:
+                    print(f"Error: could not connect to daemon at '{_resolved_host}': {exc}", file=sys.stderr)
+                    return 1
             try:
-                cam_index = resolve_enum_to_index(enum_no, registry, resolve_all())
-            except CameraSelectError as exc:
-                print(f"Error: {exc}", file=sys.stderr)
+                cam_name, _camera_dir = dc.open_camera(cam_index)
+            except Exception as exc:
+                print(f"Error: could not open camera {cam_index}: {exc}", file=sys.stderr)
                 dc.close()
                 return 1
-            cam_name, _camera_dir = dc.open_camera(cam_index)
-        except ValueError:
-            # camera_arg is a name, not an index — verify it is open
-            info = dc.get_camera_info(camera_arg)
-            cam_name = info.cam_name
+        else:
+            try:
+                # An integer CAMERA is the stable enumeration number shown by
+                # `aprilcam cameras` — resolve it to the live OS index before
+                # opening, so the number the user types matches the listing.
+                enum_no = int(camera_arg)
+                registry = CameraRegistry(config.cameras_dir)
+                try:
+                    cam_index = resolve_enum_to_index(enum_no, registry, resolve_all())
+                except CameraSelectError as exc:
+                    print(f"Error: {exc}", file=sys.stderr)
+                    dc.close()
+                    return 1
+                cam_name, _camera_dir = dc.open_camera(cam_index)
+            except ValueError:
+                # camera_arg is a name, not an index — verify it is open
+                info = dc.get_camera_info(camera_arg)
+                cam_name = info.cam_name
 
-        if cam_name is None:
-            print(f"Error: could not resolve camera '{camera_arg}'", file=sys.stderr)
-            dc.close()
-            return 1
+            if cam_name is None:
+                print(f"Error: could not resolve camera '{camera_arg}'", file=sys.stderr)
+                dc.close()
+                return 1
 
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)

@@ -1,5 +1,6 @@
 """Unified CLI dispatcher for aprilcam."""
 
+import os
 import sys
 
 
@@ -23,6 +24,10 @@ SUBCOMMANDS = {
     "cameras": {
         "help": "List available cameras",
         "module": "aprilcam.cli.cameras_cli",
+    },
+    "probe": {
+        "help": "Discover daemons and update the host/camera code store",
+        "module": "aprilcam.cli.probe_cli",
     },
     "config": {
         "help": "Show the version and resolved configuration",
@@ -83,6 +88,10 @@ def _print_help():
     print()
     print("Run 'aprilcam <command> --help' for command-specific options.")
     print()
+    print("global options (accepted before OR after the command):")
+    print("  --host HOST       Daemon hostname, IP, or single-letter host code (sets APRILCAM_DAEMON_HOST)")
+    print("  --port PORT       Daemon TCP port (sets APRILCAM_DAEMON_PORT)")
+    print()
     print("flags:")
     print("  --agent [NAME]    Print the AI-agent instructions guide (NAME: agent [default], robot)")
     print()
@@ -109,6 +118,84 @@ def _print_help():
         print(f"  {key:<36}{default:<32}{description}")
 
 
+_HOST_FLAGS = {"--host", "--daemon-host"}
+_PORT_FLAGS = {"--port", "--daemon-port"}
+
+
+def _extract_global_flags(args: list[str]) -> tuple[list[str], str | None, str | None]:
+    """Scan *args* for root-level ``--host``/``--port`` flags in any position.
+
+    Removes matched flag+value pairs from *args* and returns the remaining
+    list along with the extracted host and port values (or ``None`` if not
+    provided).
+
+    Handles both ``--host VALUE`` and ``--host=VALUE`` forms for all four
+    accepted flag names (``--host``, ``--daemon-host``, ``--port``,
+    ``--daemon-port``).
+
+    Args:
+        args: Raw argument list (``sys.argv[1:]``).
+
+    Returns:
+        ``(remaining, host, port)`` where *remaining* is *args* with the
+        global flags stripped, and *host* / *port* are the extracted values
+        or ``None``.
+    """
+    remaining: list[str] = []
+    host: str | None = None
+    port: str | None = None
+    i = 0
+    while i < len(args):
+        token = args[i]
+
+        # -- host flags (--host VALUE or --host=VALUE) ---------------------
+        matched_host = False
+        for flag in _HOST_FLAGS:
+            if token == flag:
+                if i + 1 < len(args):
+                    host = args[i + 1]
+                    i += 2
+                    matched_host = True
+                    break
+                else:
+                    i += 1
+                    matched_host = True
+                    break
+            if token.startswith(flag + "="):
+                host = token[len(flag) + 1:]
+                i += 1
+                matched_host = True
+                break
+        if matched_host:
+            continue
+
+        # -- port flags (--port VALUE or --port=VALUE) ---------------------
+        matched_port = False
+        for flag in _PORT_FLAGS:
+            if token == flag:
+                if i + 1 < len(args):
+                    port = args[i + 1]
+                    i += 2
+                    matched_port = True
+                    break
+                else:
+                    i += 1
+                    matched_port = True
+                    break
+            if token.startswith(flag + "="):
+                port = token[len(flag) + 1:]
+                i += 1
+                matched_port = True
+                break
+        if matched_port:
+            continue
+
+        remaining.append(token)
+        i += 1
+
+    return remaining, host, port
+
+
 def main(argv=None):
     """Entry point for the aprilcam CLI."""
     args = argv if argv is not None else sys.argv[1:]
@@ -133,6 +220,19 @@ def main(argv=None):
             )
             sys.exit(1)
         print(content)
+        sys.exit(0)
+
+    # Extract global --host/--port flags from ANY position in argv and expose
+    # them as environment variables so every downstream command picks them up
+    # via the existing Config resolver precedence.
+    args, _host, _port = _extract_global_flags(list(args))
+    if _host is not None:
+        os.environ["APRILCAM_DAEMON_HOST"] = _host
+    if _port is not None:
+        os.environ["APRILCAM_DAEMON_PORT"] = _port
+
+    if not args:
+        _print_help()
         sys.exit(0)
 
     command = args[0]

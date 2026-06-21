@@ -96,6 +96,7 @@ _OPENCV_FREE_MODULES = [
     "aprilcam.client.control",
     "aprilcam.client.stream",
     "aprilcam.client.discovery",
+    "aprilcam.client.host_codes",
 ]
 
 

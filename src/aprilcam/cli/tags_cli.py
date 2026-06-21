@@ -56,7 +56,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ``GetTags`` RPC.  No local ``cv.VideoCapture`` is opened — the daemon is
     the sole camera owner.
     """
-    from ..cli._daemon import add_daemon_args, connect_from_args
+    from ..cli._daemon import add_daemon_args, connect_from_args, resolve_camera_code
     from ..config import Config
     from ..camera.identity import resolve_all
     from ..camera.registry import (
@@ -70,54 +70,84 @@ def main(argv: Optional[List[str]] = None) -> int:
         prog="aprilcam tags",
         description=(
             "List ArUco and AprilTag markers detected by the daemon camera. "
-            "The daemon must be running (`aprilcam daemon start`)."
+            "The daemon must be running (`aprilcam daemon start`). "
+            "CAMERA accepts a camera number, name pattern, or an alpha code "
+            "(e.g. 'A' for local camera 1, 'FB' for host F camera B)."
         ),
     )
     parser.add_argument(
         "camera", metavar="CAMERA",
-        help="Camera name or number (the # shown by `aprilcam cameras`)",
+        help=(
+            "Camera number, name pattern, or alpha code "
+            "(e.g. 'A', 'FB' — run 'aprilcam probe' for codes)"
+        ),
     )
     add_daemon_args(parser)
     args = parser.parse_args(argv)
 
     config = Config.load()
 
-    # Resolve the camera argument to a device index (same logic as view_cli).
-    # We do this first so we can give a clear error before connecting to the
-    # daemon.
-    try:
-        enum_no = int(args.camera)
-        registry = CameraRegistry(config.cameras_dir)
+    # --- Try alpha-code resolution first ------------------------------------
+    # If CAMERA is a 1- or 2-letter code (e.g. "A", "FB"), resolve it via the
+    # host store.  This also patches args.daemon_host to reach the right host.
+    code_result = resolve_camera_code(args.camera, config, args)
+    if code_result is not None:
+        _resolved_host, cam_index = code_result
+        # cam_index here is already the enum handle — connect and open directly.
         try:
-            cam_index = resolve_enum_to_index(enum_no, registry, resolve_all())
-        except CameraSelectError as exc:
-            print(f"ERROR: {exc}")
+            dc = connect_from_args(config, args)
+        except Exception as exc:
+            print(f"ERROR: could not connect to daemon: {exc}")
             return 1
-    except ValueError:
-        # Not a number — treat it as a name pattern against connected cameras.
-        cam_index = select_camera_by_pattern(args.camera, list_cameras(quiet=True))
-        if cam_index is None:
-            print(f"ERROR: no connected camera matched '{args.camera}'")
+        try:
+            cam_name, _camera_dir = dc.open_camera(cam_index)
+            tag_frame = dc.get_tags(cam_name)
+        except Exception as exc:
+            print(f"ERROR: daemon RPC failed: {exc}")
+            dc.close()
+            return 1
+        finally:
+            dc.close()
+        tags = tag_frame.tags
+        # Fall through to printing logic below.
+    else:
+        # --- Resolve the camera argument to a device index (legacy path) ------
+        # We do this first so we can give a clear error before connecting to the
+        # daemon.
+        try:
+            enum_no = int(args.camera)
+            registry = CameraRegistry(config.cameras_dir)
+            try:
+                cam_index = resolve_enum_to_index(enum_no, registry, resolve_all())
+            except CameraSelectError as exc:
+                print(f"ERROR: {exc}")
+                return 1
+        except ValueError:
+            # Not a number — treat it as a name pattern against connected cameras.
+            cam_index = select_camera_by_pattern(args.camera, list_cameras(quiet=True))
+            if cam_index is None:
+                print(f"ERROR: no connected camera matched '{args.camera}'")
+                return 1
+
+        # Connect to the daemon — no local VideoCapture, the daemon owns the camera.
+        try:
+            dc = connect_from_args(config, args)
+        except Exception as exc:
+            print(f"ERROR: could not connect to daemon: {exc}")
             return 1
 
-    # Connect to the daemon — no local VideoCapture, the daemon owns the camera.
-    try:
-        dc = connect_from_args(config, args)
-    except Exception as exc:
-        print(f"ERROR: could not connect to daemon: {exc}")
-        return 1
+        try:
+            cam_name, _camera_dir = dc.open_camera(cam_index)
+            tag_frame = dc.get_tags(cam_name)
+        except Exception as exc:
+            print(f"ERROR: daemon RPC failed: {exc}")
+            dc.close()
+            return 1
+        finally:
+            dc.close()
 
-    try:
-        cam_name, _camera_dir = dc.open_camera(cam_index)
-        tag_frame = dc.get_tags(cam_name)
-    except Exception as exc:
-        print(f"ERROR: daemon RPC failed: {exc}")
-        dc.close()
-        return 1
-    finally:
-        dc.close()
+        tags = tag_frame.tags
 
-    tags = tag_frame.tags
     total = len(tags)
     has_world = any(t.world_xy is not None for t in tags)
 
