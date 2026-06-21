@@ -2,7 +2,7 @@
 title: Using the MCP Server
 blurb: How an AI agent drives AprilCam over the Model Context Protocol — the golden path, the coordinate system, and the full tool reference.
 order: 20
-updated: 2026-06-20
+updated: 2026-06-21
 tags: [mcp, agent, tools]
 ---
 
@@ -33,10 +33,33 @@ The MCP server speaks stdio. Register it with your MCP client (e.g. an
 }
 ```
 
-`aprilcam mcp` auto-connects to the daemon (spawning it if needed), so the only
-prerequisite is that the camera host's daemon is reachable. Base install is
-enough — `pipx install aprilcam` ships the MCP SDK; OpenCV is not required (see
-[install tiers](overview.md#install-tiers)).
+`aprilcam init` writes that block into `.mcp.json` and `.vscode/mcp.json` for
+you. (A second console entry point, `aprilcam-mcp`, runs the same server.)
+
+The MCP server is a thin client: it **connects to a running daemon — it does
+not start one.** By default it finds the daemon the way every client does (a
+local Unix socket, or mDNS on the LAN). To pin it to a specific daemon, register
+it with a `--daemon-host` (or set `APRILCAM_DAEMON_HOST`):
+
+```json
+{
+  "mcpServers": {
+    "aprilcam": {
+      "command": "aprilcam",
+      "args": ["mcp", "--daemon-host", "vidar.local"]
+    }
+  }
+}
+```
+
+You can also switch daemons at runtime without restarting — call the
+`connect_daemon` tool (below). If no daemon is reachable, tools return a clear
+`No aprilcam daemon found` error; start one on the camera host
+(`aprilcam daemon start`, or systemd) — see
+[Operating the Daemon](daemon.md#connecting-local-and-remote).
+
+Base install is enough — `pipx install aprilcam` ships the MCP SDK; OpenCV is not
+required (see [install tiers](overview.md#install-tiers)).
 
 > The server keeps **no state across restarts** and auto-opens nothing. Every
 > session must call `open_camera` first — it is the gate that registers the

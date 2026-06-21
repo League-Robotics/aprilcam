@@ -2,7 +2,7 @@
 title: Robot Direct API
 blurb: High-frequency Python API for robot control loops — read tag positions and push live overlays directly over gRPC, bypassing the MCP layer.
 order: 30
-updated: 2026-06-20
+updated: 2026-06-21
 tags: [api, grpc, robot, python]
 ---
 
@@ -23,7 +23,7 @@ from aprilcam.config import Config
 from aprilcam.client.control import DaemonControl
 
 config = Config.load()
-dc = DaemonControl.connect_default(config)   # auto-spawns daemon if needed
+dc = DaemonControl.connect_default(config)   # discover + connect (mDNS / local / host); never spawns
 
 # One-shot tag read
 cam = dc.list_cameras()[0]
@@ -47,13 +47,14 @@ your control loop.  It is thread-safe.
 from aprilcam.config import Config
 from aprilcam.client.control import DaemonControl
 
-# Auto-connect (recommended): spawns daemon if not running, probes gRPC,
-# returns a ready-to-use instance.
+# Discover + connect (recommended): finds the daemon via an explicit host,
+# the local Unix socket, or mDNS, then connects. It does NOT spawn a daemon —
+# if none is reachable it raises DaemonNotFoundError.
 dc = DaemonControl.connect_default(Config.load())
 
-# Manual connect (explicit Unix socket or TCP port):
-dc = DaemonControl(unix_path="/tmp/aprilcam/control.sock")
-dc.connect()
+# Explicit target — local Unix socket, or a remote daemon over TCP:
+dc = DaemonControl(unix_path="/tmp/aprilcam/control.sock"); dc.connect()
+dc = DaemonControl(host="vidar.local", port=5280); dc.connect()   # remote (.local works)
 
 # As a context manager:
 with DaemonControl.connect_default(Config.load()) as dc:

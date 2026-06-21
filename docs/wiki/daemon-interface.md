@@ -2,7 +2,7 @@
 title: Daemon Wire Protocol
 blurb: The gRPC control service and length-prefixed protobuf stream sockets the aprilcam daemon exposes — the wire-level contract beneath the Python client.
 order: 50
-updated: 2026-06-20
+updated: 2026-06-21
 tags: [daemon, grpc, protobuf, protocol]
 ---
 
@@ -24,7 +24,8 @@ implementing a client in another language. The authoritative schema is
 
 ## Starting the daemon and file paths
 
-The daemon auto-spawns when the first client connects, and can be managed with
+Start the daemon explicitly with `aprilcam daemon start` (or a systemd service);
+clients never spawn it. Manage it with
 `aprilcam daemon start|stop|status|restart`. For the full lifecycle, the
 config/environment variables, the FHS/XDG directory layout, and systemd, see
 **[Operating the Daemon](daemon.md)**.

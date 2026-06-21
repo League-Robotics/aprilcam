@@ -2,7 +2,7 @@
 title: Operating the Daemon
 blurb: Install, run, configure, and troubleshoot aprilcamd — the process that owns the cameras and does all vision.
 order: 40
-updated: 2026-06-20
+updated: 2026-06-21
 tags: [daemon, cli, config, systemd, ops]
 ---
 
@@ -41,13 +41,61 @@ aprilcam daemon start -v       # foreground, INFO logs (-vv for DEBUG)
 python -m aprilcam.daemon      # run in the foreground directly
 ```
 
-The daemon **auto-spawns** the first time any client connects
-(`DaemonControl.connect_default`, the MCP server, or the viewer): the client
-takes a spawn lock at `<socket_dir>/aprilcamd.spawn.lock`, launches
-`python -m aprilcam.daemon` detached, and probes the control socket until it
-answers. It refuses to start a second instance (exclusive `flock` on its
-pidfile). It runs until `Shutdown` or a kill signal — it does **not** exit when
-idle.
+You start the daemon **explicitly** — on the camera host (`aprilcam daemon
+start`) or as a systemd service (below). Clients do **not** auto-spawn it: an MCP
+server, `DaemonControl`, the CLI, or the viewer that can't find a daemon fails
+fast with `DaemonNotFoundError` ("No aprilcam daemon found …") instead of
+launching one. The daemon refuses to start a second instance (exclusive `flock`
+on its pidfile) and runs until `Shutdown` or a kill signal — it does **not** exit
+when idle.
+
+## Connecting (local and remote)
+
+The daemon listens on three things at once:
+
+- a **Unix socket** at `<socket_dir>/control.sock` (local clients),
+- **TCP `0.0.0.0:5280`** (remote clients across the network), and
+- an **mDNS / Bonjour** advertisement (`_aprilcam._tcp`, TXT `host=<hostname>`)
+  so clients can find it with no configuration.
+
+Every client (the [MCP server](mcp-server.md), the CLI, the
+[`DaemonControl` library](robot-direct-api.md), the viewer) resolves a target in
+this order — and **never spawns** a daemon:
+
+1. an explicit **`--host` / `--port`** flag, or **`APRILCAM_DAEMON_HOST` /
+   `APRILCAM_DAEMON_PORT`**;
+2. a running **local** daemon on the default Unix socket;
+3. **mDNS discovery** — exactly one daemon → use it; several → pick one with
+   `APRILCAM_DAEMON_HOST`; none → a clear `No aprilcam daemon found` error.
+
+`--host` / `--port` are **global** flags, accepted before *or* after the
+subcommand. They also accept a host *letter* once you have run `aprilcam probe`
+(below). `.local` mDNS names resolve transparently (the client resolves them to
+an IP before dialing gRPC):
+
+```
+aprilcam cameras                       # auto-discover the daemon on the LAN
+aprilcam --host vidar.local cameras    # talk to a specific remote daemon
+aprilcam cameras --host 192.168.1.40   # …by hostname or IP
+```
+
+Set `APRILCAM_DAEMON_HOST=vidar.local` (in `~/.aprilcam`, `/etc/aprilcam.env`,
+or `.env`) to make every client target a remote daemon by default.
+
+### `aprilcam probe` and short codes
+
+`aprilcam probe` discovers every reachable daemon (local + mDNS), enumerates
+their cameras, and saves a host store at `<data_dir>/hosts.json` with **stable**
+host and camera numbers. Each camera then has a compact **base-26 code**: a
+single letter for a **local** camera (`C` = local camera 3), or host-letter +
+camera-letter for a **remote** one (`FB` = host F, camera 2).
+
+```
+aprilcam probe                         # A  vidar  [remote] -> AA imx296-88000,  AB imx296-80000
+aprilcam cameras --host vidar.local    # [6] AA imx296-88000   [7] AB imx296-80000
+aprilcam --host A cameras              # address a host by its letter
+aprilcam view AB                       # open vidar's 2nd camera by its code
+```
 
 ## Cameras
 
@@ -61,6 +109,10 @@ aprilcam cameras               # [1] Brio 501  [3] Arducam OV9782  [4] Samizdat
 aprilcam cameras --details     # also shows slug + os-index for debugging
 aprilcam view 3                # open the live view for camera 3
 ```
+
+Run `aprilcam probe` to also tag each camera with a short alpha code (see
+[Connecting](#connecting-local-and-remote)) — convenient for addressing cameras
+across multiple hosts.
 
 Each camera gets a directory `<data_dir>/cameras/<slug>/` holding:
 
@@ -144,6 +196,10 @@ it in the foreground: `aprilcam daemon start -vv` or `python -m aprilcam.daemon`
 
 ## Troubleshooting
 
+- **A client prints `No aprilcam daemon found`** — no daemon was discovered and
+  none was configured. Start one on the camera host (`aprilcam daemon start`, or
+  the systemd service) or point the client at it with `--host` /
+  `APRILCAM_DAEMON_HOST`. Clients never start a daemon for you.
 - **`aprilcam daemon start` reports "did not start within 20 seconds"** — the
   client's readiness probe could not reach the socket. Most often a
   socket-directory mismatch (client and daemon resolved different

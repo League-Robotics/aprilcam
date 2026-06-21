@@ -2,7 +2,7 @@
 title: Overview
 blurb: What AprilCam is, how the daemon / MCP server / clients fit together, and where to start.
 order: 10
-updated: 2026-06-20
+updated: 2026-06-21
 tags: [overview]
 ---
 
@@ -57,18 +57,32 @@ pipx install 'aprilcam[daemon]'    # base + OpenCV, mss, websockets, …
 
 # Thin clients (MCP server, library, viewer) — no OpenCV:
 pipx install aprilcam              # includes the MCP SDK
+
+# Develop against a checkout (editable, full daemon stack):
+pipx install --editable '/path/to/aprilcam[daemon]'
 ```
 
+On a Raspberry Pi the daemon installs the same way (`pipx install
+'aprilcam[daemon]'` from a built wheel) and runs as a systemd service — see
+[Operating the Daemon](daemon.md).
+
 ```
-aprilcam mcp                        # run the MCP server (stdio)
-aprilcam daemon start               # start the daemon in the background
-aprilcam cameras                    # list cameras by their persistent number
+aprilcam daemon start               # start the daemon on the camera host
+aprilcam mcp                        # run the MCP server (stdio) against a daemon
+aprilcam probe                      # discover daemons + cameras, assign short codes
+aprilcam cameras                    # list cameras (persistent number + alpha code)
+aprilcam --host vidar.local cameras # target a remote daemon over the network
 aprilcam view 3                     # open the live view for camera 3
 ```
 
+Clients reach the daemon by **mDNS auto-discovery**, or an explicit `--host` /
+`APRILCAM_DAEMON_HOST` — they never start a daemon themselves. See
+[Operating the Daemon](daemon.md#connecting-local-and-remote).
+
 Camera numbers shown by `aprilcam cameras` (and accepted by `view`, `tags`,
 `calibrate`, and the MCP tools) are the **persistent enumeration handle** —
-stable across replug — not the volatile OS device index.
+stable across replug — not the volatile OS device index. `aprilcam probe` also
+assigns a compact base-26 code (e.g. `AB`) for addressing cameras across hosts.
 
 See the repository [README](https://github.com/League-Robotics/aprilcam#readme)
 for the full MCP tool reference and CLI commands.
