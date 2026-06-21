@@ -40,8 +40,19 @@ def _collect(cfg: Config) -> dict:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    from ..config import CONFIG_VARS
+
+    _rows = "\n".join(
+        f"  {v['key']:<36}{v['default']:<32}{v['description']}" for v in CONFIG_VARS
+    )
+    epilog = (
+        "environment variables (override the dotfiles above):\n"
+        f"  {'VARIABLE':<36}{'DEFAULT':<32}DESCRIPTION\n"
+        f"{_rows}"
+    )
     parser = argparse.ArgumentParser(
         prog="config",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "Show the aprilcam version and the resolved configuration "
             "(data/socket/log directories, daemon pidfile, deskew settings, ...) "
@@ -49,6 +60,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "~/.aprilcam, project .aprilcam/.env dotfiles, and "
             "APRILCAM_* environment variables."
         ),
+        epilog=epilog,
     )
     parser.add_argument(
         "--json",
@@ -63,7 +75,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     if args.vars:
-        from ..config import CONFIG_VARS
         for var in CONFIG_VARS:
             print(f"{var['key']:<40} {var['default']:<35} {var['description']}")
         return 0

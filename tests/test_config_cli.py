@@ -245,3 +245,19 @@ def test_config_vars_imported_from_config(tmp_path, monkeypatch, capsys):
         assert var["key"] in lines[i], (
             f"Line {i} expected key {var['key']!r}, got: {lines[i]!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# `aprilcam config --help` carries the APRILCAM_* variable table
+# (moved here from the main `aprilcam --help`)
+# ---------------------------------------------------------------------------
+
+
+def test_config_help_lists_env_vars(capsys):
+    """`aprilcam config --help` shows the APRILCAM_* variable table in its epilog."""
+    with pytest.raises(SystemExit):
+        config_cli.main(["--help"])
+    out = capsys.readouterr().out
+    assert "environment variables" in out
+    for var in CONFIG_VARS:
+        assert var["key"] in out

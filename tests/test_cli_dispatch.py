@@ -113,3 +113,13 @@ def test_help_lists_agent_flag(capsys):
         cli.main(["--help"])
     out = capsys.readouterr().out
     assert "--agent" in out
+
+
+def test_main_help_omits_env_var_table_points_to_config(capsys):
+    """The APRILCAM_* variable table lives in `aprilcam config --help`, not the
+    main help — the main help only points there."""
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    out = capsys.readouterr().out
+    assert "APRILCAM_DATA_DIR" not in out          # the full table moved out
+    assert "aprilcam config --help" in out          # …and the main help points there
