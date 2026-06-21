@@ -59,7 +59,7 @@ class TestImageStreamConsumerHostParam:
         assert consumer._host == "192.168.1.50"
 
     def test_unix_socket_ignores_host(self, tmp_path):
-        """When socket_path is set, Unix socket is preferred regardless of host."""
+        """When socket_path is set and the daemon is local, the Unix socket is used."""
         import tempfile
 
         from aprilcam.client.models import StreamEndpoint
@@ -71,11 +71,11 @@ class TestImageStreamConsumerHostParam:
         server.listen(1)
 
         endpoint = StreamEndpoint(socket_path=sock_path, tcp_port=9999)
-        consumer = ImageStreamConsumer(endpoint, host="192.168.1.50")
+        consumer = ImageStreamConsumer(endpoint, host="localhost")
         consumer.connect()
         conn, _ = server.accept()
 
-        # It connected via Unix socket despite a custom host
+        # Local daemon + socket_path → Unix socket is used (host value irrelevant)
         assert consumer._sock is not None
         assert consumer._sock.family == socket.AF_UNIX
         consumer.close()

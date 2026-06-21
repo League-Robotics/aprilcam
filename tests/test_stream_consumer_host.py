@@ -67,7 +67,7 @@ class TestImageStreamConsumerHost:
         fake_sock.connect.assert_called_once_with(("localhost", 5555))
 
     def test_connect_ignores_host_for_unix_socket(self) -> None:
-        """connect() uses Unix socket when socket_path is set, ignoring host."""
+        """connect() uses the Unix socket when the daemon host is local."""
         import tempfile
         import os
 
@@ -78,11 +78,11 @@ class TestImageStreamConsumerHost:
         server.listen(1)
 
         endpoint = StreamEndpoint(socket_path=sock_path, tcp_port=9999)
-        consumer = ImageStreamConsumer(endpoint, host="remote-host.local")
+        consumer = ImageStreamConsumer(endpoint, host="localhost")
         consumer.connect()
         conn, _ = server.accept()
 
-        # The socket should be a Unix socket (AF_UNIX) — not TCP to remote-host.local
+        # Local host + socket_path → Unix socket (AF_UNIX), not TCP
         assert consumer._sock is not None
         assert consumer._sock.family == socket.AF_UNIX
 
@@ -157,7 +157,7 @@ class TestTagStreamConsumerHost:
         fake_sock.connect.assert_called_once_with(("localhost", 6666))
 
     def test_connect_ignores_host_for_unix_socket(self) -> None:
-        """connect() prefers Unix socket over TCP host when socket_path is set."""
+        """connect() uses the Unix socket when the daemon host is local."""
         import tempfile
         import os
 
@@ -168,11 +168,11 @@ class TestTagStreamConsumerHost:
         server.listen(1)
 
         endpoint = StreamEndpoint(socket_path=sock_path, tcp_port=9999)
-        consumer = TagStreamConsumer(endpoint, host="remote-host.local")
+        consumer = TagStreamConsumer(endpoint, host="localhost")
         consumer.connect()
         conn, _ = server.accept()
 
-        # Should be a Unix socket, not TCP.
+        # Local host + socket_path → Unix socket (AF_UNIX), not TCP.
         assert consumer._sock is not None
         assert consumer._sock.family == socket.AF_UNIX
 
