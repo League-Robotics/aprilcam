@@ -46,7 +46,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         f"  {v['key']:<36}{v['default']:<32}{v['description']}" for v in CONFIG_VARS
     )
     epilog = (
-        "environment variables (override the dotfiles above):\n"
+        "configuration sources (lowest precedence first; each overrides those above):\n"
+        "  /etc/aprilcam.env\n"
+        "  /etc/aprilcam/aprilcam.env\n"
+        "  ~/.aprilcam\n"
+        "  .aprilcam  (walk up from CWD)\n"
+        "  .env       (walk up from CWD, via dotenv)\n"
+        "  APRILCAM_* environment variables  (highest)\n"
+        "\n"
+        "environment variables:\n"
         f"  {'VARIABLE':<36}{'DEFAULT':<32}DESCRIPTION\n"
         f"{_rows}"
     )

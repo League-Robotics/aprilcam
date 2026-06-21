@@ -259,5 +259,7 @@ def test_config_help_lists_env_vars(capsys):
         config_cli.main(["--help"])
     out = capsys.readouterr().out
     assert "environment variables" in out
+    assert "configuration sources" in out          # precedence block moved here too
+    assert "/etc/aprilcam.env" in out
     for var in CONFIG_VARS:
         assert var["key"] in out

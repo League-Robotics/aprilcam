@@ -122,4 +122,6 @@ def test_main_help_omits_env_var_table_points_to_config(capsys):
         cli.main(["--help"])
     out = capsys.readouterr().out
     assert "APRILCAM_DATA_DIR" not in out          # the full table moved out
-    assert "aprilcam config --help" in out          # …and the main help points there
+    assert "/etc/aprilcam.env" not in out          # …and the source-precedence list too
+    assert "Source precedence" not in out
+    assert "aprilcam config --help" in out          # …with the main help pointing there

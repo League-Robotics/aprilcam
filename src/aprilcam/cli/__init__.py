@@ -93,17 +93,8 @@ def _print_help():
     print("flags:")
     print("  --agent [NAME]    Print the AI-agent instructions guide (NAME: agent [default], robot)")
     print()
-    print("Configuration:")
-    print("  Source precedence (lowest to highest):")
-    print("    /etc/aprilcam.env")
-    print("    /etc/aprilcam/aprilcam.env")
-    print("    ~/.aprilcam")
-    print("    .aprilcam  (walk up from CWD)")
-    print("    .env       (walk up from CWD, via dotenv)")
-    print("    APRILCAM_* environment variables  (highest)")
-    print()
-    print("  Run 'aprilcam config' for resolved paths and current values, or")
-    print("  'aprilcam config --help' for the full list of APRILCAM_* variables.")
+    print("Run 'aprilcam config' for resolved paths/values and 'aprilcam config --help'")
+    print("for configuration sources and the full list of APRILCAM_* variables.")
 
 
 _HOST_FLAGS = {"--host", "--daemon-host"}
