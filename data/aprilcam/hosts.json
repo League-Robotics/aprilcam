@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "hosts": [
+    {
+      "num": 1,
+      "kind": "remote",
+      "host": "vidar",
+      "addresses": [
+        "192.168.1.144"
+      ],
+      "cameras": [
+        {
+          "num": 1,
+          "enum": 6,
+          "index": 0,
+          "name": "imx296-88000",
+          "slug": "imx296-88000"
+        },
+        {
+          "num": 2,
+          "enum": 7,
+          "index": 1,
+          "name": "imx296-80000",
+          "slug": "imx296-80000"
+        }
+      ]
+    }
+  ]
+}
