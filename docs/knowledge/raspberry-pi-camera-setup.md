@@ -130,12 +130,53 @@ Daemon env (set in `aprilcamd.service`): `APRILCAM_CAMERA_BACKEND=libcamera`,
 ## Verify
 
 ```bash
-aprilcam cameras                 # -> exactly two: imx296-88000, imx296-80000
+aprilcam cameras                 # -> the two CSI (imx296-88000, imx296-80000)
+                                 #    plus any USB/UVC camera (e.g. C920)
 # from another machine on the LAN:
 APRILCAM_DAEMON_HOST=vidar.local aprilcam cameras
 ```
 
 `systemctl status aprilcam-bridge@0 aprilcam-bridge@1 aprilcamd` — all active.
+
+## USB/UVC cameras + remote live view
+
+vidar also has a **USB webcam** (Logitech C920). USB cameras are the *reliable*
+live-view path — plain `uvcvideo` V4L2 devices OpenCV opens directly
+(`cv2.VideoCapture(index)`), with **no libcamera/bridge** in the way.
+
+- **Mixed backend.** With `APRILCAM_CAMERA_BACKEND=libcamera` the daemon
+  enumerates the CSI cameras (libcamera loopback) **and** real USB/UVC cameras
+  side by side. `camutil._list_v4l2_usb_cameras()` scans
+  `/sys/class/video4linux/video*/device/driver` for `uvcvideo` (one capture node
+  per device); `CameraPipeline` routes a libcamera index through the loopback and
+  any other index straight to `cv2.VideoCapture(index)`. The C920 shows up as
+  e.g. `[16] HD Pro Webcam C920` (its `/dev/video16` index).
+
+- **Remote live view from another machine:**
+
+  ```bash
+  aprilcam view 16 --host vidar.local      # 16 = the number from `aprilcam cameras`
+  ```
+
+  `view` resolves the typed number against the **daemon's** enumeration (not a
+  local registry — meaningless for a remote daemon), opens the camera
+  daemon-side, and streams JPEG frames over TCP to a tkinter window on the
+  client. Verified end-to-end Mac ⇄ vidar.
+
+- **Tcl/Tk on uv-managed Python (client side).** Standalone CPython builds (uv)
+  ship Tcl/Tk but record a build-time path that doesn't exist, so `tk.Tk()` dies
+  with *"Can't find a usable init.tcl"*. `view` now auto-points `TCL_LIBRARY`/
+  `TK_LIBRARY` at `<prefix>/lib/tcl8.x` before creating the window.
+
+- **⚠️ CSI live view is currently NOT usable — the bridge delivers ~0.2 fps.**
+  The `libcamerasrc → v4l2loopback` bridge feeds frames far too slowly for a live
+  view or detection (one frame every several seconds). This is a
+  GStreamer/libcamera/v4l2loopback **tuning** problem in the bridge, not a daemon
+  bug — capture, streaming, and the daemon read path all work (the USB camera
+  proves the pipeline). Until the bridge fps is fixed, **use the USB camera for
+  live view**; the CSI cameras enumerate and open but stall. Next things to try:
+  bridge caps/format/queue tuning, `v4l2loopback max_buffers`, and confirming the
+  sensor mode/framerate `libcamerasrc` negotiates.
 
 ## Replacing the old ROS camera stack
 
