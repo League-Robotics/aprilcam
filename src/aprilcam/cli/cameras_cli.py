@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 from typing import List, Optional
 
 from ..config import AppConfig, Config
-from ..client.control import DaemonControl
-from ..client.host_codes import code_for, find_host, load_store
+from ..client.host_codes import code_for, find_host, load_store, num_to_alpha
 from ._daemon import add_daemon_args, connect_from_args
 
 
@@ -13,9 +13,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="cameras",
         description=(
-            "List cameras available on the daemon host. The daemon probes the "
-            "hardware; no local camera probe is performed by this command. "
-            "Use `aprilcam daemon start` to ensure the daemon is running."
+            "List cameras. With no --host, lists every camera on every daemon "
+            "on the network recorded by 'aprilcam probe', addressed by "
+            "host-letter + camera number (local cameras need no letter). With "
+            "--host HOST, lists that one daemon's cameras live."
         ),
     )
     parser.add_argument(
@@ -31,6 +32,75 @@ def main(argv: Optional[List[str]] = None) -> int:
     add_daemon_args(parser)
     args = parser.parse_args(argv)
 
+    config = Config.load()
+
+    # An explicit --host (flag or APRILCAM_DAEMON_HOST, set by the root --host)
+    # means "list that one daemon, live". With no host, show the whole network
+    # from the host store that `aprilcam probe` builds.
+    explicit_host = bool(
+        getattr(args, "daemon_host", None) or os.environ.get("APRILCAM_DAEMON_HOST")
+    )
+    store = load_store(config)
+    hosts = store.get("hosts", [])
+
+    if not explicit_host and hosts:
+        return _list_all_from_store(hosts, args.details)
+
+    return _list_single_daemon(config, args)
+
+
+def _list_all_from_store(hosts: List[dict], details: bool) -> int:
+    """List every camera on every known daemon, addressed by host-letter+number.
+
+    Reads the persistent host store built by ``aprilcam probe``. Each camera is
+    shown as ``<host-letter><camera-number>`` — the camera number is its stable
+    enumeration handle — except local-host cameras, which are shown as the bare
+    number (no letter needed). The host letter is the daemon's single-letter
+    code (also accepted by ``--host``).
+    """
+    print("Cameras on the network (from 'aprilcam probe' — run it to refresh):")
+    print()
+
+    def _enum_key(c: dict) -> int:
+        e = c.get("enum")
+        return e if e is not None else (c.get("index") or 0)
+
+    for h in sorted(hosts, key=lambda x: x.get("num", 0)):
+        h_num = h.get("num", 0)
+        h_letter = num_to_alpha(h_num) if h_num else "?"
+        h_name = h.get("host", "?")
+        is_local = h.get("kind") == "local"
+        suffix = "  (local)" if is_local else ""
+        print(f"  {h_name}  [{h_letter}]{suffix}")
+
+        cams = sorted(h.get("cameras", []), key=_enum_key)
+        if not cams:
+            print("      (no cameras)")
+        for c in cams:
+            num = c.get("enum")
+            if num is None:
+                num = c.get("index")
+            code = f"{num}" if is_local else f"{h_letter}{num}"
+            name = c.get("name", "")
+            if details:
+                print(f"      {code:<6}{name}  (slug: {c.get('slug', '')})")
+            else:
+                print(f"      {code:<6}{name}")
+        print()
+
+    print("Open one with:")
+    print("  aprilcam view <number>                  (local, e.g. 'view 3')")
+    print("  aprilcam --host <letter> view <number>  (remote, e.g. 'A6' -> --host A view 6)")
+    return 0
+
+
+def _list_single_daemon(config: Config, args: argparse.Namespace) -> int:
+    """List cameras on a single daemon (live), with stable alpha codes.
+
+    Used when ``--host`` is given (query that daemon) or when the host store is
+    empty (no probe yet) — falls back to the local daemon. The bracketed number
+    is the persistent enumeration handle accepted by ``view``/``tags``.
+    """
     # Attempt to read .env for CAMERA pattern; tolerant to missing guard
     pattern = None
     try:
@@ -43,7 +113,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # Enumerate cameras via the daemon — no local hardware probe
     try:
-        config = Config.load()
         dc = connect_from_args(config, args)
         devices = dc.enumerate_cameras()
     except Exception as exc:

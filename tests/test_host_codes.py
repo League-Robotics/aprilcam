@@ -506,15 +506,12 @@ class TestCamerasCliCodeColumn:
         ]
 
     def test_code_shown_from_store(self, monkeypatch, tmp_path, capsys):
-        from aprilcam.client.models import CameraDevice
+        """With no --host, `cameras` lists every host from the store, addressing
+        local cameras by bare number and remote cameras by host-letter+number."""
         from aprilcam.cli import cameras_cli
         from unittest.mock import MagicMock
 
-        devices = self._make_devices()
-        dc = MagicMock()
-        dc.enumerate_cameras.return_value = devices
-
-        # Build a store with matching camera entries.
+        # Store: local host [A] + a remote host [B], each with cameras.
         store = {
             "version": 1,
             "hosts": [
@@ -525,30 +522,31 @@ class TestCamerasCliCodeColumn:
                         {"num": 1, "enum": 10, "index": 0, "name": "cam-alpha", "slug": "cam-alpha"},
                         {"num": 2, "enum": 11, "index": 1, "name": "cam-beta", "slug": "cam-beta"},
                     ],
-                }
+                },
+                {
+                    "num": 2, "kind": "remote", "host": "vidar",
+                    "addresses": ["10.0.0.2"],
+                    "cameras": [
+                        {"num": 1, "enum": 6, "index": 0, "name": "imx296", "slug": "imx296"},
+                    ],
+                },
             ],
         }
-
-        monkeypatch.setattr(
-            cameras_cli.AppConfig,
-            "load",
-            classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})()),
-        )
-        # Patch at both the module level and the definition level for robustness.
-        monkeypatch.setattr("aprilcam.cli.cameras_cli.connect_from_args", lambda *a, **kw: dc)
-        monkeypatch.setattr("aprilcam.cli._daemon.connect_from_args", lambda *a, **kw: dc)
+        monkeypatch.delenv("APRILCAM_DAEMON_HOST", raising=False)
         monkeypatch.setattr("aprilcam.cli.cameras_cli.load_store", lambda *a, **kw: store)
         mock_cfg = MagicMock()
         monkeypatch.setattr("aprilcam.cli.cameras_cli.Config", MagicMock(load=MagicMock(return_value=mock_cfg)))
 
         rc = cameras_cli.main([])
-        captured = capsys.readouterr()
-        out = captured.out
+        out = capsys.readouterr().out
 
         assert rc == 0, f"cameras_cli.main returned {rc}; stdout={out!r}"
-        # Camera 1 should show code "A", camera 2 should show "B"
-        assert " A " in out or "[10] A" in out
-        assert " B " in out or "[11] B" in out
+        # Local host: letter A in header, cameras as bare numbers (10, 11).
+        assert "myhost" in out and "[A]" in out and "(local)" in out
+        assert "10" in out and "11" in out
+        # Remote host: letter B in header, camera as host-letter+number (B6).
+        assert "vidar" in out and "[B]" in out
+        assert "B6" in out
 
     def test_hint_shown_when_no_store(self, monkeypatch, capsys):
         from aprilcam.cli import cameras_cli
