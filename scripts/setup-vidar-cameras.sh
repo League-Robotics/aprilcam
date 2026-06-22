@@ -60,7 +60,10 @@ echo "[2/6] v4l2loopback ..."
 sudo apt-get install -y "linux-headers-$(uname -r)" v4l2loopback-dkms v4l-utils
 sudo dkms autoinstall 2>/dev/null || true
 echo "v4l2loopback" | sudo tee /etc/modules-load.d/aprilcam.conf >/dev/null
-echo "options v4l2loopback video_nr=${LOOPBACK_NRS} card_label=${LOOPBACK_LABELS} exclusive_caps=1,1 max_buffers=3" \
+# max_buffers MUST be generous: with only 3 buffers the streaming-mmap reader
+# (the daemon's v4l2-ctl capture) starves to ~0.2-0.6 fps even though the
+# libcamerasrc->v4l2sink writer pushes 15-30 fps. 16 buffers restores full fps.
+echo "options v4l2loopback video_nr=${LOOPBACK_NRS} card_label=${LOOPBACK_LABELS} exclusive_caps=1,1 max_buffers=16" \
   | sudo tee /etc/modprobe.d/aprilcam.conf >/dev/null
 echo 'SUBSYSTEM=="video4linux", ATTR{name}=="aprilcam-*", GROUP="video", MODE="0660"' \
   | sudo tee /etc/udev/rules.d/99-aprilcam.rules >/dev/null

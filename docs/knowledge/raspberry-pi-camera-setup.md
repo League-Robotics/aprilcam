@@ -168,15 +168,35 @@ live-view path — plain `uvcvideo` V4L2 devices OpenCV opens directly
   with *"Can't find a usable init.tcl"*. `view` now auto-points `TCL_LIBRARY`/
   `TK_LIBRARY` at `<prefix>/lib/tcl8.x` before creating the window.
 
-- **⚠️ CSI live view is currently NOT usable — the bridge delivers ~0.2 fps.**
-  The `libcamerasrc → v4l2loopback` bridge feeds frames far too slowly for a live
-  view or detection (one frame every several seconds). This is a
-  GStreamer/libcamera/v4l2loopback **tuning** problem in the bridge, not a daemon
-  bug — capture, streaming, and the daemon read path all work (the USB camera
-  proves the pipeline). Until the bridge fps is fixed, **use the USB camera for
-  live view**; the CSI cameras enumerate and open but stall. Next things to try:
-  bridge caps/format/queue tuning, `v4l2loopback max_buffers`, and confirming the
-  sensor mode/framerate `libcamerasrc` negotiates.
+## ⚠️ The big v4l2loopback gotcha: `max_buffers` starves the reader
+
+**Symptom:** the CSI live view stalls at **~0.2–0.6 fps** even though
+`libcamerasrc` is healthy. **Cause:** `v4l2loopback` was loaded with
+**`max_buffers=3`**. With only 3 buffers, the streaming-mmap **reader** (the
+daemon's `v4l2-ctl` capture) starves to a crawl while the `libcamerasrc →
+v4l2sink` **writer** happily pushes 15–30 fps. **Fix:** load v4l2loopback with
+**`max_buffers=16`** (in `/etc/modprobe.d/aprilcam.conf`; the setup script now
+does this). After the fix the loopback reads a full 30 fps and the CSI cameras
+stream live (the daemon then caps at `detection_fps`, ~4–5 fps actual on the Pi
+5 doing AprilTag/ArUco detection at 1280×720 per camera).
+
+How it was isolated (each stage measured independently):
+
+| Stage | Rate |
+|---|---|
+| `libcamerasrc → NV12 1280×720 → fakesink` | 15 fps (30 fps native) — fine |
+| `+ videoconvert → YUY2 → fakesink` | 15 fps — fine |
+| writer `→ v4l2sink /dev/video70` (no reader) | 15 fps — fine |
+| **reader `v4l2-ctl --stream-mmap /dev/video70`** (max_buffers=3) | **0.6 fps — culprit** |
+| same reader, **max_buffers=16** | **30 fps — fixed** |
+
+To change it live (without a reboot): stop the daemon + both bridges,
+`sudo rmmod v4l2loopback`, `sudo modprobe v4l2loopback video_nr=70,71
+card_label=aprilcam-imx296-88000,aprilcam-imx296-80000 exclusive_caps=1,1
+max_buffers=16`, then restart the bridges + daemon.
+
+> The USB C920 path never hit this — it's a real UVC device read directly with
+> OpenCV, not through the loopback.
 
 ## Replacing the old ROS camera stack
 
