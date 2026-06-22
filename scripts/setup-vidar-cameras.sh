@@ -89,12 +89,44 @@ echo "[4/6] bridge launcher ..."
 sudo tee /usr/local/bin/aprilcam-camera-bridge >/dev/null <<'SH'
 #!/bin/bash
 # args: <position 0-based> <loopback /dev/videoN>
+# Bridges one CSI camera (libcamera) into a v4l2loopback device the daemon reads.
+set -u
 POS="$1"; DEV="$2"
+
+# Stagger startup by camera position: two libcamerasrc instances initialising at
+# the same time race in libcamera/PiSP and can crash. 4s/position avoids that.
+sleep "$((POS * 4))"
+
 CID="$(cam -l 2>/dev/null | sed -n "s/^$((POS+1)): .*(\(.*\))$/\1/p")"
 [ -z "$CID" ] && { echo "no libcamera camera at position $POS" >&2; exit 1; }
-exec gst-launch-1.0 -q libcamerasrc camera-name="$CID" \
+
+# The `queue` after libcamerasrc gives libcamera its own thread and releases
+# capture requests to downstream promptly — the standard mitigation for the
+# libcamerasrc "requestCompleted ... assertion failed" SIGSEGV under load.
+gst-launch-1.0 -q libcamerasrc camera-name="$CID" \
+  ! queue max-size-buffers=6 leaky=downstream \
   ! video/x-raw,format=NV12,width=1280,height=720,framerate=30/1 \
-  ! videoconvert ! video/x-raw,format=YUY2 ! v4l2sink device="$DEV" sync=false
+  ! videoconvert ! video/x-raw,format=YUY2 ! v4l2sink device="$DEV" sync=false &
+GST_PID=$!
+trap 'kill -9 $GST_PID 2>/dev/null' EXIT INT TERM
+
+# Watchdog: libcamerasrc can still SIGSEGV, after which gst-launch's fault
+# handler "spins" forever instead of exiting — so systemd never sees the failure
+# and the loopback silently freezes. Poll the loopback; if no frame is readable,
+# kill gst and exit non-zero so systemd (Restart=always) relaunches a fresh
+# pipeline. v4l2loopback fans out to all readers, so this never steals frames
+# from the daemon.
+sleep 8
+while kill -0 "$GST_PID" 2>/dev/null; do
+  if ! timeout 6 v4l2-ctl -d "$DEV" --stream-mmap --stream-count=1 >/dev/null 2>&1; then
+    echo "watchdog: $DEV stalled (libcamerasrc likely crashed) — restarting bridge" >&2
+    kill -9 "$GST_PID" 2>/dev/null
+    exit 1
+  fi
+  sleep 10
+done
+echo "watchdog: gst-launch exited — restarting bridge" >&2
+exit 1
 SH
 sudo chmod +x /usr/local/bin/aprilcam-camera-bridge
 
@@ -106,6 +138,9 @@ sudo tee /etc/systemd/system/aprilcam-bridge@.service >/dev/null <<SVC
 [Unit]
 Description=AprilCam libcamera->v4l2loopback bridge (camera %i)
 After=systemd-modules-load.service
+# Never give up on the restart loop — the watchdog deliberately exits to recover
+# from libcamerasrc crashes, and we want it relaunched indefinitely.
+StartLimitIntervalSec=0
 [Service]
 User=${USER_NAME}
 SupplementaryGroups=video
