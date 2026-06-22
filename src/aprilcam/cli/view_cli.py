@@ -449,18 +449,24 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
         else:
             try:
-                # An integer CAMERA is the stable enumeration number shown by
-                # `aprilcam cameras` — resolve it to the live OS index before
-                # opening, so the number the user types matches the listing.
-                enum_no = int(camera_arg)
-                registry = CameraRegistry(config.cameras_dir)
-                try:
-                    cam_index = resolve_enum_to_index(enum_no, registry, resolve_all())
-                except CameraSelectError as exc:
-                    print(f"Error: {exc}", file=sys.stderr)
+                # An integer CAMERA is the stable number shown by `aprilcam
+                # cameras`. Resolve it against the DAEMON's enumeration (a local
+                # registry is meaningless for a remote daemon): match the
+                # persistent enum first, then the device index.
+                num = int(camera_arg)
+                devices = dc.enumerate_cameras()
+                match = next((d for d in devices if d.enum == num), None) or next(
+                    (d for d in devices if d.index == num), None
+                )
+                if match is None:
+                    print(
+                        f"Error: no camera numbered {num} on the daemon. "
+                        f"Run 'aprilcam cameras' to list them.",
+                        file=sys.stderr,
+                    )
                     dc.close()
                     return 1
-                cam_name, _camera_dir = dc.open_camera(cam_index)
+                cam_name, _camera_dir = dc.open_camera(match.index)
             except ValueError:
                 # camera_arg is a name, not an index — verify it is open
                 info = dc.get_camera_info(camera_arg)
@@ -494,7 +500,7 @@ def main(argv: list[str] | None = None) -> int:
     # and the final ImageTk flip — is BGR-native, so convert RGB->BGR on the
     # way in to keep channel order consistent (fixes the red<->blue swap).
     try:
-        first_frame = image_consumer.read()[:, :, ::-1]  # numpy-only: RGB->BGR
+        first_frame = image_consumer.read()[:, :, ::-1].copy()  # numpy-only: RGB->BGR, contiguous for cv2
     except (EOFError, RuntimeError) as exc:
         print(f"Error: could not read first frame: {exc}", file=sys.stderr)
         image_consumer.close()
@@ -679,7 +685,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 # read() returns RGB (Pillow decode); convert to BGR for the
                 # BGR-native display + color-classification pipeline.
-                frame_bgr = image_consumer.read()[:, :, ::-1]  # numpy-only: RGB->BGR
+                frame_bgr = image_consumer.read()[:, :, ::-1].copy()  # numpy-only: RGB->BGR, contiguous for cv2
             except (EOFError, RuntimeError):
                 print("Image stream closed — daemon may have stopped.", file=sys.stderr)
                 stop_event.set()
@@ -717,6 +723,30 @@ def main(argv: list[str] | None = None) -> int:
     # ── Build tkinter window ──────────────────────────────────────────────
     import tkinter.font as tkfont
 
+    def _ensure_tcl_tk() -> None:
+        """Point tkinter at the interpreter's bundled Tcl/Tk if it can't find it.
+
+        Some standalone Python builds (e.g. uv-managed CPython) ship Tcl/Tk but
+        record a build-time TCL path that no longer exists, so ``tk.Tk()`` fails
+        with "Can't find a usable init.tcl". If TCL_LIBRARY isn't already set,
+        locate ``<prefix>/lib/tcl8.x/init.tcl`` and set TCL_LIBRARY/TK_LIBRARY.
+        """
+        import os, sys, glob
+        if os.environ.get("TCL_LIBRARY"):
+            return
+        for base in (sys.base_prefix, sys.prefix):
+            for tcl in sorted(glob.glob(os.path.join(base, "lib", "tcl8.*")), reverse=True):
+                if os.path.exists(os.path.join(tcl, "init.tcl")):
+                    os.environ["TCL_LIBRARY"] = tcl
+                    tkdir = os.path.join(
+                        os.path.dirname(tcl),
+                        os.path.basename(tcl).replace("tcl", "tk"),
+                    )
+                    if os.path.isdir(tkdir):
+                        os.environ["TK_LIBRARY"] = tkdir
+                    return
+
+    _ensure_tcl_tk()
     root = tk.Tk()
     root.title(f"aprilcam view — {cam_name}")
     root.configure(bg="#111")

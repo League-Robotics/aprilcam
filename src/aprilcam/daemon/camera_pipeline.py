@@ -228,12 +228,12 @@ class CameraPipeline:
         except Exception:
             _is_libcam = False
 
-        if _is_libcam:
-            lc = libcam.camera_for_index(self.index)
-            if lc is None:
-                raise RuntimeError(
-                    f"CameraPipeline: libcamera has no camera at index {self.index}"
-                )
+        # A libcamera (CSI) camera routes through the libcam loopback/gst path;
+        # any other index is a plain V4L2/USB device (e.g. a USB webcam) opened
+        # directly with OpenCV. This lets USB cameras work alongside the CSI
+        # cameras even when the libcamera backend is enabled.
+        lc = libcam.camera_for_index(self.index) if _is_libcam else None
+        if lc is not None:
             if libcam.capture_mode() == "loopback":
                 # Read the v4l2loopback device fed by the out-of-process
                 # libcamerasrc bridge. This keeps GStreamer/libcamera OUT of the

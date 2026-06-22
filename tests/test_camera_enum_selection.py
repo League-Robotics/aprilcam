@@ -30,6 +30,13 @@ def _seed(cameras_dir, uid="avf:0xA", name="Brio 501"):
     return reg
 
 
+def _dev(enum, index, name="Cam"):
+    """A daemon CameraDevice stand-in (enum + live index) for enumerate_cameras."""
+    return type(
+        "Dev", (), {"enum": enum, "index": index, "name": name, "slug": name.lower()}
+    )()
+
+
 class _FakeDC:
     """Minimal DaemonControl stand-in recording the index it was asked to open."""
 
@@ -63,7 +70,8 @@ def test_view_resolves_enum_number_to_live_index(tmp_path, monkeypatch, capsys):
     cfg = type("Cfg", (), {"cameras_dir": cameras_dir})()
     monkeypatch.setattr(view_cli, "_noop", None, raising=False)
 
-    fake_dc = _FakeDC()
+    # The daemon reports camera enum #1 living at live device index 7.
+    fake_dc = _FakeDC(devices=[_dev(enum=1, index=7, name="Brio 501")])
     monkeypatch.setattr(
         "aprilcam.config.Config.load", classmethod(lambda cls, *a, **k: cfg)
     )
@@ -93,7 +101,8 @@ def test_view_unknown_enum_number_errors(tmp_path, monkeypatch, capsys):
     _seed(cameras_dir)  # only enum #1 exists
 
     cfg = type("Cfg", (), {"cameras_dir": cameras_dir})()
-    fake_dc = _FakeDC()
+    # The daemon only knows camera enum #1; #9 does not exist.
+    fake_dc = _FakeDC(devices=[_dev(enum=1, index=7, name="Brio 501")])
     monkeypatch.setattr(
         "aprilcam.config.Config.load", classmethod(lambda cls, *a, **k: cfg)
     )
@@ -103,16 +112,12 @@ def test_view_unknown_enum_number_errors(tmp_path, monkeypatch, capsys):
         "aprilcam.cli._daemon.connect_from_args",
         lambda config, args: fake_dc,
     )
-    monkeypatch.setattr(
-        "aprilcam.camera.identity.resolve_all",
-        lambda *a, **k: {7: _identity("avf:0xA", name="Brio 501")},
-    )
 
     rc = view_cli.main(["9"])  # no camera #9
     err = capsys.readouterr().err
 
     assert rc == 1
-    assert "no camera #9" in err
+    assert "no camera numbered 9" in err
     assert fake_dc.opened_index is None  # never tried to open
     assert fake_dc.closed is True
 

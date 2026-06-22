@@ -151,7 +151,9 @@ class ImageStreamConsumer:
             img = Image.open(io.BytesIO(jpeg)).convert("RGB")
         except Exception as exc:
             raise RuntimeError(f"Failed to decode JPEG frame from stream: {exc}") from exc
-        return np.asarray(img)
+        # np.array (not np.asarray) returns a writable, contiguous copy so
+        # consumers can draw overlays in-place (cv2 rejects read-only arrays).
+        return np.array(img)
 
     def read_image_frame(self) -> ImageFrame:
         """Read one frame and return a full ``ImageFrame`` Pydantic model."""

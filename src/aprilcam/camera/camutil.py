@@ -135,6 +135,53 @@ def macos_avfoundation_device_names() -> Dict[int, str]:
     return _macos_avfoundation_device_names()
 
 
+def _list_v4l2_usb_cameras() -> List[CameraInfo]:
+    """List real USB/UVC V4L2 cameras (driver ``uvcvideo``), one per device.
+
+    Surfaces USB webcams (e.g. a Logitech C920) alongside the libcamera CSI
+    cameras on a Raspberry Pi. Excludes the CSI/ISP/codec nodes and the
+    v4l2loopback bridge devices (none use the ``uvcvideo`` driver). The camera's
+    ``index`` is its ``/dev/videoN`` number, so ``cv2.VideoCapture(index)`` opens
+    it directly.
+    """
+    import glob
+
+    cams: List[CameraInfo] = []
+    seen: set = set()
+
+    def _num(p: str) -> int:
+        m = re.search(r"video(\d+)$", p)
+        return int(m.group(1)) if m else (1 << 30)
+
+    for path in sorted(glob.glob("/sys/class/video4linux/video*"), key=_num):
+        idx = _num(path)
+        if idx == (1 << 30):
+            continue
+        try:
+            drv = os.path.basename(
+                os.path.realpath(os.path.join(path, "device", "driver"))
+            )
+        except Exception:
+            continue
+        if drv != "uvcvideo":
+            continue
+        # uvcvideo exposes a capture node + a metadata node per camera; keep only
+        # the first (lowest-index = capture) node per physical USB device.
+        try:
+            dev = os.path.realpath(os.path.join(path, "device"))
+        except Exception:
+            dev = path
+        if dev in seen:
+            continue
+        seen.add(dev)
+        try:
+            name = open(os.path.join(path, "name")).read().strip()
+        except Exception:
+            name = f"USB Camera {idx}"
+        cams.append(CameraInfo(index=idx, name=name, backend="v4l2", device_name=name))
+    return cams
+
+
 def list_cameras(max_index: int = 10, backends: Optional[List[int]] = None, stop_after_failures: int = 4, quiet: bool = False, detailed_names: bool = False) -> List[CameraInfo]:
     """List available cameras.
 
@@ -149,7 +196,7 @@ def list_cameras(max_index: int = 10, backends: Optional[List[int]] = None, stop
         from . import libcam
 
         if libcam.backend_enabled():
-            return [
+            cams = [
                 CameraInfo(
                     index=c.position,
                     name=c.friendly_name,
@@ -160,6 +207,10 @@ def list_cameras(max_index: int = 10, backends: Optional[List[int]] = None, stop
                 )
                 for c in libcam.list_cameras()
             ]
+            # Surface real USB/UVC cameras alongside the CSI cameras so a USB
+            # webcam works even when the libcamera backend is enabled.
+            cams.extend(_list_v4l2_usb_cameras())
+            return cams
     except Exception:
         pass
 
