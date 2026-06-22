@@ -31,9 +31,13 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 # Pixel formats we know how to convert to BGR, mapped to the cvtColor code.
+# NOTE: the YUY2 stream the libcamerasrc->videoconvert bridge writes comes out
+# with red/blue swapped under COLOR_YUV2BGR_YUYV, so we use the _RGB_ variant to
+# get true BGR frames (the daemon's frame contract). Detection is luma-based and
+# unaffected; this corrects the colour seen by get_frame / the live view.
 _YUYV_CODES = {
-    "YUYV": cv.COLOR_YUV2BGR_YUYV,
-    "YUY2": cv.COLOR_YUV2BGR_YUYV,
+    "YUYV": cv.COLOR_YUV2RGB_YUYV,
+    "YUY2": cv.COLOR_YUV2RGB_YUYV,
 }
 
 
