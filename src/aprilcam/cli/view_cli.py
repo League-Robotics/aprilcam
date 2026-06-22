@@ -420,14 +420,27 @@ def main(argv: list[str] | None = None) -> int:
     try:
         camera_arg = args.camera
 
+        # --- <host-letter><number> code (e.g. "B6") -------------------------
+        # Select camera <number> on the daemon whose host letter is <letter>.
+        # Reconnect to that host (unless it's the local one) and reduce the arg
+        # to the bare number so the normal numeric resolution handles it.
+        from aprilcam.cli._daemon import resolve_host_letter_number as _rhln
+        _hl = _rhln(camera_arg, config, args)
+        if _hl is not None:
+            camera_arg, _remote_host = _hl
+            if _remote_host:
+                dc.close()
+                from aprilcam.cli._daemon import connect_from_args as _cfa2
+                try:
+                    dc = _cfa2(config, args)
+                except Exception as exc:
+                    print(
+                        f"Error: could not connect to daemon '{_remote_host}': {exc}",
+                        file=sys.stderr,
+                    )
+                    return 1
+
         # --- Alpha-code resolution (e.g. "A", "FB") -------------------------
-        # TODO(host-codes): view_cli could also switch the daemon target host
-        # for remote codes (e.g. "FB" = host F, camera B).  For now we resolve
-        # the cam_index from the store and leave host switching to the
-        # connect_from_args / resolve_camera_code path already implemented in
-        # tags_cli.  To complete this: call resolve_camera_code(camera_arg,
-        # config, args) before the int() attempt below, and if it returns a
-        # result re-open dc against the resolved host.
         from aprilcam.cli._daemon import resolve_camera_code as _resolve_code
         _code_result = _resolve_code(camera_arg, config, args)
         if _code_result is not None:

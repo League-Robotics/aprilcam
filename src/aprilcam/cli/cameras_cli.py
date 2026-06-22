@@ -88,9 +88,9 @@ def _list_all_from_store(hosts: List[dict], details: bool) -> int:
                 print(f"      {code:<6}{name}")
         print()
 
-    print("Open one with:")
-    print("  aprilcam view <number>                  (local, e.g. 'view 3')")
-    print("  aprilcam --host <letter> view <number>  (remote, e.g. 'A6' -> --host A view 6)")
+    print("Open one with:  aprilcam view <code>")
+    print("  e.g.  'aprilcam view 3'   (local camera 3)")
+    print("        'aprilcam view B6'  (camera 6 on host B)")
     return 0
 
 

@@ -355,11 +355,13 @@ def merge_probe_results(
 
     Stability rules:
 
-    - The local host (``kind="local"``) is always assigned ``num=1``.
+    - The local host (``kind="local"``) is ALWAYS ``num=1`` (letter ``A``) and
+      always listed first. ``num=1`` is reserved for it — if a remote currently
+      holds 1 (e.g. it was probed before the local daemon existed) it is bumped.
+    - Remote hosts are numbered from ``2`` (letter ``B``) upward.
     - A host already in the store is matched by ``host`` field or by any
-      overlapping ``addresses``.  Matched hosts keep their existing ``num``.
-    - New hosts receive the next free ``num`` (gap-filling is NOT done —
-      the next free number is ``max(existing_nums) + 1``).
+      overlapping ``addresses``.  Matched remote hosts keep their existing
+      ``num`` (≥2); new remotes get the next free number ≥2.
     - Within a host, cameras are matched by ``slug``; matched cameras keep
       their ``num``.  New cameras get the next free ``num`` on that host.
 
@@ -372,12 +374,20 @@ def merge_probe_results(
     """
     existing_hosts: list[dict] = store.get("hosts", [])
 
-    # Build index of existing hosts by num for fast lookup.
-    by_num: dict[int, dict] = {h["num"]: h for h in existing_hosts}
-    all_nums: set[int] = set(by_num.keys())
+    # Remote hosts are numbered from 2 upward; num 1 (letter A) is reserved for
+    # the local host, so the local daemon is ALWAYS "A" and always listed first.
+    used_remote: set[int] = {
+        h["num"]
+        for h in existing_hosts
+        if h.get("kind") != "local" and isinstance(h.get("num"), int) and h["num"] >= 2
+    }
 
-    def _next_host_num() -> int:
-        return (max(all_nums) + 1) if all_nums else 1
+    def _next_remote_num() -> int:
+        n = 2
+        while n in used_remote:
+            n += 1
+        used_remote.add(n)
+        return n
 
     def _find_existing_host(probe: dict) -> dict | None:
         """Match *probe* against an existing host by hostname (``.local``-tolerant)
@@ -402,14 +412,13 @@ def merge_probe_results(
                 set(existing.get("addresses", [])) | set(probe.get("addresses", []))
             )
             existing["kind"] = probe.get("kind", existing.get("kind", "remote"))
+            if is_local:
+                existing["num"] = 1
+            elif not isinstance(existing.get("num"), int) or existing["num"] < 2:
+                existing["num"] = _next_remote_num()
             _merge_cameras(existing, p_cameras)
         else:
-            # Assign stable num: local host always gets 1 if slot is free.
-            if is_local and 1 not in all_nums:
-                new_num = 1
-            else:
-                new_num = _next_host_num()
-            all_nums.add(new_num)
+            new_num = 1 if is_local else _next_remote_num()
             new_host: dict = {
                 "num": new_num,
                 "kind": probe.get("kind", "remote"),
@@ -419,6 +428,16 @@ def merge_probe_results(
             }
             _merge_cameras(new_host, p_cameras)
             updated_hosts.append(new_host)
+
+    # Invariant: the local host is always num 1 (letter A). Force it to 1 and
+    # bump any OTHER host that holds 1 (e.g. a remote probed before the local
+    # daemon existed) to the next free remote number.
+    local = next((h for h in updated_hosts if h.get("kind") == "local"), None)
+    if local is not None:
+        for h in updated_hosts:
+            if h is not local and h.get("num") == 1:
+                h["num"] = _next_remote_num()
+        local["num"] = 1
 
     # Sort by num for stable JSON output.
     updated_hosts.sort(key=lambda h: h.get("num", 0))

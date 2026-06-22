@@ -409,6 +409,69 @@ class TestMergeProbeResults:
         ])
         assert len(store["hosts"]) == 1
 
+    def test_local_reserved_when_remote_probed_first(self):
+        """A remote probed before any local gets num 2 (1 reserved for local);
+        when the local host appears it takes num 1 (letter A)."""
+        store: dict = {"version": 1, "hosts": []}
+        merge_probe_results(store, [
+            {"host": "vidar", "addresses": ["10.0.0.2"], "kind": "remote", "cameras": []},
+        ])
+        assert store["hosts"][0]["num"] == 2  # remote -> B, A stays reserved
+        merge_probe_results(store, [
+            {"host": "gala", "addresses": [], "kind": "local", "cameras": []},
+        ])
+        nums = {h["host"]: h["num"] for h in store["hosts"]}
+        assert nums["gala"] == 1   # local -> A, always
+        assert nums["vidar"] == 2  # remote stays B
+
+    def test_local_bumps_remote_off_num_1(self):
+        """A legacy store with a remote at num 1 is corrected on the next probe:
+        the local host claims num 1 and the remote is bumped to >=2."""
+        store = {"version": 1, "hosts": [
+            {"num": 1, "kind": "remote", "host": "vidar", "addresses": ["10.0.0.2"], "cameras": []},
+        ]}
+        merge_probe_results(store, [
+            {"host": "gala", "addresses": [], "kind": "local", "cameras": []},
+        ])
+        nums = {h["host"]: h["num"] for h in store["hosts"]}
+        assert nums["gala"] == 1
+        assert nums["vidar"] >= 2
+
+
+class TestResolveHostLetterNumber:
+    """`<host-letter><number>` codes (e.g. 'B6') resolve host + camera number."""
+
+    def _store(self):
+        return {"version": 1, "hosts": [
+            {"num": 1, "kind": "local", "host": "gala", "addresses": ["127.0.0.1"], "cameras": []},
+            {"num": 2, "kind": "remote", "host": "vidar", "addresses": ["10.0.0.2"], "cameras": []},
+        ]}
+
+    def test_remote_code_sets_host(self, monkeypatch):
+        import argparse
+        from aprilcam.cli import _daemon
+        monkeypatch.setattr("aprilcam.client.host_codes.load_store", lambda *a, **k: self._store())
+        args = argparse.Namespace(daemon_host=None)
+        assert _daemon.resolve_host_letter_number("B6", None, args) == ("6", "vidar")
+        assert args.daemon_host == "vidar"
+
+    def test_local_code_no_reconnect(self, monkeypatch):
+        import argparse
+        from aprilcam.cli import _daemon
+        monkeypatch.setattr("aprilcam.client.host_codes.load_store", lambda *a, **k: self._store())
+        args = argparse.Namespace(daemon_host=None)
+        assert _daemon.resolve_host_letter_number("A1", None, args) == ("1", None)
+        assert args.daemon_host is None
+
+    def test_non_codes_pass_through(self, monkeypatch):
+        import argparse
+        from aprilcam.cli import _daemon
+        monkeypatch.setattr("aprilcam.client.host_codes.load_store", lambda *a, **k: self._store())
+        args = argparse.Namespace(daemon_host=None)
+        assert _daemon.resolve_host_letter_number("7", None, args) is None      # bare number
+        assert _daemon.resolve_host_letter_number("vidar", None, args) is None  # hostname
+        assert _daemon.resolve_host_letter_number("Z9", None, args) is None     # unknown host
+
 
 # ---------------------------------------------------------------------------
 # Root-level --host/--port extraction (cli/__init__)
