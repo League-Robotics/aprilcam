@@ -726,6 +726,32 @@ class CameraPipeline:
             if not ret or frame is None:
                 consecutive_failures += 1
                 if consecutive_failures >= 5:
+                    cap = self._cap
+                    # A loopback feed (the out-of-process libcamerasrc bridge)
+                    # can drop out and come back — e.g. when the bridge's
+                    # watchdog restarts it after a libcamerasrc crash. The
+                    # v4l2-ctl reader's subprocess then dies (reads return EOF).
+                    # Reconnect and keep going instead of stopping the pipeline,
+                    # so the camera self-heals without a daemon restart. (USB
+                    # cv2.VideoCapture has no reopen() — that path still stops.)
+                    if (
+                        cap is not None
+                        and hasattr(cap, "reopen")
+                        and not self._stop_event.is_set()
+                    ):
+                        try:
+                            ok = cap.reopen()
+                        except Exception:
+                            ok = False
+                        log.warning(
+                            "CameraPipeline(%s): loopback read failing — "
+                            "reconnect %s",
+                            self.cam_name,
+                            "ok" if ok else "failed, will retry",
+                        )
+                        consecutive_failures = 0
+                        self._stop_event.wait(1.0)  # backoff before resuming
+                        continue
                     log.warning(
                         "CameraPipeline(%s): camera read failed repeatedly, stopping",
                         self.cam_name,

@@ -151,3 +151,30 @@ class V4l2CtlCapture:
                 proc.kill()
             except Exception:
                 pass
+
+    def reopen(self) -> bool:
+        """Relaunch the ``v4l2-ctl`` subprocess and report whether it is running.
+
+        Used to recover after the loopback feed drops out and returns — e.g.
+        when the out-of-process ``libcamerasrc`` bridge crashes and its watchdog
+        restarts it. The old subprocess has exited (its reads return EOF), so we
+        terminate it, re-query the format (a new writer may have reconfigured the
+        device), and start a fresh stream.
+        """
+        self.release()
+        try:
+            self._width, self._height, self._pixfmt = _query_format(self._device)
+            self._cvt = _YUYV_CODES.get(self._pixfmt.upper())
+            if self._cvt is None:
+                log.warning(
+                    "V4l2CtlCapture: reopen of %s saw unsupported format %r",
+                    self._device, self._pixfmt,
+                )
+                return False
+            self._frame_bytes = self._width * self._height * 2
+        except Exception as exc:  # pragma: no cover - tooling/perms
+            log.warning("V4l2CtlCapture: reopen format query failed for %s: %s",
+                        self._device, exc)
+            return False
+        self._open()
+        return self.isOpened()
