@@ -35,6 +35,18 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
+def _mobile_tag_to_dict(t) -> dict:
+    """Convert a ``MobileTagSpec`` proto to a plain dict."""
+    return {
+        "tag_id": int(t.tag_id),
+        "x_mm": float(t.x_mm),
+        "y_mm": float(t.y_mm),
+        "z_cm": float(t.z_cm),
+        "yaw_deg": float(t.yaw_deg),
+        "owner": str(t.owner),
+    }
+
+
 class DaemonControl:
     """Typed gRPC stub wrapper for the AprilCam daemon.
 
@@ -304,6 +316,63 @@ class DaemonControl:
             aprilcam_pb2.CameraRequest(cam_name=cam_name)
         )
         return CameraInfo.from_proto(resp)
+
+    # ------------------------------------------------------------------
+    # Mobile-tag registry
+    # ------------------------------------------------------------------
+
+    def register_mobile_tag(
+        self,
+        tag_id: int,
+        *,
+        x_mm: float = 0.0,
+        y_mm: float = 0.0,
+        z_cm: float = 0.0,
+        yaw_deg: float = 0.0,
+        owner: str = "",
+    ) -> list[dict]:
+        """Declare *tag_id* mobile (mounted on a robot) with its mount pose.
+
+        The pose is the tag's position relative to the robot's centre of
+        rotation: ``x_mm`` forward, ``y_mm`` left, ``z_cm`` above the playfield,
+        ``yaw_deg`` clocked from the robot's forward. The daemon persists this
+        and thereafter reports the robot centre (not the raw tag) for this id.
+        Typically called once at robot start-up. Returns the full registry.
+        """
+        stub = self._stub_or_raise()
+        resp = stub.RegisterMobileTag(
+            aprilcam_pb2.RegisterMobileTagRequest(
+                tag=aprilcam_pb2.MobileTagSpec(
+                    tag_id=int(tag_id),
+                    x_mm=float(x_mm),
+                    y_mm=float(y_mm),
+                    z_cm=float(z_cm),
+                    yaw_deg=float(yaw_deg),
+                    owner=str(owner),
+                )
+            )
+        )
+        return [_mobile_tag_to_dict(t) for t in resp.tags]
+
+    def clear_mobile_tag(self, tag_id: int) -> list[dict]:
+        """Remove one tag from the mobile registry. Returns the remaining registry."""
+        stub = self._stub_or_raise()
+        resp = stub.ClearMobileTags(
+            aprilcam_pb2.ClearMobileTagsRequest(tag_id=int(tag_id))
+        )
+        return [_mobile_tag_to_dict(t) for t in resp.tags]
+
+    def clear_mobile_tags(self) -> list[dict]:
+        """Clear the entire mobile-tag registry. Returns the (empty) registry."""
+        stub = self._stub_or_raise()
+        resp = stub.ClearMobileTags(aprilcam_pb2.ClearMobileTagsRequest(all=True))
+        return [_mobile_tag_to_dict(t) for t in resp.tags]
+
+    def list_mobile_tags(self) -> list[dict]:
+        """Return the persisted mobile-tag registry as a list of dicts."""
+        stub = self._stub_or_raise()
+        resp = stub.ListMobileTags(aprilcam_pb2.Empty())
+        return [_mobile_tag_to_dict(t) for t in resp.tags]
 
     def capture_frame_jpeg(self, cam_name: str) -> bytes:
         """Capture a single frame; return raw JPEG bytes (no cv2 decode)."""

@@ -37,6 +37,10 @@ SUBCOMMANDS = {
         "help": "Detect and list all ArUco and AprilTag markers on a camera",
         "module": "aprilcam.cli.tags_cli",
     },
+    "mobile": {
+        "help": "Manage the daemon's mobile-tag registry (register/clear/list)",
+        "module": "aprilcam.cli.mobile_cli",
+    },
     "init": {
         "help": "Configure MCP server entries for Claude Code and VS Code",
         "module": "aprilcam.cli.init_cli",

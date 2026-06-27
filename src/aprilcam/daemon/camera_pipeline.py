@@ -139,7 +139,8 @@ class CameraPipeline:
         self._cap: Optional[cv.VideoCapture] = None
         self._april_cam: Optional[AprilCam] = None
         self._calibration = None  # CameraCalibration | None
-        self._tag_heights: dict[int, float] = {}  # loaded from data_dir/tags.json
+        self._tag_heights: dict[int, float] = {}   # id -> z_cm (parallax height)
+        self._tag_offsets: dict[int, tuple] = {}   # id -> (x_mm, y_mm, yaw_deg) mount offset
         self.device_name: str = cam_name  # resolved to OS name in start()
 
         # Ring buffer for tag history
@@ -192,6 +193,23 @@ class CameraPipeline:
             self._image_producer = image_producer
             self._tag_producer = tag_producer
 
+    def apply_mobile_registry(self, registry) -> None:
+        """Replace the live mobile-tag registry from a ``{id: MobileTag}`` map.
+
+        Refreshes the per-tag parallax height (z) and in-plane mount offset
+        (x_mm, y_mm, yaw_deg) used by the capture loop. Called at ``start()`` and
+        by the daemon whenever a client registers/clears a mobile tag, so a
+        running pipeline picks up changes without a restart. Each assignment
+        swaps a whole dict, which is atomic under the GIL, so the capture
+        thread's reads need no lock.
+        """
+        self._tag_heights = {
+            tid: mt.z_cm for tid, mt in registry.items() if mt.z_cm
+        }
+        self._tag_offsets = {
+            tid: (mt.x_mm, mt.y_mm, mt.yaw_deg) for tid, mt in registry.items()
+        }
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -212,13 +230,12 @@ class CameraPipeline:
         # Load calibration from <cameras_dir>/<cam_name>/calibration.json
         camera_dir = self.config.cameras_dir / self.cam_name
         self._calibration = load_calibration_from_camera_dir(camera_dir)
-        tags_file = self.config.data_dir / "tags.json"
-        try:
-            import json as _json
-            raw = _json.loads(tags_file.read_text())
-            self._tag_heights = {int(k): float(v) for k, v in raw.get("tag_heights", {}).items()}
-        except Exception:
-            self._tag_heights = {}
+        # Load the mobile-tag registry: client-registered tags carrying their
+        # mount pose (x_mm, y_mm, z_cm, yaw_deg) relative to the robot centre.
+        # See aprilcam.daemon.mobile_tags; the daemon also pushes live updates
+        # via apply_mobile_registry() when a client registers/clears a tag.
+        from .mobile_tags import load as _load_mobile
+        self.apply_mobile_registry(_load_mobile(self.config.data_dir))
 
         # Open camera. On a Raspberry Pi the CSI cameras come from libcamera;
         # on USB/macOS the plain V4L2/AVFoundation index path is used.
@@ -894,7 +911,24 @@ class CameraPipeline:
                     tag_h = self._tag_heights.get(tr.id, 0.0)
                     if self._calibration.camera_position and tag_h > 0.0:
                         wx, wy = self._calibration.correct_world_for_height(wx, wy, tag_h)
-                    tr = _dc.replace(tr, world_xy=(wx, wy))
+                    # Mobile-tag mount offset: the tag sits (x_mm fwd, y_mm left)
+                    # from the robot CENTRE in the object frame, clocked yaw_deg
+                    # from the robot's forward. Report the CENTRE — subtract the
+                    # offset rotated into world by the robot heading — and rotate
+                    # the reported heading by the mount yaw.
+                    off = self._tag_offsets.get(tr.id)
+                    new_yaw = None
+                    if off is not None and (off[0] or off[1] or off[2]):
+                        ox, oy = off[0] / 10.0, off[1] / 10.0  # mm -> cm
+                        obj_yaw = float(tr.orientation_yaw) - math.radians(off[2])
+                        c, s = math.cos(obj_yaw), math.sin(obj_yaw)
+                        wx -= ox * c - oy * s
+                        wy -= ox * s + oy * c
+                        new_yaw = obj_yaw
+                    if new_yaw is not None:
+                        tr = _dc.replace(tr, world_xy=(wx, wy), orientation_yaw=new_yaw)
+                    else:
+                        tr = _dc.replace(tr, world_xy=(wx, wy))
                     corrected.append(tr)
                 tag_records = corrected
 

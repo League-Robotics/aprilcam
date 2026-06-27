@@ -974,6 +974,96 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
         return aprilcam_pb2.ListPlayfieldsResponse(playfields=entries)
 
     # ------------------------------------------------------------------
+    # Mobile-tag registry
+    # ------------------------------------------------------------------
+
+    def RegisterMobileTag(
+        self,
+        request: aprilcam_pb2.RegisterMobileTagRequest,
+        context: grpc.ServicerContext,
+    ) -> aprilcam_pb2.MobileTagsResponse:
+        """Register/replace a mobile tag's mount pose; persist and apply live."""
+        from .mobile_tags import MobileTag, load, save
+
+        spec = request.tag
+        if spec.tag_id <= 0:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("tag_id must be a positive integer")
+            return aprilcam_pb2.MobileTagsResponse()
+        mt = MobileTag(
+            tag_id=int(spec.tag_id),
+            x_mm=float(spec.x_mm),
+            y_mm=float(spec.y_mm),
+            z_cm=float(spec.z_cm),
+            yaw_deg=float(spec.yaw_deg),
+            owner=str(spec.owner),
+        )
+        reg = load(self._config.data_dir)
+        reg[mt.tag_id] = mt
+        save(self._config.data_dir, reg)
+        self._apply_mobile_to_pipelines(reg)
+        log.info(
+            "RegisterMobileTag: tag %d owner=%r offset=(%.1f,%.1f mm, %.1f cm, %.1f deg)",
+            mt.tag_id, mt.owner, mt.x_mm, mt.y_mm, mt.z_cm, mt.yaw_deg,
+        )
+        return self._mobile_tags_response(reg)
+
+    def ClearMobileTags(
+        self,
+        request: aprilcam_pb2.ClearMobileTagsRequest,
+        context: grpc.ServicerContext,
+    ) -> aprilcam_pb2.MobileTagsResponse:
+        """Clear one mobile tag (``tag_id``) or the whole registry (``all=true``)."""
+        from .mobile_tags import load, save
+
+        reg = load(self._config.data_dir)
+        if request.all:
+            reg = {}
+        elif request.tag_id:
+            reg.pop(int(request.tag_id), None)
+        save(self._config.data_dir, reg)
+        self._apply_mobile_to_pipelines(reg)
+        log.info(
+            "ClearMobileTags: all=%s tag_id=%s -> %d remain",
+            request.all, request.tag_id, len(reg),
+        )
+        return self._mobile_tags_response(reg)
+
+    def ListMobileTags(
+        self,
+        request: aprilcam_pb2.Empty,
+        context: grpc.ServicerContext,
+    ) -> aprilcam_pb2.MobileTagsResponse:
+        """Return the persisted mobile-tag registry."""
+        from .mobile_tags import load
+
+        return self._mobile_tags_response(load(self._config.data_dir))
+
+    def _apply_mobile_to_pipelines(self, registry) -> None:
+        """Push *registry* to every running pipeline so it applies without restart."""
+        with self._cam_lock:
+            pipelines = list(self._cameras.values())
+        for p in pipelines:
+            try:
+                p.apply_mobile_registry(registry)
+            except Exception:
+                log.exception("apply_mobile_registry failed for a pipeline")
+
+    @staticmethod
+    def _mobile_tags_response(registry) -> aprilcam_pb2.MobileTagsResponse:
+        resp = aprilcam_pb2.MobileTagsResponse()
+        for mt in registry.values():
+            resp.tags.add(
+                tag_id=mt.tag_id,
+                x_mm=mt.x_mm,
+                y_mm=mt.y_mm,
+                z_cm=mt.z_cm,
+                yaw_deg=mt.yaw_deg,
+                owner=mt.owner,
+            )
+        return resp
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 

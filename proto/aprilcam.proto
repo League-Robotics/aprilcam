@@ -41,6 +41,13 @@ service AprilCam {
   rpc GetPaths          (CameraRequest)        returns (JsonBlobReply);
   rpc SetPaths          (CameraJsonRequest)    returns (StatusReply);
   rpc ListPlayfields    (Empty)                returns (ListPlayfieldsResponse);
+
+  // Mobile-tag registry — a client declares a tag mounted on a robot, with the
+  // tag's pose relative to the robot's centre of rotation. The daemon persists
+  // the registry and reports the robot's centre (not the raw tag) for these.
+  rpc RegisterMobileTag (RegisterMobileTagRequest) returns (MobileTagsResponse);
+  rpc ClearMobileTags   (ClearMobileTagsRequest)   returns (MobileTagsResponse);
+  rpc ListMobileTags    (Empty)                    returns (MobileTagsResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -326,4 +333,31 @@ message PlayfieldEntry {
 // ListPlayfieldsResponse — repeated PlayfieldEntry list.
 message ListPlayfieldsResponse {
   repeated PlayfieldEntry playfields = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Mobile-tag registry messages
+// ---------------------------------------------------------------------------
+
+// MobileTagSpec — a tag's mount pose relative to its robot's centre of rotation.
+message MobileTagSpec {
+  int32  tag_id  = 1;
+  float  x_mm    = 2;   // forward of robot centre (object frame, +x forward)
+  float  y_mm    = 3;   // left of robot centre (object frame, +y left)
+  float  z_cm    = 4;   // height above the playfield (parallax correction)
+  float  yaw_deg = 5;   // tag heading relative to the robot's forward
+  string owner   = 6;   // informational: client/robot that owns the tag
+}
+
+message RegisterMobileTagRequest {
+  MobileTagSpec tag = 1;
+}
+
+message ClearMobileTagsRequest {
+  int32 tag_id = 1;  // clear just this tag (ignored when all=true)
+  bool  all    = 2;  // clear the entire registry
+}
+
+message MobileTagsResponse {
+  repeated MobileTagSpec tags = 1;
 }

@@ -143,6 +143,21 @@ class AprilCamStub(object):
                 request_serializer=aprilcam__pb2.Empty.SerializeToString,
                 response_deserializer=aprilcam__pb2.ListPlayfieldsResponse.FromString,
                 _registered_method=True)
+        self.RegisterMobileTag = channel.unary_unary(
+                '/aprilcam.AprilCam/RegisterMobileTag',
+                request_serializer=aprilcam__pb2.RegisterMobileTagRequest.SerializeToString,
+                response_deserializer=aprilcam__pb2.MobileTagsResponse.FromString,
+                _registered_method=True)
+        self.ClearMobileTags = channel.unary_unary(
+                '/aprilcam.AprilCam/ClearMobileTags',
+                request_serializer=aprilcam__pb2.ClearMobileTagsRequest.SerializeToString,
+                response_deserializer=aprilcam__pb2.MobileTagsResponse.FromString,
+                _registered_method=True)
+        self.ListMobileTags = channel.unary_unary(
+                '/aprilcam.AprilCam/ListMobileTags',
+                request_serializer=aprilcam__pb2.Empty.SerializeToString,
+                response_deserializer=aprilcam__pb2.MobileTagsResponse.FromString,
+                _registered_method=True)
 
 
 class AprilCamServicer(object):
@@ -285,6 +300,27 @@ class AprilCamServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def RegisterMobileTag(self, request, context):
+        """Mobile-tag registry — a client declares a tag mounted on a robot, with the
+        tag's pose relative to the robot's centre of rotation. The daemon persists
+        the registry and reports the robot's centre (not the raw tag) for these.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ClearMobileTags(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListMobileTags(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_AprilCamServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -392,6 +428,21 @@ def add_AprilCamServicer_to_server(servicer, server):
                     servicer.ListPlayfields,
                     request_deserializer=aprilcam__pb2.Empty.FromString,
                     response_serializer=aprilcam__pb2.ListPlayfieldsResponse.SerializeToString,
+            ),
+            'RegisterMobileTag': grpc.unary_unary_rpc_method_handler(
+                    servicer.RegisterMobileTag,
+                    request_deserializer=aprilcam__pb2.RegisterMobileTagRequest.FromString,
+                    response_serializer=aprilcam__pb2.MobileTagsResponse.SerializeToString,
+            ),
+            'ClearMobileTags': grpc.unary_unary_rpc_method_handler(
+                    servicer.ClearMobileTags,
+                    request_deserializer=aprilcam__pb2.ClearMobileTagsRequest.FromString,
+                    response_serializer=aprilcam__pb2.MobileTagsResponse.SerializeToString,
+            ),
+            'ListMobileTags': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListMobileTags,
+                    request_deserializer=aprilcam__pb2.Empty.FromString,
+                    response_serializer=aprilcam__pb2.MobileTagsResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -965,6 +1016,87 @@ class AprilCam(object):
             '/aprilcam.AprilCam/ListPlayfields',
             aprilcam__pb2.Empty.SerializeToString,
             aprilcam__pb2.ListPlayfieldsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RegisterMobileTag(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.AprilCam/RegisterMobileTag',
+            aprilcam__pb2.RegisterMobileTagRequest.SerializeToString,
+            aprilcam__pb2.MobileTagsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ClearMobileTags(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.AprilCam/ClearMobileTags',
+            aprilcam__pb2.ClearMobileTagsRequest.SerializeToString,
+            aprilcam__pb2.MobileTagsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListMobileTags(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.AprilCam/ListMobileTags',
+            aprilcam__pb2.Empty.SerializeToString,
+            aprilcam__pb2.MobileTagsResponse.FromString,
             options,
             channel_credentials,
             insecure,
