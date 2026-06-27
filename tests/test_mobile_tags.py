@@ -142,3 +142,30 @@ def test_list_and_clear_rpcs(tmp_path):
 
     r = svc.ClearMobileTags(aprilcam_pb2.ClearMobileTagsRequest(all=True), MagicMock())
     assert len(r.tags) == 0
+
+
+# ---------------------------------------------------------------------------
+# MCP tool handlers (thin wrappers over DaemonControl)
+# ---------------------------------------------------------------------------
+
+
+def test_mcp_mobile_handlers(monkeypatch):
+    import pytest
+
+    pytest.importorskip("mcp")
+    from aprilcam.server import mcp_server as m
+
+    dc = MagicMock()
+    dc.register_mobile_tag.return_value = [{"tag_id": 1}]
+    dc.clear_mobile_tag.return_value = []
+    dc.clear_mobile_tags.return_value = []
+    dc.list_mobile_tags.return_value = [{"tag_id": 1}]
+    monkeypatch.setattr(m, "_ensure_daemon_client", lambda: dc)
+
+    assert m._handle_register_mobile_tag(1, 1.0, 0, 0, 0, "x")["status"] == "registered"
+    assert m._handle_clear_mobile_tags(0)["status"] == "cleared_all"   # 0 -> all
+    assert m._handle_clear_mobile_tags(5)["status"] == "cleared"        # one
+    assert "mobile_tags" in m._handle_list_mobile_tags()
+
+    dc.list_mobile_tags.side_effect = RuntimeError("boom")
+    assert m._handle_list_mobile_tags()["error"] == "boom"

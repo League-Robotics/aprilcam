@@ -2365,6 +2365,95 @@ async def stop_stream(source_id: str) -> list[TextContent]:
         return [TextContent(type="text", text=json.dumps({"error": f"Unexpected error: {exc}"}))]
 
 
+def _handle_register_mobile_tag(tag_id, x_mm, y_mm, z_cm, yaw_deg, owner) -> dict:
+    try:
+        dc = _ensure_daemon_client()
+        tags = dc.register_mobile_tag(
+            int(tag_id), x_mm=float(x_mm), y_mm=float(y_mm),
+            z_cm=float(z_cm), yaw_deg=float(yaw_deg), owner=str(owner),
+        )
+        return {"status": "registered", "tag_id": int(tag_id), "mobile_tags": tags}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def _handle_clear_mobile_tags(tag_id) -> dict:
+    try:
+        dc = _ensure_daemon_client()
+        if tag_id and int(tag_id) > 0:
+            tags = dc.clear_mobile_tag(int(tag_id))
+            return {"status": "cleared", "tag_id": int(tag_id), "mobile_tags": tags}
+        tags = dc.clear_mobile_tags()
+        return {"status": "cleared_all", "mobile_tags": tags}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def _handle_list_mobile_tags() -> dict:
+    try:
+        dc = _ensure_daemon_client()
+        return {"mobile_tags": dc.list_mobile_tags()}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@server.tool()
+async def register_mobile_tag(
+    tag_id: int,
+    x_mm: float = 0.0,
+    y_mm: float = 0.0,
+    z_cm: float = 0.0,
+    yaw_deg: float = 0.0,
+    owner: str = "",
+) -> list[TextContent]:
+    """Declare a tag *mobile* (mounted on a robot) with its mount pose.
+
+    A mobile tag is one a client has registered here; the daemon then reports the
+    robot's CENTRE OF ROTATION (not the raw tag) as that tag's world position,
+    and persists the registration. Call once when the robot starts up.
+
+    The pose is the tag's position relative to the robot centre:
+      - x_mm: forward of centre (robot frame, +x forward)
+      - y_mm: left of centre (robot frame, +y left)
+      - z_cm: tag height above the playfield (drives parallax correction)
+      - yaw_deg: tag heading relative to the robot's forward
+      - owner: optional label for the client/robot that owns the tag
+
+    Returns:
+        ``{"status": "registered", "tag_id": ..., "mobile_tags": [...]}`` or
+        ``{"error": ...}``.
+    """
+    result = _handle_register_mobile_tag(tag_id, x_mm, y_mm, z_cm, yaw_deg, owner)
+    return [TextContent(type="text", text=json.dumps(result))]
+
+
+@server.tool()
+async def clear_mobile_tags(tag_id: int = 0) -> list[TextContent]:
+    """Clear mobile-tag registrations.
+
+    Args:
+        tag_id: the tag to clear; ``0`` (the default) clears the ENTIRE registry.
+
+    Returns:
+        ``{"status": "cleared"|"cleared_all", "mobile_tags": [...]}`` or
+        ``{"error": ...}``.
+    """
+    result = _handle_clear_mobile_tags(tag_id)
+    return [TextContent(type="text", text=json.dumps(result))]
+
+
+@server.tool()
+async def list_mobile_tags() -> list[TextContent]:
+    """List the persisted mobile-tag registrations (id + mount pose + owner).
+
+    Returns:
+        ``{"mobile_tags": [{"tag_id", "x_mm", "y_mm", "z_cm", "yaw_deg", "owner"}, ...]}``
+        or ``{"error": ...}``.
+    """
+    result = _handle_list_mobile_tags()
+    return [TextContent(type="text", text=json.dumps(result))]
+
+
 @server.tool()
 async def get_tags(
     source_id: str,
@@ -2384,7 +2473,10 @@ async def get_tags(
     world coordinates.
 
     Parallax correction and origin translation are applied automatically
-    by the detection pipeline using stored per-tag heights.
+    by the detection pipeline using stored per-tag heights. For tags
+    registered via ``register_mobile_tag``, ``world_xy`` and
+    ``orientation_yaw`` report the robot's CENTRE OF ROTATION (not the raw
+    tag), using the registered mount offset.
 
     Requires an active detection loop. Recommended workflow:
     ``open_camera`` → ``create_playfield`` → ``stream_tags`` (preferred) →

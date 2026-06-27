@@ -36,13 +36,17 @@ if TYPE_CHECKING:
 
 
 def _mobile_tag_to_dict(t) -> dict:
-    """Convert a ``MobileTagSpec`` proto to a plain dict."""
+    """Convert a ``MobileTagSpec`` proto to a plain dict.
+
+    Rounds the numeric fields to shed float32 wire noise (e.g. 11.8 arriving as
+    11.800000190734863) so client responses read cleanly.
+    """
     return {
         "tag_id": int(t.tag_id),
-        "x_mm": float(t.x_mm),
-        "y_mm": float(t.y_mm),
-        "z_cm": float(t.z_cm),
-        "yaw_deg": float(t.yaw_deg),
+        "x_mm": round(float(t.x_mm), 4),
+        "y_mm": round(float(t.y_mm), 4),
+        "z_cm": round(float(t.z_cm), 4),
+        "yaw_deg": round(float(t.yaw_deg), 4),
         "owner": str(t.owner),
     }
 
