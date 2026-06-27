@@ -79,6 +79,24 @@ def test_apply_mobile_registry_derives_dicts():
     assert p._tag_offsets == {100: (43.0, 0.0, 0.0), 5: (0.0, 0.0, 0.0)}
 
 
+def test_robot_centre_from_tag_math():
+    import math
+
+    from aprilcam.daemon.camera_pipeline import CameraPipeline
+
+    f = CameraPipeline._robot_centre_from_tag
+    # Tag 100 mm (10 cm) forward of centre, no clocking, tag at world (5,0)
+    # facing +x (yaw 0): centre is 10 cm behind along +x -> (-5, 0).
+    cx, cy, yaw = f(5.0, 0.0, 0.0, (100.0, 0.0, 0.0))
+    assert abs(cx + 5.0) < 1e-6 and abs(cy) < 1e-6 and abs(yaw) < 1e-6
+    # Same offset but tag faces +y (yaw 90 deg): forward points +y -> (5, -10).
+    cx, cy, yaw = f(5.0, 0.0, math.pi / 2, (100.0, 0.0, 0.0))
+    assert abs(cx - 5.0) < 1e-6 and abs(cy + 10.0) < 1e-6
+    # Mount yaw: tag clocked +90 deg from robot forward; tag_yaw 90 -> robot 0.
+    _, _, yaw = f(0.0, 0.0, math.pi / 2, (0.0, 0.0, 90.0))
+    assert abs(yaw) < 1e-6
+
+
 # ---------------------------------------------------------------------------
 # Servicer RPC handlers
 # ---------------------------------------------------------------------------

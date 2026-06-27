@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import subprocess
 import threading
@@ -209,6 +210,22 @@ class CameraPipeline:
         self._tag_offsets = {
             tid: (mt.x_mm, mt.y_mm, mt.yaw_deg) for tid, mt in registry.items()
         }
+
+    @staticmethod
+    def _robot_centre_from_tag(wx, wy, tag_yaw, off):
+        """Map a mobile tag's world pose to its robot's centre of rotation.
+
+        *off* is the tag's mount offset ``(x_mm forward, y_mm left, yaw_deg)``
+        from the robot centre in the object frame. The offset (mm->cm), rotated
+        into the world by the robot's heading, is subtracted from the tag's world
+        position; the reported heading is the tag heading minus the mount yaw.
+
+        Returns ``(centre_x, centre_y, robot_yaw)``.
+        """
+        ox, oy = off[0] / 10.0, off[1] / 10.0  # mm -> cm
+        robot_yaw = float(tag_yaw) - math.radians(off[2])
+        c, s = math.cos(robot_yaw), math.sin(robot_yaw)
+        return wx - (ox * c - oy * s), wy - (ox * s + oy * c), robot_yaw
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -906,29 +923,36 @@ class CameraPipeline:
                     if tr.world_xy is None:
                         corrected.append(tr)
                         continue
-                    wx = tr.world_xy[0] - origin_x
-                    wy = tr.world_xy[1] - origin_y
-                    tag_h = self._tag_heights.get(tr.id, 0.0)
-                    if self._calibration.camera_position and tag_h > 0.0:
-                        wx, wy = self._calibration.correct_world_for_height(wx, wy, tag_h)
-                    # Mobile-tag mount offset: the tag sits (x_mm fwd, y_mm left)
-                    # from the robot CENTRE in the object frame, clocked yaw_deg
-                    # from the robot's forward. Report the CENTRE — subtract the
-                    # offset rotated into world by the robot heading — and rotate
-                    # the reported heading by the mount yaw.
-                    off = self._tag_offsets.get(tr.id)
-                    new_yaw = None
-                    if off is not None and (off[0] or off[1] or off[2]):
-                        ox, oy = off[0] / 10.0, off[1] / 10.0  # mm -> cm
-                        obj_yaw = float(tr.orientation_yaw) - math.radians(off[2])
-                        c, s = math.cos(obj_yaw), math.sin(obj_yaw)
-                        wx -= ox * c - oy * s
-                        wy -= ox * s + oy * c
-                        new_yaw = obj_yaw
-                    if new_yaw is not None:
-                        tr = _dc.replace(tr, world_xy=(wx, wy), orientation_yaw=new_yaw)
-                    else:
-                        tr = _dc.replace(tr, world_xy=(wx, wy))
+                    # A bad per-tag correction must never crash the capture
+                    # thread (that would brick the camera); fall back to the
+                    # uncorrected record on any error.
+                    try:
+                        wx = tr.world_xy[0] - origin_x
+                        wy = tr.world_xy[1] - origin_y
+                        tag_h = self._tag_heights.get(tr.id, 0.0)
+                        if self._calibration.camera_position and tag_h > 0.0:
+                            wx, wy = self._calibration.correct_world_for_height(wx, wy, tag_h)
+                        # Mobile-tag mount offset: the tag sits (x_mm fwd, y_mm
+                        # left) from the robot CENTRE in the object frame, clocked
+                        # yaw_deg from the robot's forward. Report the CENTRE —
+                        # subtract the offset rotated into world by the robot
+                        # heading — and rotate the reported heading by the mount
+                        # yaw.
+                        off = self._tag_offsets.get(tr.id)
+                        new_yaw = None
+                        if off is not None and (off[0] or off[1] or off[2]):
+                            wx, wy, new_yaw = self._robot_centre_from_tag(
+                                wx, wy, tr.orientation_yaw, off
+                            )
+                        if new_yaw is not None:
+                            tr = _dc.replace(tr, world_xy=(wx, wy), orientation_yaw=new_yaw)
+                        else:
+                            tr = _dc.replace(tr, world_xy=(wx, wy))
+                    except Exception:
+                        log.exception(
+                            "CameraPipeline(%s): world correction failed for tag %s",
+                            self.cam_name, getattr(tr, "id", "?"),
+                        )
                     corrected.append(tr)
                 tag_records = corrected
 
