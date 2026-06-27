@@ -124,6 +124,17 @@ class ImageStreamConsumer:
                 pass
             self._sock = None
 
+    def set_timeout(self, seconds: "float | None") -> None:
+        """Set a read timeout on the stream socket (``None`` blocks forever).
+
+        With a timeout set, a ``read``/``read_raw`` that receives no data within
+        *seconds* raises ``socket.timeout`` instead of blocking indefinitely —
+        used to bound the wait for the first frame so a viewer doesn't hang when
+        the daemon's pipeline produces nothing (e.g. the camera failed to start).
+        """
+        if self._sock is not None:
+            self._sock.settimeout(seconds)
+
     # ------------------------------------------------------------------
     # Reading
     # ------------------------------------------------------------------
@@ -259,6 +270,17 @@ class TagStreamConsumer:
             except OSError:
                 pass
             self._sock = None
+
+    def set_timeout(self, seconds: "float | None") -> None:
+        """Set a read timeout on the stream socket (``None`` blocks forever).
+
+        With a timeout set, a ``read``/``read_raw`` that receives no data within
+        *seconds* raises ``socket.timeout`` instead of blocking indefinitely —
+        used to bound the wait for the first frame so a viewer doesn't hang when
+        the daemon's pipeline produces nothing (e.g. the camera failed to start).
+        """
+        if self._sock is not None:
+            self._sock.settimeout(seconds)
 
     # ------------------------------------------------------------------
     # Reading

@@ -708,6 +708,50 @@ class CameraPipeline:
             origin_y=float(origin_y),
         )
 
+    def _reopen_usb(self) -> bool:
+        """Reopen a plain (USB/V4L2/AVFoundation) capture device into ``self._cap``.
+
+        Self-heals after repeated read failures on a real capture device (e.g. a
+        USB webcam that glitched). Releases the old handle, recreates the
+        ``VideoCapture``, drains warm-up frames, and re-applies the camera's UVC
+        settings (e.g. the OV9782's manual exposure). Returns True on success.
+        """
+        old = self._cap
+        self._cap = None
+        if old is not None:
+            try:
+                old.release()
+            except Exception:
+                pass
+        try:
+            cap = cv.VideoCapture(self.index)
+            if not cap.isOpened():
+                return False
+            for _ in range(5):  # drain warm-up frames
+                cap.read()
+            cap.set(cv.CAP_PROP_BUFFERSIZE, 1)
+            # Re-apply hardware settings (manual exposure, etc.).
+            try:
+                from ..camera.camera_config import load_camera_config as _load_cfg
+
+                camera_dir = self.config.cameras_dir / self.cam_name
+                _cam_cfg = _load_cfg(camera_dir)
+                _settings = (
+                    (_cam_cfg.get("settings") if _cam_cfg else None)
+                    or (self._calibration.settings if self._calibration is not None else None)
+                )
+                if _settings:
+                    _apply_camera_settings(
+                        _settings, getattr(self, "device_name", self.cam_name), self.config
+                    )
+            except Exception:
+                pass
+            self._cap = cap
+            return True
+        except Exception as exc:
+            log.warning("CameraPipeline(%s): USB reopen failed: %s", self.cam_name, exc)
+            return False
+
     def _capture_loop(self) -> None:
         """Background thread: read → detect → encode → publish."""
         assert self._cap is not None
@@ -720,6 +764,7 @@ class CameraPipeline:
         self._cap.set(cv.CAP_PROP_BUFFERSIZE, 1)
 
         consecutive_failures = 0
+        usb_reopens = 0  # bounded reopen budget for a real (USB) capture device
         while not self._stop_event.is_set():
             frame_start = time.monotonic()
             ret, frame = self._cap.read()
@@ -752,6 +797,28 @@ class CameraPipeline:
                         consecutive_failures = 0
                         self._stop_event.wait(1.0)  # backoff before resuming
                         continue
+                    # A real capture device (USB webcam) can also drop frames on
+                    # a transient glitch. Reopen it a bounded number of times
+                    # (re-applying UVC settings) so it self-heals instead of dying
+                    # and hanging every later viewer; give up only if it stays
+                    # dead (e.g. unplugged). The budget resets once frames flow.
+                    if (
+                        cap is not None
+                        and not hasattr(cap, "reopen")
+                        and usb_reopens < 10
+                        and not self._stop_event.is_set()
+                    ):
+                        usb_reopens += 1
+                        ok = self._reopen_usb()
+                        log.warning(
+                            "CameraPipeline(%s): camera read failing — reopen %d/10 %s",
+                            self.cam_name,
+                            usb_reopens,
+                            "ok" if ok else "failed, will retry",
+                        )
+                        consecutive_failures = 0
+                        self._stop_event.wait(1.0)  # backoff before resuming
+                        continue
                     log.warning(
                         "CameraPipeline(%s): camera read failed repeatedly, stopping",
                         self.cam_name,
@@ -760,6 +827,7 @@ class CameraPipeline:
                 time.sleep(0.05)
                 continue
             consecutive_failures = 0
+            usb_reopens = 0  # healthy frame — restore the reopen budget
 
             now_mono = time.monotonic()
             ts_mono_ns = time.monotonic_ns()

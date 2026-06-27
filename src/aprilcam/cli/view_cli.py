@@ -512,20 +512,36 @@ def main(argv: list[str] | None = None) -> int:
     # draw_overlays, the color classifier (BGR2LAB/HSV), _draw_object_boxes,
     # and the final ImageTk flip — is BGR-native, so convert RGB->BGR on the
     # way in to keep channel order consistent (fixes the red<->blue swap).
+    # Bound the wait for the first frame so the viewer never hangs forever when
+    # the daemon's pipeline produces nothing (e.g. the camera failed to start).
+    import socket as _socket
+    image_consumer.set_timeout(20.0)
     try:
         first_frame = image_consumer.read()[:, :, ::-1].copy()  # numpy-only: RGB->BGR, contiguous for cv2
-    except (EOFError, RuntimeError) as exc:
+    except (_socket.timeout, TimeoutError):
+        print(
+            f"Error: camera '{cam_name}' produced no frames within 20s — it may "
+            f"have failed to start. Check the daemon, then try again.",
+            file=sys.stderr,
+        )
+        image_consumer.close()
+        tag_consumer.close()
+        return 1
+    except (EOFError, RuntimeError, OSError) as exc:
         print(f"Error: could not read first frame: {exc}", file=sys.stderr)
         image_consumer.close()
         tag_consumer.close()
         return 1
+    image_consumer.set_timeout(None)  # back to blocking for the live stream
 
-    # Read first tag frame (non-blocking with a short timeout via separate read)
+    # Read first tag frame (bounded so a stalled tag stream can't hang startup)
     first_tag_frame = None
+    tag_consumer.set_timeout(5.0)
     try:
         first_tag_frame = tag_consumer.read()
-    except (EOFError, RuntimeError):
+    except (EOFError, RuntimeError, OSError, TimeoutError):
         pass
+    tag_consumer.set_timeout(None)
 
     _DISPLAY_W = 1000  # canvas is always this wide; height scales proportionally
 
