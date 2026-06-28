@@ -912,6 +912,7 @@ def main(argv: list[str] | None = None) -> int:
     cf_paths.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
 
     def _clear_all_paths():
+        # Clear the persisted paths (paths.json, drawn via draw_paths)...
         tmp = _paths_file.with_suffix(".tmp")
         try:
             _paths_file.parent.mkdir(parents=True, exist_ok=True)
@@ -919,6 +920,12 @@ def main(argv: list[str] | None = None) -> int:
             os.replace(tmp, _paths_file)
         except Exception:
             pass
+        # ...AND the live overlay the daemon pushed. The paths drawn on the video
+        # actually come from the overlay stream (draw_live_overlay), not paths.json
+        # — so clearing only the file left them on screen. publish_overlay is
+        # broadcast-only (never replayed), so dropping the cached frame is enough.
+        with _overlay_lock:
+            _latest_overlay[0] = None
         _refresh_paths()
 
     tk.Button(
