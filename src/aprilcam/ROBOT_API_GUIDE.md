@@ -28,6 +28,34 @@ dc.close()
 
 ---
 
+## ⚠️ Is your tag mounted on a robot? Register its mount offset
+
+`tag.world_xy` is the **tag's** position. If the tag is mounted on a robot —
+offset from the robot's centre of rotation — register that offset **once** and
+the daemon reports your robot's **centre** (and heading) for that tag instead of
+the raw tag. A tag is "mobile" simply because you registered it here.
+
+```python
+# Pose of the tag relative to the robot's centre of rotation:
+#   x_mm    forward of centre (robot frame, +x forward)
+#   y_mm    left of centre    (robot frame, +y left)
+#   z_cm    tag height above the playfield (also corrects camera parallax)
+#   yaw_deg tag heading relative to the robot's forward
+# Persisted by the daemon — call once at start-up, not every loop.
+dc.register_mobile_tag(100, x_mm=43, y_mm=0, z_cm=11.8, yaw_deg=0, owner="my-robot")
+
+dc.list_mobile_tags()      # -> [{"tag_id","x_mm","y_mm","z_cm","yaw_deg","owner"}, ...]
+dc.clear_mobile_tag(100)   # remove one
+dc.clear_mobile_tags()     # remove all
+```
+
+Without this, `world_xy` for a robot-mounted tag is the tag itself, not the point
+the robot turns about. (Operators can do the same from the CLI:
+`aprilcam mobile register 100 --x 43 --z 11.8`; agents via the
+`register_mobile_tag` MCP tool. All three share one persisted registry.)
+
+---
+
 ## DaemonControl — Full API
 
 `DaemonControl` wraps the gRPC channel.  Create it once; reuse it across
@@ -78,7 +106,9 @@ tag_frame = dc.get_tags(cam)
 for tag in tag_frame.tags:
     print(tag.id)                 # int
     print(tag.center_px)          # (float, float) pixel center
-    print(tag.world_xy)           # (float, float) in cm, or None if uncalibrated
+    print(tag.world_xy)           # (float, float) cm — the robot's CENTRE if this
+                                  #   tag is registered (see "mounted on a robot?"
+                                  #   above), otherwise the tag itself
     print(tag.yaw)                # float, radians
     print(tag.speed_world)        # float, cm/s
     print(tag.in_playfield)       # bool

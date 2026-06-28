@@ -36,6 +36,25 @@ dc.close()
 
 ---
 
+## ⚠️ Tag mounted on a robot? Register its mount offset
+
+`tag.world_xy` is the **tag's** position. If the tag is mounted on a robot —
+offset from the robot's centre of rotation — register that offset **once** and
+the daemon reports your robot's **centre** (and heading) for that tag.
+
+```python
+# x_mm forward of centre, y_mm left, z_cm above the field, yaw_deg clocked from
+# the robot's forward. Persisted by the daemon — call once at start-up.
+dc.register_mobile_tag(100, x_mm=43, y_mm=0, z_cm=11.8, yaw_deg=0, owner="my-robot")
+dc.list_mobile_tags()      # the registry
+dc.clear_mobile_tag(100)   # or dc.clear_mobile_tags() for all
+```
+
+Operators can use `aprilcam mobile register 100 --x 43 --z 11.8`; agents use the
+`register_mobile_tag` MCP tool. All three share one persisted registry.
+
+---
+
 ## DaemonControl — Full API
 
 `DaemonControl` wraps the gRPC channel.  Create it once; reuse it across

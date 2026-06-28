@@ -253,6 +253,12 @@ restarts and auto-opens nothing, so start here every time):
      Passing the camera_id to those tools also works — the server auto-resolves
      the camera's playfield.
 
+Robot-mounted tags: if a tag is mounted on a robot, register its pose relative
+to the robot's centre of rotation with register_mobile_tag(tag_id, x_mm, y_mm,
+z_cm, yaw_deg) — once, persisted. get_tags then reports that robot's CENTRE (and
+heading) for the tag instead of the raw tag. clear_mobile_tags / list_mobile_tags
+manage the registry.
+
 Discover the field with get_playfield()/list_playfields(); search it with
 where(). Call get_robot_api_guide() for the full reference (incl. the
 DaemonControl Python API for high-rate robot control).

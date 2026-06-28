@@ -97,6 +97,18 @@ for non-root use. See `aprilcam config` for the current resolved paths.
   without flickering.
 - Velocities are EMA-smoothed with dead-band suppression.
 
+### Mobile Tags (robot-mounted)
+- A **mobile tag** is one a client has registered as mounted on a robot,
+  with the tag's pose relative to the robot's **centre of rotation**.
+- For a registered tag, `world_xy` and `orientation_yaw` report the
+  robot's **centre** (not the raw tag) — the parallax/height and the
+  in-plane mount offset are applied automatically.
+- Register/clear/list via the MCP tools `register_mobile_tag`,
+  `clear_mobile_tags`, `list_mobile_tags` (pose: `x_mm` forward, `y_mm`
+  left, `z_cm` height, `yaw_deg` clocking, `owner`). Persisted by the
+  daemon, so register once. Operators/robots use the same registry via
+  `aprilcam mobile …` and `DaemonControl.register_mobile_tag(...)`.
+
 ### Homography Files
 - Calibration data is saved to `data/` as JSON files.
 - **Per-camera naming**: `data/homography-<device-slug>-<WxH>.json`
