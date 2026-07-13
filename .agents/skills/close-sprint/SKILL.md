@@ -15,7 +15,12 @@ which handles the full lifecycle.
 
 ## Process
 
-1. **Confirm with stakeholder**: Present a summary of the sprint —
+1. **Gather sprint context**: Call `list_sprints()` to identify the
+   active sprint. Record the `id` and `branch` values — you will need
+   them as `sprint_id` and `branch_name` in step 4. Do not proceed
+   without these values in hand.
+
+2. **Confirm with stakeholder**: Present a summary of the sprint —
    list the completed tickets and key changes. Ask whether to proceed:
    - "Close sprint and merge to main" (recommended)
    - "Review completed work first"
@@ -23,11 +28,18 @@ which handles the full lifecycle.
    If the stakeholder chooses to review, invoke the `sprint-review`
    skill first.
 
-2. **Call close_sprint**: Invoke the `close_sprint` MCP tool:
+3. **Load the tool schema**: Call `ToolSearch` with query
+   `select:mcp__clasi__close_sprint` to load the tool's parameter schema.
+   This is required because CLASI MCP tools are deferred — calling them
+   without first loading their schema causes all parameters to be silently
+   dropped.
+
+4. **Call close_sprint**: Invoke the `close_sprint` MCP tool using the
+   `sprint_id` and `branch` values collected in step 1:
    ```
    close_sprint(
-       sprint_id="NNN",
-       branch_name="sprint/NNN-slug",
+       sprint_id="NNN",        ← from list_sprints() in step 1
+       branch_name="sprint/NNN-slug",  ← from list_sprints() in step 1
        main_branch="master",
        push_tags=True,
        delete_branch=True,
@@ -48,26 +60,39 @@ which handles the full lifecycle.
    - Version bump and git tag
    - Merge to master, push tags, delete branch
 
-3. **Report result**: On success, report the version tag and merged
+5. **Report result**: On success, report the version tag and merged
    branch. On error, report the blocker and recovery steps.
+
+## Issue Sweep at Close
+
+When `close_sprint` runs, it automatically calls `_sweep_done_issues`, which
+moves any resolved sprint issues from `<sprint>/issues/` to
+`<sprint>/issues/done/`. No manual `move_issue_to_done` call is needed for
+issues whose tickets are all done.
+
+If any sprint issues remain unresolved at close, the close still succeeds.
+The result JSON will contain an `unresolved_issues` list with the filenames.
+Read this list and surface it to the team-lead for mop-up — these issues were
+not resolved in the sprint and need follow-up.
 
 ## Issue Preconditions
 
-Close-sprint hard-fails if any `<sprint>/issues/<filename>` (at the top
-level, not in `done/`) still has `status: in-progress`. Self-repair
-handles done-tagged files automatically, but in-progress issues require
-explicit resolution.
+Issues that are intentionally deferred (ticket carries `completes_issue: false`)
+pass cleanly through close without appearing in `unresolved_issues`. For all
+other in-progress issues, close collects their filenames in `unresolved_issues`
+and continues — the close is non-blocking on unresolved issues.
 
-**Resolution paths:**
-- **Tickets are done but issue not marked done**: this should not happen
-  in the happy path. Call `move_issue_to_done` explicitly.
+**Resolution paths for issues that should have been resolved:**
+- **Tickets are done but issue not swept**: check that all tickets referencing
+  the issue carry `issue:` back-refs. If a back-ref is missing, call
+  `add_issue_ref` and re-run close.
 - **Issue has work remaining**: call `split_issue` to split the remaining
   work into a new issue, then either defer it (it stays in the pool for
   the next sprint) or call `create_ticket` to bring it into the current
   sprint before closing.
 - **Issue is intentionally deferred**: set `completes_issue: false` on
-  the ticket(s) referencing this issue. Close-sprint will then skip the
-  hard-fail for that issue.
+  the ticket(s) referencing this issue. Close-sprint will then exclude
+  that issue from `unresolved_issues`.
 
 ## Output
 

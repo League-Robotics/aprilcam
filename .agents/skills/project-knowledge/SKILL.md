@@ -29,7 +29,7 @@ genuinely hard, it was figured out, and that understanding should persist.
    symptoms, failed attempts, working solution, and underlying explanation.
 
 3. **Write knowledge file**: Create
-   `.clasi/knowledge/YYYY-MM-DD-slug.md`:
+   `docs/knowledge/YYYY-MM-DD-slug.md`:
 
    ```yaml
    ---
@@ -51,5 +51,5 @@ genuinely hard, it was figured out, and that understanding should persist.
 
 ## Output
 
-- Knowledge file in `.clasi/knowledge/`
+- Knowledge file in `docs/knowledge/`
 - Commit with descriptive message
