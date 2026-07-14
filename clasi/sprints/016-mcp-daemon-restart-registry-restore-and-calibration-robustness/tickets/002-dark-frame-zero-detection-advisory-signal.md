@@ -1,8 +1,9 @@
 ---
 id: '002'
 title: Dark-frame / zero-detection advisory signal
-status: open
-use-cases: [SUC-002]
+status: in-progress
+use-cases:
+- SUC-002
 depends-on: []
 github-issue: ''
 issue: mcp-playfield-registry-not-restored-after-daemon-restart.md
