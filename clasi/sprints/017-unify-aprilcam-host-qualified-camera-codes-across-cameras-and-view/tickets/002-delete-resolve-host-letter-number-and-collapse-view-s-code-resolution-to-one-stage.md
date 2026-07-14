@@ -2,7 +2,7 @@
 id: '002'
 title: Delete resolve_host_letter_number and collapse view's code resolution to one
   stage
-status: open
+status: in-progress
 use-cases:
 - SUC-001
 - SUC-003
