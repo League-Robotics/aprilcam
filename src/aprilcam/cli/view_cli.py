@@ -420,26 +420,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         camera_arg = args.camera
 
-        # --- <host-letter><number> code (e.g. "B6") -------------------------
-        # Select camera <number> on the daemon whose host letter is <letter>.
-        # Reconnect to that host (unless it's the local one) and reduce the arg
-        # to the bare number so the normal numeric resolution handles it.
-        from aprilcam.cli._daemon import resolve_host_letter_number as _rhln
-        _hl = _rhln(camera_arg, config, args)
-        if _hl is not None:
-            camera_arg, _remote_host = _hl
-            if _remote_host:
-                dc.close()
-                from aprilcam.cli._daemon import connect_from_args as _cfa2
-                try:
-                    dc = _cfa2(config, args)
-                except Exception as exc:
-                    print(
-                        f"Error: could not connect to daemon '{_remote_host}': {exc}",
-                        file=sys.stderr,
-                    )
-                    return 1
-
         # --- Alpha-code resolution (e.g. "A", "FB") -------------------------
         from aprilcam.cli._daemon import resolve_camera_code as _resolve_code
         _code_result = _resolve_code(camera_arg, config, args)

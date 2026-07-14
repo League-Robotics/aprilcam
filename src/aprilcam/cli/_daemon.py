@@ -155,18 +155,18 @@ def resolve_camera_code(
     Returns:
         ``(host, enum)`` on code match, or ``None`` if not a code.
     """
-    from aprilcam.client.host_codes import load_store, resolve_code
+    from aprilcam.client.host_codes import load_store, resolve_code_or_none
 
     # Must be 1 or 2 alphabetic characters to be a code.
     s = camera_arg.strip()
     if not (1 <= len(s) <= 2 and s.isalpha()):
         return None
 
-    try:
-        store = load_store(config)
-        host_entry, cam_entry = resolve_code(s.upper(), store)
-    except (ValueError, Exception):
+    store = load_store(config)
+    resolved = resolve_code_or_none(s.upper(), store)
+    if resolved is None:
         return None
+    host_entry, cam_entry = resolved
 
     # Determine the host address to reach this daemon.
     is_local = host_entry.get("kind") == "local"
@@ -187,65 +187,3 @@ def resolve_camera_code(
             pass  # immutable namespace — caller must handle this.
 
     return (resolved_host, cam_enum)
-
-
-def resolve_host_letter_number(
-    camera_arg: str,
-    config: "Config",
-    args,
-) -> "tuple[str, str | None] | None":
-    """Resolve a ``<host-letter><number>`` camera code (e.g. ``"B6"``).
-
-    The letter is a host code from the store (``A`` = local host, ``B``, ``C``,
-    … = remotes) and the number is the camera's enumeration number on that host
-    — the scheme shown by ``aprilcam cameras``. On a match this:
-
-    - Sets ``args.daemon_host`` to the host's address when it is *remote*, so a
-      subsequent :func:`connect_from_args` reaches the right daemon.
-    - Returns ``(number_str, remote_host)`` where *number_str* is the bare
-      camera number (resolve it against the daemon as usual) and *remote_host*
-      is the address to reconnect to, or ``None`` for the local host (the
-      current connection already points at it).
-
-    Returns ``None`` when *camera_arg* is not ``<letter><digits>`` or the letter
-    is not a known host, so callers fall back to their normal resolution.
-
-    Args:
-        camera_arg: The raw camera positional argument from the CLI.
-        config: Loaded :class:`~aprilcam.config.Config`.
-        args: Argparse namespace to patch with ``daemon_host`` on a remote match.
-
-    Returns:
-        ``(number_str, remote_host_or_None)`` on match, else ``None``.
-    """
-    import re
-
-    m = re.fullmatch(r"\s*([A-Za-z])(\d+)\s*", camera_arg or "")
-    if not m:
-        return None
-    letter, number = m.group(1).upper(), m.group(2)
-
-    try:
-        from aprilcam.client.host_codes import alpha_to_num, load_store
-
-        store = load_store(config)
-        host_num = alpha_to_num(letter)
-        host_entry = next(
-            (h for h in store.get("hosts", []) if h.get("num") == host_num), None
-        )
-    except Exception:
-        return None
-
-    if host_entry is None:
-        return None  # unknown host letter — let the caller error normally
-
-    if host_entry.get("kind") == "local":
-        return (number, None)
-
-    addr = host_entry.get("host") or (host_entry.get("addresses") or [""])[0]
-    if addr:
-        try:
-            args.daemon_host = addr
-        except AttributeError:
-            pass
-    return (number, addr or None)

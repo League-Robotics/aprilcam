@@ -27,6 +27,7 @@ from aprilcam.client.host_codes import (
     merge_probe_results,
     num_to_alpha,
     resolve_code,
+    resolve_code_or_none,
     find_host,
     resolve_host_token,
     save_store,
@@ -198,6 +199,194 @@ class TestResolveCode:
         ])
         host_entry, cam_entry = resolve_code("a", store)
         assert cam_entry["num"] == 1
+
+
+# ---------------------------------------------------------------------------
+# resolve_code_or_none
+# ---------------------------------------------------------------------------
+
+
+class TestResolveCodeOrNone:
+    """Mirrors TestResolveCode: same cases, plus non-raising on failures."""
+
+    def test_local_single_letter(self):
+        store = _make_store([
+            {
+                "num": 1, "kind": "local", "host": "myhost",
+                "addresses": ["127.0.0.1"],
+                "cameras": [
+                    {"num": 1, "enum": 10, "index": 0, "name": "cam-a", "slug": "cam-a"},
+                    {"num": 2, "enum": 11, "index": 1, "name": "cam-b", "slug": "cam-b"},
+                ],
+            }
+        ])
+        result = resolve_code_or_none("A", store)
+        assert result is not None
+        host_entry, cam_entry = result
+        assert host_entry["num"] == 1
+        assert cam_entry["num"] == 1
+        assert cam_entry["name"] == "cam-a"
+
+    def test_local_second_camera(self):
+        store = _make_store([
+            {
+                "num": 1, "kind": "local", "host": "myhost",
+                "addresses": ["127.0.0.1"],
+                "cameras": [
+                    {"num": 1, "enum": 10, "index": 0, "name": "cam-a", "slug": "cam-a"},
+                    {"num": 2, "enum": 11, "index": 1, "name": "cam-b", "slug": "cam-b"},
+                ],
+            }
+        ])
+        result = resolve_code_or_none("B", store)
+        assert result is not None
+        _, cam_entry = result
+        assert cam_entry["name"] == "cam-b"
+
+    def test_remote_two_letters(self):
+        store = _make_store([
+            {"num": 1, "kind": "local", "host": "local", "addresses": [], "cameras": []},
+            {
+                "num": 6, "kind": "remote", "host": "vidar.local",
+                "addresses": ["192.168.1.144"],
+                "cameras": [
+                    {"num": 1, "enum": 6, "index": 0, "name": "imx296-88000", "slug": "imx296-88000"},
+                    {"num": 2, "enum": 7, "index": 1, "name": "imx296-80000", "slug": "imx296-80000"},
+                ],
+            },
+        ])
+        result = resolve_code_or_none("FB", store)
+        assert result is not None
+        host_entry, cam_entry = result
+        assert host_entry["host"] == "vidar.local"
+        assert cam_entry["num"] == 2
+        assert cam_entry["name"] == "imx296-80000"
+
+    def test_unknown_code_returns_none(self):
+        store = _make_store([])
+        assert resolve_code_or_none("A", store) is None
+
+    def test_unknown_remote_host_returns_none(self):
+        store = _make_store([
+            {"num": 1, "kind": "local", "host": "local", "addresses": [], "cameras": []},
+        ])
+        assert resolve_code_or_none("FA", store) is None
+
+    def test_too_long_returns_none(self):
+        store = _make_store([])
+        assert resolve_code_or_none("ABC", store) is None
+
+    def test_lowercase_accepted(self):
+        store = _make_store([
+            {
+                "num": 1, "kind": "local", "host": "myhost",
+                "addresses": [],
+                "cameras": [
+                    {"num": 1, "enum": 0, "index": 0, "name": "cam", "slug": "cam"},
+                ],
+            }
+        ])
+        result = resolve_code_or_none("a", store)
+        assert result is not None
+        _, cam_entry = result
+        assert cam_entry["num"] == 1
+
+    def test_unknown_camera_returns_none(self):
+        """A known host but a camera number that doesn't exist on it."""
+        store = _make_store([
+            {
+                "num": 1, "kind": "local", "host": "myhost",
+                "addresses": [],
+                "cameras": [
+                    {"num": 1, "enum": 0, "index": 0, "name": "cam", "slug": "cam"},
+                ],
+            }
+        ])
+        # "B" -> camera #2, which does not exist on the local host.
+        assert resolve_code_or_none("B", store) is None
+
+    def test_does_not_raise_on_malformed_input(self):
+        """Confirms the wrapper never raises, even for the raising cases."""
+        store = _make_store([])
+        try:
+            result = resolve_code_or_none("123", store)
+        except ValueError:
+            pytest.fail("resolve_code_or_none must not raise ValueError")
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# resolve_camera_code (cli/_daemon.py — the sole camera-code resolver used by
+# both `view` and `tags` after Sprint 017's collapse to one resolution stage)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveCameraCode:
+    """`cli/_daemon.py:resolve_camera_code` — letter+letter code resolution.
+
+    Covers the reconnect-to-remote-host behavior that the letter+digit
+    parser deleted this sprint got wrong: a remote code must patch
+    ``args.daemon_host`` so a subsequent :func:`connect_from_args` reaches
+    the *correct* daemon, and the returned camera number must be the
+    daemon's live ``enum`` (not the store's stable ``num``, which the
+    deleted parser conflated).
+    """
+
+    def _store(self):
+        return _make_store([
+            {
+                "num": 1, "kind": "local", "host": "gala",
+                "addresses": ["127.0.0.1"],
+                "cameras": [
+                    {"num": 1, "enum": 10, "index": 0, "name": "cam-a", "slug": "cam-a"},
+                ],
+            },
+            {
+                "num": 6, "kind": "remote", "host": "vidar.local",
+                "addresses": ["192.168.1.144"],
+                "cameras": [
+                    {"num": 1, "enum": 3, "index": 0, "name": "imx296-a", "slug": "imx296-a"},
+                    {"num": 2, "enum": 7, "index": 1, "name": "imx296-b", "slug": "imx296-b"},
+                ],
+            },
+        ])
+
+    def test_local_code_no_reconnect(self, monkeypatch):
+        import argparse
+
+        from aprilcam.cli import _daemon
+
+        monkeypatch.setattr("aprilcam.client.host_codes.load_store", lambda *a, **k: self._store())
+        args = argparse.Namespace(daemon_host=None)
+        result = _daemon.resolve_camera_code("A", None, args)
+        assert result == ("", 10)
+        assert args.daemon_host is None
+
+    def test_remote_code_sets_host_and_translates_enum(self, monkeypatch):
+        """The regression case: a remote letter+letter code must both patch
+        args.daemon_host (so connect_from_args reconnects) *and* return the
+        daemon's enum (7), not the store's stable num (2)."""
+        import argparse
+
+        from aprilcam.cli import _daemon
+
+        monkeypatch.setattr("aprilcam.client.host_codes.load_store", lambda *a, **k: self._store())
+        args = argparse.Namespace(daemon_host=None)
+        result = _daemon.resolve_camera_code("FB", None, args)
+        assert result == ("vidar.local", 7)
+        assert args.daemon_host == "vidar.local"
+
+    def test_non_codes_return_none(self, monkeypatch):
+        import argparse
+
+        from aprilcam.cli import _daemon
+
+        monkeypatch.setattr("aprilcam.client.host_codes.load_store", lambda *a, **k: self._store())
+        args = argparse.Namespace(daemon_host=None)
+        assert _daemon.resolve_camera_code("7", None, args) is None       # bare number
+        assert _daemon.resolve_camera_code("vidar", None, args) is None   # hostname (>2 chars)
+        assert _daemon.resolve_camera_code("ZZ", None, args) is None      # unknown host/camera
+        assert args.daemon_host is None
 
 
 # ---------------------------------------------------------------------------
@@ -438,41 +627,6 @@ class TestMergeProbeResults:
         assert nums["vidar"] >= 2
 
 
-class TestResolveHostLetterNumber:
-    """`<host-letter><number>` codes (e.g. 'B6') resolve host + camera number."""
-
-    def _store(self):
-        return {"version": 1, "hosts": [
-            {"num": 1, "kind": "local", "host": "gala", "addresses": ["127.0.0.1"], "cameras": []},
-            {"num": 2, "kind": "remote", "host": "vidar", "addresses": ["10.0.0.2"], "cameras": []},
-        ]}
-
-    def test_remote_code_sets_host(self, monkeypatch):
-        import argparse
-        from aprilcam.cli import _daemon
-        monkeypatch.setattr("aprilcam.client.host_codes.load_store", lambda *a, **k: self._store())
-        args = argparse.Namespace(daemon_host=None)
-        assert _daemon.resolve_host_letter_number("B6", None, args) == ("6", "vidar")
-        assert args.daemon_host == "vidar"
-
-    def test_local_code_no_reconnect(self, monkeypatch):
-        import argparse
-        from aprilcam.cli import _daemon
-        monkeypatch.setattr("aprilcam.client.host_codes.load_store", lambda *a, **k: self._store())
-        args = argparse.Namespace(daemon_host=None)
-        assert _daemon.resolve_host_letter_number("A1", None, args) == ("1", None)
-        assert args.daemon_host is None
-
-    def test_non_codes_pass_through(self, monkeypatch):
-        import argparse
-        from aprilcam.cli import _daemon
-        monkeypatch.setattr("aprilcam.client.host_codes.load_store", lambda *a, **k: self._store())
-        args = argparse.Namespace(daemon_host=None)
-        assert _daemon.resolve_host_letter_number("7", None, args) is None      # bare number
-        assert _daemon.resolve_host_letter_number("vidar", None, args) is None  # hostname
-        assert _daemon.resolve_host_letter_number("Z9", None, args) is None     # unknown host
-
-
 # ---------------------------------------------------------------------------
 # Root-level --host/--port extraction (cli/__init__)
 # ---------------------------------------------------------------------------
@@ -570,7 +724,8 @@ class TestCamerasCliCodeColumn:
 
     def test_code_shown_from_store(self, monkeypatch, tmp_path, capsys):
         """With no --host, `cameras` lists every host from the store, addressing
-        local cameras by bare number and remote cameras by host-letter+number."""
+        local cameras by their single-letter code and remote cameras by
+        host-letter+camera-letter (both via `code_for`)."""
         from aprilcam.cli import cameras_cli
         from unittest.mock import MagicMock
 
@@ -604,12 +759,14 @@ class TestCamerasCliCodeColumn:
         out = capsys.readouterr().out
 
         assert rc == 0, f"cameras_cli.main returned {rc}; stdout={out!r}"
-        # Local host: letter A in header, cameras as bare numbers (10, 11).
+        # Local host: letter A in header, cameras as single-letter codes (A, B —
+        # store nums 1 and 2 — via code_for, not the daemon enum 10/11).
         assert "myhost" in out and "[A]" in out and "(local)" in out
-        assert "10" in out and "11" in out
-        # Remote host: letter B in header, camera as host-letter+number (B6).
+        assert "cam-alpha" in out and "cam-beta" in out
+        # Remote host: letter B in header, camera as host-letter+camera-letter
+        # (store host num 2, camera num 1 -> "BA" via code_for).
         assert "vidar" in out and "[B]" in out
-        assert "B6" in out
+        assert "BA" in out
 
     def test_hint_shown_when_no_store(self, monkeypatch, capsys):
         from aprilcam.cli import cameras_cli
@@ -636,6 +793,372 @@ class TestCamerasCliCodeColumn:
 
         assert rc == 0
         assert "aprilcam probe" in out
+
+    def test_network_and_single_daemon_listings_agree(self, monkeypatch, capsys):
+        """`_list_all_from_store` and `_list_single_daemon` must format the
+        exact same code for the same host+camera store entry — both delegate
+        to `code_for`, so this guards against one path drifting back to an
+        ad hoc format."""
+        from aprilcam.cli import cameras_cli
+        from aprilcam.client.host_codes import code_for
+        from aprilcam.client.models import CameraDevice
+        from unittest.mock import MagicMock
+
+        store = {
+            "version": 1,
+            "hosts": [
+                {
+                    "num": 1, "kind": "local", "host": "myhost",
+                    "addresses": ["127.0.0.1"],
+                    "cameras": [
+                        {"num": 1, "enum": 10, "index": 0, "name": "cam-alpha", "slug": "cam-alpha"},
+                        {"num": 2, "enum": 11, "index": 1, "name": "cam-beta", "slug": "cam-beta"},
+                    ],
+                },
+                {
+                    "num": 2, "kind": "remote", "host": "vidar",
+                    "addresses": ["10.0.0.2"],
+                    "cameras": [
+                        {"num": 1, "enum": 6, "index": 0, "name": "imx296", "slug": "imx296"},
+                        {"num": 2, "enum": 7, "index": 1, "name": "imx296b", "slug": "imx296b"},
+                    ],
+                },
+            ],
+        }
+
+        # --- network listing (_list_all_from_store), no --host ---
+        monkeypatch.delenv("APRILCAM_DAEMON_HOST", raising=False)
+        monkeypatch.setattr("aprilcam.cli.cameras_cli.load_store", lambda *a, **kw: store)
+        mock_cfg = MagicMock()
+        monkeypatch.setattr("aprilcam.cli.cameras_cli.Config", MagicMock(load=MagicMock(return_value=mock_cfg)))
+
+        rc = cameras_cli.main([])
+        network_out = capsys.readouterr().out
+        assert rc == 0
+
+        # Expected codes straight from code_for, for each store entry.
+        expected = {
+            "cam-alpha": code_for(1, 1, True),   # "A"
+            "cam-beta": code_for(1, 2, True),    # "B"
+            "imx296": code_for(2, 1, False),     # "BA"
+            "imx296b": code_for(2, 2, False),    # "BB"
+        }
+        for name, code in expected.items():
+            assert f"{code:<6}{name}" in network_out, (
+                f"expected code {code!r} for {name!r} in network listing:\n{network_out}"
+            )
+
+        # --- single-daemon listing (_list_single_daemon), local host ---
+        local_devices = [
+            CameraDevice(index=0, name="cam-alpha", slug="cam-alpha", enum=10),
+            CameraDevice(index=1, name="cam-beta", slug="cam-beta", enum=11),
+        ]
+        dc = MagicMock()
+        dc.enumerate_cameras.return_value = local_devices
+        dc._unix_path = "/tmp/fake.sock"  # local connection marker
+
+        monkeypatch.setattr(
+            cameras_cli.AppConfig,
+            "load",
+            classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})()),
+        )
+        monkeypatch.setattr("aprilcam.cli.cameras_cli.connect_from_args", lambda *a, **kw: dc)
+
+        rc = cameras_cli.main(["--host", "myhost"])
+        single_out = capsys.readouterr().out
+        assert rc == 0
+
+        assert f" {expected['cam-alpha']} cam-alpha" in single_out
+        assert f" {expected['cam-beta']} cam-beta" in single_out
+
+    def test_usage_hint_code_resolves(self, monkeypatch, capsys):
+        """The printed usage-hint example code must actually resolve via
+        resolve_code against a store shaped like the one used in the hint."""
+        from aprilcam.cli import cameras_cli
+        from aprilcam.client.host_codes import resolve_code
+        from unittest.mock import MagicMock
+
+        # A store with a host F (num=6) whose camera 2 is the hint's example.
+        store = {
+            "version": 1,
+            "hosts": [
+                {
+                    "num": 1, "kind": "local", "host": "myhost",
+                    "addresses": ["127.0.0.1"], "cameras": [],
+                },
+                {
+                    "num": 6, "kind": "remote", "host": "fhost",
+                    "addresses": ["10.0.0.6"],
+                    "cameras": [
+                        {"num": 1, "enum": 1, "index": 0, "name": "cam1", "slug": "cam1"},
+                        {"num": 2, "enum": 2, "index": 1, "name": "cam2", "slug": "cam2"},
+                    ],
+                },
+            ],
+        }
+        monkeypatch.delenv("APRILCAM_DAEMON_HOST", raising=False)
+        monkeypatch.setattr("aprilcam.cli.cameras_cli.load_store", lambda *a, **kw: store)
+        mock_cfg = MagicMock()
+        monkeypatch.setattr("aprilcam.cli.cameras_cli.Config", MagicMock(load=MagicMock(return_value=mock_cfg)))
+
+        rc = cameras_cli.main([])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "aprilcam view FB" in out
+
+        host_entry, cam_entry = resolve_code("FB", store)
+        assert host_entry["host"] == "fhost"
+        assert cam_entry["slug"] == "cam2"
+
+
+# ---------------------------------------------------------------------------
+# Round-trip test matrix — code_for() -> resolve_code() losslessness
+#
+# This is the closing regression guard for Sprint 017: every code the
+# `cameras` listing logic can PRINT (via code_for, used identically by both
+# _list_all_from_store and _list_single_daemon since ticket 003) must PARSE
+# back through resolve_code (the sole parser after ticket 002) to the exact
+# (host, camera) pair it was generated from. Producer and consumer must
+# agree losslessly across a matrix of store shapes, including the two-letter
+# *host* code rollover (host num >= 27).
+# ---------------------------------------------------------------------------
+
+
+def _iter_store_codes(store: dict):
+    """Yield (code, host_entry, cam_entry) for every camera in *store*.
+
+    Generates each code exactly the way `_list_all_from_store` /
+    `_list_single_daemon` do: via `code_for(host_num, cam_num, is_local)`,
+    iterating cameras by their store `num`.
+    """
+    for host_entry in store.get("hosts", []):
+        h_num = host_entry.get("num")
+        is_local = host_entry.get("kind") == "local"
+        for cam_entry in host_entry.get("cameras", []):
+            c_num = cam_entry.get("num")
+            code = code_for(h_num, c_num, is_local)
+            yield code, host_entry, cam_entry
+
+
+class TestRoundTrip:
+    """code_for() -> resolve_code() must be lossless across store shapes."""
+
+    def _assert_matrix_round_trips(self, store: dict) -> int:
+        """Generate + resolve every code in *store*; return the count checked."""
+        checked = 0
+        for code, host_entry, cam_entry in _iter_store_codes(store):
+            resolved_host, resolved_cam = resolve_code(code, store)
+            assert resolved_host["host"] == host_entry["host"], (
+                f"code {code!r}: expected host {host_entry['host']!r}, "
+                f"got {resolved_host['host']!r}"
+            )
+            assert resolved_cam["num"] == cam_entry["num"], (
+                f"code {code!r}: expected camera num {cam_entry['num']!r}, "
+                f"got {resolved_cam['num']!r}"
+            )
+            assert resolved_cam.get("enum") == cam_entry.get("enum")
+            checked += 1
+        return checked
+
+    def test_local_only_store(self):
+        """Local-only: one local host, multiple cameras, no remotes."""
+        store = _make_store([
+            {
+                "num": 1, "kind": "local", "host": "gala",
+                "addresses": ["127.0.0.1"],
+                "cameras": [
+                    {"num": 1, "enum": 10, "index": 0, "name": "cam-a", "slug": "cam-a"},
+                    {"num": 2, "enum": 11, "index": 1, "name": "cam-b", "slug": "cam-b"},
+                    {"num": 3, "enum": 12, "index": 2, "name": "cam-c", "slug": "cam-c"},
+                ],
+            },
+        ])
+        checked = self._assert_matrix_round_trips(store)
+        assert checked == 3
+
+    def test_single_remote_store(self):
+        """Local + one remote host, multiple cameras on each."""
+        store = _make_store([
+            {
+                "num": 1, "kind": "local", "host": "gala",
+                "addresses": ["127.0.0.1"],
+                "cameras": [
+                    {"num": 1, "enum": 10, "index": 0, "name": "cam-a", "slug": "cam-a"},
+                    {"num": 2, "enum": 11, "index": 1, "name": "cam-b", "slug": "cam-b"},
+                ],
+            },
+            {
+                "num": 6, "kind": "remote", "host": "vidar.local",
+                "addresses": ["192.168.1.144"],
+                "cameras": [
+                    {"num": 1, "enum": 3, "index": 0, "name": "imx296-a", "slug": "imx296-a"},
+                    {"num": 2, "enum": 7, "index": 1, "name": "imx296-b", "slug": "imx296-b"},
+                    {"num": 3, "enum": 8, "index": 2, "name": "imx296-c", "slug": "imx296-c"},
+                ],
+            },
+        ])
+        checked = self._assert_matrix_round_trips(store)
+        assert checked == 5
+
+    def test_multi_remote_store_with_two_letter_host_rollover(self):
+        """Local + 2+ remotes, including a host num >= 27 (two-letter host
+        code, e.g. "AA") to exercise the bijective base-26 rollover for the
+        *host* portion of the code.
+
+        This matrix entry surfaces a genuine boundary gap rather than a
+        clean round trip: `code_for`'s remote formula is
+        `num_to_alpha(host_num) + num_to_alpha(cam_num)` with no separator,
+        so a two-letter host code makes the *whole* code 3+ characters (e.g.
+        host 27 camera 1 -> "AA" + "A" = "AAA"). `resolve_code` caps input at
+        2 alphabetic characters and does a fixed 1-char/1-char split, so it
+        structurally cannot parse anything `code_for` emits once a host
+        needs two letters -- this is not merely "out of range", it is a
+        parser/formatter mismatch for any store with >=27 hosts. Per the
+        sprint's architecture-update.md ("Decision: code_for/resolve_code
+        keep their current 1-2 letter, <=26x26 addressing limit" -- out of
+        scope for this test-only ticket), the fix is deferred; this test
+        pins the *current, known* behavior (clean ValueError, not silent
+        data corruption) so a future addressing-limit change doesn't
+        silently regress it, and documents it as a real gap this round-trip
+        matrix caught.
+        """
+        store = _make_store([
+            {
+                "num": 1, "kind": "local", "host": "gala",
+                "addresses": ["127.0.0.1"],
+                "cameras": [
+                    {"num": 1, "enum": 10, "index": 0, "name": "cam-a", "slug": "cam-a"},
+                ],
+            },
+            {
+                "num": 6, "kind": "remote", "host": "vidar.local",
+                "addresses": ["192.168.1.144"],
+                "cameras": [
+                    {"num": 1, "enum": 3, "index": 0, "name": "imx296-a", "slug": "imx296-a"},
+                    {"num": 2, "enum": 7, "index": 1, "name": "imx296-b", "slug": "imx296-b"},
+                ],
+            },
+            {
+                # host num 27 -> letter "AA": exercises two-letter *host* code.
+                "num": 27, "kind": "remote", "host": "vali.local",
+                "addresses": ["192.168.1.200"],
+                "cameras": [
+                    {"num": 1, "enum": 1, "index": 0, "name": "usb-cam", "slug": "usb-cam"},
+                    {"num": 2, "enum": 2, "index": 1, "name": "csi-cam", "slug": "csi-cam"},
+                ],
+            },
+            {
+                # A second two-letter host to prove rollover isn't a fluke of 27.
+                "num": 28, "kind": "remote", "host": "vili.local",
+                "addresses": ["192.168.1.201"],
+                "cameras": [
+                    {"num": 1, "enum": 5, "index": 0, "name": "cam-x", "slug": "cam-x"},
+                ],
+            },
+        ])
+        # Sanity: confirm the rollover actually produces two-letter host codes.
+        assert num_to_alpha(27) == "AA"
+        assert num_to_alpha(28) == "AB"
+
+        # Cameras on hosts addressable with a single-letter host code (num
+        # <=26 -- here just the local host and host "F"/num 6) round-trip
+        # losslessly, exactly like the other matrix shapes.
+        single_letter_host_codes = 0
+        for code, host_entry, cam_entry in _iter_store_codes(store):
+            if host_entry["num"] > 26:
+                continue
+            resolved_host, resolved_cam = resolve_code(code, store)
+            assert resolved_host["host"] == host_entry["host"]
+            assert resolved_cam["num"] == cam_entry["num"]
+            single_letter_host_codes += 1
+        assert single_letter_host_codes == 3  # 1 local + 2 on host "F"
+
+        # Cameras on the two-letter-host-code hosts (num >= 27) produce
+        # codes >2 characters, which resolve_code rejects by construction --
+        # pinned here as the known (not silently wrong) failure mode.
+        two_letter_host_codes = [
+            (code, host_entry, cam_entry)
+            for code, host_entry, cam_entry in _iter_store_codes(store)
+            if host_entry["num"] > 26
+        ]
+        assert len(two_letter_host_codes) == 3  # 2 on host 27 + 1 on host 28
+        for code, host_entry, cam_entry in two_letter_host_codes:
+            assert len(code) == 3, (
+                f"expected a 3-char code for host {host_entry['host']!r} "
+                f"(num={host_entry['num']}), got {code!r}"
+            )
+            with pytest.raises(ValueError, match="1 or 2 alphabetic"):
+                resolve_code(code, store)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end producer/consumer check: cameras' emitted codes resolve via the
+# same resolve_camera_code() that view_cli.py actually calls, against a fake
+# store — no live daemon required.
+# ---------------------------------------------------------------------------
+
+
+class TestCamerasEmitsViewResolves:
+    """Drives the code-generation path the way `_list_all_from_store` does,
+    then feeds each emitted code into `cli/_daemon.py:resolve_camera_code` —
+    the single-stage resolver `view_cli.py` calls — confirming producer
+    (`cameras`) and consumer (`view`) genuinely agree end-to-end."""
+
+    def _store(self) -> dict:
+        return _make_store([
+            {
+                "num": 1, "kind": "local", "host": "gala",
+                "addresses": ["127.0.0.1"],
+                "cameras": [
+                    {"num": 1, "enum": 10, "index": 0, "name": "cam-a", "slug": "cam-a"},
+                    {"num": 2, "enum": 11, "index": 1, "name": "cam-b", "slug": "cam-b"},
+                ],
+            },
+            {
+                "num": 6, "kind": "remote", "host": "vidar.local",
+                "addresses": ["192.168.1.144"],
+                "cameras": [
+                    {"num": 1, "enum": 3, "index": 0, "name": "imx296-a", "slug": "imx296-a"},
+                    {"num": 2, "enum": 7, "index": 1, "name": "imx296-b", "slug": "imx296-b"},
+                ],
+            },
+        ])
+
+    def test_every_emitted_code_resolves_via_resolve_camera_code(self, monkeypatch):
+        """For every code `_list_all_from_store`'s logic would print, feed it
+        through `resolve_camera_code` (view's actual entry point) and assert
+        it opens the correct host + the daemon's live `enum` — the same
+        distinction (store `num` vs. daemon `enum`) that the deleted
+        letter+digit parser got wrong."""
+        import argparse
+
+        from aprilcam.cli import _daemon
+
+        store = self._store()
+        monkeypatch.setattr(
+            "aprilcam.client.host_codes.load_store", lambda *a, **k: store
+        )
+
+        checked = 0
+        for code, host_entry, cam_entry in _iter_store_codes(store):
+            args = argparse.Namespace(daemon_host=None)
+            result = _daemon.resolve_camera_code(code, None, args)
+            assert result is not None, f"code {code!r} failed to resolve"
+            resolved_host, resolved_enum = result
+
+            is_local = host_entry.get("kind") == "local"
+            if is_local:
+                assert resolved_host == ""
+                assert args.daemon_host is None
+            else:
+                expected_host = host_entry.get("host")
+                assert resolved_host == expected_host
+                assert args.daemon_host == expected_host
+
+            assert resolved_enum == cam_entry["enum"]
+            checked += 1
+
+        assert checked == 4  # 2 local + 2 remote cameras
 
 
 # ---------------------------------------------------------------------------

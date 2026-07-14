@@ -14,9 +14,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         prog="cameras",
         description=(
             "List cameras. With no --host, lists every camera on every daemon "
-            "on the network recorded by 'aprilcam probe', addressed by "
-            "host-letter + camera number (local cameras need no letter). With "
-            "--host HOST, lists that one daemon's cameras live."
+            "on the network recorded by 'aprilcam probe', addressed by its "
+            "base-26 code: host-letter + camera-letter (local cameras need no "
+            "host letter). With --host HOST, lists that one daemon's cameras "
+            "live."
         ),
     )
     parser.add_argument(
@@ -50,13 +51,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 def _list_all_from_store(hosts: List[dict], details: bool) -> int:
-    """List every camera on every known daemon, addressed by host-letter+number.
+    """List every camera on every known daemon, addressed by its base-26 code.
 
-    Reads the persistent host store built by ``aprilcam probe``. Each camera is
-    shown as ``<host-letter><camera-number>`` — the camera number is its stable
-    enumeration handle — except local-host cameras, which are shown as the bare
-    number (no letter needed). The host letter is the daemon's single-letter
-    code (also accepted by ``--host``).
+    Reads the persistent host store built by ``aprilcam probe``. Each camera's
+    code is produced by ``code_for`` (the same helper ``_list_single_daemon``
+    uses): a single letter for local cameras (no host letter needed), or
+    host-letter + camera-letter for remote ones. The host letter is the
+    daemon's single-letter code (also accepted by ``--host``).
     """
     print("Cameras on the network (from 'aprilcam probe' — run it to refresh):")
     print()
@@ -77,20 +78,23 @@ def _list_all_from_store(hosts: List[dict], details: bool) -> int:
         if not cams:
             print("      (no cameras)")
         for c in cams:
-            num = c.get("enum")
-            if num is None:
-                num = c.get("index")
-            code = f"{num}" if is_local else f"{h_letter}{num}"
+            cam_num = c.get("num")
+            code = code_for(h_num, cam_num, is_local) if cam_num is not None else "?"
             name = c.get("name", "")
             if details:
-                print(f"      {code:<6}{name}  (slug: {c.get('slug', '')})")
+                enum = c.get("enum")
+                if enum is None:
+                    enum = c.get("index")
+                print(
+                    f"      {code:<6}{name}  (slug: {c.get('slug', '')}, enum: {enum})"
+                )
             else:
                 print(f"      {code:<6}{name}")
         print()
 
     print("Open one with:  aprilcam view <code>")
     print("  e.g.  'aprilcam view 3'   (local camera 3)")
-    print("        'aprilcam view B6'  (camera 6 on host B)")
+    print("        'aprilcam view FB'  (camera 2 on host F)")
     return 0
 
 
