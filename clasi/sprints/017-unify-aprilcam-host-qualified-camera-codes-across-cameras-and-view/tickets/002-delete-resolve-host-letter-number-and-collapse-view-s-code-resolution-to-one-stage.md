@@ -2,7 +2,7 @@
 id: '002'
 title: Delete resolve_host_letter_number and collapse view's code resolution to one
   stage
-status: in-progress
+status: done
 use-cases:
 - SUC-001
 - SUC-003
@@ -41,31 +41,31 @@ full justification of deletion over in-place repair.
 
 ## Acceptance Criteria
 
-- [ ] `cli/_daemon.py:resolve_host_letter_number` (currently lines
+- [x] `cli/_daemon.py:resolve_host_letter_number` (currently lines
       ~192-251) is deleted entirely.
-- [ ] `cli/view_cli.py`'s letter+digit resolution block (currently lines
+- [x] `cli/view_cli.py`'s letter+digit resolution block (currently lines
       ~423-441 — the `from aprilcam.cli._daemon import
       resolve_host_letter_number as _rhln` import and its reconnect
       branch) is deleted.
-- [ ] `view`'s camera-argument resolution is now two stages: (1)
+- [x] `view`'s camera-argument resolution is now two stages: (1)
       `resolve_camera_code` (letter+letter code), (2) the existing bare
       int/name fallback (lines ~463-491, unchanged). The three-stage
       resolution (letter+digit → letter+letter → fallback) no longer
       exists.
-- [ ] `aprilcam view <code>` succeeds for every valid letter+letter code
+- [x] `aprilcam view <code>` succeeds for every valid letter+letter code
       (local single-letter and remote two-letter), reconnecting to the
       correct remote daemon when the code addresses a non-local host —
       verified against a populated host store (test double or fixture, not
       live hardware).
-- [ ] A remote host code always triggers a reconnect via
+- [x] A remote host code always triggers a reconnect via
       `connect_from_args` before `open_camera` is called — no code path
       remains where a genuine remote code silently queries the local
       daemon.
-- [ ] `cli/tags_cli.py` is confirmed unchanged and still correct: it
+- [x] `cli/tags_cli.py` is confirmed unchanged and still correct: it
       already calls `resolve_camera_code` exclusively (line ~93). Verify
       this by inspection/test — no code edit expected here, but note in the
       ticket's completion if any drift is found.
-- [ ] `grep -rn resolve_host_letter_number src/ tests/` returns no matches
+- [x] `grep -rn resolve_host_letter_number src/ tests/` returns no matches
       in `src/` (test file cleanup of `TestResolveHostLetterNumber` is
       ticket 004's responsibility, not this ticket's — do not delete those
       tests here if it would leave `view_cli`/`_daemon` tests failing to

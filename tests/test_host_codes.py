@@ -316,6 +316,80 @@ class TestResolveCodeOrNone:
 
 
 # ---------------------------------------------------------------------------
+# resolve_camera_code (cli/_daemon.py — the sole camera-code resolver used by
+# both `view` and `tags` after Sprint 017's collapse to one resolution stage)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveCameraCode:
+    """`cli/_daemon.py:resolve_camera_code` — letter+letter code resolution.
+
+    Covers the reconnect-to-remote-host behavior that
+    `resolve_host_letter_number` (deleted this sprint) got wrong: a remote
+    code must patch ``args.daemon_host`` so a subsequent
+    :func:`connect_from_args` reaches the *correct* daemon, and the returned
+    camera number must be the daemon's live ``enum`` (not the store's stable
+    ``num``, which the deleted parser conflated).
+    """
+
+    def _store(self):
+        return _make_store([
+            {
+                "num": 1, "kind": "local", "host": "gala",
+                "addresses": ["127.0.0.1"],
+                "cameras": [
+                    {"num": 1, "enum": 10, "index": 0, "name": "cam-a", "slug": "cam-a"},
+                ],
+            },
+            {
+                "num": 6, "kind": "remote", "host": "vidar.local",
+                "addresses": ["192.168.1.144"],
+                "cameras": [
+                    {"num": 1, "enum": 3, "index": 0, "name": "imx296-a", "slug": "imx296-a"},
+                    {"num": 2, "enum": 7, "index": 1, "name": "imx296-b", "slug": "imx296-b"},
+                ],
+            },
+        ])
+
+    def test_local_code_no_reconnect(self, monkeypatch):
+        import argparse
+
+        from aprilcam.cli import _daemon
+
+        monkeypatch.setattr("aprilcam.client.host_codes.load_store", lambda *a, **k: self._store())
+        args = argparse.Namespace(daemon_host=None)
+        result = _daemon.resolve_camera_code("A", None, args)
+        assert result == ("", 10)
+        assert args.daemon_host is None
+
+    def test_remote_code_sets_host_and_translates_enum(self, monkeypatch):
+        """The regression case: a remote letter+letter code must both patch
+        args.daemon_host (so connect_from_args reconnects) *and* return the
+        daemon's enum (7), not the store's stable num (2)."""
+        import argparse
+
+        from aprilcam.cli import _daemon
+
+        monkeypatch.setattr("aprilcam.client.host_codes.load_store", lambda *a, **k: self._store())
+        args = argparse.Namespace(daemon_host=None)
+        result = _daemon.resolve_camera_code("FB", None, args)
+        assert result == ("vidar.local", 7)
+        assert args.daemon_host == "vidar.local"
+
+    def test_non_codes_return_none(self, monkeypatch):
+        import argparse
+
+        from aprilcam.cli import _daemon
+
+        monkeypatch.setattr("aprilcam.client.host_codes.load_store", lambda *a, **k: self._store())
+        args = argparse.Namespace(daemon_host=None)
+        assert _daemon.resolve_camera_code("7", None, args) is None       # bare number
+        assert _daemon.resolve_camera_code("vidar", None, args) is None   # hostname (>2 chars)
+        assert _daemon.resolve_camera_code("ZZ", None, args) is None      # unknown host/camera
+        assert args.daemon_host is None
+
+
+# ---------------------------------------------------------------------------
 # resolve_host_token
 # ---------------------------------------------------------------------------
 
@@ -551,41 +625,6 @@ class TestMergeProbeResults:
         nums = {h["host"]: h["num"] for h in store["hosts"]}
         assert nums["gala"] == 1
         assert nums["vidar"] >= 2
-
-
-class TestResolveHostLetterNumber:
-    """`<host-letter><number>` codes (e.g. 'B6') resolve host + camera number."""
-
-    def _store(self):
-        return {"version": 1, "hosts": [
-            {"num": 1, "kind": "local", "host": "gala", "addresses": ["127.0.0.1"], "cameras": []},
-            {"num": 2, "kind": "remote", "host": "vidar", "addresses": ["10.0.0.2"], "cameras": []},
-        ]}
-
-    def test_remote_code_sets_host(self, monkeypatch):
-        import argparse
-        from aprilcam.cli import _daemon
-        monkeypatch.setattr("aprilcam.client.host_codes.load_store", lambda *a, **k: self._store())
-        args = argparse.Namespace(daemon_host=None)
-        assert _daemon.resolve_host_letter_number("B6", None, args) == ("6", "vidar")
-        assert args.daemon_host == "vidar"
-
-    def test_local_code_no_reconnect(self, monkeypatch):
-        import argparse
-        from aprilcam.cli import _daemon
-        monkeypatch.setattr("aprilcam.client.host_codes.load_store", lambda *a, **k: self._store())
-        args = argparse.Namespace(daemon_host=None)
-        assert _daemon.resolve_host_letter_number("A1", None, args) == ("1", None)
-        assert args.daemon_host is None
-
-    def test_non_codes_pass_through(self, monkeypatch):
-        import argparse
-        from aprilcam.cli import _daemon
-        monkeypatch.setattr("aprilcam.client.host_codes.load_store", lambda *a, **k: self._store())
-        args = argparse.Namespace(daemon_host=None)
-        assert _daemon.resolve_host_letter_number("7", None, args) is None      # bare number
-        assert _daemon.resolve_host_letter_number("vidar", None, args) is None  # hostname
-        assert _daemon.resolve_host_letter_number("Z9", None, args) is None     # unknown host
 
 
 # ---------------------------------------------------------------------------
