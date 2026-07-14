@@ -1,7 +1,7 @@
 ---
 id: '002'
 title: Dark-frame / zero-detection advisory signal
-status: in-progress
+status: done
 use-cases:
 - SUC-002
 depends-on: []
@@ -42,39 +42,39 @@ start producing that data via the diagnostic signal.
 
 ## Acceptance Criteria
 
-- [ ] `src/aprilcam/daemon/camera_pipeline.py`: the per-pipeline frame loop
+- [x] `src/aprilcam/daemon/camera_pipeline.py`: the per-pipeline frame loop
       computes a cheap **mean-luminance sample** (downsample + `numpy.mean`
       — pure NumPy, already a base daemon dependency; no new CV dependency)
       once per N frames (configurable constant; not every frame, to keep
       cost negligible), alongside the detector's already-computed per-frame
       tag count (no new detection work — reuse the existing count).
-- [ ] A **sustained** condition — mean luminance below a configurable floor
+- [x] A **sustained** condition — mean luminance below a configurable floor
       **and** zero tags detected — over a configurable window (e.g. last 30
       frames ≈ 1s at 30fps) sets a new boolean, `frame_dark: bool`.
-- [ ] `frame_dark` is written to `info.json` via the existing
+- [x] `frame_dark` is written to `info.json` via the existing
       write-on-change pattern already used by
       `_maybe_update_stale_flag()`/`_write_info_json()`
       (`camera_pipeline.py`) — i.e. `info.json` is only rewritten when the
       flag's value actually changes, not every frame/window.
-- [ ] A rate-limited log warning fires when `frame_dark` transitions to
+- [x] A rate-limited log warning fires when `frame_dark` transitions to
       `True` (and optionally when it clears back to `False`).
-- [ ] The signal is **purely advisory**: no existing code path (daemon RPC
+- [x] The signal is **purely advisory**: no existing code path (daemon RPC
       handlers, MCP tool handlers, calibration logic) is modified to gate,
       block, or refuse any operation based on `frame_dark`. This matches
       the confirmed-advisory behavior of the existing `calibration_stale`
       field (verify via grep that no new gating is introduced, mirroring
       the audit already done for `calibration_stale` during planning).
-- [ ] No MCP tool surface change in this ticket (no new field on
+- [x] No MCP tool surface change in this ticket (no new field on
       `open_camera`'s response, no new MCP tool). This is intentionally
       deferred — see Open Question 3 in `architecture-update.md`.
-- [ ] The luminance-floor and window-size constants are clearly named and
+- [x] The luminance-floor and window-size constants are clearly named and
       isolated (e.g. module-level constants or a small config block in
       `camera_pipeline.py`) so they can be tuned later without a structural
       change.
-- [ ] Exposure/gain remediation is NOT implemented in this ticket. If
+- [x] Exposure/gain remediation is NOT implemented in this ticket. If
       implementation surfaces a trivially-safe opportunistic improvement,
       it must be raised as a follow-up issue rather than folded in here.
-- [ ] `uv run pytest` green; no regression in existing daemon pipeline
+- [x] `uv run pytest` green; no regression in existing daemon pipeline
       tests.
 
 ## Testing
