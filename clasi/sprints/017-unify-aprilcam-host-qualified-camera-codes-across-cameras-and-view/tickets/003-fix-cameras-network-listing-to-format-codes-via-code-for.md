@@ -1,7 +1,7 @@
 ---
 id: '003'
 title: Fix cameras' network listing to format codes via code_for
-status: open
+status: in-progress
 use-cases:
 - SUC-002
 depends-on:
