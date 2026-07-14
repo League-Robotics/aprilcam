@@ -1,7 +1,7 @@
 ---
 id: '004'
 title: Round-trip test matrix and removal of tests for the deleted parser
-status: in-progress
+status: done
 use-cases:
 - SUC-001
 - SUC-002
@@ -38,16 +38,16 @@ See `architecture-update.md` §7 ("Tests") and the Test Strategy section of
 
 ## Acceptance Criteria
 
-- [ ] A round-trip test matrix exists (new test module or a new test class
+- [x] A round-trip test matrix exists (new test module or a new test class
       in `tests/test_host_codes.py`) covering at minimum:
-  - [ ] Local-only store (one local host, multiple cameras, no remotes).
-  - [ ] Single-remote store (local + one remote host, multiple cameras on
+  - [x] Local-only store (one local host, multiple cameras, no remotes).
+  - [x] Single-remote store (local + one remote host, multiple cameras on
         each).
-  - [ ] Multi-remote store (local + 2+ remote hosts), including at least
+  - [x] Multi-remote store (local + 2+ remote hosts), including at least
         one host number high enough to require a two-letter *host* code
         (e.g. host `num` ≥ 27, producing a host letter like `AA`) to
         exercise the bijective base-26 rollover.
-- [ ] For every store shape in the matrix, for every camera in the store,
+- [x] For every store shape in the matrix, for every camera in the store,
       the test: (a) generates the code via `code_for(host_num, cam_num,
       is_local)` the same way `_list_all_from_store`/`_list_single_daemon`
       now do; (b) parses it back via `resolve_code(code, store)`; (c)
@@ -55,10 +55,10 @@ See `architecture-update.md` §7 ("Tests") and the Test Strategy section of
       originating host and camera exactly (by identity of stable
       identifying fields, e.g. `host_entry["host"]` and
       `camera_entry["num"]`/`["enum"]`).
-- [ ] `grep -rn "resolve_host_letter_number\|TestResolveHostLetterNumber"
+- [x] `grep -rn "resolve_host_letter_number\|TestResolveHostLetterNumber"
       src/ tests/` returns zero matches anywhere in the repository.
-- [ ] Full test suite (`uv run pytest`) passes green.
-- [ ] A brief manual/fixture-based check (not necessarily live hardware)
+- [x] Full test suite (`uv run pytest`) passes green.
+- [x] A brief manual/fixture-based check (not necessarily live hardware)
       confirms the end-to-end story: a code printed by
       `_list_all_from_store` for a synthetic multi-host store, when passed
       through `cli/view_cli.py`'s (now single-stage) resolution path against
@@ -102,3 +102,32 @@ after this change").
 
 **Documentation updates**: None beyond what tickets 002/003 already cover.
 This ticket is test-only.
+
+## Implementation Notes (post-completion)
+
+The multi-remote matrix (host `num` ≥ 27) surfaced a genuine, pre-existing
+boundary gap rather than a clean round trip: `code_for`'s remote formula is
+`num_to_alpha(host_num) + num_to_alpha(cam_num)` with no separator, so once
+a host needs a two-letter code (num ≥ 27) the *combined* code is 3+
+characters (e.g. host 27 camera 1 → `"AA" + "A"` = `"AAA"`). `resolve_code`
+caps input at 2 alphabetic characters and does a fixed 1-char/1-char split
+for the two-letter branch, so it structurally cannot parse anything
+`code_for` emits once a host's own code needs two letters — not merely "out
+of the documented ≤26-host range" but a parser/formatter shape mismatch
+that would also bite well within a nominally-supported deployment size if
+host numbering ever exceeded 26 for any reason (e.g. many probed-then-
+retired hosts).
+
+Per architecture-update.md's explicit decision ("`code_for`/`resolve_code`
+keep their current 1-2 letter, ≤26×26 addressing limit … out of scope"),
+this ticket does not change `host_codes.py` — it is test-only. The
+round-trip matrix (`TestRoundTrip::test_multi_remote_store_with_two_letter_host_rollover`
+in `tests/test_host_codes.py`) instead pins the *current* behavior for this
+boundary: cameras on hosts with `num` ≤ 26 round-trip losslessly (asserted
+identically to the other matrix shapes); cameras on hosts with `num` ≥ 27
+produce a >2-character code that `resolve_code` rejects with a clear
+`ValueError` (not silent misresolution) — asserted explicitly so this known
+gap is documented and regression-guarded rather than fixed under this
+ticket's scope. A follow-up ticket/issue would be needed to extend
+`code_for`/`resolve_code` to a variable-length, separator-aware or
+fixed-width host-segment encoding if a deployment ever needs >26 hosts.
