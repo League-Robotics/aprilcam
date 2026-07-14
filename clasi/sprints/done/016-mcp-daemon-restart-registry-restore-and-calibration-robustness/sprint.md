@@ -1,7 +1,7 @@
 ---
 id: '016'
 title: MCP daemon-restart registry restore and calibration robustness
-status: planning-docs
+status: done
 branch: sprint/016-mcp-daemon-restart-registry-restore-and-calibration-robustness
 use-cases:
 - SUC-001
