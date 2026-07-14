@@ -155,18 +155,18 @@ def resolve_camera_code(
     Returns:
         ``(host, enum)`` on code match, or ``None`` if not a code.
     """
-    from aprilcam.client.host_codes import load_store, resolve_code
+    from aprilcam.client.host_codes import load_store, resolve_code_or_none
 
     # Must be 1 or 2 alphabetic characters to be a code.
     s = camera_arg.strip()
     if not (1 <= len(s) <= 2 and s.isalpha()):
         return None
 
-    try:
-        store = load_store(config)
-        host_entry, cam_entry = resolve_code(s.upper(), store)
-    except (ValueError, Exception):
+    store = load_store(config)
+    resolved = resolve_code_or_none(s.upper(), store)
+    if resolved is None:
         return None
+    host_entry, cam_entry = resolved
 
     # Determine the host address to reach this daemon.
     is_local = host_entry.get("kind") == "local"

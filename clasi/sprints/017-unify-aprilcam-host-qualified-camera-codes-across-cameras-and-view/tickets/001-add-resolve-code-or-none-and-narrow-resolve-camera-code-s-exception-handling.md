@@ -1,7 +1,7 @@
 ---
 id: '001'
 title: Add resolve_code_or_none and narrow resolve_camera_code's exception handling
-status: open
+status: done
 use-cases:
 - SUC-003
 depends-on: []
@@ -31,23 +31,23 @@ the divergent letter+digit parser") for full design context.
 
 ## Acceptance Criteria
 
-- [ ] `client/host_codes.py` has a new function `resolve_code_or_none(code,
+- [x] `client/host_codes.py` has a new function `resolve_code_or_none(code,
       store)` that calls `resolve_code(code, store)` and returns `None`
       instead of raising when `resolve_code` raises `ValueError` (malformed
       code, unknown host, unknown camera). No changes to `code_for`,
       `resolve_code`, `resolve_host_token`, `num_to_alpha`, or
       `alpha_to_num`.
-- [ ] `cli/_daemon.py:resolve_camera_code` calls `resolve_code_or_none`
+- [x] `cli/_daemon.py:resolve_camera_code` calls `resolve_code_or_none`
       instead of its own `try: resolve_code(...) except (ValueError,
       Exception): return None` block. The bare `Exception` catch is
       removed — only the specific failure mode (invalid/unmatched code)
       is swallowed; unrelated exceptions propagate.
-- [ ] `resolve_camera_code`'s external contract is unchanged: still returns
+- [x] `resolve_camera_code`'s external contract is unchanged: still returns
       `(resolved_host, cam_enum)` on a code match or `None` otherwise, and
       still patches `args.daemon_host` for remote hosts.
-- [ ] Existing `tests/test_host_codes.py` coverage for `code_for`,
+- [x] Existing `tests/test_host_codes.py` coverage for `code_for`,
       `resolve_code`, and `resolve_host_token` remains green, unmodified.
-- [ ] New unit tests for `resolve_code_or_none` mirror the existing
+- [x] New unit tests for `resolve_code_or_none` mirror the existing
       `resolve_code` test cases (local single-letter match, remote
       two-letter match, unknown host, unknown camera, malformed code) plus
       the "returns `None`, does not raise" assertion for each failure case.

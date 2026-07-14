@@ -195,6 +195,32 @@ def resolve_code(
     return host_entry, cam
 
 
+def resolve_code_or_none(
+    code: str,
+    store: dict,
+) -> "tuple[dict, dict] | None":
+    """Resolve a camera code to (host_entry, camera_entry), or ``None``.
+
+    Thin non-raising wrapper around :func:`resolve_code`: delegates entirely
+    to it and returns ``None`` instead of raising when the code is malformed
+    or does not resolve to a known host/camera, matching the "return `None`
+    to let the caller fall back" convention used elsewhere in the CLI layer.
+
+    Args:
+        code: 1 or 2 upper-case letter camera code (e.g. ``"A"``, ``"FB"``).
+        store: Store dict as returned by :func:`load_store`.
+
+    Returns:
+        ``(host_entry, camera_entry)`` dicts from the store, or ``None`` when
+        *code* does not resolve (invalid format, unknown host, or unknown
+        camera).
+    """
+    try:
+        return resolve_code(code, store)
+    except ValueError:
+        return None
+
+
 def resolve_host_token(token: str, store: dict) -> str:
     """Resolve *token* to a hostname/IP if it is a single-letter host code.
 

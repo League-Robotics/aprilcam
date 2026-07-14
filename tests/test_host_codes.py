@@ -27,6 +27,7 @@ from aprilcam.client.host_codes import (
     merge_probe_results,
     num_to_alpha,
     resolve_code,
+    resolve_code_or_none,
     find_host,
     resolve_host_token,
     save_store,
@@ -198,6 +199,120 @@ class TestResolveCode:
         ])
         host_entry, cam_entry = resolve_code("a", store)
         assert cam_entry["num"] == 1
+
+
+# ---------------------------------------------------------------------------
+# resolve_code_or_none
+# ---------------------------------------------------------------------------
+
+
+class TestResolveCodeOrNone:
+    """Mirrors TestResolveCode: same cases, plus non-raising on failures."""
+
+    def test_local_single_letter(self):
+        store = _make_store([
+            {
+                "num": 1, "kind": "local", "host": "myhost",
+                "addresses": ["127.0.0.1"],
+                "cameras": [
+                    {"num": 1, "enum": 10, "index": 0, "name": "cam-a", "slug": "cam-a"},
+                    {"num": 2, "enum": 11, "index": 1, "name": "cam-b", "slug": "cam-b"},
+                ],
+            }
+        ])
+        result = resolve_code_or_none("A", store)
+        assert result is not None
+        host_entry, cam_entry = result
+        assert host_entry["num"] == 1
+        assert cam_entry["num"] == 1
+        assert cam_entry["name"] == "cam-a"
+
+    def test_local_second_camera(self):
+        store = _make_store([
+            {
+                "num": 1, "kind": "local", "host": "myhost",
+                "addresses": ["127.0.0.1"],
+                "cameras": [
+                    {"num": 1, "enum": 10, "index": 0, "name": "cam-a", "slug": "cam-a"},
+                    {"num": 2, "enum": 11, "index": 1, "name": "cam-b", "slug": "cam-b"},
+                ],
+            }
+        ])
+        result = resolve_code_or_none("B", store)
+        assert result is not None
+        _, cam_entry = result
+        assert cam_entry["name"] == "cam-b"
+
+    def test_remote_two_letters(self):
+        store = _make_store([
+            {"num": 1, "kind": "local", "host": "local", "addresses": [], "cameras": []},
+            {
+                "num": 6, "kind": "remote", "host": "vidar.local",
+                "addresses": ["192.168.1.144"],
+                "cameras": [
+                    {"num": 1, "enum": 6, "index": 0, "name": "imx296-88000", "slug": "imx296-88000"},
+                    {"num": 2, "enum": 7, "index": 1, "name": "imx296-80000", "slug": "imx296-80000"},
+                ],
+            },
+        ])
+        result = resolve_code_or_none("FB", store)
+        assert result is not None
+        host_entry, cam_entry = result
+        assert host_entry["host"] == "vidar.local"
+        assert cam_entry["num"] == 2
+        assert cam_entry["name"] == "imx296-80000"
+
+    def test_unknown_code_returns_none(self):
+        store = _make_store([])
+        assert resolve_code_or_none("A", store) is None
+
+    def test_unknown_remote_host_returns_none(self):
+        store = _make_store([
+            {"num": 1, "kind": "local", "host": "local", "addresses": [], "cameras": []},
+        ])
+        assert resolve_code_or_none("FA", store) is None
+
+    def test_too_long_returns_none(self):
+        store = _make_store([])
+        assert resolve_code_or_none("ABC", store) is None
+
+    def test_lowercase_accepted(self):
+        store = _make_store([
+            {
+                "num": 1, "kind": "local", "host": "myhost",
+                "addresses": [],
+                "cameras": [
+                    {"num": 1, "enum": 0, "index": 0, "name": "cam", "slug": "cam"},
+                ],
+            }
+        ])
+        result = resolve_code_or_none("a", store)
+        assert result is not None
+        _, cam_entry = result
+        assert cam_entry["num"] == 1
+
+    def test_unknown_camera_returns_none(self):
+        """A known host but a camera number that doesn't exist on it."""
+        store = _make_store([
+            {
+                "num": 1, "kind": "local", "host": "myhost",
+                "addresses": [],
+                "cameras": [
+                    {"num": 1, "enum": 0, "index": 0, "name": "cam", "slug": "cam"},
+                ],
+            }
+        ])
+        # "B" -> camera #2, which does not exist on the local host.
+        assert resolve_code_or_none("B", store) is None
+
+    def test_does_not_raise_on_malformed_input(self):
+        """Confirms the wrapper never raises, even for the raising cases."""
+        store = _make_store([])
+        try:
+            result = resolve_code_or_none("123", store)
+        except ValueError:
+            pytest.fail("resolve_code_or_none must not raise ValueError")
+        assert result is None
 
 
 # ---------------------------------------------------------------------------
