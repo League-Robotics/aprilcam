@@ -1,7 +1,7 @@
 ---
 id: '003'
 title: Fix calibration_stale reset gap
-status: in-progress
+status: done
 use-cases:
 - SUC-003
 depends-on: []
@@ -45,34 +45,34 @@ silently deskew with a stale transform after a bump").
 
 ## Acceptance Criteria
 
-- [ ] `src/aprilcam/core/playfield.py`: `_update_static` (or the boundary's
+- [x] `src/aprilcam/core/playfield.py`: `_update_static` (or the boundary's
       update cycle) gains a symmetric reset — when all tracked static
       markers are within `_effective_movement_threshold()` on a given
       check, `_calibration_stale` is cleared back to `False`, mirroring the
       existing set-to-`True` path.
-- [ ] The reset is symmetric and correct in both directions: a marker that
+- [x] The reset is symmetric and correct in both directions: a marker that
       exceeds threshold sets the flag `True`; on a subsequent check where
       all tracked markers are back within threshold, the flag clears to
       `False`. Partial recovery (some markers within threshold, at least
       one still outside) keeps the flag `True`.
-- [ ] `src/aprilcam/daemon/camera_pipeline.py`'s `_maybe_update_stale_flag()`
+- [x] `src/aprilcam/daemon/camera_pipeline.py`'s `_maybe_update_stale_flag()`
       requires no changes — it already writes `info.json` only "when the
       flag changes" and already treats `True→False` and `False→True`
       symmetrically; confirm this by running it against the new reset logic
       rather than modifying it speculatively.
-- [ ] **No threshold value change.** `DEFAULT_MOVEMENT_THRESHOLD_PX` (25.0px,
+- [x] **No threshold value change.** `DEFAULT_MOVEMENT_THRESHOLD_PX` (25.0px,
       `calibration/geometry.py:58`) and any per-camera
       `movement_threshold_px` override remain unchanged in this ticket.
-- [ ] The flag remains purely advisory after this fix — confirm no new
+- [x] The flag remains purely advisory after this fix — confirm no new
       gating is introduced anywhere that reads `calibration_stale`
       (`mcp_server.py:685-686` surfaces it informationally on
       `open_camera`'s response; `grpc_server.py` has zero references per
       planning-time grep — both should remain true after this change).
-- [ ] Regression test on `PlayfieldBoundary`/`_update_static` directly:
+- [x] Regression test on `PlayfieldBoundary`/`_update_static` directly:
       simulate marker positions exceeding threshold then returning within
       threshold across successive `update()` calls; assert
       `calibration_stale` transitions `False → True → False`.
-- [ ] `uv run pytest` green; no regression in existing playfield/calibration
+- [x] `uv run pytest` green; no regression in existing playfield/calibration
       tests.
 
 ## Testing
