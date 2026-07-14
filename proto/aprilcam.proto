@@ -333,6 +333,12 @@ message PlayfieldEntry {
 // ListPlayfieldsResponse — repeated PlayfieldEntry list.
 message ListPlayfieldsResponse {
   repeated PlayfieldEntry playfields = 1;
+  // Per-process daemon identity, generated once at daemon startup
+  // (uuid4().hex). Lets a long-lived MCP server detect a daemon restart
+  // (boot_id changes) vs. a transient channel reconnect (boot_id unchanged)
+  // without a dedicated RPC — piggybacked on this existing call. Empty on
+  // responses from a pre-boot_id daemon (mixed-version deployments).
+  string boot_id = 2;
 }
 
 // ---------------------------------------------------------------------------

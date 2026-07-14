@@ -1,8 +1,9 @@
 ---
 id: '001'
 title: Repopulate playfield registry after daemon restart
-status: open
-use-cases: [SUC-001]
+status: done
+use-cases:
+- SUC-001
 depends-on: []
 github-issue: ''
 issue: mcp-playfield-registry-not-restored-after-daemon-restart.md
@@ -45,18 +46,18 @@ timer.
 
 ## Acceptance Criteria
 
-- [ ] `proto/aprilcam.proto`: `ListPlayfieldsResponse` gains a `string
+- [x] `proto/aprilcam.proto`: `ListPlayfieldsResponse` gains a `string
       boot_id = N;` field (additive; no new RPC; no existing field
       renumbered). Stubs regenerated (`src/aprilcam/proto/aprilcam_pb2*.py`).
-- [ ] Daemon (`src/aprilcam/daemon/grpc_server.py` or the appropriate
+- [x] Daemon (`src/aprilcam/daemon/grpc_server.py` or the appropriate
       startup module) generates one `boot_id = uuid.uuid4().hex` per
       process at startup and stamps it onto every `ListPlayfieldsResponse`.
-- [ ] `src/aprilcam/client/control.py`: `DaemonControl.list_playfields()`
+- [x] `src/aprilcam/client/control.py`: `DaemonControl.list_playfields()`
       response carries `boot_id` through to the caller (pass-through field
       or +1 model field, whichever fits the existing wrapper pattern).
-- [ ] `src/aprilcam/server/mcp_server.py`: new module-level
+- [x] `src/aprilcam/server/mcp_server.py`: new module-level
       `_daemon_boot_id: Optional[str] = None`.
-- [ ] `_ensure_daemon_client()` calls a new `_maybe_repopulate_registry(client)`
+- [x] `_ensure_daemon_client()` calls a new `_maybe_repopulate_registry(client)`
       helper on every invocation (not only when `_daemon_client is None`).
       The helper calls `list_playfields()` (reusing the existing RPC, not
       an additional one), compares the returned `boot_id` to
@@ -67,7 +68,7 @@ timer.
       - On an **unchanged** `boot_id`: no-op — the registry is already
         correct. This is the mechanism that must NOT clobber valid,
         already-populated state on a transient connection blip.
-- [ ] Empty-registry fallback: the `create_playfield`, `calibrate_playfield`,
+- [x] Empty-registry fallback: the `create_playfield`, `calibrate_playfield`,
       and `set_camera_playfield` handlers (all of which consult
       `playfield_def_registry`) call `_maybe_repopulate_registry(client)`
       once, at the point where they would otherwise fail because the
@@ -75,11 +76,11 @@ timer.
       mixed-version deployments where the connected daemon doesn't yet
       stamp `boot_id` (old daemon → new MCP server), where the `boot_id`
       comparison alone can't detect the restart.
-- [ ] `connect_daemon` tool (`mcp_server.py:1613`) continues to work
+- [x] `connect_daemon` tool (`mcp_server.py:1613`) continues to work
       unchanged — it already re-fires `_on_daemon_connect` explicitly on
       every manual reconnect; update it to also refresh `_daemon_boot_id`
       from the new connection so the two mechanisms stay consistent.
-- [ ] Regression test simulating a daemon restart under a persistent MCP
+- [x] Regression test simulating a daemon restart under a persistent MCP
       connection: a fake/stub `DaemonControl` (pattern from
       `tests/test_connect_daemon.py`'s `MagicMock`-based
       `_inject_fake_client` helper) whose `list_playfields()` return value
@@ -93,11 +94,11 @@ timer.
       - After repopulation, `open_camera` rehydration,
         `create_playfield`, and `calibrate_playfield` succeed against the
         new registry contents without an MCP-server restart.
-- [ ] Unit test for the empty-registry fallback: registry empty, daemon
+- [x] Unit test for the empty-registry fallback: registry empty, daemon
       reachable and returns playfields on retry (e.g. old-daemon
       simulation with no `boot_id` change signal) → handler recovers
       instead of raising `"Available playfields: [(none)]"`.
-- [ ] `uv run pytest` green; no regression in existing
+- [x] `uv run pytest` green; no regression in existing
       `tests/test_connect_daemon.py`, `tests/test_daemon_control.py`,
       `tests/test_015_003_mcp_tag_tools_daemon.py`.
 
