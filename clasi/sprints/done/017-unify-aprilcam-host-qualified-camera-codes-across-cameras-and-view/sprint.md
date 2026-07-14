@@ -1,7 +1,7 @@
 ---
 id: '017'
 title: Unify aprilcam host-qualified camera codes across cameras and view
-status: architecture-review
+status: done
 branch: sprint/017-unify-aprilcam-host-qualified-camera-codes-across-cameras-and-view
 use-cases:
 - SUC-001
