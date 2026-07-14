@@ -681,7 +681,13 @@ class DaemonControl:
 
         Returns:
             ``ListPlayfieldsResponse`` with a repeated ``PlayfieldEntry`` list,
-            each carrying ``name`` (slug) and ``json_blob`` (raw file content).
+            each carrying ``name`` (slug) and ``json_blob`` (raw file content),
+            plus ``boot_id`` — the daemon process's identity (``uuid4().hex``,
+            generated once at daemon startup). A caller that compares
+            ``boot_id`` across calls can tell a genuine daemon restart (value
+            changes) apart from a transient channel reconnect (value
+            unchanged). Empty string when talking to a pre-``boot_id`` daemon
+            (mixed-version deployments; see Sprint 016 ticket 001).
         """
         stub = self._stub_or_raise()
         return stub.ListPlayfields(aprilcam_pb2.Empty())

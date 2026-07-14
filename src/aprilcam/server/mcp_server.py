@@ -278,6 +278,13 @@ playfield_def_registry = PlayfieldDefinitionRegistry()
 
 _daemon_client: Optional[DaemonControl] = None
 
+# The connected daemon's process identity (uuid4().hex), as last observed via
+# ListPlayfields' boot_id field. None until the first successful
+# _maybe_repopulate_registry() call. Used to detect a genuine daemon restart
+# (boot_id changes) vs. a transient gRPC channel reconnect (boot_id
+# unchanged) — see Sprint 016 ticket 001.
+_daemon_boot_id: Optional[str] = None
+
 # Per-camera info read from info.json after open_camera RPC.
 # Keys are camera_id strings (e.g. "cam_0"); values are the parsed
 # info.json dicts including a "paths_file" key.
@@ -310,12 +317,16 @@ def _tag_stream_reader(
 
 
 def _on_daemon_connect(client: DaemonControl) -> None:
-    """Post-connect hook: populate the playfield_def_registry via ListPlayfields RPC.
+    """Post-connect hook: (re)populate the playfield_def_registry via ListPlayfields RPC.
 
-    Called after a daemon connection is established (either lazily on first use
-    or explicitly via the ``connect_daemon`` tool).  Replaces any
-    ``playfield_def_registry.load_all(local_dir)`` calls that assumed local disk
-    access to the daemon's files.
+    Unconditionally clears and repopulates ``playfield_def_registry`` from
+    the daemon's current playfield definitions. Called after a daemon
+    connection is established (first use or explicit ``connect_daemon``
+    reconnect), and reused as the repopulate body by
+    :func:`_maybe_repopulate_registry` once it has determined a repopulate is
+    actually warranted (first connect or a changed ``boot_id``).  Replaces
+    any ``playfield_def_registry.load_all(local_dir)`` calls that assumed
+    local disk access to the daemon's files.
     """
     import logging
     _log = logging.getLogger("aprilcam")
@@ -332,8 +343,54 @@ def _on_daemon_connect(client: DaemonControl) -> None:
             "_on_daemon_connect: loaded %d playfield(s) from daemon",
             len(playfield_def_registry.list()),
         )
+        global _daemon_boot_id
+        _daemon_boot_id = getattr(pf_reply, "boot_id", "") or ""
     except Exception as exc:
         _log.warning("_on_daemon_connect: ListPlayfields RPC failed: %s", exc)
+
+
+def _maybe_repopulate_registry(client: DaemonControl) -> None:
+    """Repopulate ``playfield_def_registry`` if the daemon has actually restarted.
+
+    Calls ``list_playfields()`` (the same RPC ``_on_daemon_connect`` already
+    uses — this is not an additional round trip beyond what first-connect
+    already pays) and compares the response's ``boot_id`` to the
+    module-level ``_daemon_boot_id`` recorded from the last check:
+
+    - **Changed** ``boot_id`` (including the first check, where
+      ``_daemon_boot_id is None``): the daemon process is new (or newly
+      observed) — run :func:`_on_daemon_connect` (clear + repopulate the
+      registry; it also updates ``_daemon_boot_id``).
+    - **Unchanged** ``boot_id``: no-op. This is what prevents a transient
+      connection blip from clobbering an already-correct, populated
+      registry — the daemon process itself never restarted, even if the
+      gRPC channel briefly reconnected at the transport layer.
+
+    A daemon that predates ``boot_id`` (mixed-version deployment) always
+    reports ``boot_id == ""``; two `""` responses compare equal, so this
+    mechanism alone never detects a restart against such a daemon. The
+    empty-registry fallback in the ``create_playfield`` /
+    ``calibrate_playfield`` / ``set_camera_playfield`` handlers is the
+    compatibility floor for that case.
+
+    A cheap probe-only RPC (no repopulate) is made even when unchanged, so a
+    transient RPC failure here is logged and swallowed — callers treat this
+    as best-effort, matching ``_on_daemon_connect``.
+    """
+    import logging
+    _log = logging.getLogger("aprilcam")
+    try:
+        pf_reply = client.list_playfields()
+    except Exception as exc:
+        _log.warning("_maybe_repopulate_registry: ListPlayfields RPC failed: %s", exc)
+        return
+
+    new_boot_id = getattr(pf_reply, "boot_id", "") or ""
+    if _daemon_boot_id is not None and new_boot_id == _daemon_boot_id:
+        # Same daemon process as last observed — registry is already correct.
+        return
+
+    _on_daemon_connect(client)
 
 
 def _ensure_daemon_client() -> DaemonControl:
@@ -343,8 +400,13 @@ def _ensure_daemon_client() -> DaemonControl:
     discovery.  If ``--daemon-host`` / ``--daemon-port`` were parsed by
     ``main()``, those override all discovery methods.
 
-    On first connection, calls :func:`_on_daemon_connect` to populate the
-    playfield definition registry via the ``ListPlayfields`` RPC.
+    On every call — first connection and every subsequent call against an
+    already-open channel alike — calls :func:`_maybe_repopulate_registry`,
+    which populates the playfield definition registry via the
+    ``ListPlayfields`` RPC on first connect or when the daemon's ``boot_id``
+    has changed (a genuine daemon restart), and is a no-op otherwise. This is
+    what keeps a long-lived MCP server from serving a permanently-stale
+    registry after ``aprilcamd`` restarts under it (Sprint 016 ticket 001).
     """
     global _daemon_client
     if _daemon_client is None:
@@ -356,7 +418,7 @@ def _ensure_daemon_client() -> DaemonControl:
             daemon_port = _daemon_port_override or config.daemon_port
 
         _daemon_client = DaemonControl.connect_default(config, cli_args=_CliProxy())
-        _on_daemon_connect(_daemon_client)
+    _maybe_repopulate_registry(_daemon_client)
     return _daemon_client
 
 
@@ -711,8 +773,19 @@ def _handle_set_camera_playfield(camera_id: str, playfield: str) -> dict:
     if camera_id not in registry._cameras:
         return {"error": f"Unknown camera_id '{camera_id}'"}
 
-    # Validate playfield name exists in the definition registry
+    # Validate playfield name exists in the definition registry. An empty
+    # registry with a reachable daemon is itself evidence of a stale
+    # MCP-side cache (e.g. a daemon restart the boot_id check alone didn't
+    # catch — mixed-version deployment); retry once via
+    # _maybe_repopulate_registry before concluding the playfield is really
+    # unknown (Sprint 016 ticket 001 empty-registry fallback).
     available = playfield_def_registry.list()
+    if playfield not in available and not available:
+        try:
+            _maybe_repopulate_registry(_ensure_daemon_client())
+        except Exception:
+            pass
+        available = playfield_def_registry.list()
     if playfield not in available:
         names = ", ".join(available) if available else "(none loaded)"
         return {"error": f"Playfield '{playfield}' not found. Available: [{names}]"}
@@ -812,6 +885,20 @@ def _handle_create_playfield(
         # Validate camera exists (sentinel None is fine — daemon owns the capture)
         if camera_id not in registry._cameras:
             return {"error": f"Unknown camera_id '{camera_id}'"}
+
+        # Empty registry with a reachable daemon is itself evidence of a
+        # stale MCP-side cache (e.g. a daemon restart the boot_id check
+        # alone didn't catch — mixed-version deployment). This handler does
+        # not itself key off playfield_def_registry, but callers commonly
+        # chain create_playfield -> get_playfield_info/where, which do; retry
+        # once here so those calls don't see a stale-empty registry
+        # immediately after create_playfield succeeds (Sprint 016 ticket 001
+        # empty-registry fallback).
+        if not playfield_def_registry.list():
+            try:
+                _maybe_repopulate_registry(_ensure_daemon_client())
+            except Exception:
+                pass
 
         # Create playfield and try to detect corners (proc_width=0 disables downscale)
         pf = Playfield(detect_inverted=True, proc_width=0)
@@ -1703,7 +1790,12 @@ async def connect_daemon(
     except Exception as exc:
         return [TextContent(type="text", text=json.dumps({"error": f"Cannot connect to daemon: {exc}"}))]
 
-    # Populate playfield registry from new daemon.
+    # Populate playfield registry from new daemon. Also refreshes
+    # _daemon_boot_id (as a side effect of _on_daemon_connect) so the two
+    # repopulate mechanisms — this explicit reconnect and the per-call
+    # _maybe_repopulate_registry() boot_id comparison — stay consistent: a
+    # manual connect_daemon() to the same daemon process the ensure-client
+    # path already observed will not be mistaken for a restart later.
     _on_daemon_connect(_daemon_client)
 
     # Report target.
@@ -1960,6 +2052,15 @@ async def calibrate_playfield(
                 PlayfieldConfigError,
             )
             client = _ensure_daemon_client()
+
+            # Empty registry with a reachable daemon is itself evidence of a
+            # stale MCP-side cache (e.g. a daemon restart the boot_id check
+            # alone didn't catch — mixed-version deployment); retry once
+            # before calibrate_from_playfield_def raises PlayfieldConfigError
+            # with "Available playfields: [(none)]" (Sprint 016 ticket 001
+            # empty-registry fallback).
+            if not playfield_def_registry.list():
+                _maybe_repopulate_registry(client)
 
             # Fetch config from daemon (no local disk read).
             cfg_reply = client.get_camera_config(camera_id)

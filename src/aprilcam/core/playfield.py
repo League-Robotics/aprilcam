@@ -330,12 +330,16 @@ class PlayfieldBoundary:
 
         # --- Movement invalidation: compare detected vs stored positions ---
         threshold = self._effective_movement_threshold()
+        any_checked = False
+        any_exceeded = False
         for key, live in detected.items():
             ref = stored.get(key)
             if ref is None:
                 continue
+            any_checked = True
             dist = math.hypot(live[0] - ref[0], live[1] - ref[1])
             if dist > threshold:
+                any_exceeded = True
                 if not self._calibration_stale:
                     log.warning(
                         "Static marker %s moved %.1fpx (> %.1fpx threshold): "
@@ -344,6 +348,21 @@ class PlayfieldBoundary:
                         key, dist, threshold,
                     )
                 self._calibration_stale = True
+
+        # --- Reset (symmetric to the set path above): if every static marker
+        # checked this cycle is back within threshold, clear the staleness
+        # flag.  Partial recovery (at least one checked marker still outside
+        # threshold) is handled above (``any_exceeded`` keeps it True) and
+        # never reaches this branch as a reset.  A cycle where nothing was
+        # detected/checked (``any_checked`` False) leaves the flag untouched —
+        # there is no positional evidence to justify clearing it.
+        if any_checked and not any_exceeded and self._calibration_stale:
+            log.info(
+                "All tracked static markers back within %.1fpx threshold: "
+                "clearing stale static calibration flag.",
+                threshold,
+            )
+            self._calibration_stale = False
 
         # --- Fill-in: hold stored position for any static marker not detected;
         # update the held position for detected ones. ---

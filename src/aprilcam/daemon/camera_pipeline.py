@@ -100,6 +100,22 @@ def _apply_camera_settings(
 _RING_BUFFER_SIZE = 300
 _FPS_WINDOW = 30  # number of recent frame timestamps to keep for rolling FPS
 
+# --- Dark-frame / zero-detection advisory signal (sprint 016, ticket 002) ---
+# Purely advisory: nothing reads ``frame_dark`` to gate or refuse an
+# operation.  See architecture-update.md §2 for the full design.  A cheap
+# windowed mean-luminance sample (downsampled, pure NumPy — no new CV
+# dependency) is taken once every _DARK_SAMPLE_EVERY_N_FRAMES frames and
+# compared against _DARK_LUMINANCE_FLOOR.  A sample counts as "dark" when
+# the mean luminance is below the floor AND zero tags were detected in that
+# same frame.  Once _DARK_WINDOW_SAMPLES consecutive dark samples have been
+# observed, the sustained condition sets frame_dark = True; a single
+# non-dark sample clears it.
+_DARK_SAMPLE_EVERY_N_FRAMES = 5
+_DARK_LUMINANCE_FLOOR = 25.0  # mean of downsampled grayscale, 0-255 scale
+_DARK_WINDOW_SAMPLES = 30  # consecutive dark samples required (~1s at 30fps/5)
+_DARK_DOWNSAMPLE_MAX_DIM = 64  # longest side of the downsampled luminance sample
+_DARK_LOG_RATE_LIMIT_S = 30.0  # minimum seconds between repeated dark/clear warnings
+
 
 class CameraPipeline:
     """Capture, detect, encode, and publish for a single camera.
@@ -178,6 +194,14 @@ class CameraPipeline:
         # Thread control
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+
+        # Dark-frame / zero-detection advisory signal (sprint 016, ticket 002).
+        # See module-level _DARK_* constants. Purely advisory — see
+        # _maybe_update_frame_dark() / _write_info_json().
+        self._frame_dark: bool = False
+        self._last_frame_dark_written: bool = False
+        self._dark_consecutive_samples: int = 0
+        self._last_dark_log_mono: float = 0.0
 
     # ------------------------------------------------------------------
     # Producer injection
@@ -611,6 +635,76 @@ class CameraPipeline:
         fw, fh = self._info_frame_size
         self._write_info_json(fw, fh, self._info_homography, self._info_device_name)
 
+    @staticmethod
+    def _sample_mean_luminance(frame: np.ndarray) -> float:
+        """Return a cheap mean-luminance sample for *frame*.
+
+        Downsamples to at most ``_DARK_DOWNSAMPLE_MAX_DIM`` on the longest
+        side (simple strided slicing — no cv2 resize, no new CV dependency)
+        and averages either the single channel (grayscale) or the BGR
+        channels (a rough luminance proxy; good enough for a coarse
+        dark/bright signal, not colorimetrically accurate). Pure NumPy.
+        """
+        h, w = frame.shape[:2]
+        if h == 0 or w == 0:
+            return 0.0
+        step = max(1, max(h, w) // _DARK_DOWNSAMPLE_MAX_DIM)
+        small = frame[::step, ::step]
+        return float(np.mean(small))
+
+    def _maybe_update_frame_dark(self, frame: np.ndarray, tag_count: int) -> None:
+        """Update the windowed dark-frame / zero-detection advisory signal.
+
+        Samples mean luminance once every ``_DARK_SAMPLE_EVERY_N_FRAMES``
+        frames (not every frame, to keep the cost negligible). A sample is
+        "dark" when luminance is below ``_DARK_LUMINANCE_FLOOR`` AND
+        ``tag_count`` is zero. ``_DARK_WINDOW_SAMPLES`` consecutive dark
+        samples set ``frame_dark = True``; any non-dark sample clears the
+        run and, if the flag was set, clears it immediately. Writes
+        info.json only when the flag's value actually changes (mirrors
+        ``_maybe_update_stale_flag``), and emits a rate-limited log warning
+        on each transition. Purely advisory — nothing else reads this flag.
+        """
+        if self._frame_id % _DARK_SAMPLE_EVERY_N_FRAMES != 0:
+            return
+
+        luminance = self._sample_mean_luminance(frame)
+        is_dark_sample = luminance < _DARK_LUMINANCE_FLOOR and tag_count == 0
+
+        if is_dark_sample:
+            self._dark_consecutive_samples += 1
+        else:
+            self._dark_consecutive_samples = 0
+
+        new_frame_dark = self._dark_consecutive_samples >= _DARK_WINDOW_SAMPLES
+        if new_frame_dark == self._frame_dark:
+            return
+
+        self._frame_dark = new_frame_dark
+        now = time.monotonic()
+        if now - self._last_dark_log_mono >= _DARK_LOG_RATE_LIMIT_S:
+            self._last_dark_log_mono = now
+            if new_frame_dark:
+                log.warning(
+                    "CameraPipeline(%s): frame_dark=True — mean luminance "
+                    "%.1f below floor %.1f with zero tags detected for "
+                    "%d consecutive samples (advisory only)",
+                    self.cam_name,
+                    luminance,
+                    _DARK_LUMINANCE_FLOOR,
+                    self._dark_consecutive_samples,
+                )
+            else:
+                log.info(
+                    "CameraPipeline(%s): frame_dark=False — condition cleared",
+                    self.cam_name,
+                )
+
+        if new_frame_dark == self._last_frame_dark_written:
+            return
+        fw, fh = self._info_frame_size
+        self._write_info_json(fw, fh, self._info_homography, self._info_device_name)
+
     def _write_info_json(
         self,
         frame_w: int,
@@ -631,11 +725,13 @@ class CameraPipeline:
         info = {
             "paths_file": str(cam_dir / "paths.json"),
             "calibration_stale": stale,
+            "frame_dark": self._frame_dark,
         }
         dest = cam_dir / "info.json"
         tmp = cam_dir / "info.json.tmp"
         tmp.write_text(json.dumps(info, indent=2))
         tmp.rename(dest)
+        self._last_frame_dark_written = self._frame_dark
 
     def _rolling_fps(self) -> float:
         """Compute FPS as frames / elapsed over the rolling window."""
@@ -905,6 +1001,11 @@ class CameraPipeline:
             # Surface movement-invalidation: if the boundary flagged the static
             # calibration stale this frame, reflect it in info.json.
             self._maybe_update_stale_flag()
+
+            # Dark-frame / zero-detection advisory signal (sprint 016, ticket
+            # 002): windowed mean-luminance + zero-tag-count check, purely
+            # advisory (see _maybe_update_frame_dark docstring).
+            self._maybe_update_frame_dark(frame, len(tag_records))
 
             # Re-centre world_xy on AprilTag 1 and apply parallax correction.
             # The def-driven homography is already A1-centred with +y pointing

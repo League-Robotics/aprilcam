@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import uuid
 from concurrent import futures
 from typing import TYPE_CHECKING, Dict, List, Optional
 
@@ -68,6 +69,13 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
         self._image_producers: Dict[str, "ImageStreamProducer"] = {}
         self._tag_producers: Dict[str, "TagStreamProducer"] = {}
         self._producer_lock = threading.Lock()
+
+        # Per-process identity, generated once at servicer construction (i.e.
+        # once per daemon process lifetime). Stamped onto every
+        # ListPlayfieldsResponse so a long-lived MCP client can distinguish a
+        # genuine daemon restart (boot_id changes) from a transient channel
+        # reconnect (boot_id unchanged) — see Sprint 016 ticket 001.
+        self.boot_id = uuid.uuid4().hex
 
     # ------------------------------------------------------------------
     # Camera lifecycle
@@ -962,7 +970,9 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
         playfields_dir = self._config.playfields_dir
         entries: list[aprilcam_pb2.PlayfieldEntry] = []
         if not playfields_dir.exists():
-            return aprilcam_pb2.ListPlayfieldsResponse(playfields=entries)
+            return aprilcam_pb2.ListPlayfieldsResponse(
+                playfields=entries, boot_id=self.boot_id
+            )
         for p in sorted(playfields_dir.glob("*.json")):
             try:
                 blob = p.read_text(encoding="utf-8")
@@ -971,7 +981,9 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
                 )
             except Exception:
                 log.warning("ListPlayfields: skipping unreadable file %s", p)
-        return aprilcam_pb2.ListPlayfieldsResponse(playfields=entries)
+        return aprilcam_pb2.ListPlayfieldsResponse(
+            playfields=entries, boot_id=self.boot_id
+        )
 
     # ------------------------------------------------------------------
     # Mobile-tag registry

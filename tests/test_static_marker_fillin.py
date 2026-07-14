@@ -11,6 +11,11 @@ ArUco markers — ``_detect_corners`` is mocked):
 - sentinel: AprilTag 1 trips invalidation even when corner markers are occluded.
 - configurability: the threshold and the static set are configurable.
 - daemon surfacing: the stale flag is written into ``info.json``.
+- reset gap (Sprint 016, ticket 003): once tracked static markers return
+  within threshold, ``calibration_stale`` clears back to ``False`` — a
+  symmetric counterpart to the set-to-``True`` path above. Partial recovery
+  (some markers back within threshold, at least one still outside) keeps the
+  flag ``True``.
 """
 
 from __future__ import annotations
@@ -268,6 +273,131 @@ def test_info_json_carries_stale_flag(tmp_path: Path):
     pipe._info_homography = None
     pipe._info_device_name = "cam0"
     pipe._last_stale_written = True
+    _FakeBoundary.calibration_stale = False
+    pipe._maybe_update_stale_flag()
+    data = json.loads(info_path.read_text())
+    assert data["calibration_stale"] is False
+
+
+# ---------------------------------------------------------------------------
+# Reset gap (Sprint 016, ticket 003): calibration_stale must clear back to
+# False once all tracked static markers return within threshold — mirroring
+# the existing set-to-True path. Before this fix, no code path ever cleared
+# the flag once set.
+# ---------------------------------------------------------------------------
+
+
+def test_calibration_stale_resets_when_markers_return_within_threshold(caplog):
+    b = _boundary(movement_threshold_px=25.0)
+    assert b.calibration_stale is False
+
+    # Frame 1: LR corner (ArUco 3) moved far beyond threshold -> flag sets True.
+    moved = dict(_ARUCO)
+    moved[3] = (_CORNERS["corner:LR"][0] + 80.0, _CORNERS["corner:LR"][1] + 80.0)
+    _mock_corners(b, moved)
+    b.update(_FRAME, apriltags={1: _APRIL1["apriltag:1"]})
+    assert b.calibration_stale is True
+
+    # Frame 2: all static markers detected back at (or within threshold of)
+    # their stored positions -> flag must clear back to False.
+    _mock_corners(b, _ARUCO)
+    with caplog.at_level(logging.INFO, logger="aprilcam.core.playfield"):
+        b.update(_FRAME, apriltags={1: _APRIL1["apriltag:1"]})
+    assert b.calibration_stale is False
+    assert any("clearing stale" in rec.message.lower() for rec in caplog.records)
+
+
+def test_calibration_stale_partial_recovery_keeps_flag_true():
+    b = _boundary(movement_threshold_px=25.0)
+
+    # Frame 1: two corners moved beyond threshold -> flag sets True.
+    moved = dict(_ARUCO)
+    moved[3] = (_CORNERS["corner:LR"][0] + 80.0, _CORNERS["corner:LR"][1] + 80.0)
+    moved[2] = (_CORNERS["corner:LL"][0] + 80.0, _CORNERS["corner:LL"][1] + 80.0)
+    _mock_corners(b, moved)
+    b.update(_FRAME, apriltags={1: _APRIL1["apriltag:1"]})
+    assert b.calibration_stale is True
+
+    # Frame 2: only one of the two offending corners (LR, id 3) recovers;
+    # the other (LL, id 2) is still detected beyond threshold -> flag stays True.
+    partial_recovery = dict(_ARUCO)
+    partial_recovery[2] = (_CORNERS["corner:LL"][0] + 80.0, _CORNERS["corner:LL"][1] + 80.0)
+    _mock_corners(b, partial_recovery)
+    b.update(_FRAME, apriltags={1: _APRIL1["apriltag:1"]})
+    assert b.calibration_stale is True
+
+    # Frame 3: the remaining offending corner also recovers -> flag clears.
+    _mock_corners(b, _ARUCO)
+    b.update(_FRAME, apriltags={1: _APRIL1["apriltag:1"]})
+    assert b.calibration_stale is False
+
+
+def test_calibration_stale_full_transition_false_true_false():
+    """Core regression test: drive the boundary through a full
+    False -> True -> False cycle across successive update() calls."""
+    b = _boundary(movement_threshold_px=25.0)
+    assert b.calibration_stale is False
+
+    # Exceed threshold: False -> True.
+    moved = dict(_ARUCO)
+    moved[0] = (_CORNERS["corner:UL"][0] + 50.0, _CORNERS["corner:UL"][1] + 50.0)
+    _mock_corners(b, moved)
+    b.update(_FRAME, apriltags={1: _APRIL1["apriltag:1"]})
+    assert b.calibration_stale is True
+
+    # Return within threshold: True -> False.
+    _mock_corners(b, _ARUCO)
+    b.update(_FRAME, apriltags={1: _APRIL1["apriltag:1"]})
+    assert b.calibration_stale is False
+
+
+def test_calibration_stale_untouched_when_nothing_detected():
+    """A cycle with no static markers detected at all (e.g. full occlusion)
+    has no positional evidence and must not clear a previously-set flag."""
+    b = _boundary(movement_threshold_px=25.0)
+
+    moved = dict(_ARUCO)
+    moved[3] = (_CORNERS["corner:LR"][0] + 80.0, _CORNERS["corner:LR"][1] + 80.0)
+    _mock_corners(b, moved)
+    b.update(_FRAME, apriltags={1: _APRIL1["apriltag:1"]})
+    assert b.calibration_stale is True
+
+    # Nothing detected this cycle -> fill-in holds, but no reset should occur.
+    _mock_corners(b, {})
+    b.update(_FRAME, apriltags={})
+    assert b.calibration_stale is True
+
+
+def test_maybe_update_stale_flag_writes_info_json_on_both_transitions(tmp_path: Path):
+    """Guard against a future regression: _maybe_update_stale_flag() must
+    write info.json on both False->True and True->False transitions."""
+    from aprilcam.config import Config
+    from aprilcam.daemon.camera_pipeline import CameraPipeline
+
+    cfg = Config(data_dir=tmp_path, socket_dir=tmp_path / "sock")
+    pipe = CameraPipeline("cam0", 0, cfg)
+
+    class _FakeBoundary:
+        calibration_stale = False
+
+    class _FakeCam:
+        playfield = _FakeBoundary()
+
+    pipe._april_cam = _FakeCam()
+    pipe._info_frame_size = (640, 480)
+    pipe._info_homography = None
+    pipe._info_device_name = "cam0"
+    pipe._last_stale_written = False
+
+    info_path = cfg.cameras_dir / "cam0" / "info.json"
+
+    # False -> True: info.json is (re)written with calibration_stale True.
+    _FakeBoundary.calibration_stale = True
+    pipe._maybe_update_stale_flag()
+    data = json.loads(info_path.read_text())
+    assert data["calibration_stale"] is True
+
+    # True -> False: info.json is rewritten again with calibration_stale False.
     _FakeBoundary.calibration_stale = False
     pipe._maybe_update_stale_flag()
     data = json.loads(info_path.read_text())
