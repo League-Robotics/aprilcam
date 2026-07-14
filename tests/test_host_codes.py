@@ -724,7 +724,8 @@ class TestCamerasCliCodeColumn:
 
     def test_code_shown_from_store(self, monkeypatch, tmp_path, capsys):
         """With no --host, `cameras` lists every host from the store, addressing
-        local cameras by bare number and remote cameras by host-letter+number."""
+        local cameras by their single-letter code and remote cameras by
+        host-letter+camera-letter (both via `code_for`)."""
         from aprilcam.cli import cameras_cli
         from unittest.mock import MagicMock
 
@@ -758,12 +759,14 @@ class TestCamerasCliCodeColumn:
         out = capsys.readouterr().out
 
         assert rc == 0, f"cameras_cli.main returned {rc}; stdout={out!r}"
-        # Local host: letter A in header, cameras as bare numbers (10, 11).
+        # Local host: letter A in header, cameras as single-letter codes (A, B —
+        # store nums 1 and 2 — via code_for, not the daemon enum 10/11).
         assert "myhost" in out and "[A]" in out and "(local)" in out
-        assert "10" in out and "11" in out
-        # Remote host: letter B in header, camera as host-letter+number (B6).
+        assert "cam-alpha" in out and "cam-beta" in out
+        # Remote host: letter B in header, camera as host-letter+camera-letter
+        # (store host num 2, camera num 1 -> "BA" via code_for).
         assert "vidar" in out and "[B]" in out
-        assert "B6" in out
+        assert "BA" in out
 
     def test_hint_shown_when_no_store(self, monkeypatch, capsys):
         from aprilcam.cli import cameras_cli
@@ -790,6 +793,122 @@ class TestCamerasCliCodeColumn:
 
         assert rc == 0
         assert "aprilcam probe" in out
+
+    def test_network_and_single_daemon_listings_agree(self, monkeypatch, capsys):
+        """`_list_all_from_store` and `_list_single_daemon` must format the
+        exact same code for the same host+camera store entry — both delegate
+        to `code_for`, so this guards against one path drifting back to an
+        ad hoc format."""
+        from aprilcam.cli import cameras_cli
+        from aprilcam.client.host_codes import code_for
+        from aprilcam.client.models import CameraDevice
+        from unittest.mock import MagicMock
+
+        store = {
+            "version": 1,
+            "hosts": [
+                {
+                    "num": 1, "kind": "local", "host": "myhost",
+                    "addresses": ["127.0.0.1"],
+                    "cameras": [
+                        {"num": 1, "enum": 10, "index": 0, "name": "cam-alpha", "slug": "cam-alpha"},
+                        {"num": 2, "enum": 11, "index": 1, "name": "cam-beta", "slug": "cam-beta"},
+                    ],
+                },
+                {
+                    "num": 2, "kind": "remote", "host": "vidar",
+                    "addresses": ["10.0.0.2"],
+                    "cameras": [
+                        {"num": 1, "enum": 6, "index": 0, "name": "imx296", "slug": "imx296"},
+                        {"num": 2, "enum": 7, "index": 1, "name": "imx296b", "slug": "imx296b"},
+                    ],
+                },
+            ],
+        }
+
+        # --- network listing (_list_all_from_store), no --host ---
+        monkeypatch.delenv("APRILCAM_DAEMON_HOST", raising=False)
+        monkeypatch.setattr("aprilcam.cli.cameras_cli.load_store", lambda *a, **kw: store)
+        mock_cfg = MagicMock()
+        monkeypatch.setattr("aprilcam.cli.cameras_cli.Config", MagicMock(load=MagicMock(return_value=mock_cfg)))
+
+        rc = cameras_cli.main([])
+        network_out = capsys.readouterr().out
+        assert rc == 0
+
+        # Expected codes straight from code_for, for each store entry.
+        expected = {
+            "cam-alpha": code_for(1, 1, True),   # "A"
+            "cam-beta": code_for(1, 2, True),    # "B"
+            "imx296": code_for(2, 1, False),     # "BA"
+            "imx296b": code_for(2, 2, False),    # "BB"
+        }
+        for name, code in expected.items():
+            assert f"{code:<6}{name}" in network_out, (
+                f"expected code {code!r} for {name!r} in network listing:\n{network_out}"
+            )
+
+        # --- single-daemon listing (_list_single_daemon), local host ---
+        local_devices = [
+            CameraDevice(index=0, name="cam-alpha", slug="cam-alpha", enum=10),
+            CameraDevice(index=1, name="cam-beta", slug="cam-beta", enum=11),
+        ]
+        dc = MagicMock()
+        dc.enumerate_cameras.return_value = local_devices
+        dc._unix_path = "/tmp/fake.sock"  # local connection marker
+
+        monkeypatch.setattr(
+            cameras_cli.AppConfig,
+            "load",
+            classmethod(lambda cls, *a, **k: type("E", (), {"env": {}})()),
+        )
+        monkeypatch.setattr("aprilcam.cli.cameras_cli.connect_from_args", lambda *a, **kw: dc)
+
+        rc = cameras_cli.main(["--host", "myhost"])
+        single_out = capsys.readouterr().out
+        assert rc == 0
+
+        assert f" {expected['cam-alpha']} cam-alpha" in single_out
+        assert f" {expected['cam-beta']} cam-beta" in single_out
+
+    def test_usage_hint_code_resolves(self, monkeypatch, capsys):
+        """The printed usage-hint example code must actually resolve via
+        resolve_code against a store shaped like the one used in the hint."""
+        from aprilcam.cli import cameras_cli
+        from aprilcam.client.host_codes import resolve_code
+        from unittest.mock import MagicMock
+
+        # A store with a host F (num=6) whose camera 2 is the hint's example.
+        store = {
+            "version": 1,
+            "hosts": [
+                {
+                    "num": 1, "kind": "local", "host": "myhost",
+                    "addresses": ["127.0.0.1"], "cameras": [],
+                },
+                {
+                    "num": 6, "kind": "remote", "host": "fhost",
+                    "addresses": ["10.0.0.6"],
+                    "cameras": [
+                        {"num": 1, "enum": 1, "index": 0, "name": "cam1", "slug": "cam1"},
+                        {"num": 2, "enum": 2, "index": 1, "name": "cam2", "slug": "cam2"},
+                    ],
+                },
+            ],
+        }
+        monkeypatch.delenv("APRILCAM_DAEMON_HOST", raising=False)
+        monkeypatch.setattr("aprilcam.cli.cameras_cli.load_store", lambda *a, **kw: store)
+        mock_cfg = MagicMock()
+        monkeypatch.setattr("aprilcam.cli.cameras_cli.Config", MagicMock(load=MagicMock(return_value=mock_cfg)))
+
+        rc = cameras_cli.main([])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "aprilcam view FB" in out
+
+        host_entry, cam_entry = resolve_code("FB", store)
+        assert host_entry["host"] == "fhost"
+        assert cam_entry["slug"] == "cam2"
 
 
 # ---------------------------------------------------------------------------

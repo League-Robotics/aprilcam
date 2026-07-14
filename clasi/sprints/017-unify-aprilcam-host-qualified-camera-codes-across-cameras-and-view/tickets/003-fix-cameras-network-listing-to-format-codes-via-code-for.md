@@ -1,7 +1,7 @@
 ---
 id: '003'
 title: Fix cameras' network listing to format codes via code_for
-status: in-progress
+status: done
 use-cases:
 - SUC-002
 depends-on:
@@ -34,30 +34,30 @@ switches to `code_for`") for full design detail.
 
 ## Acceptance Criteria
 
-- [ ] `cli/cameras_cli.py:_list_all_from_store` formats each camera's code
+- [x] `cli/cameras_cli.py:_list_all_from_store` formats each camera's code
       via `code_for(h_num, c["num"], is_local)` — the camera's *store* `num`
       (stable, letter-mapped), not the daemon's live `enum` — replacing the
       current `code = f"{num}" if is_local else f"{h_letter}{num}"` (which
       used the daemon `enum` directly, letter+digit style).
-  - [ ] The daemon `enum` may still be displayed alongside the code for
+  - [x] The daemon `enum` may still be displayed alongside the code for
         informational purposes (e.g. under `--details`), but the *code*
         itself is always `code_for`'s output.
-- [ ] `_list_all_from_store` and `_list_single_daemon` produce byte-identical
+- [x] `_list_all_from_store` and `_list_single_daemon` produce byte-identical
       codes for the same host+camera store entry (verified by a test that
       constructs a matching store and compares both functions' output for
       several entries).
-- [ ] The printed usage hint (currently `'aprilcam view B6'  (camera 6 on
+- [x] The printed usage hint (currently `'aprilcam view B6'  (camera 6 on
       host B)'`) is replaced with a working letter+letter example consistent
       with `docs/wiki/daemon.md` (e.g. `'aprilcam view FB'  (camera 2 on
       host F)`), and this example, if run against the same fixture store
       used in tests, actually resolves via `resolve_code`.
-- [ ] The local-camera example in the usage hint (`'aprilcam view 3' (local
+- [x] The local-camera example in the usage hint (`'aprilcam view 3' (local
       camera 3)`) is preserved or updated consistently — local cameras may
       be addressed by bare persistent enum (existing fallback) or by their
       single-letter code; verify which the codebase intends as primary and
       keep the hint accurate (cross-check against `_list_single_daemon`'s
       existing local example, if any, for consistency).
-- [ ] No change to `_list_single_daemon` — it already uses `code_for`
+- [x] No change to `_list_single_daemon` — it already uses `code_for`
       correctly.
 
 ## Implementation Plan
