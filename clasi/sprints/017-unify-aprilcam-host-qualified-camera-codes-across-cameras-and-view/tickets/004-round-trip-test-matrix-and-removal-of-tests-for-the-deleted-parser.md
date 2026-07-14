@@ -1,7 +1,7 @@
 ---
 id: '004'
 title: Round-trip test matrix and removal of tests for the deleted parser
-status: open
+status: in-progress
 use-cases:
 - SUC-001
 - SUC-002
