@@ -1,7 +1,7 @@
 ---
 id: '001'
 title: Config lock path and new daemon error types
-status: open
+status: done
 use-cases:
 - SUC-001
 - SUC-002
@@ -41,28 +41,28 @@ and "Design Rationale" for the fixed-path reasoning.
 
 ## Acceptance Criteria
 
-- [ ] `Config` gains a `daemon_lock_path: Path` field, defaulting to
+- [x] `Config` gains a `daemon_lock_path: Path` field, defaulting to
       `Path("/tmp/aprilcamd.lock")` when `APRILCAM_DAEMON_LOCK` is unset.
-- [ ] `Config.load()` parses `APRILCAM_DAEMON_LOCK` following the same
+- [x] `Config.load()` parses `APRILCAM_DAEMON_LOCK` following the same
       priority chain as the other `APRILCAM_*` variables (env wins over
       `.env`/dotfiles/system config), and the field appears in the
       `CONFIG_VARS` table (~line 200) with the same shape as the existing
       `APRILCAM_SOCKET_DIR` / `APRILCAM_DAEMON_HOST` entries (key, field
       name, description, default).
-- [ ] `daemon_pidfile` is unchanged (still derived in `__post_init__` from
+- [x] `daemon_pidfile` is unchanged (still derived in `__post_init__` from
       `socket_dir`); no existing `Config` field is removed or renamed.
-- [ ] `errors.py` gains `DaemonAlreadyRunningError` with an
+- [x] `errors.py` gains `DaemonAlreadyRunningError` with an
       `existing_pid: int | None` attribute set from the constructor,
       following the docstring style of the existing `DaemonNotFoundError`
       (explain cause and remedy).
-- [ ] `errors.py` gains `DaemonPortInUseError` and `DaemonBindError` as
+- [x] `errors.py` gains `DaemonPortInUseError` and `DaemonBindError` as
       distinct exception classes (not aliases of each other), each with a
       short docstring stating which transport (TCP vs. Unix socket) it
       corresponds to.
-- [ ] A new unit test confirms `Config.load()` resolves `daemon_lock_path`
+- [x] A new unit test confirms `Config.load()` resolves `daemon_lock_path`
       from `APRILCAM_DAEMON_LOCK` when set, and falls back to
       `/tmp/aprilcamd.lock` when unset.
-- [ ] No other module is modified in this ticket — `daemon/server.py`,
+- [x] No other module is modified in this ticket — `daemon/server.py`,
       `daemon/grpc_server.py`, `daemon/__main__.py`, and `cli/daemon_cli.py`
       are untouched (their changes are tickets 002-004). `uv run pytest`
       passes unchanged (no new failures, no behavior change in the running

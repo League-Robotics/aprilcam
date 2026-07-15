@@ -267,6 +267,14 @@ CONFIG_VARS: list[dict] = [
         "default": "5280",
         "description": "TCP port the AprilCam daemon's gRPC server listens on.",
     },
+    {
+        "key": "APRILCAM_DAEMON_LOCK",
+        "default": "/tmp/aprilcamd.lock",
+        "description": (
+            "Fixed, machine-global lock path used to enforce a single "
+            "aprilcamd instance per machine, regardless of socket_dir."
+        ),
+    },
 ]
 
 
@@ -415,6 +423,14 @@ class Config:
     # TCP port the daemon's gRPC server listens on (APRILCAM_DAEMON_PORT).
     daemon_port: int = 5280
 
+    # --- Machine-global singleton lock (sprint 018) ---
+    # Fixed path every aprilcamd instance on the machine flocks to enforce a
+    # single running daemon, regardless of socket_dir (which is
+    # uid/runtime-namespaced and therefore NOT a valid singleton guard on its
+    # own — see architecture-update.md sprint 018 "Decision: fixed path").
+    # Overridable via APRILCAM_DAEMON_LOCK (primarily for test isolation).
+    daemon_lock_path: Path = field(default_factory=lambda: Path("/tmp/aprilcamd.lock"))
+
     @property
     def cameras_dir(self) -> Path:
         """Directory containing one subdirectory per camera keyed by slug."""
@@ -514,6 +530,10 @@ class Config:
         except (ValueError, TypeError):
             _daemon_port = 5280
 
+        # Parse daemon_lock_path — fixed machine-global default, overridable
+        # via APRILCAM_DAEMON_LOCK (test isolation escape hatch).
+        _daemon_lock_path = _path("APRILCAM_DAEMON_LOCK", Path("/tmp/aprilcamd.lock"))
+
         cfg = cls(
             data_dir=data_dir,
             socket_dir=socket_dir,
@@ -530,6 +550,7 @@ class Config:
             movement_threshold_px=_float("APRILCAM_MOVEMENT_THRESHOLD_PX", 0.0),
             daemon_host=_daemon_host,
             daemon_port=_daemon_port,
+            daemon_lock_path=_daemon_lock_path,
         )
 
         # Ensure runtime directories exist; guarded to emit an actionable message
