@@ -614,7 +614,9 @@ class Playfield:
             self._homography = self._load_homography(calibration)
             self._corner_pixels = self._load_corner_pixels(calibration)
             self._static_markers = self._load_static_markers(calibration)
-            self._static_marker_ids = self._load_static_marker_ids(calibration)
+            # config_dir threading (sprint 019 config/state split) deferred
+            # to ticket 003; None preserves today's sibling-lookup behavior.
+            self._static_marker_ids = self._load_static_marker_ids(calibration, None)
 
         # Internal components. When a homography is known up front, seed the
         # boundary geometry so its polygon is non-None before any live frame.
@@ -822,7 +824,10 @@ class Playfield:
                     # back to the constructor values when absent from the record.
                     self._corner_pixels = self._load_corner_pixels(str(found))
                     self._static_markers = self._load_static_markers(str(found))
-                    self._static_marker_ids = self._load_static_marker_ids(str(found))
+                    # config_dir threading (sprint 019 config/state split)
+                    # deferred to ticket 003; None preserves today's
+                    # sibling-lookup behavior.
+                    self._static_marker_ids = self._load_static_marker_ids(str(found), None)
                     self._load_dimensions_into_self(str(found))
                 return H
         except Exception:
@@ -930,26 +935,46 @@ class Playfield:
             pass
         return None
 
-    def _load_static_marker_ids(self, path: str) -> Optional[List[str]]:
+    def _load_static_marker_ids(
+        self, path: str, config_dir: "str | Path | None" = None,
+    ) -> Optional[List[str]]:
         """Load the configurable ``static_marker_ids`` set.
 
-        Checks ``config.json`` in the same directory first (the authoritative
-        source after the config/calibration split), then falls back to reading
-        the calibration file at *path*.  Returns ``None`` when absent (the
+        Checks ``config.json`` first, then falls back to reading the
+        calibration file at *path*.  Returns ``None`` when absent (the
         boundary then falls back to :data:`DEFAULT_STATIC_MARKER_IDS`).
+
+        Parameters
+        ----------
+        path:
+            Path to the calibration/homography file (not a directory).
+        config_dir:
+            Optional root directory holding per-camera config (the
+            config/state split from sprint 019).  When given,
+            ``<config_dir>/<slug>/config.json`` is checked first, where
+            *slug* is *path*'s parent directory name (the camera slug).
+            When ``None`` (the default), falls back to the original
+            sibling lookup: ``config.json`` next to *path* itself.
         """
         import json
         from pathlib import Path
         cal_path = Path(path)
-        # Check sibling config.json first.
-        config_path = cal_path.parent / "config.json"
-        try:
-            cfg = json.loads(config_path.read_text())
-            ids = cfg.get("static_marker_ids")
-            if ids:
-                return [str(s) for s in ids]
-        except Exception:
-            pass
+
+        candidates = []
+        if config_dir is not None:
+            candidates.append(Path(config_dir) / cal_path.parent.name / "config.json")
+        else:
+            candidates.append(cal_path.parent / "config.json")
+
+        for config_path in candidates:
+            try:
+                cfg = json.loads(config_path.read_text())
+                ids = cfg.get("static_marker_ids")
+                if ids:
+                    return [str(s) for s in ids]
+            except Exception:
+                pass
+
         # Fall back to calibration file.
         try:
             data = json.loads(cal_path.read_text())

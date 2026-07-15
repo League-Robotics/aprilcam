@@ -2,7 +2,7 @@
 id: '002'
 title: Decouple config reads from calibration reads in the loader and playfield marker-id
   lookup
-status: in-progress
+status: done
 use-cases:
 - SUC-004
 - SUC-005
@@ -76,38 +76,38 @@ full design detail.
 
 ## Acceptance Criteria
 
-- [ ] `load_calibration_from_camera_dir` accepts a 4th optional
+- [x] `load_calibration_from_camera_dir` accepts a 4th optional
       `config_dir` parameter; omitting it reproduces byte-identical
       behavior to before this ticket (regression guard via existing
       tests).
-- [ ] When `camera_config` is `None` and `config_dir` is provided, the
+- [x] When `camera_config` is `None` and `config_dir` is provided, the
       config overlay (`device_name`, `resolution`, `settings`,
       `static_marker_ids`, `camera_position`) is read from
       `<config_dir>/<slug>/config.json`, not `<camera_dir>/config.json`.
-- [ ] When `camera_config` is provided (MCP path), `config_dir` has no
+- [x] When `camera_config` is provided (MCP path), `config_dir` has no
       effect — the pre-loaded dict is used exactly as today.
-- [ ] A calibration file present in `camera_dir` (state) with NO
+- [x] A calibration file present in `camera_dir` (state) with NO
       `config.json` alongside it, but a `config.json` present under
       `config_dir/<slug>/`, still yields a fully-populated calibration
       (config overlay fields present) when `config_dir` is passed.
-- [ ] `calibrate_from_playfield_def`'s daemon-local write branch writes
+- [x] `calibrate_from_playfield_def`'s daemon-local write branch writes
       `calibration.json` to the state dir and `config.json` to a
       separately-parameterized config dir; the two writes' ordering and
       failure-reporting behavior is documented in the function's
       docstring.
-- [ ] MCP `skip_save=True` calibration path continues to write neither
+- [x] MCP `skip_save=True` calibration path continues to write neither
       file (unaffected).
-- [ ] `_load_static_marker_ids` accepts an optional 2nd `config_dir`
+- [x] `_load_static_marker_ids` accepts an optional 2nd `config_dir`
       parameter; omitting it reproduces today's sibling-lookup behavior
       exactly.
-- [ ] When `config_dir` is provided and a matching `config.json` exists
+- [x] When `config_dir` is provided and a matching `config.json` exists
       under `<config_dir>/<slug>/`, `static_marker_ids` from that file
       takes priority over the calibration-file fallback, matching the
       existing "config wins" contract.
-- [ ] `test_config_calibration_split.py`'s canonical fixture
+- [x] `test_config_calibration_split.py`'s canonical fixture
       (`arducam-ov9782-usb-camera` holding both files in one dir) continues
       to pass unmodified as the backward-compat (`config_dir=None`) case.
-- [ ] Full `uv run pytest` green.
+- [x] Full `uv run pytest` green.
 
 ## Testing
 
