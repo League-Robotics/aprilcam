@@ -1,7 +1,7 @@
 ---
 id: '004'
 title: --force flag, refusal exit code, and CLI takeover sequence
-status: open
+status: in-progress
 use-cases:
 - SUC-001
 - SUC-002
