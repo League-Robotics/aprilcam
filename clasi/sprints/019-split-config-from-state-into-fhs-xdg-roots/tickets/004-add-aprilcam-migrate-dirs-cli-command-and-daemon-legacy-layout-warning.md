@@ -1,7 +1,7 @@
 ---
 id: '004'
 title: Add aprilcam migrate-dirs CLI command and daemon legacy-layout warning
-status: in-progress
+status: done
 use-cases:
 - SUC-002
 - SUC-003
@@ -69,33 +69,33 @@ working until migrated") for full design detail and rationale.
 
 ## Acceptance Criteria
 
-- [ ] `aprilcam migrate-dirs --dry-run` prints the exact planned moves
+- [x] `aprilcam migrate-dirs --dry-run` prints the exact planned moves
       (source path → destination path for each `config.json` and each
       `playfields/*.json` found under the legacy `data_dir` location) and
       performs zero filesystem writes.
-- [ ] `aprilcam migrate-dirs` (no `--dry-run`) moves only
+- [x] `aprilcam migrate-dirs` (no `--dry-run`) moves only
       `cameras/<slug>/config.json` → `<config_dir>/cameras/<slug>/
       config.json` and `playfields/*.json` → `<config_dir>/playfields/
       *.json`; all state-category files remain byte-identical and in
       place under `data_dir` after the run.
-- [ ] Re-running `aprilcam migrate-dirs` after a successful migration
+- [x] Re-running `aprilcam migrate-dirs` after a successful migration
       exits 0 and reports "nothing to migrate" — no error, no duplicate
       writes, no file changes.
-- [ ] A destination-already-exists conflict is reported (skip-and-warn)
+- [x] A destination-already-exists conflict is reported (skip-and-warn)
       rather than silently overwritten.
-- [ ] Post-migration, `load_calibration_from_camera_dir` (with an explicit
+- [x] Post-migration, `load_calibration_from_camera_dir` (with an explicit
       `config_dir` per ticket 002) returns a fully-populated calibration
       (config overlay fields present) for a migrated camera.
-- [ ] The daemon logs exactly one WARNING per process lifetime when
+- [x] The daemon logs exactly one WARNING per process lifetime when
       started against a legacy single-tree layout (config files present
       under `data_dir`, none under `config_dir`); config reads still
       succeed via the fallback in this scenario (no functional
       regression).
-- [ ] The daemon logs zero WARNINGs when `config_dir` already has config
+- [x] The daemon logs zero WARNINGs when `config_dir` already has config
       files (post-migration or fresh split-root install).
-- [ ] Neither the migration command's `--dry-run` mode nor the daemon
+- [x] Neither the migration command's `--dry-run` mode nor the daemon
       warning path creates, moves, or deletes any file.
-- [ ] Full `uv run pytest` green.
+- [x] Full `uv run pytest` green.
 
 ## Testing
 
