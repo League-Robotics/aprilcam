@@ -1,7 +1,7 @@
 ---
-id: '019'
+id: 019
 title: Split config from state into FHS XDG roots
-status: ticketing
+status: done
 branch: sprint/019-split-config-from-state-into-fhs-xdg-roots
 use-cases:
 - SUC-001
