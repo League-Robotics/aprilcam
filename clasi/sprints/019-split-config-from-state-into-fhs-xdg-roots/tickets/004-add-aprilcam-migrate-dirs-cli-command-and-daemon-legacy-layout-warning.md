@@ -1,9 +1,12 @@
 ---
 id: '004'
 title: Add aprilcam migrate-dirs CLI command and daemon legacy-layout warning
-status: open
-use-cases: [SUC-002, SUC-003]
-depends-on: ['003']
+status: in-progress
+use-cases:
+- SUC-002
+- SUC-003
+depends-on:
+- '003'
 github-issue: ''
 issue: split-config-from-state-into-fhs-xdg-roots.md
 completes_issue: true
