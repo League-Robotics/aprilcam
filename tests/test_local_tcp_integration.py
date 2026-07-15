@@ -58,13 +58,20 @@ def test_local_tcp_daemon_golden_path(tmp_path: Path) -> None:
     # Build a config that uses tmp directories so the test is isolated.
     sock_dir = tmp_path / "s"
     data_dir = tmp_path / "d"
-    sock_dir.mkdir()
+    config_dir = tmp_path / "c"  # empty → no playfields seeded (hermetic; never
+    sock_dir.mkdir()             # reads the user's real ~/.config/aprilcam)
     data_dir.mkdir()
+    config_dir.mkdir()
 
     cfg = Config(
         data_dir=data_dir,
+        config_dir=config_dir,
         socket_dir=sock_dir,
         daemon_pidfile=sock_dir / "aprilcamd.pid",
+        # Never touch the real /tmp/aprilcamd.lock — unique per test so the
+        # machine-global singleton guard (sprint 018) doesn't collide with a
+        # real running daemon.
+        daemon_lock_path=tmp_path / "aprilcamd.lock",
         log_level="WARNING",
     )
 

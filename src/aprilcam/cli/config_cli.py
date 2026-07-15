@@ -26,6 +26,14 @@ def _collect(cfg: Config) -> dict:
         "cameras_dir": str(cfg.cameras_dir),
         "playfields_dir": str(cfg.playfields_dir),
         "calibration_dir": str(cfg.calibration_dir),
+        # Config root (admin-owned config.json + playfield defs) — sprint 019
+        # split it out of data_dir. effective_config_dir accounts for the
+        # legacy single-tree fallback (== data_dir when config still lives
+        # co-located under the state tree).
+        "config_dir": str(cfg.config_dir),
+        "effective_config_dir": str(cfg.effective_config_dir),
+        "config_cameras_dir": str(cfg.config_cameras_dir),
+        "config_playfields_dir": str(cfg.config_playfields_dir),
         "log_dir": str(cfg.log_dir),
         "socket_dir": str(cfg.socket_dir),
         "daemon_pidfile": str(cfg.daemon_pidfile),

@@ -43,8 +43,13 @@ def _make_config(base: Path) -> tuple[Config, str]:
 
     config = Config(
         data_dir=data_dir,
+        config_dir=base / "c",  # hermetic: never read the real ~/.config/aprilcam
         socket_dir=sock_dir,
         daemon_pidfile=sock_dir / "aprilcamd.pid",
+        # Never touch the real /tmp/aprilcamd.lock — unique per test so the
+        # machine-global singleton guard (sprint 018) doesn't collide with a
+        # real running daemon or another test.
+        daemon_lock_path=base / "aprilcamd.lock",
     )
     return config, unix_sock_path
 

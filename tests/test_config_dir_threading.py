@@ -97,7 +97,15 @@ def test_camera_pipeline_start_config_dir_falls_back_legacy(tmp_path, monkeypatc
     cam_dir.mkdir(parents=True)
     (cam_dir / "config.json").write_text(json.dumps({"device_name": "cam0"}))
 
-    cfg = Config(data_dir=tmp_path, socket_dir=tmp_path / "sock")
+    # Point config_dir at a distinct EMPTY tmp dir so the test is hermetic
+    # (never reads the user's real ~/.config/aprilcam). With no config files
+    # there and legacy config co-located under data_dir, effective_config_dir
+    # must fall back to data_dir.
+    cfg = Config(
+        data_dir=tmp_path,
+        config_dir=tmp_path / "config",
+        socket_dir=tmp_path / "sock",
+    )
     assert cfg.effective_config_dir == tmp_path  # sanity: legacy fallback engaged
 
     pipe = cp_mod.CameraPipeline("cam0", 0, cfg)

@@ -261,9 +261,14 @@ def _make_short_tmp_cfg():
     data_dir.mkdir()
     cfg = Config(
         data_dir=data_dir,
+        config_dir=base / "c",  # hermetic: never read the real ~/.config/aprilcam
         socket_dir=sock_dir,
         calibration_dir=data_dir / "cal",
         daemon_pidfile=sock_dir / "aprilcamd.pid",
+        # Never touch the real /tmp/aprilcamd.lock — unique per test so the
+        # machine-global singleton guard (sprint 018) doesn't collide with a
+        # real running daemon or another test.
+        daemon_lock_path=base / "aprilcamd.lock",
     )
     return cfg, base
 
