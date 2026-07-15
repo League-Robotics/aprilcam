@@ -1,7 +1,7 @@
 ---
 id: '004'
 title: --force flag, refusal exit code, and CLI takeover sequence
-status: in-progress
+status: done
 use-cases:
 - SUC-001
 - SUC-002
@@ -75,40 +75,40 @@ raises instead of silently returning on refusal").
 
 ## Acceptance Criteria
 
-- [ ] `python -m aprilcam.daemon --force` is a valid invocation; without
+- [x] `python -m aprilcam.daemon --force` is a valid invocation; without
       `--force` (default), a second daemon start against an already-locked
       machine prints `"aprilcamd already running (pid N)"` (real pid) to
       stderr and exits with code 3 — not the current silent-success exit 0.
-- [ ] `DaemonPortInUseError`/`DaemonBindError` raised from ticket 003's
+- [x] `DaemonPortInUseError`/`DaemonBindError` raised from ticket 003's
       bind-check are also caught in `main()` with a clear message and exit
       code 3 (share the same catch/exit-3 path as
       `DaemonAlreadyRunningError`, with a message specific to each error
       type).
-- [ ] `aprilcam daemon start --force` and a detached spawn triggered by
+- [x] `aprilcam daemon start --force` and a detached spawn triggered by
       `_cmd_start` both result in the daemon process actually running with
       `--force` (verify via the spawned process's argv or via behavioral
       test — it successfully takes over a pre-existing daemon).
-- [ ] `aprilcam daemon restart` always performs a `--force`-equivalent
+- [x] `aprilcam daemon restart` always performs a `--force`-equivalent
       start for the new instance, regardless of whether the old daemon
       was already stopped cleanly or needed escalation.
-- [ ] `_cmd_restart`'s wait-loop polls `config.daemon_lock_path` (not
+- [x] `_cmd_restart`'s wait-loop polls `config.daemon_lock_path` (not
       `config.daemon_pidfile`) for lock availability before starting the
       new daemon.
-- [ ] **(c)** New/updated test: `--force` takeover of a running daemon
+- [x] **(c)** New/updated test: `--force` takeover of a running daemon
       succeeds end-to-end — old instance's process exits, new instance
       holds the lock, `aprilcam daemon status`-equivalent check shows the
       new pid. Exercise via the CLI helper functions directly (not a real
       subprocess daemon, per the "no hardware" testing constraint — use the
       same fake/stub-daemon patterns already used elsewhere in
       `tests/test_daemon_server.py`/`tests/test_daemon_spawn_race.py`).
-- [ ] Takeover sequence order is verified: graceful Shutdown RPC is
+- [x] Takeover sequence order is verified: graceful Shutdown RPC is
       attempted before any signal; `SIGTERM` is sent before `SIGKILL`;
       `SIGKILL` only happens after a bounded timeout elapses with the
       process still alive.
-- [ ] `aprilcam daemon status` reports the correct machine-global pid after
+- [x] `aprilcam daemon status` reports the correct machine-global pid after
       a `--force` takeover (i.e. the new daemon's pid, once it has written
       its local `daemon_pidfile`).
-- [ ] All existing tests in `tests/test_daemon_server.py` and
+- [x] All existing tests in `tests/test_daemon_server.py` and
       `tests/test_daemon_spawn_race.py` remain green; any test asserting the
       old exit-0-on-duplicate behavior is updated to expect exit 3.
 
@@ -178,7 +178,7 @@ Shutdown RPCs.
   `DaemonAlreadyRunningError(existing_pid=1234)` → asserts stderr contains
   `"aprilcamd already running (pid 1234)"` and `sys.exit(3)` is called
   (via `pytest.raises(SystemExit)` and checking `.code == 3`).
-  - [ ] Repeat for `DaemonPortInUseError` and `DaemonBindError` with their
+  - [x] Repeat for `DaemonPortInUseError` and `DaemonBindError` with their
         respective messages.
 - Integration-style test (in-process, fake/stub daemon per existing
   patterns): start a `DaemonServer` in a thread, then exercise

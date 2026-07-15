@@ -17,7 +17,7 @@ pytest.importorskip("aprilcam.daemon.grpc_server", reason="requires aprilcam[dae
 
 from aprilcam.config import Config
 from aprilcam.daemon.server import DaemonServer
-from aprilcam.errors import DaemonAlreadyRunningError
+from aprilcam.errors import DaemonAlreadyRunningError, DaemonBindError, DaemonPortInUseError
 from aprilcam.proto import aprilcam_pb2, aprilcam_pb2_grpc
 
 
@@ -421,3 +421,108 @@ def test_main_both_disabled_exits(capsys):
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
     assert "at least one transport" in captured.err
+
+
+def test_main_parse_args_force_default_false():
+    """--force defaults to False."""
+    from aprilcam.daemon.__main__ import _parse_args
+
+    args = _parse_args([])
+    assert args.force is False
+
+
+def test_main_parse_args_force_flag():
+    """--force is a valid, parseable flag."""
+    from aprilcam.daemon.__main__ import _parse_args
+
+    args = _parse_args(["--force"])
+    assert args.force is True
+
+
+# ── __main__ refusal exit code (018-004) ───────────────────────────────────────
+
+
+def test_main_exits_3_on_already_running(monkeypatch, capsys, tmp_path):
+    """main() catches DaemonAlreadyRunningError, prints the exact message,
+    and exits with code 3 — not the old silent exit 0.
+    """
+    from aprilcam.daemon import __main__ as main_mod
+
+    def _fake_run(self):
+        raise DaemonAlreadyRunningError(existing_pid=4321)
+
+    monkeypatch.setattr(main_mod.DaemonServer, "run", _fake_run)
+    monkeypatch.setattr(
+        main_mod.Config, "load", classmethod(lambda cls: _fake_config(tmp_path))
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main_mod.main([])
+
+    assert exc_info.value.code == 3
+    captured = capsys.readouterr()
+    assert "aprilcamd already running (pid 4321)" in captured.err
+
+
+def test_main_exits_3_on_port_in_use(monkeypatch, capsys, tmp_path):
+    """main() catches DaemonPortInUseError with a clear message and exit 3."""
+    from aprilcam.daemon import __main__ as main_mod
+
+    def _fake_run(self):
+        raise DaemonPortInUseError("port 5280 already bound")
+
+    monkeypatch.setattr(main_mod.DaemonServer, "run", _fake_run)
+    monkeypatch.setattr(
+        main_mod.Config, "load", classmethod(lambda cls: _fake_config(tmp_path))
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main_mod.main([])
+
+    assert exc_info.value.code == 3
+    captured = capsys.readouterr()
+    assert "port" in captured.err.lower()
+
+
+def test_main_exits_3_on_bind_error(monkeypatch, capsys, tmp_path):
+    """main() catches DaemonBindError with a clear message and exit 3."""
+    from aprilcam.daemon import __main__ as main_mod
+
+    def _fake_run(self):
+        raise DaemonBindError("unix socket bind failed")
+
+    monkeypatch.setattr(main_mod.DaemonServer, "run", _fake_run)
+    monkeypatch.setattr(
+        main_mod.Config, "load", classmethod(lambda cls: _fake_config(tmp_path))
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        main_mod.main([])
+
+    assert exc_info.value.code == 3
+    captured = capsys.readouterr()
+    assert "unix socket" in captured.err.lower()
+
+
+def _fake_config(tmp_path: Path) -> Config:
+    """Minimal Config for __main__ refusal-path tests (never touches real
+    /tmp/aprilcamd.lock or binds real port 5280 — main()'s DaemonServer.run
+    is monkeypatched before any of that would happen).
+    """
+    import stat
+    import tempfile
+
+    base = Path(tempfile.mkdtemp(prefix="main_ads_", dir="/tmp"))
+    base.chmod(base.stat().st_mode | stat.S_IRWXO)
+    sock_dir = base / "s"
+    data_dir = base / "d"
+    sock_dir.mkdir()
+    data_dir.mkdir()
+    return Config(
+        data_dir=data_dir,
+        socket_dir=sock_dir,
+        calibration_dir=data_dir / "calibration",
+        log_level="DEBUG",
+        daemon_pidfile=sock_dir / "aprilcamd.pid",
+        daemon_lock_path=base / "aprilcamd.lock",
+    )
