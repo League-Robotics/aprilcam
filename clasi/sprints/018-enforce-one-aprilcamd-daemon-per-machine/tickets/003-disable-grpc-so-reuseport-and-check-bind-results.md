@@ -1,7 +1,7 @@
 ---
 id: '003'
 title: Disable gRPC SO_REUSEPORT and check bind results
-status: in-progress
+status: done
 use-cases:
 - SUC-001
 depends-on:
@@ -47,27 +47,32 @@ tables.
 
 ## Acceptance Criteria
 
-- [ ] `make_grpc_server()` passes `options=[("grpc.so_reuseport", 0)]` to
+- [x] `make_grpc_server()` passes `options=[("grpc.so_reuseport", 0)]` to
       `grpc.server(...)`.
-- [ ] Each `add_insecure_port(addr)` call's return value is captured (not
+- [x] Each `add_insecure_port(addr)` call's return value is captured (not
       discarded).
-- [ ] A `0` return for a TCP address (`[::]:<port>` or similar) raises
+- [x] A `0` return for a TCP address (`[::]:<port>` or similar) raises
       `DaemonPortInUseError`.
-- [ ] A `0` return for a Unix socket address (`unix:<path>`) raises
+- [x] A `0` return for a Unix socket address (`unix:<path>`) raises
       `DaemonBindError`.
-- [ ] **(b)** New test: with `SO_REUSEPORT` disabled, a second `grpc.Server`
+- [x] **(b)** New test: with `SO_REUSEPORT` disabled, a second `grpc.Server`
       built by `make_grpc_server()` and pointed at the same TCP port as a
       first, already-bound server raises `DaemonPortInUseError` when it
       attempts to bind (use an ephemeral port obtained via a bind-to-0
       probe, not the real 5280, per the sprint's test-isolation rule).
-  - [ ] A successful bind (port free, or first call in the test) does not
+  - [x] A successful bind (port free, or first call in the test) does not
       raise and returns/proceeds normally — confirm no regression to the
       happy path used by every other daemon test.
-- [ ] Unix-socket bind-failure path is exercised by at least one test (can
-      reuse `tests/test_daemon_server.py`'s existing unix-socket test
-      fixtures for a "path already bound" scenario) and raises
-      `DaemonBindError`.
-- [ ] All existing tests in `tests/test_daemon_server.py`,
+- [x] Unix-socket bind-failure path is exercised by at least one test and
+      raises `DaemonBindError`. Deviation from the plan: the installed
+      grpcio unlinks-and-rebinds any existing unix socket path (even one
+      held by a live, unrelated `AF_UNIX` listener) rather than failing on
+      "path already bound" — verified empirically — so a same-path
+      double-bind cannot exercise this branch. Used a bind into a
+      nonexistent directory instead (a real, reliable unix-bind failure
+      matching the "unwritable/misconfigured socket_dir" scenario from the
+      architecture's Open Questions).
+- [x] All existing tests in `tests/test_daemon_server.py`,
       `tests/test_daemon_spawn_race.py`, and any gRPC-server-construction
       tests remain green — reflection registration and existing transports
       list behavior are unchanged by this ticket.

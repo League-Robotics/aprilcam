@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 import grpc
 from grpc_reflection.v1alpha import reflection
 
+from ..errors import DaemonBindError, DaemonPortInUseError
 from ..proto import aprilcam_pb2, aprilcam_pb2_grpc
 
 if TYPE_CHECKING:
@@ -1117,8 +1118,19 @@ def make_grpc_server(
 ) -> grpc.Server:
     """Build a ``grpc.Server`` with the AprilCam servicer and reflection registered.
 
-    The server is *not* started here.  The caller must call
-    ``server.add_insecure_port(addr)`` and then ``server.start()``.
+    The addresses in ``transports`` are bound inside this function (the
+    caller only needs to call ``server.start()`` afterwards).
+    ``SO_REUSEPORT`` is explicitly disabled
+    (``options=[("grpc.so_reuseport", 0)]``) so a second process can never
+    silently co-bind the same TCP port and have the kernel load-balance
+    RPCs between two daemons (sprint 018) — each ``add_insecure_port(addr)``
+    return value is checked, and a bind failure (return ``0``) raises
+    instead of being silently ignored:
+
+    - TCP address (e.g. ``[::]:5280``) bind failure ->
+      :class:`~aprilcam.errors.DaemonPortInUseError`.
+    - Unix socket address (``unix:...``) bind failure ->
+      :class:`~aprilcam.errors.DaemonBindError`.
 
     Args:
         transports:   List of address strings to bind (e.g.
@@ -1129,8 +1141,15 @@ def make_grpc_server(
 
     Returns:
         Configured but not-yet-started ``grpc.Server``.
+
+    Raises:
+        DaemonPortInUseError: A TCP address failed to bind.
+        DaemonBindError: A Unix socket address failed to bind.
     """
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=max_workers),
+        options=[("grpc.so_reuseport", 0)],
+    )
 
     aprilcam_pb2_grpc.add_AprilCamServicer_to_server(servicer, server)
 
@@ -1142,6 +1161,19 @@ def make_grpc_server(
     reflection.enable_server_reflection(service_names, server)
 
     for addr in transports:
-        server.add_insecure_port(addr)
+        # ``grpc.Server.add_insecure_port`` returns 0 on bind failure per the
+        # gRPC API contract. Some grpcio versions additionally raise
+        # ``RuntimeError`` from their own internal zero-check
+        # (``grpc._common.validate_port_binding_result``) before we ever see
+        # the return value — catch both so this is correct across versions.
+        try:
+            bound_port = server.add_insecure_port(addr)
+        except RuntimeError:
+            bound_port = 0
+
+        if bound_port == 0:
+            if addr.startswith("unix:"):
+                raise DaemonBindError(f"failed to bind {addr}")
+            raise DaemonPortInUseError(f"failed to bind {addr}")
 
     return server

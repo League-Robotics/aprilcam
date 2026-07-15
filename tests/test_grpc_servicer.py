@@ -349,6 +349,96 @@ def test_make_grpc_server_no_transports(tmp_path: Path) -> None:
         server.stop(grace=0)
 
 
+def _free_tcp_port() -> int:
+    """Discover a free ephemeral TCP port via a bind-to-0 probe.
+
+    Never returns the real daemon port (5280) — this binds an OS-assigned
+    ephemeral port, releases it, and hands the number back for the caller
+    to immediately re-bind.
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+        probe.bind(("::", 0))
+        return probe.getsockname()[1]
+
+
+def test_make_grpc_server_reuseport_disabled(tmp_path: Path) -> None:
+    """grpc.server() is built with SO_REUSEPORT disabled.
+
+    Regression guard for the options= kwarg itself, independent of the
+    bind-failure behavior exercised below: patch grpc.server and assert
+    the exact options tuple is passed through.
+    """
+    servicer = _make_servicer(tmp_path=tmp_path)
+
+    with patch("aprilcam.daemon.grpc_server.grpc.server", wraps=grpc.server) as spy:
+        server = make_grpc_server(transports=[], servicer=servicer)
+        try:
+            _, kwargs = spy.call_args
+            assert kwargs.get("options") == [("grpc.so_reuseport", 0)]
+        finally:
+            server.stop(grace=0)
+
+
+def test_make_grpc_server_tcp_port_in_use_raises(tmp_path: Path) -> None:
+    """A second bind on an already-occupied TCP port raises DaemonPortInUseError.
+
+    With SO_REUSEPORT disabled, the kernel refuses the second bind instead
+    of silently load-balancing between two daemons (the sprint 018 bug).
+    Uses an ephemeral port discovered via a bind-to-0 probe — never the
+    real daemon port 5280.
+    """
+    from aprilcam.errors import DaemonPortInUseError
+
+    port = _free_tcp_port()
+    addr = f"[::]:{port}"
+
+    servicer_a = _make_servicer(tmp_path=tmp_path)
+    first = make_grpc_server(transports=[addr], servicer=servicer_a)
+    first.start()
+
+    try:
+        servicer_b = _make_servicer(tmp_path=tmp_path)
+        with pytest.raises(DaemonPortInUseError):
+            make_grpc_server(transports=[addr], servicer=servicer_b)
+    finally:
+        first.stop(grace=0)
+
+
+def test_make_grpc_server_tcp_bind_success_no_regression(tmp_path: Path) -> None:
+    """A normal, unoccupied TCP bind succeeds and returns a usable server."""
+    servicer = _make_servicer(tmp_path=tmp_path)
+    port = _free_tcp_port()
+    server = make_grpc_server(transports=[f"[::]:{port}"], servicer=servicer)
+    try:
+        assert isinstance(server, grpc.Server)
+        server.start()
+    finally:
+        server.stop(grace=0)
+
+
+def test_make_grpc_server_unix_bind_failure_raises(tmp_path: Path) -> None:
+    """A unix socket bind into a nonexistent directory raises DaemonBindError.
+
+    Empirically, gRPC's unix-domain-socket transport unlinks and re-binds
+    any existing path (even one held by a live, unrelated listening
+    socket) rather than failing on "path already occupied" the way TCP
+    does — so a same-path double-bind can't be used to exercise this
+    branch. A bind into a directory that doesn't exist (e.g. an
+    unwritable/misconfigured ``socket_dir``, per the sprint's Open
+    Questions) is a real, reliable unix-bind failure and is the scenario
+    this branch exists to catch.
+    """
+    from aprilcam.errors import DaemonBindError
+
+    addr = "unix:/nonexistent_dir_ags_test/aprilcamd.sock"
+
+    servicer = _make_servicer(tmp_path=tmp_path)
+    with pytest.raises(DaemonBindError):
+        make_grpc_server(transports=[addr], servicer=servicer)
+
+
 # ── Tests: EnumerateCameras ───────────────────────────────────────────────────
 
 
