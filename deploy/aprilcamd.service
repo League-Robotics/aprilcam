@@ -25,15 +25,25 @@ Environment=APRILCAM_DATA_DIR=/home/eric/aprilcam-data
 Environment=APRILCAM_SOCKET_DIR=/run/aprilcam
 
 # Run the daemon in the foreground so systemd captures output via journald.
-# --tcp   : bind gRPC on all interfaces (port 5280) for remote MCP clients.
-# --unix  : also bind a Unix socket under APRILCAM_SOCKET_DIR for on-box CLI.
+# --tcp    : bind gRPC on all interfaces (port 5280) for remote MCP clients.
+# --unix   : also bind a Unix socket under APRILCAM_SOCKET_DIR for on-box CLI.
+# --force  : systemd's instance must always win the machine-global daemon
+#            lock (sprint 018) on boot or restart, taking over from any
+#            stray non-systemd aprilcamd instead of refusing to start.
 ExecStart=/home/eric/.local/share/pipx/venvs/aprilcam/bin/python \
     -m aprilcam.daemon \
     --tcp --tcp-port 5280 \
-    --unix
+    --unix --force
 
 Restart=on-failure
 RestartSec=5
+
+# IMPORTANT: do not set PrivateTmp=true (or any PrivateTmp directive) on
+# this unit. The one-daemon-per-machine guard (sprint 018) relies on a
+# shared, machine-global lock file at /tmp/aprilcamd.lock (or
+# $APRILCAM_DAEMON_LOCK). A private /tmp namespace would give this daemon
+# its own private lock file, silently defeating the guard and allowing a
+# second daemon elsewhere on the host to run undetected.
 
 StandardOutput=journal
 StandardError=journal

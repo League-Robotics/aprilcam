@@ -1,7 +1,7 @@
 ---
 id: '005'
 title: systemd unit --force and PrivateTmp documentation
-status: in-progress
+status: done
 use-cases:
 - SUC-002
 depends-on:
@@ -45,31 +45,39 @@ remain off").
 
 ## Acceptance Criteria
 
-- [ ] `deploy/aprilcamd.service`'s `ExecStart` includes `--force` as an
+- [x] `deploy/aprilcamd.service`'s `ExecStart` includes `--force` as an
       argument to `python -m aprilcam.daemon` (alongside the existing
       `--tcp --tcp-port 5280 --unix`).
-- [ ] A comment is present in the `[Service]` section explicitly stating
+- [x] A comment is present in the `[Service]` section explicitly stating
       that `PrivateTmp` must stay off (unset/`false`) and explaining why
       (private `/tmp` would give the daemon its own
       `/tmp/aprilcamd.lock`, defeating the shared machine-global lock from
       ticket 002).
-- [ ] No `PrivateTmp=true` (or any `PrivateTmp` directive at all) is
+- [x] No `PrivateTmp=true` (or any `PrivateTmp` directive at all) is
       introduced by this ticket — the absence is the correct state; the
       comment documents *why* it must stay absent.
-- [ ] The rest of the unit file (directories, environment variables,
+- [x] The rest of the unit file (directories, environment variables,
       `Restart=on-failure`, `RestartSec=5`, `[Install]` section) is
       unchanged — this ticket does not touch anything beyond `ExecStart`
       and the new comment.
-- [ ] Manual verification note added to the ticket (or cross-referenced
+- [x] Manual verification note added to the ticket (or cross-referenced
       from the issue's existing "Verification (end-to-end)" section, which
       already specifies the manual steps): confirm on a real host (or
       documented as deferred to live Pi bring-up if hardware isn't
       available in this session) that `systemctl restart aprilcamd` when
       another `aprilcamd` is already running results in exactly one
       daemon process afterward.
-- [ ] No test suite changes required (deployment file, not code) — but run
+- [x] No test suite changes required (deployment file, not code) — but run
       `uv run pytest` to confirm this ticket introduces no regressions
       (expected: zero test changes, zero failures).
+
+**Manual verification**: Deferred to live Pi bring-up — no systemd host
+available in this session. Reuse the issue's existing "Verification
+(end-to-end)" steps against the updated `deploy/aprilcamd.service` on
+`vali.local`/`vidar.local`: start `aprilcamd` manually (no `--force`),
+then `sudo systemctl restart aprilcamd` and confirm via `pgrep -fa
+aprilcam.daemon` / `lsof -i :5280` that exactly one daemon process is
+running afterward and it is the systemd-managed one.
 
 ## Implementation Plan
 
