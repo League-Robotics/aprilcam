@@ -151,9 +151,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         cameras_dir = config.data_dir / "cameras"
 
     # Load playfield definition registry — dims come from the def, not from args.
+    # Playfield definitions are config-root files (sprint 019 config/state
+    # split); effective_config_dir falls back to data_dir for legacy
+    # single-tree installs. getattr guards keep this tolerant of minimal
+    # Config stand-ins (e.g. in tests) that only set data_dir/cameras_dir.
     from ..core.playfield_def import PlayfieldDefinitionRegistry
     playfield_def_registry = PlayfieldDefinitionRegistry()
-    _playfields_dir = getattr(config, "playfields_dir", None) or (config.data_dir / "playfields")
+    _playfields_dir = (
+        getattr(config, "config_playfields_dir", None)
+        or (getattr(config, "effective_config_dir", None) or config.data_dir) / "playfields"
+    )
     playfield_def_registry.load_all(_playfields_dir)
 
     # Resolve which cameras to calibrate — enumerate via daemon (no local probe)
@@ -332,6 +339,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                 camera_dir = cameras_dir / cam_name
                 camera_slug = cam_name
 
+                # config.json lives under the config root (sprint 019
+                # config/state split) — pre-load it here so
+                # calibrate_from_playfield_def's Step 1 "find the linked
+                # playfield" read (which is pinned to camera_dir/state for
+                # backward-compat) sees the real config-root content instead
+                # of a possibly-empty state dir.
+                from ..camera.camera_config import load_camera_config
+                _cam_config_dir = config.config_cameras_dir / camera_slug
+                _cam_config = load_camera_config(
+                    _cam_config_dir
+                ) or load_camera_config(camera_dir)
+
                 try:
                     cal = calibrate_from_playfield_def(
                         cap=cap,
@@ -339,6 +358,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                         camera_slug=camera_slug,
                         playfield_def_registry=playfield_def_registry,
                         num_frames=args.frames,
+                        camera_config=_cam_config,
+                        config_dir=_cam_config_dir,
                     )
                 except PlayfieldConfigError as exc:
                     print(f"  ERROR: {exc}")

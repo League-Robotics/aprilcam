@@ -294,7 +294,10 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
 
         camera_dir = self._config.cameras_dir / cam_name
         try:
-            calibration = load_calibration_from_camera_dir(camera_dir)
+            calibration = load_calibration_from_camera_dir(
+                camera_dir,
+                config_dir=self._config.effective_config_dir / "cameras",
+            )
         except Exception as exc:
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"calibration load failed: {exc}")
@@ -741,15 +744,17 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
     ) -> aprilcam_pb2.JsonBlobReply:
         """Return config.json for *cam_name* as an opaque JSON blob.
 
-        Reads ``<cameras_dir>/<cam_name>/config.json`` using
-        ``camera_config.load_camera_config``.  Returns ``present=False`` when
-        the file is absent.
+        Reads ``<config_cameras_dir>/<cam_name>/config.json`` (the config
+        root — sprint 019 config/state split; resolved via
+        ``effective_config_dir`` so legacy single-tree installs still read
+        from ``data_dir``) using ``camera_config.load_camera_config``.
+        Returns ``present=False`` when the file is absent.
         """
         import json as _json
         from ..camera.camera_config import load_camera_config
 
         cam_name = request.cam_name
-        camera_dir = self._config.cameras_dir / cam_name
+        camera_dir = self._config.effective_config_dir / "cameras" / cam_name
         cfg = load_camera_config(camera_dir)
         if cfg is None:
             return aprilcam_pb2.JsonBlobReply(json_blob="", present=False)
@@ -763,16 +768,20 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
         request: aprilcam_pb2.CameraJsonRequest,
         context: grpc.ServicerContext,
     ) -> aprilcam_pb2.StatusReply:
-        """Write *json_blob* to ``<cameras_dir>/<cam_name>/config.json`` atomically.
+        """Write *json_blob* to ``<config_cameras_dir>/<cam_name>/config.json``
+        atomically.
 
-        Uses ``camera_config.save_camera_config`` (write to ``.tmp`` then
+        Writes land under the config root (``config.config_cameras_dir`` —
+        the true FHS/XDG target, sprint 019 config/state split), never under
+        ``cameras_dir``/``data_dir`` (state).  Uses
+        ``camera_config.save_camera_config`` (write to ``.tmp`` then
         ``os.replace``).
         """
         import json as _json
         from ..camera.camera_config import save_camera_config
 
         cam_name = request.cam_name
-        camera_dir = self._config.cameras_dir / cam_name
+        camera_dir = self._config.config_cameras_dir / cam_name
         try:
             cfg_dict = _json.loads(request.json_blob)
         except _json.JSONDecodeError as exc:
@@ -875,7 +884,10 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
                 from ..calibration.calibration import load_calibration_from_camera_dir
                 from .camera_pipeline import _apply_camera_settings
 
-                calibration = load_calibration_from_camera_dir(camera_dir)
+                calibration = load_calibration_from_camera_dir(
+                    camera_dir,
+                    config_dir=self._config.effective_config_dir / "cameras",
+                )
                 if pipeline._april_cam is not None:
                     if calibration is not None:
                         pipeline._april_cam.homography = calibration.homography
@@ -971,13 +983,15 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
         request: aprilcam_pb2.Empty,
         context: grpc.ServicerContext,
     ) -> aprilcam_pb2.ListPlayfieldsResponse:
-        """Return all playfield definitions from ``config.playfields_dir``.
+        """Return all playfield definitions from the config root.
 
-        Scans ``<playfields_dir>/*.json`` and returns each file's raw content
-        as a ``PlayfieldEntry``.  Files that cannot be read are skipped with a
-        log warning.
+        Scans ``<config.effective_config_dir>/playfields/*.json`` (the
+        config root — sprint 019 config/state split; legacy single-tree
+        installs fall back to ``data_dir`` via ``effective_config_dir``) and
+        returns each file's raw content as a ``PlayfieldEntry``.  Files that
+        cannot be read are skipped with a log warning.
         """
-        playfields_dir = self._config.playfields_dir
+        playfields_dir = self._config.effective_config_dir / "playfields"
         entries: list[aprilcam_pb2.PlayfieldEntry] = []
         if not playfields_dir.exists():
             return aprilcam_pb2.ListPlayfieldsResponse(

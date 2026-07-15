@@ -583,6 +583,7 @@ class Playfield:
         proc_width: int = 960,
         detect_interval: int = 3,
         data_dir: str = "data",
+        config_dir: "str | Path | None" = None,
         px_per_cm: float = 0.0,
         static_mode: Optional[bool] = None,
         movement_threshold_px: float = 0.0,
@@ -597,6 +598,12 @@ class Playfield:
         self._height_cm = height_cm
         self._calibration = calibration
         self._data_dir = data_dir
+        # Root directory holding per-camera config.json (sprint 019
+        # config/state split). None preserves the pre-019 sibling-lookup
+        # behavior in _load_static_marker_ids (config.json next to the
+        # calibration/homography file). Callers that know their Config's
+        # effective_config_dir should pass it here.
+        self._config_dir = config_dir
         self._px_per_cm = px_per_cm
         # Static-camera mode override (ticket 007): None=auto-on when a saved
         # homography exists; False forces the live-corner path.
@@ -614,9 +621,12 @@ class Playfield:
             self._homography = self._load_homography(calibration)
             self._corner_pixels = self._load_corner_pixels(calibration)
             self._static_markers = self._load_static_markers(calibration)
-            # config_dir threading (sprint 019 config/state split) deferred
-            # to ticket 003; None preserves today's sibling-lookup behavior.
-            self._static_marker_ids = self._load_static_marker_ids(calibration, None)
+            # config_dir threading (sprint 019 config/state split): uses the
+            # explicit config root when the caller supplied one, else falls
+            # back to the pre-019 sibling-lookup behavior.
+            self._static_marker_ids = self._load_static_marker_ids(
+                calibration, self._config_dir
+            )
 
         # Internal components. When a homography is known up front, seed the
         # boundary geometry so its polygon is non-None before any live frame.
@@ -824,10 +834,13 @@ class Playfield:
                     # back to the constructor values when absent from the record.
                     self._corner_pixels = self._load_corner_pixels(str(found))
                     self._static_markers = self._load_static_markers(str(found))
-                    # config_dir threading (sprint 019 config/state split)
-                    # deferred to ticket 003; None preserves today's
-                    # sibling-lookup behavior.
-                    self._static_marker_ids = self._load_static_marker_ids(str(found), None)
+                    # config_dir threading (sprint 019 config/state split):
+                    # uses the explicit config root when the caller supplied
+                    # one, else falls back to the pre-019 sibling-lookup
+                    # behavior.
+                    self._static_marker_ids = self._load_static_marker_ids(
+                        str(found), self._config_dir
+                    )
                     self._load_dimensions_into_self(str(found))
                 return H
         except Exception:

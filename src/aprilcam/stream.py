@@ -66,7 +66,9 @@ def _load_homography_matrix(
             from .config import Config
             cfg = Config.load()
             cam_dir = cfg.cameras_dir / device_name_slug(device_name)
-            cal = load_calibration_from_camera_dir(cam_dir)
+            cal = load_calibration_from_camera_dir(
+                cam_dir, config_dir=cfg.effective_config_dir / "cameras"
+            )
             if cal is not None:
                 return cal.homography
         except Exception:

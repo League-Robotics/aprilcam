@@ -2,7 +2,7 @@
 id: '003'
 title: Thread config_dir through daemon-local callers and repoint config-touching
   RPCs
-status: in-progress
+status: done
 use-cases:
 - SUC-005
 depends-on:
@@ -71,33 +71,33 @@ verified line numbers this ticket touches.
 
 ## Acceptance Criteria
 
-- [ ] `camera_pipeline.py`, both `grpc_server.py` reload sites,
+- [x] `camera_pipeline.py`, both `grpc_server.py` reload sites,
       `stream.py`, and `view_cli.py` each pass `config_dir` to their
       `load_calibration_from_camera_dir` call, resolved from their local
       `Config`/`config` instance's `effective_config_dir`.
-- [ ] `_load_static_marker_ids` call sites in `core/playfield.py` (617,
+- [x] `_load_static_marker_ids` call sites in `core/playfield.py` (617,
       825) pass a real config-dir value (not `None`) once the class has
       access to it.
-- [ ] `SetCameraConfig` writes land under `config_cameras_dir`, never
+- [x] `SetCameraConfig` writes land under `config_cameras_dir`, never
       under `cameras_dir`/`data_dir`.
-- [ ] `GetCameraConfig` reads resolve against `config_cameras_dir`.
-- [ ] `SetCalibration`/`GetCalibration`/`SetPaths`/`GetPaths` are
+- [x] `GetCameraConfig` reads resolve against `config_cameras_dir`.
+- [x] `SetCalibration`/`GetCalibration`/`SetPaths`/`GetPaths` are
       unchanged — writes/reads still resolve against `cameras_dir` (state)
       exactly as before this ticket.
-- [ ] `ListPlayfields` returns definitions found under
+- [x] `ListPlayfields` returns definitions found under
       `config_playfields_dir`.
-- [ ] `core/playfield_def.py`'s `load_all()` daemon-startup caller passes
+- [x] `core/playfield_def.py`'s `load_all()` daemon-startup caller passes
       `config_playfields_dir`.
-- [ ] `camera/registry.py` (`registry.json`) is untouched — confirmed by a
+- [x] `camera/registry.py` (`registry.json`) is untouched — confirmed by a
       grep/test that no new reference to `config_dir` was introduced there.
-- [ ] A camera with `config.json` under the config root and
+- [x] A camera with `config.json` under the config root and
       `calibration.json` under the state root (fully split layout, no
       legacy fallback needed) opens correctly end-to-end: daemon starts,
       `GetCameraConfig` returns the config-root content, `GetCalibration`
       returns the state-root content, detection loop starts and
       `get_tags`-equivalent (`test_file_proxy_rpcs.py` or integration
       test) returns world coordinates.
-- [ ] Full `uv run pytest` green.
+- [x] Full `uv run pytest` green.
 
 ## Testing
 

@@ -269,8 +269,14 @@ class CameraPipeline:
         self.device_name = device_name
 
         # Load calibration from <cameras_dir>/<cam_name>/calibration.json
+        # (state); the static config.json overlay is read from
+        # <effective_config_dir>/cameras/<cam_name> (sprint 019 config/state
+        # split — effective_config_dir falls back to data_dir for legacy
+        # single-tree installs, reproducing today's sibling-read location).
         camera_dir = self.config.cameras_dir / self.cam_name
-        self._calibration = load_calibration_from_camera_dir(camera_dir)
+        self._calibration = load_calibration_from_camera_dir(
+            camera_dir, config_dir=self.config.effective_config_dir / "cameras"
+        )
         # Load the mobile-tag registry: client-registered tags carrying their
         # mount pose (x_mm, y_mm, z_cm, yaw_deg) relative to the robot centre.
         # See aprilcam.daemon.mobile_tags; the daemon also pushes live updates
@@ -344,10 +350,14 @@ class CameraPipeline:
 
             # Apply hardware settings now that the capture session is stable.
             # Prefer settings from config.json (the authoritative source after
-            # the config/calibration split).  Fall back to calibration.settings
-            # for legacy un-migrated cameras that still carry settings there.
+            # the config/calibration split) — read from the config root
+            # (sprint 019 config/state split; effective_config_dir falls back
+            # to data_dir for legacy single-tree installs).  Fall back to
+            # calibration.settings for legacy un-migrated cameras that still
+            # carry settings there.
             from ..camera.camera_config import load_camera_config as _load_cfg
-            _cam_cfg = _load_cfg(camera_dir)
+            _config_cam_dir = self.config.effective_config_dir / "cameras" / self.cam_name
+            _cam_cfg = _load_cfg(_config_cam_dir)
             _settings = (
                 (_cam_cfg.get("settings") if _cam_cfg else None)
                 or (self._calibration.settings if self._calibration is not None else None)
@@ -860,12 +870,15 @@ class CameraPipeline:
             for _ in range(5):  # drain warm-up frames
                 cap.read()
             cap.set(cv.CAP_PROP_BUFFERSIZE, 1)
-            # Re-apply hardware settings (manual exposure, etc.).
+            # Re-apply hardware settings (manual exposure, etc.). config.json
+            # is read from the config root (sprint 019 config/state split;
+            # effective_config_dir falls back to data_dir for legacy
+            # single-tree installs).
             try:
                 from ..camera.camera_config import load_camera_config as _load_cfg
 
-                camera_dir = self.config.cameras_dir / self.cam_name
-                _cam_cfg = _load_cfg(camera_dir)
+                _config_cam_dir = self.config.effective_config_dir / "cameras" / self.cam_name
+                _cam_cfg = _load_cfg(_config_cam_dir)
                 _settings = (
                     (_cam_cfg.get("settings") if _cam_cfg else None)
                     or (self._calibration.settings if self._calibration is not None else None)

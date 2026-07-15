@@ -1200,6 +1200,12 @@ def calibrate_from_playfield_def(
 
     # Step 1: load config.json to find the linked playfield.
     # When camera_config is pre-supplied (MCP RPC path), skip the file read.
+    # NOTE (sprint 019 config/state split): this read intentionally stays on
+    # camera_dir, not config_dir — config_dir here is write-only (see the
+    # config_dir docstring above and the Step 12/13 write branch below).
+    # Daemon-local callers that already know config.json lives under the
+    # config root (e.g. cli/calibrate_cli.py) pre-load it via camera_config
+    # instead of relying on this fallback read.
     if camera_config is not None:
         config = camera_config
     elif camera_dir is not None:
