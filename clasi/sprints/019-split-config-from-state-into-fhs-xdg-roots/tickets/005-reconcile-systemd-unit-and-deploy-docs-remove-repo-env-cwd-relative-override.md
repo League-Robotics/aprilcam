@@ -1,9 +1,12 @@
 ---
 id: '005'
 title: Reconcile systemd unit and deploy docs; remove repo .env CWD-relative override
-status: open
-use-cases: [SUC-001, SUC-006]
-depends-on: ['004']
+status: in-progress
+use-cases:
+- SUC-001
+- SUC-006
+depends-on:
+- '004'
 github-issue: ''
 issue: split-config-from-state-into-fhs-xdg-roots.md
 completes_issue: true
