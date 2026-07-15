@@ -1,7 +1,7 @@
 ---
 id: '002'
 title: Machine-global lock in DaemonServer
-status: open
+status: in-progress
 use-cases:
 - SUC-001
 - SUC-002
