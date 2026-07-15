@@ -1,7 +1,7 @@
 ---
-id: '018'
+id: 018
 title: Enforce one aprilcamd daemon per machine
-status: architecture-review
+status: done
 branch: sprint/018-enforce-one-aprilcamd-daemon-per-machine
 use-cases:
 - SUC-001
