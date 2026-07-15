@@ -1,7 +1,7 @@
 ---
 id: '005'
 title: Reconcile systemd unit and deploy docs; remove repo .env CWD-relative override
-status: in-progress
+status: done
 use-cases:
 - SUC-001
 - SUC-006
@@ -76,24 +76,24 @@ for full design detail.
 
 ## Acceptance Criteria
 
-- [ ] `deploy/aprilcamd.service` no longer contains
+- [x] `deploy/aprilcamd.service` no longer contains
       `Environment=APRILCAM_DATA_DIR=/home/eric/aprilcam-data`.
-- [ ] `deploy/aprilcamd.service` still declares both
+- [x] `deploy/aprilcamd.service` still declares both
       `ConfigurationDirectory=aprilcam` and `StateDirectory=aprilcam`
       (confirmed present, not removed).
-- [ ] If the service user configuration requires it (non-root `User=`
+- [x] If the service user configuration requires it (non-root `User=`
       without `DynamicUser`), the unit sets `Environment=APRILCAM_SYSTEM=1`
       so FHS directory selection triggers correctly under systemd.
-- [ ] `deploy/README.md` documents `APRILCAM_CONFIG_DIR`, adds the FHS
+- [x] `deploy/README.md` documents `APRILCAM_CONFIG_DIR`, adds the FHS
       config row (`/etc/aprilcam`), and includes the four-step Pi
       migration procedure (migrate-dirs → manual state move → remove
       override → restart + verify).
-- [ ] Repo `.env` no longer contains `APRILCAM_DATA_DIR=./data/aprilcam`.
-- [ ] A fresh `Config.load()` on a clean checkout (no `.env` override, no
+- [x] Repo `.env` no longer contains `APRILCAM_DATA_DIR=./data/aprilcam`.
+- [x] A fresh `Config.load()` on a clean checkout (no `.env` override, no
       `APRILCAM_*` env vars set) resolves to XDG defaults
       (`~/.local/share/aprilcam` state, `~/.config/aprilcam` config) on a
       non-root Mac dev machine.
-- [ ] Full `uv run pytest` green — including a systemd-unit smoke test
+- [x] Full `uv run pytest` green — including a systemd-unit smoke test
       (directive presence, absence of the removed `Environment=` line) if
       such a test exists or is added; no test touches a real Pi or real
       `/etc`/`/var/lib`.

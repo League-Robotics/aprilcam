@@ -7,15 +7,25 @@ must prefer the registry and fall back to the legacy file.
 """
 import json
 import types
+from pathlib import Path
 
 from aprilcam.core import playfield_query as pq
-from aprilcam.config import Config
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_DATA_DIR = _REPO_ROOT / "data" / "aprilcam"
 
 
 def test_load_playfield_map_prefers_registry_real_data():
     # The real data dir has playfields/main-playfield.json; the legacy
-    # playfield.json was migrated away.
-    cfg = Config.load()
+    # playfield.json was migrated away. Point directly at the repo fixture
+    # tree rather than going through Config.load() — since sprint 019
+    # removed the repo .env's APRILCAM_DATA_DIR override (Mac dev now
+    # resolves to XDG defaults by design), Config.load() no longer reaches
+    # this repo-local data dir on a clean checkout.
+    cfg = types.SimpleNamespace(
+        effective_config_dir=_DATA_DIR,
+        data_dir=_DATA_DIR,
+    )
     pf = pq.load_playfield_map(cfg)
     assert pf["playfield"]["width_cm"] == 134.3
     feats = pq.iter_features(pf)
@@ -37,7 +47,7 @@ def test_load_playfield_map_falls_back_to_legacy_file(tmp_path):
         encoding="utf-8",
     )
     cfg = types.SimpleNamespace(
-        playfields_dir=tmp_path / "playfields",  # does not exist
+        effective_config_dir=tmp_path,  # tmp_path/playfields does not exist
         data_dir=tmp_path,
     )
     pf = pq.load_playfield_map(cfg)

@@ -19,9 +19,17 @@ StateDirectory=aprilcam
 RuntimeDirectory=aprilcam
 LogsDirectory=aprilcam
 
-# APRILCAM_DATA_DIR points to the user's persistent data (cameras, playfields).
+# APRILCAM_SYSTEM=1 forces FHS directory selection. Config._default_dirs()
+# only auto-selects FHS when os.geteuid() == 0 OR APRILCAM_SYSTEM == '1'; this
+# unit runs as a static non-root User=eric (no DynamicUser), so without this
+# flag the daemon would fall through to XDG paths under /home/eric instead of
+# the directories systemd just provisioned above. With it set, the daemon
+# resolves config_dir -> /etc/aprilcam (admin-owned: per-camera config.json,
+# playfields/*.json) and data_dir -> /var/lib/aprilcam (state: calibration.json,
+# registry.json, hosts.json, info.json, paths.json) automatically — no
+# APRILCAM_DATA_DIR/APRILCAM_CONFIG_DIR override needed.
 # APRILCAM_SOCKET_DIR is the runtime dir managed by systemd (ephemeral).
-Environment=APRILCAM_DATA_DIR=/home/eric/aprilcam-data
+Environment=APRILCAM_SYSTEM=1
 Environment=APRILCAM_SOCKET_DIR=/run/aprilcam
 
 # Run the daemon in the foreground so systemd captures output via journald.

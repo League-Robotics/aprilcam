@@ -158,7 +158,8 @@ Key variables:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `APRILCAM_DATA_DIR` | FHS `/var/lib/aprilcam` · XDG `~/.local/share/aprilcam` | Cameras, calibrations, playfields. |
+| `APRILCAM_DATA_DIR` | FHS `/var/lib/aprilcam` · XDG `~/.local/share/aprilcam` | State: `calibration.json`, `registry.json`, `hosts.json`, `info.json`, `paths.json`. |
+| `APRILCAM_CONFIG_DIR` | FHS `/etc/aprilcam` · XDG `~/.config/aprilcam` | Admin-owned config: per-camera `config.json`, `playfields/*.json`. Falls back to reading from `APRILCAM_DATA_DIR` if unset and legacy (pre-sprint-019) config files are found there — see `aprilcam migrate-dirs`. |
 | `APRILCAM_SOCKET_DIR` | FHS `/run/aprilcam` · XDG `$XDG_RUNTIME_DIR/aprilcam` (falls back to a per-user temp dir, e.g. `$TMPDIR/aprilcam-<uid>` on macOS) | Control socket, stream sockets, pidfile. |
 | `APRILCAM_LOG_DIR` | FHS `/var/log/aprilcam` · XDG `~/.local/state/aprilcam` | `aprilcamd.log`. |
 | `APRILCAM_LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR`. |
@@ -173,7 +174,8 @@ AprilCam picks a layout from whether it runs as root (`euid == 0`) or
 
 | Path | FHS (root / `APRILCAM_SYSTEM=1`) | XDG (user) |
 |------|----------------------------------|------------|
-| Data | `/var/lib/aprilcam` | `~/.local/share/aprilcam` |
+| Data (state) | `/var/lib/aprilcam` | `~/.local/share/aprilcam` |
+| Config (admin-owned) | `/etc/aprilcam` | `~/.config/aprilcam` |
 | Socket / runtime | `/run/aprilcam` | `$XDG_RUNTIME_DIR/aprilcam` (or per-user temp) |
 | Logs | `/var/log/aprilcam` | `~/.local/state/aprilcam` |
 
