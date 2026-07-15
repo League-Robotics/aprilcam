@@ -2,9 +2,12 @@
 id: '002'
 title: Decouple config reads from calibration reads in the loader and playfield marker-id
   lookup
-status: open
-use-cases: [SUC-004, SUC-005]
-depends-on: ['001']
+status: in-progress
+use-cases:
+- SUC-004
+- SUC-005
+depends-on:
+- '001'
 github-issue: ''
 issue: split-config-from-state-into-fhs-xdg-roots.md
 completes_issue: true
