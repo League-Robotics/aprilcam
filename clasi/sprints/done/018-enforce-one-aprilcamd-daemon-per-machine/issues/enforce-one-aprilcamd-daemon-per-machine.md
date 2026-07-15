@@ -1,5 +1,12 @@
 ---
-status: pending
+status: in-progress
+sprint: 018
+tickets:
+- 018-001
+- 018-002
+- 018-003
+- 018-004
+- 018-005
 ---
 
 # Enforce one aprilcamd daemon per machine

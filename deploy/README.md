@@ -105,6 +105,14 @@ ssh eric@vali.local "systemctl status aprilcamd"
 ssh eric@vali.local "journalctl -u aprilcamd -n 50 --no-pager"
 ```
 
+**One-daemon-per-machine (sprint 018)**: the unit's `ExecStart` always
+passes `--force`, so `systemctl start|restart aprilcamd` takes over the
+machine-global lock (`/tmp/aprilcamd.lock`) from any other `aprilcamd`
+instance rather than refusing to start — systemd's daemon is meant to
+always win. Do **not** add `PrivateTmp=true` to this unit; a private
+`/tmp` would give the daemon its own lock file and silently defeat that
+guard (see the comment in `deploy/aprilcamd.service`).
+
 ---
 
 ## Step 6 — Seed calibration data
@@ -179,4 +187,4 @@ See `project_ov9782_exposure_tuning` memory entry for full details.
 | opencv-contrib wheel not on PyPI for aarch64/cp312 | Use `--extra-index-url https://www.piwheels.org/simple` (included above) |
 | Camera not detected after provisioning | Log out and back in for `video` group membership; verify with `v4l2-ctl --list-devices` |
 | `mss` import failure on headless Pi | `mss` is lazy-imported; run `python -c "import aprilcam.daemon"` to confirm — if it fails, check for `DISPLAY` env var requirements in `mss` version |
-| Daemon won't start — duplicate instance | Check `journalctl -u aprilcamd`; remove stale pidfile if needed: `rm /run/aprilcam/aprilcamd.pid` |
+| Daemon won't start — duplicate instance | Check `journalctl -u aprilcamd`; since sprint 018 the singleton guard is a machine-global lock at `/tmp/aprilcamd.lock` (not the per-run pidfile) — the systemd unit's `--force` flag makes `systemctl restart aprilcamd` take over automatically, so this should only occur on a manual (non-systemd) start without `--force` |

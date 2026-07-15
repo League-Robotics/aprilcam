@@ -9,6 +9,18 @@ Transport flags
 --tcp-port N            TCP port to bind (default: 5280).
 --unix-path PATH        Filesystem path for the Unix socket
                         (default: <socket_dir>/control.sock).
+--force                 Take over the machine-global singleton lock from a
+                        running daemon instead of refusing to start (sprint
+                        018). See ``aprilcam.errors.DaemonAlreadyRunningError``.
+
+Exit codes
+----------
+0   Normal startup (server ran and shut down cleanly).
+1   Argument error (e.g. both transports disabled).
+3   Refused to start: another aprilcamd instance already holds the
+    machine-global lock (``DaemonAlreadyRunningError``), or the gRPC
+    transport failed to bind (``DaemonPortInUseError`` / ``DaemonBindError``).
+    Retry with ``--force`` to take over.
 """
 
 import argparse
@@ -17,6 +29,7 @@ import sys
 
 from aprilcam.config import Config
 from aprilcam.daemon.server import DaemonServer, _DEFAULT_TCP_PORT
+from aprilcam.errors import DaemonAlreadyRunningError, DaemonBindError, DaemonPortInUseError
 
 
 def _parse_args(argv=None):
@@ -63,6 +76,15 @@ def _parse_args(argv=None):
         metavar="PATH",
         help="Unix socket path (default: <socket_dir>/control.sock)",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help=(
+            "Take over the machine-global lock from a running daemon "
+            "instead of refusing to start"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -105,13 +127,24 @@ def main(argv=None):
     except Exception:
         logging.getLogger("aprilcam.daemon").exception("libcamera warm-up failed")
 
-    DaemonServer(
-        config,
-        unix_enabled=args.unix_enabled,
-        tcp_enabled=args.tcp_enabled,
-        unix_path=unix_path,
-        tcp_port=args.tcp_port,
-    ).run()
+    try:
+        DaemonServer(
+            config,
+            unix_enabled=args.unix_enabled,
+            tcp_enabled=args.tcp_enabled,
+            unix_path=unix_path,
+            tcp_port=args.tcp_port,
+            force=args.force,
+        ).run()
+    except DaemonAlreadyRunningError as exc:
+        print(f"aprilcamd already running (pid {exc.existing_pid})", file=sys.stderr)
+        sys.exit(3)
+    except DaemonPortInUseError as exc:
+        print(f"aprilcamd: TCP port already in use: {exc}", file=sys.stderr)
+        sys.exit(3)
+    except DaemonBindError as exc:
+        print(f"aprilcamd: failed to bind Unix socket: {exc}", file=sys.stderr)
+        sys.exit(3)
 
 
 if __name__ == "__main__":

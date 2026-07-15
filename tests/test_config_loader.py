@@ -528,6 +528,52 @@ def test_permission_error_on_mkdir_prints_hint_and_reraises(tmp_path, monkeypatc
 
 
 # ---------------------------------------------------------------------------
+# Config.load() — daemon_lock_path (sprint 018, ticket 001)
+# ---------------------------------------------------------------------------
+
+
+def test_daemon_lock_path_defaults_to_tmp_aprilcamd_lock(tmp_path, monkeypatch):
+    """With APRILCAM_DAEMON_LOCK unset, daemon_lock_path falls back to
+    /tmp/aprilcamd.lock — the fixed, machine-global singleton lock path."""
+    monkeypatch.delenv("APRILCAM_DAEMON_LOCK", raising=False)
+    monkeypatch.setenv("APRILCAM_SOCKET_DIR", str(tmp_path / "sock"))
+    monkeypatch.setenv("APRILCAM_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("APRILCAM_LOG_DIR", str(tmp_path / "log"))
+
+    cfg = Config.load(start=tmp_path)
+
+    assert cfg.daemon_lock_path == Path("/tmp/aprilcamd.lock")
+
+
+def test_daemon_lock_path_env_var_override(tmp_path, monkeypatch):
+    """APRILCAM_DAEMON_LOCK overrides the default lock path (test isolation
+    escape hatch, mirroring APRILCAM_SOCKET_DIR)."""
+    custom_lock = tmp_path / "custom" / "aprilcamd.lock"
+    monkeypatch.setenv("APRILCAM_DAEMON_LOCK", str(custom_lock))
+    monkeypatch.setenv("APRILCAM_SOCKET_DIR", str(tmp_path / "sock"))
+    monkeypatch.setenv("APRILCAM_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("APRILCAM_LOG_DIR", str(tmp_path / "log"))
+
+    cfg = Config.load(start=tmp_path)
+
+    assert cfg.daemon_lock_path == custom_lock
+
+
+def test_daemon_pidfile_unchanged_by_daemon_lock_path_addition(tmp_path, monkeypatch):
+    """daemon_pidfile remains the local, per-socket_dir pid cache — unaffected
+    by daemon_lock_path, which is an independent machine-global field."""
+    monkeypatch.delenv("APRILCAM_DAEMON_LOCK", raising=False)
+    monkeypatch.setenv("APRILCAM_SOCKET_DIR", str(tmp_path / "sock"))
+    monkeypatch.setenv("APRILCAM_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("APRILCAM_LOG_DIR", str(tmp_path / "log"))
+
+    cfg = Config.load(start=tmp_path)
+
+    assert cfg.daemon_pidfile == tmp_path / "sock" / "aprilcamd.pid"
+    assert cfg.daemon_lock_path == Path("/tmp/aprilcamd.lock")
+
+
+# ---------------------------------------------------------------------------
 # Config docstring — six-level precedence chain
 # ---------------------------------------------------------------------------
 
