@@ -923,12 +923,36 @@ def _build_static_markers(
     Returns ``{id_str: {"pixel": [u, v], "world": [x, y]}}``.  World
     coordinates are real-world centimetres.
     """
-    _CORNER_KEYS = ["corner:UL", "corner:UR", "corner:LR", "corner:LL"]
     static_markers: Dict[str, Dict[str, List[float]]] = {}
+
+    # Derive each corner's UL/UR/LR/LL key from its PIXEL position, not from
+    # the order it arrives in.  ``corner_pixels`` / ``corner_worlds`` are
+    # paired but their ordering follows the ArUco-ID→world mapping in
+    # ``_assign_corners_by_position`` ([UL, UR, LL, LR] for the 4-corner
+    # canonical layout), which does NOT match the [UL, UR, LR, LL] label
+    # order — a naive zip mislabels LR<->LL.  The live static-marker check in
+    # core/playfield.py orders corners geometrically by PIXEL coords
+    # (``_order_poly``: top two by y, then left/right by x) and compares
+    # against these keys, so the stored key must reflect pixel geometry
+    # (image coords: x right, y DOWN), NOT world coords (which are A1-centred,
+    # +y = north — a different convention).  Keying off pixels here is what
+    # makes the stored label match what the live check computes, eliminating
+    # the spurious ~field-width "marker moved" flap.
+    def _corner_key(px_x: float, px_y: float, mid_x: float, mid_y: float) -> str:
+        left = px_x < mid_x
+        top = px_y < mid_y  # image y increases downward
+        if top:
+            return "corner:UL" if left else "corner:UR"
+        return "corner:LL" if left else "corner:LR"
 
     for marker_id in static_marker_ids:
         if marker_id == "aruco_corners":
-            for key, px, wp in zip(_CORNER_KEYS, corner_pixels, corner_worlds):
+            xs = [float(p[0]) for p in corner_pixels]
+            ys = [float(p[1]) for p in corner_pixels]
+            mid_x = (min(xs) + max(xs)) / 2.0 if xs else 0.0
+            mid_y = (min(ys) + max(ys)) / 2.0 if ys else 0.0
+            for px, wp in zip(corner_pixels, corner_worlds):
+                key = _corner_key(float(px[0]), float(px[1]), mid_x, mid_y)
                 static_markers[key] = {
                     "pixel": [float(px[0]), float(px[1])],
                     "world": [float(wp[0]), float(wp[1])],

@@ -829,13 +829,22 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
         cam_name = request.cam_name
         camera_dir = self._config.cameras_dir / cam_name
 
-        # Validate JSON before writing.
+        # Validate JSON before writing, and inject the ``camera`` slug key so
+        # the RPC-written file matches the direct-write schema
+        # (``save_calibration_to_camera_dir`` sets ``data["camera"] =
+        # <dir name>``).  The MCP calibrate path serializes via
+        # ``to_camera_json()``, which emits ``calibrated_camera`` but not
+        # ``camera``; without this the two save paths produce different files
+        # (the file the loader/tests expect is the direct-write shape).
         try:
-            _json.loads(request.json_blob)
+            cal_obj = _json.loads(request.json_blob)
         except _json.JSONDecodeError as exc:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(f"SetCalibration: invalid JSON: {exc}")
             return aprilcam_pb2.StatusReply(ok=False, error=str(exc))
+        if isinstance(cal_obj, dict):
+            cal_obj["camera"] = cam_name
+        blob_to_write = _json.dumps(cal_obj)
 
         # Atomic write.
         try:
@@ -843,7 +852,7 @@ class AprilCamServicer(aprilcam_pb2_grpc.AprilCamServicer):
             cal_file = camera_dir / "calibration.json"
             tmp = cal_file.with_suffix(".json.tmp")
             try:
-                tmp.write_text(request.json_blob, encoding="utf-8")
+                tmp.write_text(blob_to_write, encoding="utf-8")
                 _os.replace(tmp, cal_file)
             finally:
                 try:
