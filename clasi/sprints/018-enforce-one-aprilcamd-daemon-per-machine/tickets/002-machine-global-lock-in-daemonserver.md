@@ -1,7 +1,7 @@
 ---
 id: '002'
 title: Machine-global lock in DaemonServer
-status: in-progress
+status: done
 use-cases:
 - SUC-001
 - SUC-002
@@ -65,34 +65,34 @@ takeover sequence, run() raises) for full reasoning.
 
 ## Acceptance Criteria
 
-- [ ] `DaemonServer.__init__` accepts `force: bool = False`.
-- [ ] `run()` acquires an exclusive flock on `config.daemon_lock_path`
+- [x] `DaemonServer.__init__` accepts `force: bool = False`.
+- [x] `run()` acquires an exclusive flock on `config.daemon_lock_path`
       (not `config.daemon_pidfile`) as its singleton guard.
-- [ ] **(a)** A second `DaemonServer` constructed with a *different*
+- [x] **(a)** A second `DaemonServer` constructed with a *different*
       `socket_dir`-derived config but the *same* `daemon_lock_path` as a
       running first instance is refused — reproduces and closes the
       confirmed today's-gap scenario.
-- [ ] **(d)** Refuse-by-default: when the lock is held and `force=False`,
+- [x] **(d)** Refuse-by-default: when the lock is held and `force=False`,
       `run()` raises `DaemonAlreadyRunningError` carrying the existing
       daemon's pid (read from the lock file contents), instead of silently
       returning.
-- [ ] **(e)** A stale lock file left behind by a process that died via
+- [x] **(e)** A stale lock file left behind by a process that died via
       `kill -9` (simulate: hold the lock in a subprocess, kill -9 it, then
       start a new `DaemonServer`) is reclaimed by the next `run()` call
       without unlinking the file and without raising — the new process
       acquires the lock and overwrites the pid.
-  - [ ] The local `daemon_pidfile` is still written after global-lock
+  - [x] The local `daemon_pidfile` is still written after global-lock
       acquisition, unchanged in format/location from today.
-- [ ] The lock file is never unlinked by `_shutdown()`/the release path —
+- [x] The lock file is never unlinked by `_shutdown()`/the release path —
       verify via a test that starts, gracefully stops, and restarts a
       `DaemonServer` reusing the same lock path, confirming the second
       `run()` succeeds without needing lock-file recreation.
-- [ ] `test_pidfile_lock_prevents_duplicate`
+- [x] `test_pidfile_lock_prevents_duplicate`
       (`tests/test_daemon_server.py:164`) is replaced (not merely
       supplemented) by the new lock-path-based tests above, since it only
       covers the shared-pidfile case that no longer reflects the real
       guard.
-- [ ] All other existing tests in `tests/test_daemon_server.py` and
+- [x] All other existing tests in `tests/test_daemon_server.py` and
       `tests/test_daemon_spawn_race.py` remain green.
 
 ## Implementation Plan

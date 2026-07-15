@@ -1,8 +1,11 @@
-"""Tests for aprilcam.daemon.server — DaemonServer gRPC startup and pidfile."""
+"""Tests for aprilcam.daemon.server — DaemonServer gRPC startup and locking."""
 
 from __future__ import annotations
 
+import fcntl
+import multiprocessing
 import os
+import signal
 import threading
 import time
 from pathlib import Path
@@ -14,6 +17,7 @@ pytest.importorskip("aprilcam.daemon.grpc_server", reason="requires aprilcam[dae
 
 from aprilcam.config import Config
 from aprilcam.daemon.server import DaemonServer
+from aprilcam.errors import DaemonAlreadyRunningError
 from aprilcam.proto import aprilcam_pb2, aprilcam_pb2_grpc
 
 
@@ -44,6 +48,8 @@ def tmp_config(tmp_path: Path):
         calibration_dir=data_dir / "calibration",
         log_level="DEBUG",
         daemon_pidfile=sock_dir / "aprilcamd.pid",
+        # Never touch the real /tmp/aprilcamd.lock — unique per test.
+        daemon_lock_path=base / "aprilcamd.lock",
     )
     yield cfg
 
@@ -158,37 +164,205 @@ def test_grpc_shutdown_rpc(tmp_config: Config):
     assert not t.is_alive(), "Server thread did not exit after Shutdown RPC"
 
 
-# ── Pidfile locking ───────────────────────────────────────────────────────────
+# ── Machine-global lock ───────────────────────────────────────────────────────
 
 
-def test_pidfile_lock_prevents_duplicate(tmp_config: Config, caplog):
-    """A second DaemonServer with the same config cannot acquire the pidfile."""
-    import logging
+def test_global_lock_prevents_duplicate_different_socket_dir(tmp_path: Path):
+    """(a) A second DaemonServer with a DIFFERENT socket_dir but the SAME
+    daemon_lock_path as a running first instance is refused.
 
-    unix_path = str(tmp_config.socket_dir / "ctrl.sock")
-    server1 = DaemonServer(
-        tmp_config, unix_enabled=True, tcp_enabled=False, unix_path=unix_path
+    This reproduces and closes the confirmed today's-gap scenario: two
+    daemons with different socket_dir values used to both flock their own
+    (different) pidfile successfully and coexist.
+    """
+    import stat
+    import tempfile
+
+    shared_lock = Path(tempfile.mkdtemp(prefix="lock_", dir="/tmp")) / "aprilcamd.lock"
+
+    def _cfg(suffix: str) -> Config:
+        base = Path(tempfile.mkdtemp(prefix=f"ads_{suffix}_", dir="/tmp"))
+        base.chmod(base.stat().st_mode | stat.S_IRWXO)
+        sock_dir = base / "s"
+        data_dir = base / "d"
+        sock_dir.mkdir()
+        data_dir.mkdir()
+        return Config(
+            data_dir=data_dir,
+            socket_dir=sock_dir,
+            calibration_dir=data_dir / "calibration",
+            log_level="DEBUG",
+            daemon_pidfile=sock_dir / "aprilcamd.pid",
+            daemon_lock_path=shared_lock,
+        )
+
+    cfg1 = _cfg("a")
+    cfg2 = _cfg("b")  # different socket_dir entirely
+
+    server1 = _make_server(
+        cfg1, unix_path=str(cfg1.socket_dir / "control.sock"), tcp_port=15290
     )
     t1 = threading.Thread(target=server1.run, daemon=True)
     t1.start()
+    try:
+        assert server1.started_event.wait(timeout=3.0), "server1 did not start"
 
+        server2 = _make_server(
+            cfg2, unix_path=str(cfg2.socket_dir / "control.sock"), tcp_port=15291
+        )
+        with pytest.raises(DaemonAlreadyRunningError):
+            server2.run()
+    finally:
+        server1._shutdown_event.set()
+        t1.join(timeout=5.0)
+
+    import shutil
+
+    shutil.rmtree(cfg1.data_dir.parent, ignore_errors=True)
+    shutil.rmtree(cfg2.data_dir.parent, ignore_errors=True)
+    shutil.rmtree(shared_lock.parent, ignore_errors=True)
+
+
+def test_global_lock_refuse_by_default_carries_pid(tmp_config: Config):
+    """(d) Refuse-by-default: run() raises DaemonAlreadyRunningError carrying
+    the running daemon's pid when the lock is held and force=False.
+    """
+    unix_path = str(tmp_config.socket_dir / "ctrl.sock")
+    server1 = _make_server(tmp_config, unix_path=unix_path, tcp_port=15292)
+    t1 = threading.Thread(target=server1.run, daemon=True)
+    t1.start()
+    try:
+        assert server1.started_event.wait(timeout=3.0), "server1 did not start"
+
+        server2 = _make_server(
+            tmp_config, unix_path=unix_path + "2", tcp_port=15293
+        )
+        with pytest.raises(DaemonAlreadyRunningError) as exc_info:
+            server2.run()
+
+        assert exc_info.value.existing_pid == os.getpid()
+    finally:
+        server1._shutdown_event.set()
+        t1.join(timeout=5.0)
+
+
+def _hold_lock_forever(lock_path: str) -> None:
+    """Helper for a subprocess: open+flock the lock file, write our pid,
+    then block until killed.  Used to simulate a stale lock via SIGKILL.
+    """
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o666)
+    os.fchmod(fd, 0o666)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    while True:
+        time.sleep(1)
+
+
+def test_stale_lock_reclaimed_after_kill9(tmp_config: Config):
+    """(e) A stale lock file left behind by a process killed via SIGKILL is
+    reclaimed cleanly by the next run() without unlinking the file and
+    without raising.
+    """
+    lock_path = str(tmp_config.daemon_lock_path)
+
+    proc = multiprocessing.Process(target=_hold_lock_forever, args=(lock_path,))
+    proc.start()
+    try:
+        # Wait for the subprocess to actually hold the lock.
+        deadline = time.monotonic() + 5.0
+        held = False
+        while time.monotonic() < deadline:
+            if os.path.exists(lock_path) and os.path.getsize(lock_path) > 0:
+                held = True
+                break
+            time.sleep(0.05)
+        assert held, "subprocess did not acquire the lock in time"
+        time.sleep(0.2)  # let the write settle
+
+        os.kill(proc.pid, signal.SIGKILL)
+        proc.join(timeout=5.0)
+        assert not proc.is_alive()
+
+        # The lock file must still exist (never unlinked) but its flock is
+        # now released by the kernel since the holder is dead.
+        assert os.path.exists(lock_path)
+
+        unix_path = str(tmp_config.socket_dir / "ctrl.sock")
+        server = _make_server(tmp_config, unix_path=unix_path, tcp_port=15294)
+        t = threading.Thread(target=server.run, daemon=True)
+        t.start()
+        try:
+            assert server.started_event.wait(timeout=3.0), (
+                "server did not reclaim the stale lock in time"
+            )
+            with open(lock_path) as f:
+                pid_in_lock = int(f.read().strip())
+            assert pid_in_lock == os.getpid()
+        finally:
+            server._shutdown_event.set()
+            t.join(timeout=5.0)
+    finally:
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=2.0)
+
+
+def test_global_lock_not_unlinked_on_shutdown_and_restart(tmp_config: Config):
+    """The lock file is never unlinked by _shutdown()/the release path —
+    start, gracefully stop, and restart a DaemonServer reusing the same
+    lock path; the second run() succeeds without needing lock-file
+    recreation.
+    """
+    lock_path = tmp_config.daemon_lock_path
+
+    unix_path = str(tmp_config.socket_dir / "ctrl.sock")
+    server1 = _make_server(tmp_config, unix_path=unix_path, tcp_port=15295)
+    t1 = threading.Thread(target=server1.run, daemon=True)
+    t1.start()
     assert server1.started_event.wait(timeout=3.0), "server1 did not start"
 
-    # server2 should detect "already running" and return without blocking
-    with caplog.at_level(logging.ERROR, logger="aprilcam.daemon.server"):
-        server2 = DaemonServer(
-            tmp_config, unix_enabled=True, tcp_enabled=False, unix_path=unix_path + "2"
-        )
-        server2.run()  # should return quickly — pidfile is held by server1
+    inode_before = os.stat(lock_path).st_ino
 
-    assert any(
-        "already running" in record.message
-        for record in caplog.records
-    ), f"Expected 'already running' in log, got: {[r.message for r in caplog.records]}"
-
-    # Shut down server1
     server1._shutdown_event.set()
     t1.join(timeout=5.0)
+    assert not t1.is_alive()
+
+    # Lock file must still exist — never unlinked.
+    assert lock_path.exists()
+    assert os.stat(lock_path).st_ino == inode_before
+
+    server2 = _make_server(tmp_config, unix_path=unix_path, tcp_port=15296)
+    t2 = threading.Thread(target=server2.run, daemon=True)
+    t2.start()
+    try:
+        assert server2.started_event.wait(timeout=3.0), (
+            "server2 did not restart and reacquire the lock"
+        )
+        # Still the same inode — reused, not recreated.
+        assert os.stat(lock_path).st_ino == inode_before
+    finally:
+        server2._shutdown_event.set()
+        t2.join(timeout=5.0)
+
+
+def test_local_pidfile_still_written_after_global_lock(tmp_config: Config):
+    """The local daemon_pidfile is still written after global-lock
+    acquisition, unchanged in format/location from today.
+    """
+    unix_path = str(tmp_config.socket_dir / "ctrl.sock")
+    server = _make_server(tmp_config, unix_path=unix_path, tcp_port=15297)
+    t = threading.Thread(target=server.run, daemon=True)
+    t.start()
+    try:
+        assert server.started_event.wait(timeout=3.0), "server did not start"
+        assert tmp_config.daemon_pidfile.exists()
+        with open(tmp_config.daemon_pidfile) as f:
+            pid = int(f.read().strip())
+        assert pid == os.getpid()
+    finally:
+        server._shutdown_event.set()
+        t.join(timeout=5.0)
 
 
 # ── __main__ argument parsing ─────────────────────────────────────────────────

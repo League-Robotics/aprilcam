@@ -1,8 +1,15 @@
 """
-aprilcam.daemon.server — DaemonServer: gRPC server, pidfile/flock, camera registry.
+aprilcam.daemon.server — DaemonServer: gRPC server, machine-global lock, camera registry.
 
 The daemon owns:
-  - An exclusive flock on the pidfile (prevents duplicate daemons).
+  - An exclusive flock on ``config.daemon_lock_path`` (a fixed, machine-global
+    path, default ``/tmp/aprilcamd.lock``) — this is the sole singleton guard
+    that prevents duplicate daemons anywhere on the machine, regardless of
+    ``socket_dir``.  See ``_acquire_global_lock()``.
+  - A local pidfile at ``config.daemon_pidfile`` (``socket_dir``-relative), a
+    best-effort convenience cache written immediately after the global lock
+    is acquired, used by ``daemon status``/``stop`` for local pid discovery.
+    It is not itself a locking mechanism.
   - A gRPC server bound to one or both of:
       * Unix domain socket at ``unix_path`` (default /tmp/aprilcam/control.sock)
       * TCP socket at ``0.0.0.0:tcp_port`` (default port 5280)
@@ -20,10 +27,12 @@ import logging
 import os
 import signal
 import threading
+import time
 from pathlib import Path
 from typing import Dict, Optional
 
 from ..config import Config
+from ..errors import DaemonAlreadyRunningError
 from .camera_pipeline import CameraPipeline
 
 log = logging.getLogger(__name__)
@@ -64,6 +73,7 @@ class DaemonServer:
         tcp_enabled: bool = True,
         unix_path: str = _DEFAULT_UNIX_PATH,
         tcp_port: int = _DEFAULT_TCP_PORT,
+        force: bool = False,
     ) -> None:
         if not unix_enabled and not tcp_enabled:
             raise ValueError(
@@ -76,6 +86,7 @@ class DaemonServer:
         self._tcp_enabled = tcp_enabled
         self._unix_path = unix_path
         self._tcp_port = tcp_port
+        self._force = force
 
         # Cameras: cam_name → CameraPipeline
         self._cameras: Dict[str, CameraPipeline] = {}
@@ -84,8 +95,13 @@ class DaemonServer:
         # Shutdown coordination
         self._shutdown_event = threading.Event()
 
-        # Pidfile file descriptor (kept open for the lifetime of the process
-        # so the flock is held continuously)
+        # Machine-global lock file descriptor (kept open for the lifetime of
+        # the process so the flock is held continuously) — the singleton
+        # guard.  Distinct from the local pidfile fd below.
+        self._lock_fd: Optional[int] = None
+
+        # Local pidfile file descriptor — a convenience cache for
+        # status/stop pid discovery, not itself a locking mechanism.
         self._pidfile_fd: Optional[int] = None
 
         # gRPC server (set in run())
@@ -105,40 +121,19 @@ class DaemonServer:
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        """Block until shutdown.  Returns silently if already running."""
-        # 1. Acquire exclusive pidfile lock --------------------------------
+        """Block until shutdown.  Raises ``DaemonAlreadyRunningError`` if a
+        daemon already holds the machine-global lock and ``force`` was not
+        set at construction time.
+        """
+        # 1. Acquire the machine-global singleton lock ---------------------
+        self._acquire_global_lock()
+
+        # 1b. Write the local pidfile (convenience cache for status/stop) --
         pidfile = self._config.daemon_pidfile
         pidfile.parent.mkdir(parents=True, exist_ok=True)
-
-        try:
-            fd = os.open(str(pidfile), os.O_RDWR | os.O_CREAT, 0o644)
-        except OSError as exc:
-            log.error("cannot open pidfile %s: %s", pidfile, exc)
-            return
-
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            os.close(fd)
-            log.error("already running")
-            return
-        except OSError:
-            # Stale pidfile with no live lock — remove and retry once
-            os.close(fd)
-            try:
-                pidfile.unlink(missing_ok=True)
-                fd = os.open(str(pidfile), os.O_RDWR | os.O_CREAT, 0o644)
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except Exception as exc:
-                log.error("cannot acquire pidfile lock: %s", exc)
-                return
-
-        self._pidfile_fd = fd
-
-        # Write our PID
-        os.ftruncate(fd, 0)
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, f"{os.getpid()}\n".encode())
+        pidfile_fd = os.open(str(pidfile), os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
+        os.write(pidfile_fd, f"{os.getpid()}\n".encode())
+        self._pidfile_fd = pidfile_fd
 
         # 2. Build gRPC server --------------------------------------------
         from .grpc_server import AprilCamServicer, make_grpc_server
@@ -200,6 +195,132 @@ class DaemonServer:
         self._shutdown()
 
     # ------------------------------------------------------------------
+    # Internal: machine-global lock
+    # ------------------------------------------------------------------
+
+    def _acquire_global_lock(self) -> None:
+        """Acquire an exclusive flock on ``config.daemon_lock_path``.
+
+        This is the sole singleton guard: it is machine-global (a fixed
+        path, default ``/tmp/aprilcamd.lock``), not ``socket_dir``-relative,
+        so it catches duplicate daemons regardless of what ``socket_dir``
+        each was launched with.
+
+        Stale-lock recovery is lock-first-then-rewrite: a dead holder's
+        flock is already released by the kernel, so a plain
+        ``flock(LOCK_EX | LOCK_NB)`` on the *existing* (never recreated)
+        file simply succeeds; only then do we ftruncate + write our pid.
+        The lock file is never unlinked.
+
+        On contention (``BlockingIOError``): if ``self._force`` is False,
+        raise ``DaemonAlreadyRunningError`` carrying the pid read from the
+        lock file. If ``self._force`` is True, perform a local
+        SIGTERM→SIGKILL takeover of the existing holder and retry once.
+        """
+        lock_path = self._config.daemon_lock_path
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o666)
+        os.fchmod(fd, 0o666)
+
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            existing_pid = self._read_lock_pid(fd)
+            if not self._force:
+                os.close(fd)
+                log.error(
+                    "already running (pid %s), lock=%s",
+                    existing_pid,
+                    lock_path,
+                )
+                raise DaemonAlreadyRunningError(existing_pid=existing_pid)
+
+            os.close(fd)
+            log.warning(
+                "aprilcamd: --force given, taking over lock from pid %s",
+                existing_pid,
+            )
+            self._force_takeover(existing_pid)
+
+            # Retry once, non-forced this time — if it still fails, the
+            # takeover did not succeed and we surface the error normally.
+            fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o666)
+            os.fchmod(fd, 0o666)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                retry_pid = self._read_lock_pid(fd)
+                os.close(fd)
+                log.error(
+                    "aprilcamd: --force takeover failed, lock still held "
+                    "(pid %s)",
+                    retry_pid,
+                )
+                raise DaemonAlreadyRunningError(existing_pid=retry_pid)
+
+        # Lock acquired — rewrite the pid.
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, f"{os.getpid()}\n".encode())
+        self._lock_fd = fd
+
+    @staticmethod
+    def _read_lock_pid(fd: int) -> Optional[int]:
+        """Best-effort read of the pid recorded in an open lock-file fd."""
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            contents = os.read(fd, 64).decode().strip()
+            return int(contents) if contents else None
+        except (OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _force_takeover(existing_pid: Optional[int]) -> None:
+        """Local half of the --force takeover: SIGTERM, wait, SIGKILL.
+
+        This is the pure ``os``/``signal`` fallback only — it does not send
+        the graceful Shutdown RPC first.  That step is layered on top at the
+        CLI level (ticket 018-004's ``daemon_cli.py`` takeover helper calls
+        ``DaemonControl.shutdown()`` before ever constructing a
+        ``force=True`` DaemonServer), so ``daemon/server.py`` stays free of
+        a ``client/`` import and remains a leaf module.
+        """
+        if existing_pid is None:
+            return
+
+        try:
+            os.kill(existing_pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return  # already gone
+        except OSError as exc:
+            log.warning("--force: SIGTERM to pid %d failed: %s", existing_pid, exc)
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                os.kill(existing_pid, 0)
+            except ProcessLookupError:
+                return  # process exited
+            time.sleep(0.1)
+
+        # Still alive after the grace window — escalate.
+        try:
+            os.kill(existing_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        except OSError as exc:
+            log.warning("--force: SIGKILL to pid %d failed: %s", existing_pid, exc)
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                os.kill(existing_pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+
+    # ------------------------------------------------------------------
     # Internal: signal handling
     # ------------------------------------------------------------------
 
@@ -249,19 +370,36 @@ class DaemonServer:
                 log.exception("Error stopping mDNS advertiser")
             self._mdns_advertiser = None
 
-        # Release pidfile
+        # Release the global lock and local pidfile
         self._release_pidfile()
+        self._release_global_lock()
 
         log.info("aprilcamd: goodbye")
 
     def _release_pidfile(self) -> None:
+        """Close the local pidfile fd.  Never unlinks the file."""
         if self._pidfile_fd is not None:
-            try:
-                fcntl.flock(self._pidfile_fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
             try:
                 os.close(self._pidfile_fd)
             except OSError:
                 pass
             self._pidfile_fd = None
+
+    def _release_global_lock(self) -> None:
+        """Release the machine-global lock: ``LOCK_UN`` + close, no unlink.
+
+        The lock file is intentionally never removed — see
+        architecture-update.md "Decision: never unlink the lock file".
+        Removing it would reopen a create/lock race window between the
+        unlink and the next daemon's open+flock.
+        """
+        if self._lock_fd is not None:
+            try:
+                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(self._lock_fd)
+            except OSError:
+                pass
+            self._lock_fd = None
