@@ -1,8 +1,10 @@
 ---
 id: '001'
 title: Add config_dir root, APRILCAM_CONFIG_DIR, and legacy fallback to config.py
-status: open
-use-cases: [SUC-001, SUC-003]
+status: done
+use-cases:
+- SUC-001
+- SUC-003
 depends-on: []
 github-issue: ''
 issue: split-config-from-state-into-fhs-xdg-roots.md
@@ -57,40 +59,40 @@ rationale.
 
 ## Acceptance Criteria
 
-- [ ] `_default_dirs()` returns a 4-tuple `(data_dir, socket_dir, log_dir,
+- [x] `_default_dirs()` returns a 4-tuple `(data_dir, socket_dir, log_dir,
       config_dir)`; FHS branch returns `Path("/etc/aprilcam")` as the 4th
       element; XDG branch returns `$XDG_CONFIG_HOME/aprilcam` (when set)
       or `~/.config/aprilcam` (fallback) as the 4th element.
-- [ ] `Config` dataclass has a `config_dir: Path` field.
-- [ ] `Config.load()` resolves `config_dir` from `APRILCAM_CONFIG_DIR` when
+- [x] `Config` dataclass has a `config_dir: Path` field.
+- [x] `Config.load()` resolves `config_dir` from `APRILCAM_CONFIG_DIR` when
       set, else from `_default_dirs()`'s 4th element — mirroring the exact
       pattern used for `data_dir`/`socket_dir`/`log_dir`.
-- [ ] `APRILCAM_SYSTEM=1` (or root euid) yields `config_dir ==
+- [x] `APRILCAM_SYSTEM=1` (or root euid) yields `config_dir ==
       Path("/etc/aprilcam")` when `APRILCAM_CONFIG_DIR` is unset.
-- [ ] Non-root, `APRILCAM_SYSTEM` unset, yields `config_dir ==
+- [x] Non-root, `APRILCAM_SYSTEM` unset, yields `config_dir ==
       Path.home() / ".config" / "aprilcam"` when `XDG_CONFIG_HOME` and
       `APRILCAM_CONFIG_DIR` are both unset.
-- [ ] `XDG_CONFIG_HOME=/tmp/xdgcfg` (non-root) yields `config_dir ==
+- [x] `XDG_CONFIG_HOME=/tmp/xdgcfg` (non-root) yields `config_dir ==
       Path("/tmp/xdgcfg/aprilcam")`.
-- [ ] `APRILCAM_CONFIG_DIR=/tmp/explicit` wins over both FHS and XDG
+- [x] `APRILCAM_CONFIG_DIR=/tmp/explicit` wins over both FHS and XDG
       defaults, for both root and non-root.
-- [ ] `Config.load()` called with two different `start`/cwd values (no
+- [x] `Config.load()` called with two different `start`/cwd values (no
       `APRILCAM_DATA_DIR`/`APRILCAM_CONFIG_DIR` set) returns an identical
       `config_dir` in both calls (proves launch-independence — SUC-001).
-- [ ] `config_cameras_dir` returns `config_dir / "cameras"`;
+- [x] `config_cameras_dir` returns `config_dir / "cameras"`;
       `config_playfields_dir` returns `config_dir / "playfields"`.
-- [ ] `effective_config_dir` returns `config_dir` unchanged when
+- [x] `effective_config_dir` returns `config_dir` unchanged when
       `APRILCAM_CONFIG_DIR` was explicitly set, OR when `config_dir`
       already contains at least one `cameras/*/config.json`.
-- [ ] `effective_config_dir` returns `data_dir` when `APRILCAM_CONFIG_DIR`
+- [x] `effective_config_dir` returns `data_dir` when `APRILCAM_CONFIG_DIR`
       is unset, `config_dir` has no config files, and `data_dir` has at
       least one `cameras/*/config.json` (legacy fallback case — SUC-003).
-- [ ] `CONFIG_VARS` gains an `APRILCAM_CONFIG_DIR` entry with a non-empty
+- [x] `CONFIG_VARS` gains an `APRILCAM_CONFIG_DIR` entry with a non-empty
       default description and description string, following the existing
       entry format.
-- [ ] No existing test regresses; no caller of `cameras_dir`/
+- [x] No existing test regresses; no caller of `cameras_dir`/
       `playfields_dir` changes behavior (those properties are untouched).
-- [ ] New tests use only tmp directories via env var overrides
+- [x] New tests use only tmp directories via env var overrides
       (`APRILCAM_DATA_DIR`, `APRILCAM_CONFIG_DIR`, `XDG_CONFIG_HOME`,
       `APRILCAM_SYSTEM`, monkeypatched `os.geteuid`) — never touch real
       `/etc` or `/var/lib`.

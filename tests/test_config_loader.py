@@ -349,7 +349,7 @@ def test_default_dirs_fhs_when_root(monkeypatch):
     monkeypatch.setattr(os, "geteuid", lambda: 0)
     monkeypatch.setattr(os, "getuid", lambda: 0)
 
-    data, sock, log = _default_dirs()
+    data, sock, log, _cfgdir = _default_dirs()
 
     assert data == Path("/var/lib/aprilcam")
     assert sock == Path("/run/aprilcam")
@@ -365,7 +365,7 @@ def test_default_dirs_xdg_when_non_root(monkeypatch):
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
     monkeypatch.setattr(os, "getuid", lambda: 1000)
 
-    data, sock, log = _default_dirs()
+    data, sock, log, _cfgdir = _default_dirs()
 
     assert "aprilcam" in str(data)
     assert "aprilcam" in str(sock)
@@ -382,7 +382,7 @@ def test_default_dirs_system_env_forces_fhs(monkeypatch):
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
     monkeypatch.setattr(os, "getuid", lambda: 1000)
 
-    data, sock, log = _default_dirs()
+    data, sock, log, _cfgdir = _default_dirs()
 
     assert data == Path("/var/lib/aprilcam")
     assert sock == Path("/run/aprilcam")
@@ -398,7 +398,7 @@ def test_default_dirs_system_env_zero_forces_xdg_even_for_root(monkeypatch):
     monkeypatch.setattr(os, "geteuid", lambda: 0)
     monkeypatch.setattr(os, "getuid", lambda: 0)
 
-    data, sock, log = _default_dirs()
+    data, sock, log, _cfgdir = _default_dirs()
 
     assert data != Path("/var/lib/aprilcam")
     assert sock != Path("/run/aprilcam")
@@ -414,7 +414,7 @@ def test_default_dirs_xdg_env_vars_respected(monkeypatch):
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
     monkeypatch.setattr(os, "getuid", lambda: 1000)
 
-    data, sock, log = _default_dirs()
+    data, sock, log, _cfgdir = _default_dirs()
 
     assert data == Path("/custom/data/aprilcam")
     assert sock == Path("/custom/run/aprilcam")
@@ -438,7 +438,7 @@ def test_config_load_fhs_paths_when_root(tmp_path, monkeypatch):
     monkeypatch.setenv("APRILCAM_LOG_DIR", str(tmp_path / "log"))
 
     # Verify _default_dirs returns FHS (the wiring is correct)
-    data, sock, log = _default_dirs()
+    data, sock, log, _cfgdir = _default_dirs()
     assert data == Path("/var/lib/aprilcam")
     assert sock == Path("/run/aprilcam")
     assert log == Path("/var/log/aprilcam")
@@ -456,6 +456,8 @@ def test_config_load_xdg_paths_when_non_root(tmp_path, monkeypatch):
     monkeypatch.delenv("APRILCAM_DATA_DIR", raising=False)
     monkeypatch.delenv("APRILCAM_SOCKET_DIR", raising=False)
     monkeypatch.delenv("APRILCAM_LOG_DIR", raising=False)
+    monkeypatch.delenv("APRILCAM_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     # Use a fake home so ~/.aprilcam isn't picked up
     fake_home = tmp_path / "home"
     fake_home.mkdir()
@@ -466,6 +468,7 @@ def test_config_load_xdg_paths_when_non_root(tmp_path, monkeypatch):
     assert cfg.data_dir == tmp_path / "xdg_data" / "aprilcam"
     assert cfg.socket_dir == tmp_path / "xdg_run" / "aprilcam"
     assert cfg.log_dir == tmp_path / "xdg_state" / "aprilcam"
+    assert cfg.config_dir == fake_home / ".config" / "aprilcam"
 
 
 # ---------------------------------------------------------------------------
