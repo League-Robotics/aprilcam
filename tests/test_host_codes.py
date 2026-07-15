@@ -359,7 +359,7 @@ class TestResolveCameraCode:
         monkeypatch.setattr("aprilcam.client.host_codes.load_store", lambda *a, **k: self._store())
         args = argparse.Namespace(daemon_host=None)
         result = _daemon.resolve_camera_code("A", None, args)
-        assert result == ("", 10)
+        assert result == ("", 10, "cam-a")
         assert args.daemon_host is None
 
     def test_remote_code_sets_host_and_translates_enum(self, monkeypatch):
@@ -373,7 +373,7 @@ class TestResolveCameraCode:
         monkeypatch.setattr("aprilcam.client.host_codes.load_store", lambda *a, **k: self._store())
         args = argparse.Namespace(daemon_host=None)
         result = _daemon.resolve_camera_code("FB", None, args)
-        assert result == ("vidar.local", 7)
+        assert result == ("vidar.local", 7, "imx296-b")
         assert args.daemon_host == "vidar.local"
 
     def test_non_codes_return_none(self, monkeypatch):
@@ -904,7 +904,10 @@ class TestCamerasCliCodeColumn:
         rc = cameras_cli.main([])
         out = capsys.readouterr().out
         assert rc == 0
-        assert "aprilcam view FB" in out
+        # The daemon for host F is unreachable in this test, so its cameras are
+        # shown from the last probe (fallback) and code FB still appears.
+        assert "FB" in out
+        assert "aprilcam view" in out
 
         host_entry, cam_entry = resolve_code("FB", store)
         assert host_entry["host"] == "fhost"
@@ -1144,7 +1147,7 @@ class TestCamerasEmitsViewResolves:
             args = argparse.Namespace(daemon_host=None)
             result = _daemon.resolve_camera_code(code, None, args)
             assert result is not None, f"code {code!r} failed to resolve"
-            resolved_host, resolved_enum = result
+            resolved_host, resolved_enum, resolved_slug = result
 
             is_local = host_entry.get("kind") == "local"
             if is_local:
@@ -1156,6 +1159,7 @@ class TestCamerasEmitsViewResolves:
                 assert args.daemon_host == expected_host
 
             assert resolved_enum == cam_entry["enum"]
+            assert resolved_slug == cam_entry.get("slug", "")
             checked += 1
 
         assert checked == 4  # 2 local + 2 remote cameras

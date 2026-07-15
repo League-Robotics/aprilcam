@@ -92,15 +92,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     # host store.  This also patches args.daemon_host to reach the right host.
     code_result = resolve_camera_code(args.camera, config, args)
     if code_result is not None:
-        _resolved_host, cam_index = code_result
-        # cam_index here is already the enum handle — connect and open directly.
+        _resolved_host, cam_enum, cam_slug = code_result
         try:
             dc = connect_from_args(config, args)
         except Exception as exc:
             print(f"ERROR: could not connect to daemon: {exc}")
             return 1
         try:
-            cam_name, _camera_dir = dc.open_camera(cam_index)
+            # Resolve the code to the daemon's CURRENT camera by slug — the
+            # stored enum can be stale after cameras are plugged/unplugged.
+            devices = dc.enumerate_cameras()
+            match = None
+            if cam_slug:
+                match = next((d for d in devices if d.slug == cam_slug), None)
+            if match is None:
+                match = next((d for d in devices if d.enum == cam_enum), None)
+            if match is None:
+                print(
+                    f"ERROR: camera '{args.camera}' is not connected. "
+                    f"Run 'aprilcam cameras' to see what's available."
+                )
+                dc.close()
+                return 1
+            cam_name, _camera_dir = dc.open_camera(match.index)
             tag_frame = dc.get_tags(cam_name)
         except Exception as exc:
             print(f"ERROR: daemon RPC failed: {exc}")

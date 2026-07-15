@@ -132,17 +132,23 @@ def resolve_camera_code(
     camera_arg: str,
     config: "Config",
     args,
-) -> "tuple[str, int] | None":
-    """Resolve a camera code (e.g. ``A``, ``FB``) to ``(daemon_host, cam_enum)``.
+) -> "tuple[str, int, str] | None":
+    """Resolve a camera code (e.g. ``A``, ``FB``) to ``(host, enum, slug)``.
 
     If *camera_arg* is a 1- or 2-letter alpha string that matches a code in
     the host store, this function:
 
-    - Returns ``(resolved_host, cam_enum)`` where *resolved_host* is the
-      stored hostname/IP for the remote host (or an empty string for the
-      local host), and *cam_enum* is the camera's enumeration number.
+    - Returns ``(resolved_host, cam_enum, cam_slug)`` where *resolved_host*
+      is the stored hostname/IP for the remote host (or an empty string for
+      the local host), *cam_enum* is the camera's stored enumeration number,
+      and *cam_slug* is the camera's stable slug.
     - Sets ``args.daemon_host`` to the resolved host so that callers can
       pass *args* to :func:`connect_from_args` and reach the right daemon.
+
+    The *slug* is the reliable key: the stored *enum* can be stale (the daemon
+    may re-enumerate after cameras are plugged/unplugged), so callers should
+    match *slug* against the live daemon enumeration to find the current index
+    and fall back to *enum* only when no live slug matches.
 
     Returns ``None`` when *camera_arg* is not a valid camera code, so callers
     can fall back to their existing (index/pattern) resolution logic.
@@ -153,7 +159,7 @@ def resolve_camera_code(
         args: Argparse namespace to patch with ``daemon_host`` on a match.
 
     Returns:
-        ``(host, enum)`` on code match, or ``None`` if not a code.
+        ``(host, enum, slug)`` on code match, or ``None`` if not a code.
     """
     from aprilcam.client.host_codes import load_store, resolve_code_or_none
 
@@ -178,6 +184,7 @@ def resolve_camera_code(
         )
 
     cam_enum: int = cam_entry.get("enum") or cam_entry.get("index", 0)
+    cam_slug: str = cam_entry.get("slug", "")
 
     # Patch args so connect_from_args reaches the right daemon.
     if resolved_host:
@@ -186,4 +193,4 @@ def resolve_camera_code(
         except AttributeError:
             pass  # immutable namespace — caller must handle this.
 
-    return (resolved_host, cam_enum)
+    return (resolved_host, cam_enum, cam_slug)

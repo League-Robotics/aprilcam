@@ -424,7 +424,7 @@ def main(argv: list[str] | None = None) -> int:
         from aprilcam.cli._daemon import resolve_camera_code as _resolve_code
         _code_result = _resolve_code(camera_arg, config, args)
         if _code_result is not None:
-            _resolved_host, cam_index = _code_result
+            _resolved_host, cam_enum, cam_slug = _code_result
             if _resolved_host:
                 # Remote host code: reconnect to the right daemon.
                 dc.close()
@@ -434,10 +434,27 @@ def main(argv: list[str] | None = None) -> int:
                 except Exception as exc:
                     print(f"Error: could not connect to daemon at '{_resolved_host}': {exc}", file=sys.stderr)
                     return 1
+            # Resolve the code to the daemon's CURRENT camera by slug — the
+            # stored enum can be stale after cameras are plugged/unplugged.
+            # Fall back to the stored enum only if no live slug matches.
+            devices = dc.enumerate_cameras()
+            match = None
+            if cam_slug:
+                match = next((d for d in devices if d.slug == cam_slug), None)
+            if match is None:
+                match = next((d for d in devices if d.enum == cam_enum), None)
+            if match is None:
+                print(
+                    f"Error: camera '{camera_arg}' is not connected. "
+                    f"Run 'aprilcam cameras' to see what's available.",
+                    file=sys.stderr,
+                )
+                dc.close()
+                return 1
             try:
-                cam_name, _camera_dir = dc.open_camera(cam_index)
+                cam_name, _camera_dir = dc.open_camera(match.index)
             except Exception as exc:
-                print(f"Error: could not open camera {cam_index}: {exc}", file=sys.stderr)
+                print(f"Error: could not open camera '{camera_arg}': {exc}", file=sys.stderr)
                 dc.close()
                 return 1
         else:

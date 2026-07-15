@@ -45,21 +45,63 @@ def main(argv: Optional[List[str]] = None) -> int:
     hosts = store.get("hosts", [])
 
     if not explicit_host and hosts:
-        return _list_all_from_store(hosts, args.details)
+        return _list_all_from_store(hosts, args.details, config)
 
     return _list_single_daemon(config, args)
 
 
-def _list_all_from_store(hosts: List[dict], details: bool) -> int:
-    """List every camera on every known daemon, addressed by its base-26 code.
+def _live_slugs_for_host(config: Config, h: dict) -> Optional[set]:
+    """Return the set of camera slugs the host's daemon reports live.
 
-    Reads the persistent host store built by ``aprilcam probe``. Each camera's
-    code is produced by ``code_for`` (the same helper ``_list_single_daemon``
-    uses): a single letter for local cameras (no host letter needed), or
-    host-letter + camera-letter for remote ones. The host letter is the
-    daemon's single-letter code (also accepted by ``--host``).
+    Connects to the host's daemon (local Unix socket for the local host, TCP
+    for a remote one) and enumerates its cameras *now*. Returns the set of
+    live slugs, or ``None`` if the daemon could not be reached (so the caller
+    can fall back to the stored list rather than hiding everything).
     """
-    print("Cameras on the network (from 'aprilcam probe' — run it to refresh):")
+    from ..client.control import DaemonControl
+    from ..client.discovery import _probe_unix
+
+    dc: Optional[DaemonControl] = None
+    try:
+        if h.get("kind") == "local":
+            unix_path = str(config.socket_dir / "control.sock")
+            if _probe_unix(unix_path):
+                dc = DaemonControl(unix_path=unix_path)
+            else:
+                dc = DaemonControl(host="localhost", port=config.daemon_port)
+        else:
+            addr = h.get("host") or (h.get("addresses") or [""])[0]
+            if not addr:
+                return None
+            dc = DaemonControl(host=addr, port=config.daemon_port)
+        dc.connect()
+        devices = dc.enumerate_cameras()
+        return {d.slug for d in devices}
+    except Exception:
+        return None
+    finally:
+        if dc is not None:
+            try:
+                dc.close()
+            except Exception:
+                pass
+
+
+def _list_all_from_store(hosts: List[dict], details: bool, config: Config) -> int:
+    """List the cameras that are actually connected on every known daemon.
+
+    Reads the persistent host store built by ``aprilcam probe`` for the stable
+    base-26 codes, but reconciles each host against its *live* daemon so only
+    cameras that are connected **right now** are shown — every code printed
+    here can be opened with ``aprilcam view <code>``. Cameras in the store
+    that the daemon no longer reports (unplugged since the last probe) are
+    hidden. If a host's daemon can't be reached, its stored list is shown
+    as-is with a note, rather than hiding everything.
+
+    Each camera's code is produced by ``code_for``: a single letter for local
+    cameras, or host-letter + camera-letter for remote ones.
+    """
+    print("Cameras (connected now; codes open with 'aprilcam view <code>'):")
     print()
 
     def _enum_key(c: dict) -> int:
@@ -72,11 +114,22 @@ def _list_all_from_store(hosts: List[dict], details: bool) -> int:
         h_name = h.get("host", "?")
         is_local = h.get("kind") == "local"
         suffix = "  (local)" if is_local else ""
-        print(f"  {h_name}  [{h_letter}]{suffix}")
 
-        cams = sorted(h.get("cameras", []), key=_enum_key)
+        live_slugs = _live_slugs_for_host(config, h)
+        unreachable = live_slugs is None
+        note = "  (daemon unreachable — showing last probe)" if unreachable else ""
+        print(f"  {h_name}  [{h_letter}]{suffix}{note}")
+
+        stored = sorted(h.get("cameras", []), key=_enum_key)
+        # Show only cameras the daemon reports live (matched by stable slug),
+        # unless the daemon is unreachable — then fall back to the stored list.
+        if unreachable:
+            cams = stored
+        else:
+            cams = [c for c in stored if c.get("slug") in live_slugs]
+
         if not cams:
-            print("      (no cameras)")
+            print("      (no cameras connected)" if not unreachable else "      (no cameras)")
         for c in cams:
             cam_num = c.get("num")
             code = code_for(h_num, cam_num, is_local) if cam_num is not None else "?"
@@ -92,9 +145,7 @@ def _list_all_from_store(hosts: List[dict], details: bool) -> int:
                 print(f"      {code:<6}{name}")
         print()
 
-    print("Open one with:  aprilcam view <code>")
-    print("  e.g.  'aprilcam view 3'   (local camera 3)")
-    print("        'aprilcam view FB'  (camera 2 on host F)")
+    print("Open one with:  aprilcam view <code>   (e.g. 'aprilcam view A')")
     return 0
 
 
