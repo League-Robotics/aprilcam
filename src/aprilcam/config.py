@@ -204,6 +204,11 @@ CONFIG_VARS: list[dict] = [
         "description": "Root directory for persistent state (cameras, calibrations, playfields).",
     },
     {
+        "key": "APRILCAM_CONFIG_DIR",
+        "default": "(FHS: /etc/aprilcam · XDG: ~/.config/aprilcam)",
+        "description": "Root directory for admin-owned config (per-camera config.json, playfields/*.json).",
+    },
+    {
         "key": "APRILCAM_SOCKET_DIR",
         "default": "(FHS: /run/aprilcam · XDG: $XDG_RUNTIME_DIR/aprilcam)",
         "description": "Directory for the control socket, stream sockets, and pidfile.",
@@ -315,8 +320,8 @@ def _parse_dotfile(path: Path) -> Dict[str, str]:
     return result
 
 
-def _default_dirs() -> tuple[Path, Path, Path]:
-    """Return (data_dir, socket_dir, log_dir) for FHS or XDG mode.
+def _default_dirs() -> tuple[Path, Path, Path, Path]:
+    """Return (data_dir, socket_dir, log_dir, config_dir) for FHS or XDG mode.
 
     FHS mode triggers when os.geteuid() == 0 OR APRILCAM_SYSTEM env var == '1'.
     XDG mode is used otherwise (APRILCAM_SYSTEM=0 forces XDG even for root).
@@ -333,6 +338,7 @@ def _default_dirs() -> tuple[Path, Path, Path]:
             Path("/var/lib/aprilcam"),
             Path("/run/aprilcam"),
             Path("/var/log/aprilcam"),
+            Path("/etc/aprilcam"),
         )
     # XDG paths with fallbacks
     import tempfile as _tempfile
@@ -355,7 +361,34 @@ def _default_dirs() -> tuple[Path, Path, Path]:
             run = Path(_tempfile.gettempdir()) / f"aprilcam-{uid}"
 
     log = Path(_os.environ.get("XDG_STATE_HOME", "") or Path.home() / ".local/state") / "aprilcam"
-    return data, run, log
+    config = Path(_os.environ.get("XDG_CONFIG_HOME", "") or Path.home() / ".config") / "aprilcam"
+    return data, run, log, config
+
+
+def _has_config_files(root: Path) -> bool:
+    """Return True if *root* already holds admin-owned config files.
+
+    Checks for the two config-category shapes this sprint splits out of the
+    state tree: per-camera ``cameras/<slug>/config.json`` and
+    ``playfields/*.json`` definitions. Used by ``Config.effective_config_dir``
+    to decide whether ``config_dir`` (new) or ``data_dir`` (legacy,
+    co-located) is the correct place to read config from. Performs
+    filesystem I/O; tolerant of a missing/unreadable root (returns False).
+    """
+    try:
+        cameras_root = root / "cameras"
+        if cameras_root.is_dir():
+            for camera_dir in cameras_root.iterdir():
+                if (camera_dir / "config.json").exists():
+                    return True
+        playfields_root = root / "playfields"
+        if playfields_root.is_dir():
+            for entry in playfields_root.iterdir():
+                if entry.suffix == ".json" and entry.is_file():
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 @dataclass
@@ -375,10 +408,18 @@ class Config:
     Key directories
     ---------------
     ``data_dir``
-        Root AprilCam data directory (``APRILCAM_DATA_DIR``).
+        Root AprilCam **state** directory (``APRILCAM_DATA_DIR``) —
+        app-generated, persistent runtime state.
     ``cameras_dir``
-        Per-camera subdirectory: ``<data_dir>/cameras/<slug>/``.
+        Per-camera state subdirectory: ``<data_dir>/cameras/<slug>/``.
         Each camera directory contains ``calibration.json`` and ``paths.json``.
+    ``config_dir``
+        Root AprilCam **config** directory (``APRILCAM_CONFIG_DIR``) —
+        admin-owned, hand-editable configuration, split from ``data_dir``
+        in sprint 019 (FHS: ``/etc/aprilcam``; XDG: ``~/.config/aprilcam``).
+        See ``effective_config_dir`` for the legacy-install fallback read
+        path, and ``config_cameras_dir``/``config_playfields_dir`` for the
+        config-root equivalents of ``cameras_dir``/``playfields_dir``.
     ``socket_dir``
         Directory for the Unix socket and pidfile (``APRILCAM_SOCKET_DIR``).
     ``log_dir``
@@ -386,6 +427,7 @@ class Config:
     """
 
     data_dir: Path = field(default_factory=lambda: Path("./data/aprilcam/"))
+    config_dir: Path = field(default_factory=lambda: Path.home() / ".config" / "aprilcam")
     socket_dir: Path = field(default_factory=lambda: Path("/tmp/aprilcam/"))
     env_dir: Optional[Path] = None  # directory containing the .env file (project root)
     log_level: str = "INFO"
@@ -431,15 +473,76 @@ class Config:
     # Overridable via APRILCAM_DAEMON_LOCK (primarily for test isolation).
     daemon_lock_path: Path = field(default_factory=lambda: Path("/tmp/aprilcamd.lock"))
 
+    # Set by Config.load() only: True when APRILCAM_CONFIG_DIR was explicitly
+    # supplied by the caller (env, dotfile, or process environment). Drives
+    # effective_config_dir's legacy-fallback decision below. Defaults to
+    # False for directly-constructed Config instances (no explicit override).
+    _config_dir_explicit: bool = False
+
     @property
     def cameras_dir(self) -> Path:
-        """Directory containing one subdirectory per camera keyed by slug."""
+        """Directory containing one subdirectory per camera keyed by slug.
+
+        This is the **state** root (calibration.json, paths.json, etc.) and
+        is unaffected by the config/state split introduced in sprint 019 —
+        see ``config_cameras_dir`` for the config-root equivalent.
+        """
         return self.data_dir / "cameras"
 
     @property
     def playfields_dir(self) -> Path:
-        """Directory containing one JSON file per named playfield definition."""
+        """Directory containing one JSON file per named playfield definition.
+
+        This is the **state** root, unchanged by sprint 019 — see
+        ``config_playfields_dir`` for the config-root equivalent.
+        """
         return self.data_dir / "playfields"
+
+    @property
+    def config_cameras_dir(self) -> Path:
+        """Config-root directory holding per-camera ``config.json`` files.
+
+        Rooted at ``config_dir`` (the true FHS/XDG target), not the legacy
+        fallback — write call sites (``SetCameraConfig``, ``migrate-dirs``)
+        use this so a dry-run plan is never confused by the fallback.
+        """
+        return self.config_dir / "cameras"
+
+    @property
+    def config_playfields_dir(self) -> Path:
+        """Config-root directory holding ``<name>.json`` playfield definitions.
+
+        Rooted at ``config_dir`` (the true FHS/XDG target) — see
+        ``config_cameras_dir`` docstring for why write call sites use the
+        plain ``config_dir``-rooted property rather than the fallback.
+        """
+        return self.config_dir / "playfields"
+
+    @property
+    def effective_config_dir(self) -> Path:
+        """Resolved config root to actually *read* config from right now.
+
+        Returns ``config_dir`` unchanged when ``APRILCAM_CONFIG_DIR`` was
+        explicitly set, or when ``config_dir`` already contains at least one
+        camera ``config.json``. Otherwise, falls back to ``data_dir`` when
+        *that* tree already contains legacy co-located config files (i.e.
+        ``data_dir/cameras/*/config.json`` exists) — keeping every install
+        created before sprint 019 (including this repo's own
+        ``data/aprilcam`` tree) working with zero action until
+        ``aprilcam migrate-dirs`` is run.
+
+        Read call sites (loaders, RPC reads) should use this property.
+        Write call sites (``SetCameraConfig``, ``migrate-dirs``) should use
+        the plain ``config_dir`` — the true FHS/XDG target — so a dry-run
+        plan is never confused by the fallback.
+        """
+        if self._config_dir_explicit:
+            return self.config_dir
+        if _has_config_files(self.config_dir):
+            return self.config_dir
+        if _has_config_files(self.data_dir):
+            return self.data_dir
+        return self.config_dir
 
     def __post_init__(self) -> None:
         if self.daemon_pidfile is None:
@@ -492,10 +595,12 @@ class Config:
             p = Path(sources[key])
             return p.resolve() if not p.is_absolute() else p
 
-        _dd, _sd, _ld = _default_dirs()
+        _dd, _sd, _ld, _cd = _default_dirs()
         data_dir = _path("APRILCAM_DATA_DIR", _dd)
         socket_dir = _path("APRILCAM_SOCKET_DIR", _sd)
         log_dir = _path("APRILCAM_LOG_DIR", _ld)
+        config_dir = _path("APRILCAM_CONFIG_DIR", _cd)
+        config_dir_explicit = "APRILCAM_CONFIG_DIR" in sources
 
         # Parse detection_fps — default 10, must be a positive integer
         _fps_raw = sources.get("APRILCAM_DETECTION_FPS", "10")
@@ -536,6 +641,7 @@ class Config:
 
         cfg = cls(
             data_dir=data_dir,
+            config_dir=config_dir,
             socket_dir=socket_dir,
             env_dir=env_file.parent.resolve() if env_file else None,
             log_level=sources.get("APRILCAM_LOG_LEVEL", "INFO"),
@@ -551,6 +657,7 @@ class Config:
             daemon_host=_daemon_host,
             daemon_port=_daemon_port,
             daemon_lock_path=_daemon_lock_path,
+            _config_dir_explicit=config_dir_explicit,
         )
 
         # Ensure runtime directories exist; guarded to emit an actionable message

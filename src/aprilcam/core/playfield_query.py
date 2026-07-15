@@ -125,10 +125,13 @@ def load_playfield(path: Path) -> dict:
 def load_playfield_map(config) -> dict:
     """Return the active playfield map dict for ``where`` resolution.
 
-    Prefers the named-playfields registry (``<data_dir>/playfields/``) and
-    falls back to the legacy single-file ``playfield.json`` for installations
-    that predate the migration.  *config* must expose ``playfields_dir`` and
-    ``data_dir``.
+    Prefers the named-playfields registry — read from the config root
+    (``config.effective_config_dir / "playfields"``, sprint 019
+    config/state split; legacy single-tree installs fall back to
+    ``data_dir`` automatically via ``effective_config_dir``) — and falls
+    back to the legacy single-file ``playfield.json`` under ``data_dir``
+    for installations that predate the named-playfield migration.
+    *config* must expose ``effective_config_dir`` and ``data_dir``.
 
     Raises:
         FileNotFoundError: If neither a named playfield nor the legacy file
@@ -139,7 +142,7 @@ def load_playfield_map(config) -> dict:
 
     reg = PlayfieldDefinitionRegistry()
     try:
-        reg.load_all(config.playfields_dir)
+        reg.load_all(config.effective_config_dir / "playfields")
         defn = reg.first()
     except Exception:
         defn = None

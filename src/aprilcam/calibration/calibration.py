@@ -376,6 +376,7 @@ def load_calibration_from_camera_dir(
     camera_dir: str | Path,
     camera_config: "dict | None" = None,
     playfield_def: "object | None" = None,
+    config_dir: "str | Path | None" = None,
 ) -> Optional["CameraCalibration"]:
     """Load calibration from ``<camera_dir>/calibration.json``.
 
@@ -430,6 +431,16 @@ def load_calibration_from_camera_dir(
     playfield_def:
         Optional :class:`~aprilcam.core.playfield_def.PlayfieldDefinition`.
         Must expose ``width_cm`` and ``height_cm`` attributes.
+    config_dir:
+        Optional root directory holding per-camera config (the config/state
+        split from sprint 019).  Only consulted when *camera_config* is
+        ``None`` — the MCP path always pre-supplies *camera_config* and is
+        unaffected by this parameter.  When given, ``config.json`` is read
+        from ``<config_dir>/<camera_dir.name>/config.json`` (reconstructing
+        the per-camera slug subdirectory under the config root) instead of
+        ``<camera_dir>/config.json``.  When ``None`` (the default),
+        preserves today's exact sibling-read behavior — ``config.json`` is
+        read from *camera_dir* itself.
     """
     from ..camera.camera_config import load_camera_config as _load_config
 
@@ -450,7 +461,12 @@ def load_calibration_from_camera_dir(
 
         # Overlay static developer-owned fields from config.json.
         # config wins over any legacy values already parsed from calibration.json.
-        cfg = camera_config if camera_config is not None else _load_config(camera_dir)
+        if camera_config is not None:
+            cfg = camera_config
+        elif config_dir is not None:
+            cfg = _load_config(Path(config_dir) / Path(camera_dir).name)
+        else:
+            cfg = _load_config(camera_dir)
         if cfg:
             if "device_name" in cfg:
                 cal.device_name = cfg["device_name"]
@@ -1094,6 +1110,7 @@ def calibrate_from_playfield_def(
     camera_position: "CameraPosition | None" = None,
     camera_config: "dict | None" = None,
     skip_save: bool = False,
+    config_dir: "Path | str | None" = None,
 ) -> CameraCalibration:
     """Calibrate a camera using a named playfield definition as the source of truth.
 
@@ -1139,6 +1156,26 @@ def calibrate_from_playfield_def(
         ``calibration.json``) are skipped.  The caller is responsible for
         persisting the calibration (e.g. via ``SetCalibration`` /
         ``SetCameraConfig`` RPCs).
+    config_dir:
+        Root directory to write ``config.json`` under (sprint 019
+        config/state split).  Only consulted by the daemon-local write
+        branch (``skip_save=False``); ignored when *skip_save* is ``True``.
+        Defaults to *camera_dir* when omitted, preserving today's
+        single-directory behavior.  ``calibration.json`` always writes to
+        *camera_dir* (the state root) via
+        :func:`save_calibration_to_camera_dir`; ``config.json`` writes to
+        ``<config_dir>/`` (the config root) via
+        :func:`~aprilcam.camera.camera_config.save_camera_config`.
+
+        **Write ordering / failure reporting**: the state write
+        (``calibration.json``) happens *first*, since it is the
+        higher-frequency, app-generated file that ``get_tags`` depends on
+        being fresh — it is the time-critical write. The config write
+        (``config.json``) happens second; if it raises, the exception is
+        logged as a warning and swallowed rather than propagated, since the
+        state write (the one that matters for live tag data) already
+        succeeded. A config-write failure therefore never rolls back or
+        masks a successful calibration.
 
     Returns
     -------
@@ -1163,6 +1200,12 @@ def calibrate_from_playfield_def(
 
     # Step 1: load config.json to find the linked playfield.
     # When camera_config is pre-supplied (MCP RPC path), skip the file read.
+    # NOTE (sprint 019 config/state split): this read intentionally stays on
+    # camera_dir, not config_dir — config_dir here is write-only (see the
+    # config_dir docstring above and the Step 12/13 write branch below).
+    # Daemon-local callers that already know config.json lives under the
+    # config root (e.g. cli/calibrate_cli.py) pre-load it via camera_config
+    # instead of relying on this fallback read.
     if camera_config is not None:
         config = camera_config
     elif camera_dir is not None:
@@ -1346,11 +1389,26 @@ def calibrate_from_playfield_def(
     merged_config["resolution"] = [cam_w, cam_h]
 
     if not skip_save:
-        # Daemon-local path: write config.json and calibration.json to camera_dir.
+        # Daemon-local path: write calibration.json to the state dir
+        # (camera_dir) and config.json to the config dir. Defaults to
+        # camera_dir when config_dir is not supplied (backward-compat,
+        # single-directory behavior).
         if camera_dir is not None:
-            save_camera_config(camera_dir, merged_config)
-            # Step 13: persist calibration (strips the 5 static fields automatically).
+            # Step 13 (state write, first — higher-frequency, time-critical
+            # for get_tags): strips the 5 static fields automatically.
             save_calibration_to_camera_dir(cal, camera_dir, pf_def.width_cm, pf_def.height_cm)
+            # Step 12 (config write, second): failure here is logged as a
+            # warning, not raised — the state write already succeeded and is
+            # the one that matters for live tag data.
+            _cfg_dir = config_dir if config_dir is not None else camera_dir
+            try:
+                save_camera_config(_cfg_dir, merged_config)
+            except Exception:
+                _log.warning(
+                    "calibrate_from_playfield_def: failed to write config.json "
+                    "to %s (calibration.json was written successfully to %s)",
+                    _cfg_dir, camera_dir, exc_info=True,
+                )
     else:
         # MCP/RPC path: caller persists via SetCalibration / SetCameraConfig RPCs.
         # Store merged_config on the cal object so the caller can access it.

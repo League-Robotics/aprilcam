@@ -33,6 +33,10 @@ SUBCOMMANDS = {
         "help": "Show the version and resolved configuration",
         "module": "aprilcam.cli.config_cli",
     },
+    "migrate-dirs": {
+        "help": "Move legacy co-located config files into the proper config_dir",
+        "module": "aprilcam.cli.migrate_dirs_cli",
+    },
     "tags": {
         "help": "Detect and list all ArUco and AprilTag markers on a camera",
         "module": "aprilcam.cli.tags_cli",

@@ -554,7 +554,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         from aprilcam.calibration.calibration import load_calibration_from_camera_dir
         _cam_dir = Path(_camera_dir) if _camera_dir else (config.cameras_dir / cam_name)
-        _view_cal = load_calibration_from_camera_dir(_cam_dir)
+        _view_cal = load_calibration_from_camera_dir(
+            _cam_dir, config_dir=config.effective_config_dir / "cameras"
+        )
     except Exception:
         _view_cal = None
     display = PlayfieldDisplay(

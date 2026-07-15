@@ -3,6 +3,15 @@
 Tests handler round-trips (write via Set*, read back via Get*) against a temp
 cameras_dir, and ListPlayfields against a temp playfields_dir.  No real camera
 hardware or gRPC network is needed — the handlers are called directly.
+
+Sprint 019 split config/state into separate FHS/XDG roots: config.json
+(GetCameraConfig/SetCameraConfig) and playfield definitions (ListPlayfields)
+now resolve against the config root (``config.effective_config_dir``), while
+calibration.json and paths.json (Get/SetCalibration, Get/SetPaths) stay on
+the state root (``data_dir``/``cameras_dir``).  ``_make_servicer`` supports
+both a SPLIT layout (distinct config_dir) and the LEGACY single-tree layout
+(config_dir omitted, defaulting to data_dir) to cover the back-compat
+fallback.
 """
 
 from __future__ import annotations
@@ -10,6 +19,7 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
+from typing import Optional
 from unittest.mock import MagicMock
 
 import grpc
@@ -26,8 +36,17 @@ from aprilcam.proto import aprilcam_pb2
 # ---------------------------------------------------------------------------
 
 
-def _make_servicer(tmp_path: Path) -> AprilCamServicer:
-    """Build an AprilCamServicer backed by *tmp_path* as the data dir."""
+def _make_servicer(
+    tmp_path: Path, config_dir: Optional[Path] = None
+) -> AprilCamServicer:
+    """Build an AprilCamServicer backed by *tmp_path* as the state (data) dir.
+
+    When *config_dir* is omitted, defaults to ``tmp_path`` itself — a
+    single-tree (legacy) layout where config and state are co-located, the
+    back-compat case that must keep working unmigrated. Pass a distinct
+    *config_dir* (e.g. ``tmp_path / "config"``) to exercise the split-root
+    behavior.
+    """
     from aprilcam.config import Config
 
     cameras_dir = tmp_path / "cameras"
@@ -37,8 +56,11 @@ def _make_servicer(tmp_path: Path) -> AprilCamServicer:
     sock_dir = tmp_path / "sockets"
     sock_dir.mkdir()
 
+    resolved_config_dir = config_dir if config_dir is not None else tmp_path
+
     config = Config(
         data_dir=tmp_path,
+        config_dir=resolved_config_dir,
         socket_dir=sock_dir,
         daemon_pidfile=sock_dir / "aprilcamd.pid",
     )
@@ -371,3 +393,197 @@ def test_list_playfields_sorted_alphabetically(tmp_path: Path) -> None:
     names = [e.name for e in reply.playfields]
     assert names == sorted(names)
     assert names == ["alpha", "beta", "zebra"]
+
+
+# ---------------------------------------------------------------------------
+# Sprint 019: config/state root split
+# ---------------------------------------------------------------------------
+#
+# These tests use a distinct config_dir (tmp_path / "config") from the state
+# dir (tmp_path).  GetCameraConfig/SetCameraConfig and ListPlayfields must
+# resolve under config_dir; GetCalibration/SetCalibration and GetPaths/
+# SetPaths must stay under the state dir (tmp_path/"cameras") — proving no
+# cross-root leakage in either direction.
+
+
+def test_set_camera_config_split_writes_under_config_dir(tmp_path: Path) -> None:
+    """With a split layout, SetCameraConfig writes land under config_dir,
+    never under the state dir's cameras_dir."""
+    config_dir = tmp_path / "config"
+    svc = _make_servicer(tmp_path, config_dir=config_dir)
+    cfg = {"device_name": "split-cam", "playfield": "main-playfield"}
+    blob = json.dumps(cfg)
+
+    reply = svc.SetCameraConfig(
+        aprilcam_pb2.CameraJsonRequest(cam_name="cam-split", json_blob=blob),
+        _mock_ctx(),
+    )
+    assert reply.ok is True
+
+    written_config = config_dir / "cameras" / "cam-split" / "config.json"
+    assert written_config.exists()
+    assert json.loads(written_config.read_text()) == cfg
+
+    # Never written under the state root.
+    leaked = tmp_path / "cameras" / "cam-split" / "config.json"
+    assert not leaked.exists()
+
+
+def test_get_camera_config_split_reads_from_config_dir(tmp_path: Path) -> None:
+    """With a split layout, GetCameraConfig reads from config_dir, not the
+    state dir, even if a stale config.json exists under cameras_dir."""
+    config_dir = tmp_path / "config"
+    svc = _make_servicer(tmp_path, config_dir=config_dir)
+
+    # Stale file directly under the state root — must be ignored.
+    stale_dir = tmp_path / "cameras" / "cam-split-read"
+    stale_dir.mkdir(parents=True)
+    (stale_dir / "config.json").write_text(json.dumps({"device_name": "stale"}))
+
+    cfg = {"device_name": "fresh-from-config-root"}
+    svc.SetCameraConfig(
+        aprilcam_pb2.CameraJsonRequest(
+            cam_name="cam-split-read", json_blob=json.dumps(cfg)
+        ),
+        _mock_ctx(),
+    )
+
+    reply = svc.GetCameraConfig(
+        aprilcam_pb2.CameraRequest(cam_name="cam-split-read"), _mock_ctx()
+    )
+    assert reply.present is True
+    assert json.loads(reply.json_blob) == cfg
+
+
+def test_set_calibration_split_writes_under_state_dir(tmp_path: Path) -> None:
+    """With a split layout, SetCalibration still writes under the state dir
+    (cameras_dir), unaffected by config_dir."""
+    config_dir = tmp_path / "config"
+    svc = _make_servicer(tmp_path, config_dir=config_dir)
+    cal_data = {"homography": [[1, 0, 0], [0, 1, 0], [0, 0, 1]], "camera": "cam-split-cal"}
+
+    reply = svc.SetCalibration(
+        aprilcam_pb2.CameraJsonRequest(
+            cam_name="cam-split-cal", json_blob=json.dumps(cal_data)
+        ),
+        _mock_ctx(),
+    )
+    assert reply.ok is True
+
+    written = tmp_path / "cameras" / "cam-split-cal" / "calibration.json"
+    assert written.exists()
+    assert json.loads(written.read_text()) == cal_data
+
+    # Never written under config_dir.
+    leaked = config_dir / "cameras" / "cam-split-cal" / "calibration.json"
+    assert not leaked.exists()
+
+
+def test_get_calibration_split_reads_from_state_dir(tmp_path: Path) -> None:
+    """With a split layout, GetCalibration reads from the state dir."""
+    config_dir = tmp_path / "config"
+    svc = _make_servicer(tmp_path, config_dir=config_dir)
+    cal_data = {"homography": [[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 1.0]]}
+    svc.SetCalibration(
+        aprilcam_pb2.CameraJsonRequest(
+            cam_name="cam-split-cal-rt", json_blob=json.dumps(cal_data)
+        ),
+        _mock_ctx(),
+    )
+
+    reply = svc.GetCalibration(
+        aprilcam_pb2.CameraRequest(cam_name="cam-split-cal-rt"), _mock_ctx()
+    )
+    assert reply.present is True
+    assert json.loads(reply.json_blob)["homography"] == cal_data["homography"]
+
+
+def test_set_paths_split_writes_under_state_dir(tmp_path: Path) -> None:
+    """With a split layout, SetPaths/GetPaths still resolve against the
+    state dir, unaffected by config_dir."""
+    config_dir = tmp_path / "config"
+    svc = _make_servicer(tmp_path, config_dir=config_dir)
+    paths_data = [{"path_id": "path_000", "playfield_id": "pf-0", "waypoints": []}]
+
+    reply = svc.SetPaths(
+        aprilcam_pb2.CameraJsonRequest(
+            cam_name="cam-split-paths", json_blob=json.dumps(paths_data)
+        ),
+        _mock_ctx(),
+    )
+    assert reply.ok is True
+
+    written = tmp_path / "cameras" / "cam-split-paths" / "paths.json"
+    assert written.exists()
+
+    reply2 = svc.GetPaths(
+        aprilcam_pb2.CameraRequest(cam_name="cam-split-paths"), _mock_ctx()
+    )
+    assert reply2.present is True
+    assert json.loads(reply2.json_blob) == paths_data
+
+    leaked = config_dir / "cameras" / "cam-split-paths" / "paths.json"
+    assert not leaked.exists()
+
+
+def test_list_playfields_split_scans_config_dir(tmp_path: Path) -> None:
+    """With a split layout, ListPlayfields scans config_dir/playfields, not
+    the state dir's playfields_dir."""
+    config_dir = tmp_path / "config"
+    svc = _make_servicer(tmp_path, config_dir=config_dir)
+
+    config_pf_dir = config_dir / "playfields"
+    config_pf_dir.mkdir(parents=True)
+    pf = {"playfield": {"width_cm": 100.0, "height_cm": 60.0}}
+    (config_pf_dir / "config-root-field.json").write_text(json.dumps(pf))
+
+    # A definition under the legacy state-root playfields dir must NOT be
+    # picked up once config_dir has its own content (no fallback needed —
+    # effective_config_dir resolves to config_dir when it holds files).
+    state_pf_dir = tmp_path / "playfields"
+    (state_pf_dir / "state-root-field.json").write_text(json.dumps(pf))
+
+    reply = svc.ListPlayfields(aprilcam_pb2.Empty(), _mock_ctx())
+    names = [e.name for e in reply.playfields]
+    assert names == ["config-root-field"]
+
+
+def test_list_playfields_legacy_fallback_to_state_dir(tmp_path: Path) -> None:
+    """A definition placed only under the legacy data_dir/playfields location
+    is still found via the effective_config_dir legacy-fallback path when
+    config_dir is empty (until aprilcam migrate-dirs is run)."""
+    config_dir = tmp_path / "config"  # empty — never populated
+    svc = _make_servicer(tmp_path, config_dir=config_dir)
+
+    state_pf_dir = tmp_path / "playfields"
+    pf = {"playfield": {"width_cm": 134.3, "height_cm": 89.3}}
+    (state_pf_dir / "legacy-field.json").write_text(json.dumps(pf))
+
+    reply = svc.ListPlayfields(aprilcam_pb2.Empty(), _mock_ctx())
+    names = [e.name for e in reply.playfields]
+    assert names == ["legacy-field"]
+
+
+def test_camera_config_legacy_single_tree_unchanged(tmp_path: Path) -> None:
+    """LEGACY single-tree layout (no explicit config_dir override): all RPCs
+    resolve to the same data_dir-rooted paths as before this ticket — the
+    back-compat guard for existing installs."""
+    svc = _make_servicer(tmp_path)  # config_dir defaults to tmp_path (== data_dir)
+    cfg = {"device_name": "legacy-cam"}
+
+    svc.SetCameraConfig(
+        aprilcam_pb2.CameraJsonRequest(
+            cam_name="cam-legacy", json_blob=json.dumps(cfg)
+        ),
+        _mock_ctx(),
+    )
+
+    written = tmp_path / "cameras" / "cam-legacy" / "config.json"
+    assert written.exists()
+    assert json.loads(written.read_text()) == cfg
+
+    reply = svc.GetCameraConfig(
+        aprilcam_pb2.CameraRequest(cam_name="cam-legacy"), _mock_ctx()
+    )
+    assert reply.present is True
+    assert json.loads(reply.json_blob) == cfg

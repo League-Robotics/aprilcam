@@ -31,11 +31,17 @@ import time
 from pathlib import Path
 from typing import Dict, Optional
 
-from ..config import Config
+from ..config import Config, _has_config_files
 from ..errors import DaemonAlreadyRunningError
 from .camera_pipeline import CameraPipeline
 
 log = logging.getLogger(__name__)
+
+# Process-lifetime flag: set True the first time _warn_if_legacy_layout()
+# fires a warning, so a second DaemonServer instance created in the same
+# process (e.g. in tests) does not log it again. See run()'s call site and
+# architecture-update.md "Daemon one-time legacy-layout warning".
+_legacy_layout_warned = False
 
 _DEFAULT_UNIX_PATH = "/tmp/aprilcam/control.sock"
 _DEFAULT_TCP_PORT = 5280
@@ -125,6 +131,10 @@ class DaemonServer:
         daemon already holds the machine-global lock and ``force`` was not
         set at construction time.
         """
+        # 0. Warn (at most once per process) if relying on the legacy
+        #    config/state single-tree fallback -------------------------------
+        self._warn_if_legacy_layout()
+
         # 1. Acquire the machine-global singleton lock ---------------------
         self._acquire_global_lock()
 
@@ -193,6 +203,50 @@ class DaemonServer:
 
         # Clean shutdown
         self._shutdown()
+
+    # ------------------------------------------------------------------
+    # Internal: legacy config/state layout warning
+    # ------------------------------------------------------------------
+
+    def _warn_if_legacy_layout(self) -> None:
+        """Log one WARNING if this daemon is relying on the legacy config
+        fallback (config files co-located under ``data_dir``, none yet under
+        the true ``config_dir``).
+
+        Detection-only — performs zero file operations and never moves
+        anything (see architecture-update.md "No automatic migration —
+        explicit CLI only"). Fires at most once per process, guarded by the
+        module-level ``_legacy_layout_warned`` flag, so repeated
+        ``DaemonServer`` construction within one process (tests, restarts of
+        the object without a new interpreter) does not repeat the log line.
+        """
+        global _legacy_layout_warned
+        if _legacy_layout_warned:
+            return
+
+        config = self._config
+        if config.config_dir == config.data_dir:
+            # Both roots pinned to the same path (e.g. env-forced) — the
+            # config/state split doesn't apply; nothing to warn about.
+            return
+
+        # Only warn when the operator has NOT explicitly set
+        # APRILCAM_CONFIG_DIR — an explicit split-root install (even an
+        # empty config_dir, e.g. fresh install with no cameras configured
+        # yet) is not "legacy" and should stay silent.
+        if config._config_dir_explicit:
+            return
+
+        config_has_files = _has_config_files(config.config_dir)
+        data_has_files = _has_config_files(config.data_dir)
+
+        if not config_has_files and data_has_files:
+            log.warning(
+                "legacy config layout detected under %s; run "
+                "'aprilcam migrate-dirs' to relocate config files — see docs",
+                config.data_dir,
+            )
+            _legacy_layout_warned = True
 
     # ------------------------------------------------------------------
     # Internal: machine-global lock
