@@ -2,9 +2,11 @@
 id: '003'
 title: Thread config_dir through daemon-local callers and repoint config-touching
   RPCs
-status: open
-use-cases: [SUC-005]
-depends-on: ['002']
+status: in-progress
+use-cases:
+- SUC-005
+depends-on:
+- '002'
 github-issue: ''
 issue: split-config-from-state-into-fhs-xdg-roots.md
 completes_issue: true
