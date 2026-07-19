@@ -64,7 +64,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         CameraSelectError,
         resolve_enum_to_index,
     )
-    from ..camera.camutil import list_cameras, select_camera_by_pattern
 
     parser = argparse.ArgumentParser(
         prog="aprilcam tags",
@@ -125,9 +124,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         tags = tag_frame.tags
         # Fall through to printing logic below.
     else:
-        # --- Resolve the camera argument to a device index (legacy path) ------
-        # We do this first so we can give a clear error before connecting to the
-        # daemon.
+        # --- Legacy path: connect to the daemon first, then resolve CAMERA. ----
+        # Numeric args resolve via the local (cv2-free) camera registry; name
+        # patterns resolve through the daemon's enumerate_cameras() RPC — no
+        # local OpenCV probing, the daemon is the sole camera owner.
+        try:
+            dc = connect_from_args(config, args)
+        except Exception as exc:
+            print(f"ERROR: could not connect to daemon: {exc}")
+            return 1
+
         try:
             enum_no = int(args.camera)
             registry = CameraRegistry(config.cameras_dir)
@@ -135,20 +141,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                 cam_index = resolve_enum_to_index(enum_no, registry, resolve_all())
             except CameraSelectError as exc:
                 print(f"ERROR: {exc}")
+                dc.close()
                 return 1
         except ValueError:
-            # Not a number — treat it as a name pattern against connected cameras.
-            cam_index = select_camera_by_pattern(args.camera, list_cameras(quiet=True))
-            if cam_index is None:
+            # Not a number — treat it as a name pattern against the daemon's
+            # currently connected cameras.
+            pattern = args.camera.strip().lower()
+            devices = dc.enumerate_cameras()
+            match = next((d for d in devices if pattern in d.name.lower()), None)
+            if match is None:
                 print(f"ERROR: no connected camera matched '{args.camera}'")
+                dc.close()
                 return 1
-
-        # Connect to the daemon — no local VideoCapture, the daemon owns the camera.
-        try:
-            dc = connect_from_args(config, args)
-        except Exception as exc:
-            print(f"ERROR: could not connect to daemon: {exc}")
-            return 1
+            cam_index = match.index
 
         try:
             cam_name, _camera_dir = dc.open_camera(cam_index)
