@@ -1,0 +1,189 @@
+{
+  "baseline_controls": {
+    "auto-exposure-mode": "8",
+    "auto-white-balance-temp": "true",
+    "exposure-time-abs": "128",
+    "gain": "64",
+    "white-balance-temp": "4826"
+  },
+  "camera": {
+    "config_dir": "hd-usb-camera",
+    "device_name": "HD USB CAMERA",
+    "registry_enum": null,
+    "resolution": [
+      1920,
+      1080
+    ],
+    "unique_id": "avf:0x211412032e40317"
+  },
+  "capture_finished_at": "2026-07-29T16:49:10.526292+00:00",
+  "capture_started_at": "2026-07-29T16:48:34.830302+00:00",
+  "daemon_version": "0.20260719.1",
+  "field_state_id": "unverified-20260729",
+  "images": [
+    {
+      "captured_at": "2026-07-29T16:48:34.830302+00:00",
+      "controls": {
+        "auto-exposure-mode": "8",
+        "auto-white-balance-temp": "true",
+        "exposure-time-abs": "128",
+        "gain": "64",
+        "white-balance-temp": "4826"
+      },
+      "dark": false,
+      "file": "baseline.jpg",
+      "mean_luminance": 113.71,
+      "name": "baseline",
+      "settle_s": 1.5,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-07-29T16:48:45.313955+00:00",
+      "controls": {
+        "auto-exposure-mode": "8",
+        "auto-white-balance-temp": "true",
+        "exposure-time-abs": "128",
+        "gain": "13",
+        "white-balance-temp": "4826"
+      },
+      "dark": false,
+      "file": "gain-13.jpg",
+      "mean_luminance": 89.84,
+      "name": "gain-13",
+      "settle_s": 1.5,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-07-29T16:48:47.792374+00:00",
+      "controls": {
+        "auto-exposure-mode": "8",
+        "auto-white-balance-temp": "true",
+        "exposure-time-abs": "128",
+        "gain": "38",
+        "white-balance-temp": "4826"
+      },
+      "dark": false,
+      "file": "gain-38.jpg",
+      "mean_luminance": 101.34,
+      "name": "gain-38",
+      "settle_s": 1.5,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-07-29T16:48:50.237035+00:00",
+      "controls": {
+        "auto-exposure-mode": "8",
+        "auto-white-balance-temp": "true",
+        "exposure-time-abs": "128",
+        "gain": "76",
+        "white-balance-temp": "4826"
+      },
+      "dark": false,
+      "file": "gain-76.jpg",
+      "mean_luminance": 119.44,
+      "name": "gain-76",
+      "settle_s": 1.5,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-07-29T16:48:52.712510+00:00",
+      "controls": {
+        "auto-exposure-mode": "8",
+        "auto-white-balance-temp": "true",
+        "exposure-time-abs": "128",
+        "gain": "128",
+        "white-balance-temp": "4826"
+      },
+      "dark": false,
+      "file": "gain-128.jpg",
+      "mean_luminance": 149.17,
+      "name": "gain-128",
+      "settle_s": 1.5,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-07-29T16:48:55.196423+00:00",
+      "controls": {
+        "auto-exposure-mode": "8",
+        "auto-white-balance-temp": "true",
+        "exposure-time-abs": "128",
+        "gain": "204",
+        "white-balance-temp": "4826"
+      },
+      "dark": false,
+      "file": "gain-204.jpg",
+      "mean_luminance": 198.94,
+      "name": "gain-204",
+      "settle_s": 1.5,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-07-29T16:48:57.676715+00:00",
+      "controls": {
+        "auto-exposure-mode": "8",
+        "auto-white-balance-temp": "true",
+        "exposure-time-abs": "128",
+        "gain": "255",
+        "white-balance-temp": "4826"
+      },
+      "dark": false,
+      "file": "gain-255.jpg",
+      "mean_luminance": 224.86,
+      "name": "gain-255",
+      "settle_s": 1.5,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-07-29T16:49:01.569202+00:00",
+      "controls": {
+        "auto-exposure-mode": "1",
+        "auto-white-balance-temp": "true",
+        "exposure-time-abs": "128",
+        "gain": "64",
+        "white-balance-temp": "4826"
+      },
+      "dark": false,
+      "file": "auto-exposure-1.jpg",
+      "mean_luminance": 63.76,
+      "name": "auto-exposure-1",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-07-29T16:49:08.556974+00:00",
+      "controls": {
+        "auto-exposure-mode": "8",
+        "auto-white-balance-temp": "false",
+        "exposure-time-abs": "128",
+        "gain": "64",
+        "white-balance-temp": "4826"
+      },
+      "dark": false,
+      "file": "auto-wb-false.jpg",
+      "mean_luminance": 112.46,
+      "name": "auto-wb-false",
+      "settle_s": 3.0,
+      "washed": false
+    }
+  ],
+  "matrix_source": "fallback",
+  "package_version": "0.20260719.1",
+  "playfield": "main-playfield",
+  "skipped_variations": {
+    "apply_failed": [
+      "exp-51",
+      "exp-101",
+      "exp-301",
+      "exp-801",
+      "exp-2001",
+      "exp-5000",
+      "exp-10000",
+      "wb-2800",
+      "wb-4650",
+      "wb-6500",
+      "stress-lowexp-higain",
+      "stress-highexp-logain"
+    ],
+    "no_frame": []
+  }
+}

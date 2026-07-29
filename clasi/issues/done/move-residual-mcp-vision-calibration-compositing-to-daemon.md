@@ -1,8 +1,22 @@
 ---
-status: pending
+status: done
+tickets:
+- NONE
 ---
 
 # Move the last MCP-side vision (calibration, compositing, process_frame) into the daemon
+
+**SUPERSEDED (2026-07-29)** by the v2 re-specification
+([docs/design/specification.md](../../docs/design/specification.md)):
+the calibration RPC is now [[move-calibration-execution-into-daemon]],
+and the removal of `process_frame`/`deskew_image`/
+`create_playfield_from_image` and all MCP-local cv2 is
+[[slim-mcp-server-to-pure-daemon-client]]. Compositing
+(`camera/composite.py`, `create_composite`) no longer exists in the
+codebase — already removed after the daemon refactor. Archived with no
+remaining unique scope.
+
+---
 
 Follow-up from sprint 015. That sprint made the MCP **perception path** (tags,
 objects, where, frames, tag stream) and the `web`/`view` clients fully

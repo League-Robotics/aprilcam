@@ -1,0 +1,103 @@
+# testdev/capture_matrix.yaml
+#
+# Variation matrix for testdev/capture_matrix.py (see
+# docs/test-plans/camera-image-matrix.md §3/§4).
+#
+# `cameras` is a list of entries keyed by a case-insensitive substring
+# `match` against the camera's LIVE device_name (as reported by
+# aprilcam.camera.camutil, not the on-disk config.json path). The first
+# matching entry wins. When no entry matches, `fallback` applies: it builds
+# an exposure/gain/white-balance sweep from whatever of its named controls
+# `uvc-util -N <name> -c` reports as supported on the live device, using
+# fractions of each control's live [minimum, maximum] range (queried via
+# `uvc-util -S <control>`).
+#
+# Every camera always gets a `baseline.jpg` (baseline controls, unmodified)
+# in addition to the variations/fallback-sweep entries below. Each
+# variation's `controls` are OVERLAID onto the camera's own baseline
+# controls (never a hardcoded baseline) — the full baseline is re-applied
+# before every variation so dimensions never bleed into each other.
+
+settle_s: 1.5          # default settle time before capture, per variation
+settle_s_auto: 3.0      # settle time for variations that touch an "auto" control
+
+cameras:
+  # Arducam OV9782 (main-playfield tag camera). Baseline (from config.json):
+  # auto-exposure-mode=1 (manual), exposure-time-abs=6, gain=2,
+  # white-balance-temp=4600, auto-white-balance-temp=false. Known washout
+  # cliff around exposure 12-18 (docs/knowledge) — deliberately crossed.
+  - match: "ov9782"
+    variations:
+      # -- exposure sweep at baseline gain --
+      - name: exp-03
+        controls: {exposure-time-abs: "3"}
+      - name: exp-04
+        controls: {exposure-time-abs: "4"}
+      - name: exp-08
+        controls: {exposure-time-abs: "8"}
+      - name: exp-10
+        controls: {exposure-time-abs: "10"}
+      - name: exp-12
+        controls: {exposure-time-abs: "12"}
+      - name: exp-16
+        controls: {exposure-time-abs: "16"}
+      - name: exp-24
+        controls: {exposure-time-abs: "24"}
+      - name: exp-40
+        controls: {exposure-time-abs: "40"}
+      # -- gain sweep at baseline exposure --
+      - name: gain-01
+        controls: {gain: "1"}
+      - name: gain-04
+        controls: {gain: "4"}
+      - name: gain-08
+        controls: {gain: "8"}
+      - name: gain-16
+        controls: {gain: "16"}
+      # -- auto-exposure toggle (baseline is manual mode "1") --
+      - name: auto-exposure
+        controls: {auto-exposure-mode: "8"}
+        settle_s: 3.0
+      # -- white balance --
+      - name: wb-3000
+        controls: {white-balance-temp: "3000"}
+      - name: wb-6500
+        controls: {white-balance-temp: "6500"}
+      - name: wb-auto
+        controls: {auto-white-balance-temp: "true"}
+        settle_s: 3.0
+      # -- combined stress states (realistic drift) --
+      - name: stress-lowexp-higain
+        controls: {exposure-time-abs: "3", gain: "16"}
+      - name: stress-highexp-logain
+        controls: {exposure-time-abs: "40", gain: "1"}
+
+# Generic fallback for any camera with no matching `cameras` entry above
+# (e.g. HD USB CAMERA, which has no `settings` block in its config.json).
+# Baseline is whatever the hardware is set to when the tool starts — it is
+# snapshotted and restored, never assumed. Actual numeric sweep values are
+# computed at runtime from the control's live [minimum, maximum] (via
+# `uvc-util -S <control>`), so this section only names controls + fractions.
+fallback:
+  exposure_control: exposure-time-abs
+  exposure_fractions: [0.005, 0.01, 0.03, 0.08, 0.2, 0.5, 1.0]
+  gain_control: gain
+  gain_fractions: [0.05, 0.15, 0.3, 0.5, 0.8, 1.0]
+  auto_exposure_control: auto-exposure-mode
+  # UVC-spec auto-exposure-mode values: 1=manual, 2=auto, 4=shutter-priority,
+  # 8=aperture-priority. Try whichever of these differs from the live
+  # baseline, once, so the sweep documents whether auto mode changes
+  # detection quality without assuming which mode is "the" auto mode.
+  auto_exposure_candidate_values: ["1", "8"]
+  auto_exposure_settle_s: 3.0
+  white_balance_control: white-balance-temp
+  white_balance_fractions: [0.0, 0.5, 1.0]
+  auto_white_balance_control: auto-white-balance-temp
+  auto_white_balance_settle_s: 3.0
+  stress_combos:
+    - name: stress-lowexp-higain
+      exposure_fraction: 0.01
+      gain_fraction: 1.0
+    - name: stress-highexp-logain
+      exposure_fraction: 1.0
+      gain_fraction: 0.05

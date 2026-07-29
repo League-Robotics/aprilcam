@@ -1032,6 +1032,22 @@ class CameraPipeline:
             ):
                 import dataclasses as _dc
                 origin_x, origin_y = self._a1_origin()
+                # Precompute the inverse homography once per frame (constant
+                # across the tag loop below) so a corrected world position can
+                # be projected back to a pixel for the overlay.  ``None`` when
+                # there is no homography this frame — pixel correction is then
+                # skipped entirely, matching prior (unshifted) behaviour.
+                homography = self._calibration.homography
+                Hinv = None
+                if homography is not None:
+                    try:
+                        Hinv = np.linalg.inv(homography)
+                    except Exception:
+                        log.exception(
+                            "CameraPipeline(%s): homography inversion failed",
+                            self.cam_name,
+                        )
+                        Hinv = None
                 corrected = []
                 for tr in tag_records:
                     if tr.world_xy is None:
@@ -1058,10 +1074,47 @@ class CameraPipeline:
                             wx, wy, new_yaw = self._robot_centre_from_tag(
                                 wx, wy, tr.orientation_yaw, off
                             )
+
+                        # The overlay must be drawn at the CORRECTED ground
+                        # position, not the raw detected pixel — otherwise the
+                        # drawn tag disagrees with its own reported world_xy
+                        # (and with everything else on screen at that world
+                        # position).  Project the corrected, A1-centred (wx,
+                        # wy) back to a pixel via the inverse homography (which
+                        # expects RAW, un-shifted world coords, hence adding
+                        # the origin back) and shift center_px/corners_px by
+                        # the resulting delta.
+                        center_px = tr.center_px
+                        corners_px = tr.corners_px
+                        if Hinv is not None:
+                            vec = Hinv @ np.array([wx + origin_x, wy + origin_y, 1.0])
+                            if vec[2] != 0.0:
+                                u = vec[0] / vec[2]
+                                v = vec[1] / vec[2]
+                                cx_raw, cy_raw = tr.center_px
+                                du = u - cx_raw
+                                dv = v - cy_raw
+                                if abs(du) > 1e-6 or abs(dv) > 1e-6:
+                                    center_px = (u, v)
+                                    corners_px = [
+                                        [c[0] + du, c[1] + dv] for c in tr.corners_px
+                                    ]
+
                         if new_yaw is not None:
-                            tr = _dc.replace(tr, world_xy=(wx, wy), orientation_yaw=new_yaw)
+                            tr = _dc.replace(
+                                tr,
+                                world_xy=(wx, wy),
+                                orientation_yaw=new_yaw,
+                                center_px=center_px,
+                                corners_px=corners_px,
+                            )
                         else:
-                            tr = _dc.replace(tr, world_xy=(wx, wy))
+                            tr = _dc.replace(
+                                tr,
+                                world_xy=(wx, wy),
+                                center_px=center_px,
+                                corners_px=corners_px,
+                            )
                     except Exception:
                         log.exception(
                             "CameraPipeline(%s): world correction failed for tag %s",

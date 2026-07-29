@@ -7,3 +7,6 @@ paths:
   reflections: clasi/reflections
   sprints: clasi/sprints
 process: se
+design_docs: enabled
+sources:
+- src/aprilcam
