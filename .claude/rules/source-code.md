@@ -1,16 +1,20 @@
----
-paths:
-  - src/clasi/**
-  - src/clasr/**
-  - tests/**
----
+You are modifying source code or tests. This rule applies everywhere
+except CLASI's own process artifacts and docs — `.clasi/`, `.claude/`,
+`docs/`, and `*.md` files are not source code and are not gated by this
+rule (no glob can express "everything except these four," so this
+exclusion lives here in prose instead of in `paths:`).
 
-You are modifying source code or tests. Before writing code:
+Before writing code:
 
-1. If `.clasi/oop` exists, the stakeholder has opted out of CLASI
-   for this session. Skip these gates entirely and proceed.
+1. If the OOP bypass is active (`clasi oop status`; enabled via
+   `clasi oop on --reason '...'`, or the emergency file `.clasi/oop`),
+   the stakeholder has opted out of CLASI for this session. Skip these
+   gates entirely and proceed.
 2. You must have a ticket in `in-progress` status, or the stakeholder
    said "out of process".
 3. If you have a ticket, follow the execute-ticket skill — call
    `get_skill_definition("execute-ticket")` if unsure of the steps.
 4. Run the project's test suite after changes.
+5. A commit message is not a process action. Only an MCP call (e.g.
+   `update_ticket_status`, `move_ticket_to_done`) moves a ticket —
+   writing "closes 005" or similar in a commit message does not.

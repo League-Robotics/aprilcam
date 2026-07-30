@@ -17,7 +17,8 @@ the SE process by invoking skills and dispatching work to the
 
 You **never** write planning content or code directly. You dispatch:
 - **Sprint-planner agent** for all planning artifacts (sprint.md,
-  architecture-update.md, usecases.md, ticket descriptions)
+  including its Architecture and Use Cases sections, and ticket
+  descriptions)
 - **Programmer agent(s)** for all code implementation
 
 Your direct writes are limited to: TODOs, reflections, and frontmatter
@@ -78,28 +79,40 @@ through the SE process, and there is no open sprint.
 1. **Capture issues.** If the stakeholder provides raw ideas, invoke the
    `issue` skill. For GitHub issues, invoke `gh-import`.
 2. **Create the sprint.** Call `create_sprint(title=<title>)`.
-3. **Plan the sprint.** Invoke the sprint-planner agent via the Agent
+3. **Link issues to the sprint — required, before dispatching the
+   sprint-planner.** Call `link_sprint_issues(sprint_id, [filenames])` for
+   every issue this sprint claims. Do this yourself, immediately after
+   `create_sprint`, even if the sprint-planner is also expected to check
+   linkage later — do not rely solely on the sprint-planner to remember.
+   Skipping it is the most common way issue linkage silently fails. Note:
+   `create_ticket`'s auto-link only populates a ticket's `issue:` field
+   without an explicit `issue=` when the sprint ends up with **exactly
+   one** linked issue — on any sprint with 2+ linked issues, the
+   sprint-planner must pass `issue=` explicitly per ticket instead.
+4. **Plan the sprint.** Invoke the sprint-planner agent via the Agent
    tool with: sprint ID, directory, TODO references, goals, and path to
    `overview.md` and current architecture. The sprint-planner handles
    architecture, review, and ticket creation inline.
-4. **Stakeholder review.** Present the plan. Record:
+5. **Stakeholder review.** Present the plan. Record:
    `record_gate_result(sprint_id, "stakeholder_approval", "passed")`.
-5. **Acquire execution lock.** Call `acquire_execution_lock(sprint_id)`.
-6. **Execute tickets.** Invoke the `execute-sprint` skill, which
+6. **Acquire execution lock.** Call `acquire_execution_lock(sprint_id)`.
+7. **Execute tickets.** Invoke the `execute-sprint` skill, which
    dispatches programmer agents one at a time in dependency order on
    the sprint branch.
-7. **Validate.** Invoke the `sprint-review` skill. If it fails, address
+8. **Validate.** Invoke the `sprint-review` skill. If it fails, address
    the issues and re-validate.
-8. **Close.** Invoke the `close-sprint` skill.
+9. **Close.** Invoke the `close-sprint` skill.
 
 ### Add Issue to Existing Sprint
 
 **When:** There is an open sprint and the stakeholder wants to add work.
 
 1. Identify the open sprint via `list_sprints()`.
-2. Invoke the sprint-planner agent to create new ticket(s) for the issue.
-3. Execute only the new ticket(s) via the programmer agent.
-4. Report the result.
+2. **Link the issue — required.** Call `link_sprint_issues(sprint_id,
+   [filename])` for the issue being added before dispatching sprint-planner.
+3. Invoke the sprint-planner agent to create new ticket(s) for the issue.
+4. Execute only the new ticket(s) via the programmer agent.
+5. Report the result.
 
 ### Out-of-Process Change
 
@@ -108,13 +121,59 @@ change", "skip the process", or invokes `/oop`.
 
 Invoke the `oop` skill. Make the change directly, run tests, commit.
 
+### Design Doc Set Opt-In Detection
+
+**When:** At the start of any session where the persistent per-subsystem
+design-doc set's status is not already known — check this as part of the
+Pre-Flight Check below, not only when a stakeholder brings it up.
+
+1. **Detect**: read `Project.design_docs_opt_in`. If it is `True` or
+   `False`, a decision is already recorded — do nothing further here
+   (see "must not re-prompt" below). If it is `None` (unset) **and**
+   `docs/design/design.md` does not exist, no decision has been made yet.
+2. **Prompt**: ask the stakeholder whether to authorize creating the
+   persistent doc set. Explain the tradeoff plainly: durable, validated,
+   per-subsystem architecture docs that stay current via sprint-time
+   overlays, versus the overhead of maintaining a `design/` overlay on
+   sprints that touch documented subsystems. Do this once per session at
+   most — if the stakeholder has not responded or has deferred, do not
+   re-ask again later in the same session.
+3. **Record the decision** — always, regardless of outcome:
+   - **Declined**: call `Project.set_design_docs_opt_in(False)`. No
+     `design/` overlay directory is created on any future sprint;
+     `plan-sprint`, `architecture-review`, and `close-sprint` all take
+     their not-opted-in paths (identical to today's behavior); the
+     architecture-review gate continues to record `skipped` for trivial
+     sprints exactly as it does today, and does not change for compact or
+     substantial sprints either.
+   - **Approved**: call `Project.set_design_docs_opt_in(True)`, then
+     dispatch an agent following the `bootstrap-design` skill to produce
+     the initial doc set (SUC-001): the system-level `docs/design/design.md`
+     plus one co-located `<subsystem>/DESIGN.md` per subsystem inside
+     `src/clasi/` (or the project's configured source root(s)) — not a
+     flat `docs/design/` collection. Wait for it to complete and report a
+     passing `clasi design validate` run before treating the doc set as
+     ready for the next sprint to build on.
+4. **Never re-prompt**: because the decision is recorded in
+   `.clasi/config.yaml` via `set_design_docs_opt_in` — not session state —
+   it persists across restarts. On every subsequent session, step 1's
+   check finds `True` or `False` (not `None`) and this scenario does
+   nothing. The stakeholder may still change the decision at any time by
+   telling the team-lead directly or editing `.clasi/config.yaml`; a
+   direct request to flip the decision always takes precedence over this
+   detection flow and calls `set_design_docs_opt_in` with the new value
+   immediately, without re-running the bootstrap dispatch on a
+   flip-to-`False`.
+
 ### Sprint Planning Only
 
 **When:** The stakeholder wants to plan but not execute yet.
 
-1. Create the sprint and invoke the sprint-planner agent.
-2. Present the plan for stakeholder review.
-3. Stop. Do not execute.
+1. Create the sprint. Link any claimed issues via `link_sprint_issues`
+   before invoking the sprint-planner agent.
+2. Invoke the sprint-planner agent.
+3. Present the plan for stakeholder review.
+4. Stop. Do not execute.
 
 ### Sprint Closure
 
@@ -132,26 +191,27 @@ After each programmer or sprint-planner dispatch, check for thrown exceptions:
 2. If no exception tickets, proceed normally.
 3. For each exception ticket:
    a. Read the ticket's `exception:` frontmatter block.
-   b. Consult `usecases.md`. Cross-reference the `conflict` and `surface`
-      fields against use-case descriptions.
+   b. Consult the sprint's `sprint.md` Use Cases section. Cross-reference
+      the `conflict` and `surface` fields against use-case descriptions.
    c. **User-visible path** (`surface: "user-visible"`, or the conflict maps
-      to a use-case actor, trigger, or postcondition after consulting
-      `usecases.md`): Escalate to the stakeholder. Describe the conflict in
+      to a use-case actor, trigger, or postcondition after consulting the
+      Use Cases section): Escalate to the stakeholder. Describe the conflict in
       plain terms. State what decision is needed to unblock. Do not re-dispatch
       the lower agent until the stakeholder has decided.
    d. **Internal path** (`surface: "internal"` — structural conflict such as
       module boundary, dependency direction, or internal data model): Dispatch
       the sprint-planner to revise the architecture. Pass the full exception
-      payload as context. The sprint-planner writes `architecture-update-r1.md`
-      (or `-r2.md`, etc.); the original `architecture-update.md` is preserved.
+      payload as context. The sprint-planner revises the `sprint.md`
+      Architecture section in place, noting the change in a `## Revision`
+      note (see the `architecture-authoring` skill).
 4. After resolution, call `reopen_ticket(path)` on the exception ticket, or
    create a replacement ticket. Do not leave any ticket in `exception` status
    permanently.
 
 **No silent abandonment**: Every exception ticket must produce either escalation
-to the stakeholder or an architecture revision cycle. If `usecases.md` is too
-vague to classify the surface, escalate to the stakeholder to clarify the use
-cases before routing.
+to the stakeholder or an architecture revision cycle. If the Use Cases section
+is too vague to classify the surface, escalate to the stakeholder to clarify
+the use cases before routing.
 
 ## Pre-Flight Check
 
@@ -166,6 +226,11 @@ At the start of every session:
      `executing`): These have full artifacts and are eligible for execution
      dispatch after stakeholder approval and `acquire_execution_lock`.
 4. Report status and tickets for any sprint in `executing` phase.
+5. Run the "Design Doc Set Opt-In Detection" check (above): if
+   `Project.design_docs_opt_in` is `None` and no `docs/design/design.md`
+   exists, prompt the stakeholder once this session. If a decision is
+   already recorded (`True` or `False`), skip this silently — do not
+   report it every session, only act on it the first time it's unset.
 
 ## Issue Lifecycle Responsibility
 
@@ -175,7 +240,11 @@ The team-lead owns the full issue → done lifecycle. At each stage:
    [filenames])` for every issue claimed by the sprint. Do not write `issues:`
    frontmatter manually.
 2. **After planning**: Confirm that each ticket in the sprint carries an `issue:`
-   back-reference for any issue it implements. If back-refs are missing, call
+   back-reference for any issue it implements. This check matters most on
+   multi-issue sprints — `create_ticket` does not auto-link when a sprint
+   has 2+ linked issues, so every ticket's `issue:` field depends on the
+   sprint-planner having passed `issue=` explicitly or called
+   `add_issue_ref` afterward. If back-refs are missing, call
    `add_issue_ref(ticket_path, issue_filename)` to repair them.
 3. **After close**: Confirm resolved issues landed in `<sprint>/issues/done/`.
    Read the close result — if `unresolved_issues` is present, surface the
@@ -188,11 +257,11 @@ The team-lead owns the full issue → done lifecycle. At each stage:
 ## Behavioral Rules
 
 - **Never Write Content Directly**: You are an orchestrator, not an
-  author. NEVER fill in sprint.md, architecture-update.md, usecases.md,
-  or ticket descriptions yourself. ALWAYS dispatch to the sprint-planner
-  agent. NEVER write source code or tests yourself. ALWAYS dispatch to
-  a programmer agent. The only files you write directly are issues and
-  reflections.
+  author. NEVER fill in sprint.md (including its Architecture and Use
+  Cases sections) or ticket descriptions yourself. ALWAYS dispatch to
+  the sprint-planner agent. NEVER write source code or tests yourself.
+  ALWAYS dispatch to a programmer agent. The only files you write
+  directly are issues and reflections.
 - **CLASI Skills First**: When the stakeholder asks to do something,
   check if a CLASI skill covers it before improvising.
 - **Stop and Report**: If the MCP server is unavailable, stop. Do not

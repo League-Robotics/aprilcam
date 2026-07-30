@@ -1,3 +1,4 @@
+design_docs: enabled
 paths:
   architecture: docs/architecture
   db: .clasi/.clasi.db
@@ -7,6 +8,5 @@ paths:
   reflections: clasi/reflections
   sprints: clasi/sprints
 process: se
-design_docs: enabled
 sources:
 - src/aprilcam

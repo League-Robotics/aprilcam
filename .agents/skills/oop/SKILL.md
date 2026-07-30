@@ -24,6 +24,30 @@ The stakeholder may request this mode with a variety of phrases, such as:
 
 - THe stakeholder did not explicitly request it.  
 
+## Enabling the bypass
+
+The primary way to enable OOP is the CLI, which records who/why/until-when
+in the state DB — this is what makes the bypass auditable instead of a
+silent, forgettable flag:
+
+- `clasi oop on --reason '<why>'` — enable the bypass. Reason is
+  required; if omitted, the command prompts for it interactively rather
+  than defaulting to blank. Defaults to an 8-hour TTL (`--ttl-hours` to
+  override); the bypass self-expires so it can never be forgotten on
+  indefinitely.
+- `clasi oop off` — disable the bypass. Clears the DB record **and**
+  removes any leftover flag files. "Off" means off everywhere.
+- `clasi oop status` — show whether the bypass is active, its source
+  (DB, file, or both), reason, age, and expiry.
+
+**Emergency fallback**: if `clasi` itself is broken (e.g. the CLI won't
+run), create an empty file at `.clasi/oop` in the project root as an
+unconditional override — it works even when the DB layer or the `clasi`
+command itself is unavailable. This file mechanism has no audit trail
+(no reason, no timestamp, no expiry), so prefer the CLI whenever `clasi`
+is working. Remove `.clasi/oop` (or run `clasi oop off`, which removes
+it too) once the emergency has passed.
+
 ## Process
 
 1. Read the relevant code.

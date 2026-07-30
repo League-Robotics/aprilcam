@@ -1,1 +1,1 @@
-/Volumes/Proj/proj/RobotProjects/AprilTags/.agents/skills/consolidate-architecture/SKILL.md
+/Volumes/Proj/proj/RobotProjects/aprilcam/.agents/skills/consolidate-architecture/SKILL.md

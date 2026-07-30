@@ -1,1 +1,1 @@
-/Volumes/Proj/proj/RobotProjects/AprilTags/.agents/skills/systematic-debugging/SKILL.md
+/Volumes/Proj/proj/RobotProjects/aprilcam/.agents/skills/systematic-debugging/SKILL.md

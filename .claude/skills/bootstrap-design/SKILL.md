@@ -1,0 +1,1 @@
+/Volumes/Proj/proj/RobotProjects/aprilcam/.agents/skills/bootstrap-design/SKILL.md

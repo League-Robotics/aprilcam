@@ -58,11 +58,15 @@ From team-lead (via Task description):
    - Check off all acceptance criteria (`- [x]`)
    - Set frontmatter `status: done`
 8. **Commit** all changes with a message referencing the ticket ID.
-9. **Bump the version**: run `dotconfig version bump` and commit the result
-   (`chore: bump version`). Tools are installed editable, so the
-   version is how sessions tell which code is live. Do this after each
-   substantive commit, not just at ticket end. Do not bump immediately
-   before `close_sprint` — it bumps and tags itself.
+9. **Do not bump the version.** `close_sprint` bumps and tags exactly
+   once per sprint — that is the only bump for sprint work. Bumping
+   per ticket (the old instruction here) is what produced 11 bump
+   commits in 36 total in one measured sprint; it added no release
+   value and is now redundant with `close_sprint`'s own bump plus
+   the automatic staleness check (`clasi.staleness.check_staleness`)
+   that fails closed on a stale running build. Exception: if you are
+   working out-of-process directly on `master` (no sprint branch), run
+   `dotconfig version bump` after your commit per the `oop` skill.
 
 ## Error Recovery
 
@@ -139,7 +143,8 @@ attempted=..., conflict=..., surface=...)`. Do this before exiting.
 - `conflict`: The specific architecture section, use-case, or decision
   that blocks you. Be precise — cite the section heading or use-case ID.
 - `surface`: Your first-pass classification:
-  - `"user-visible"` — the conflict affects behavior described in usecases.md.
+  - `"user-visible"` — the conflict affects behavior described in the
+    sprint's `sprint.md` Use Cases section.
   - `"internal"` — the conflict is purely structural (module boundary,
     dependency direction, internal data model). When in doubt, prefer
     `"internal"` and let the team-lead override.

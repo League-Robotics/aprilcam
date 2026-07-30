@@ -3,6 +3,7 @@ name: close-sprint
 description: Validates and closes a completed sprint — verifies tickets, merges branch, archives sprint
 ---
 
+
 # Close Sprint Skill
 
 This skill closes a completed sprint using the `close_sprint` MCP tool,
@@ -52,13 +53,40 @@ which handles the full lifecycle.
    - Custom string (e.g., `"npm test"`): runs that command
    - Empty string `""`: skips tests entirely (non-Python projects)
 
-   The tool handles internally:
+   The tool handles internally, in this exact order:
    - Pre-condition verification with self-repair
    - Run tests (if test_command is provided)
    - Archive sprint directory to `sprints/done/`
    - Update state DB, release execution lock
+   - **Apply the sprint's design overlay** (opt-in only — see "Design
+     Overlay Apply at Close" below)
    - Version bump and git tag
    - Merge to master, push tags, delete branch
+
+## Design Overlay Apply at Close
+
+When `Project.design_docs_opt_in` is `True` and the sprint carries a
+`design/` overlay (`sprint.design_dir.exists()`), `close_sprint` applies
+the overlay to the canonical `docs/design/` doc set as one of its
+internal steps (`design_overlay_apply`), placed immediately after
+`sprint.archive()`/the DB update and **before** the version bump/tag
+step. Concretely it copies each overlay `.md` file (excluding
+`.diff.md` files) over its same-named canonical doc, then re-runs
+`clasi design validate` against the updated canonical set.
+
+**A failed apply or a failed post-apply validation blocks the version
+bump, tag, and merge** — `close_sprint` returns an error result at the
+`design_overlay_apply` step and does not proceed further, the same
+fail-closed pattern already used for a failed test run. No partially
+applied doc set is ever tagged as a release. Recovery follows the same
+shape as any other blocked close: read the error, fix the underlying
+issue (a missing canonical target, a validation failure), and re-run
+`close_sprint`.
+
+When opt-in is unset/`False`, or the sprint has no `design/` directory
+(trivial/compact sprint under opt-in, or an opted-out project), this
+step no-ops silently — behavior is identical to today's close, no
+`design/` overlay concept exists for that sprint.
 
 5. **Report result**: On success, report the version tag and merged
    branch. On error, report the blocker and recovery steps.
