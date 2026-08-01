@@ -1,7 +1,7 @@
 ---
 id: '003'
 title: Calibration engine
-status: done
+status: in-progress
 use-cases:
 - SUC-003
 depends-on:
@@ -239,6 +239,45 @@ choice (frame *count* policy belongs with frame *access*, which is
 handed in, not with the averaging math), not an oversight, but is
 recorded here since it means the archived constant name exists in two
 places for two different reasons.
+
+**Hotfix (team-lead verification defect): persistent-number addressing
+was broken for `calibrate`/`get_calibration`/`get_camera_config`.**
+`camera calibrate 3` failed with a misleading `NoPlayfieldLinked`
+against a camera `camera list` showed correctly linked. Root cause:
+these three methods looked `self._camera_configs`/`self._calibrations`
+up keyed by the *raw* CLI/RPC token, but both stores are keyed by slug
+only (`set_camera_config`'s `self._camera_configs[config.name] =
+config`; `_persist_calibration`/`_load_calibrations` likewise) — a
+persistent number never matched, so `calibrate` silently concluded "no
+config" instead of resolving to the same camera `camera list`/
+`get_frame`/`get_tags` already reach correctly via `_camera_for`.
+Fixed with one shared, soft resolver,
+`DaemonService._resolve_slug_if_known`, built on the same
+`_record_for` `_camera_for` already uses — every camera-config-
+addressed method (`get_camera_config`, `calibrate`, `get_calibration`)
+now resolves a number-or-slug token to the canonical slug before doing
+anything else, so a future camera-config-addressed method inherits
+correct addressing automatically instead of re-implementing it.
+Deliberately soft (never raises) so it does not disturb
+`get_camera_config`'s existing "unknown token" error shape
+(`available` = configured slugs, not every registered camera).
+`get_frame`/`get_tags`/`get_tag`/`get_tag_history` (and therefore
+`view/viewer.py`, which only calls those) were never affected — they
+already went through `_camera_for`'s own, correct, number-or-slug
+resolution since ticket 021-002. `cli/playfield.py`'s `playfield
+config` and `cli/camera.py`'s `camera config` push whole self-naming
+documents (the camera identity comes from the document's own `name`
+field, never a CLI address token), so neither takes a resolvable token
+and neither had this defect. Regression tests added: `calibrate`/
+`get_camera_config` by number vs. by slug reach the identical camera,
+config, and stored `Calibration`; an RPC-level round trip repeats the
+exact live reproduction (`Calibrate` with a numeric `camera` field).
+Re-verified live against the stakeholder's running daemon and the
+physically-mounted `main-playfield`: `aprilcam camera calibrate 3`
+now succeeds (10/10 matched, 0.184 cm reprojection error), and
+`get_calibration('3') == get_calibration('arducam-ov9782-usb-camera')`
+— exactly one `calibration.json`, under the canonical slug directory,
+not a second one keyed `"3"`.
 
 **What ticket 004 needs.** `daemon/detection.py`'s burst pipeline gets
 a `Calibration` for a camera the same way `daemon/service.py` does
