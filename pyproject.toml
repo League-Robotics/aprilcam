@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aprilcam"
-version = "0.20260719.1"
+version = "0.20260801.1"
 description = "MCP server and CLI for camera management, AprilTag/ArUco detection, playfield homography, and image processing"
 authors = [
   { name = "Eric Busboom" }
@@ -88,6 +88,7 @@ norecursedirs = ["archive", ".git", ".clasi", "build", "dist"]
 asyncio_mode = "auto"
 markers = [
     "integration: end-to-end tests that start real daemon/hardware processes (deselect with -m 'not integration')",
+    "camera: tests that require real capture hardware attached (deselect with -m 'not camera')",
 ]
 
 [dependency-groups]

@@ -1,5 +1,14 @@
 ---
-status: pending
+status: done
+sprint: '020'
+tickets:
+- 020-001
+- 020-002
+- 020-003
+- 020-004
+- 020-005
+- 020-006
+- 020-007
 ---
 
 # Daemon bring-up with basic camera CLI

@@ -1,0 +1,158 @@
+// aprilcam_v2.proto -- the v2 daemon control plane, sprint-020-scoped.
+//
+// **This file is a subset, not a placeholder.** Sprint 020 (daemon
+// bring-up) needs exactly four RPCs -- ListCameras, ProbeCameras,
+// GetFrame, GetStatus -- to satisfy UC-01, UC-13 (local-lifecycle
+// parts), UC-14, UC-17, and UC-25's in-scope scenarios. The full v1
+// surface (`archive/proto/aprilcam.proto`, 369 lines: calibration,
+// annotations, config push/pull, mobile tags, stream endpoints) is
+// deliberately not converted this sprint -- see sprint 020's
+// architecture Decision 1. A later sprint (development-plan.md's
+// Stage 8) EXTENDS this same file in place -- new RPCs and messages
+// added alongside these, existing ones only ever widened
+// (new optional fields), never removed or renumbered -- rather than
+// replacing it with a fresh proto. Treat every message/field number
+// below as permanent.
+//
+// Wire conventions this file follows (docs/design/design.md §6):
+//   - World-cm coordinates cross no boundary here -- this sprint's
+//     RPCs carry no tag/world data at all (out of scope; see below).
+//   - `optional` scalar fields distinguish "not applicable" from a
+//     legitimate zero/empty value (`CameraState.playfield`,
+//     `CameraState.number`) -- the same Optional-vs-None-vs-empty
+//     discipline `types.py` enforces in Python.
+//
+// Deliberately absent this sprint (Stage 8 territory, not forgotten):
+// OpenCamera/CloseCamera (no explicit open/close verb -- `GetFrame`
+// opens on demand and the daemon holds it, see `daemon/service.py`),
+// calibration trigger, config push/pull, annotation store, mobile-tag
+// registry, stream endpoint allocation (`GetImageStream`/
+// `GetTagStream`), `WhereIs`, `GetTags`. None of sprint 020's use cases
+// need them.
+
+syntax = "proto3";
+
+package aprilcam.v2;
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
+service AprilCamV2 {
+  // Every camera the registry knows, present or not (daemon.interfaces.
+  // Daemon.list_cameras). Cheap -- answered from what the daemon already
+  // knows, never re-probes.
+  rpc ListCameras (ListCamerasRequest) returns (ListCamerasResponse);
+
+  // Force a deep re-interrogation of every backend (UC-25). May be slow;
+  // never disturbs a camera already held open for a live caller -- such
+  // a camera is reported from cached state and named in `skipped`.
+  rpc ProbeCameras (ProbeCamerasRequest) returns (ProbeCamerasResponse);
+
+  // One raw frame from a named camera (UC-17). `deskewed=true` on an
+  // uncalibrated camera (every camera, this sprint -- no calibration
+  // subsystem exists yet) fails explicitly rather than substituting a
+  // raw frame.
+  rpc GetFrame (GetFrameRequest) returns (GetFrameResponse);
+
+  // Readiness, queryable by any client (UC-05, as scoped by this
+  // sprint's four-RPC surface).
+  rpc GetStatus (GetStatusRequest) returns (GetStatusResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Shared messages
+// ---------------------------------------------------------------------------
+
+// Mirrors aprilcam.types.CameraState field-for-field. See that
+// dataclass's docstring for what each field means (UC-14, UC-25):
+// `present=false` with a config still held is normal, not an error;
+// `usable=false` with `present=true` is "plugged in and broken".
+message CameraState {
+  string name = 1;
+  bool present = 2;
+  bool usable = 3;
+  optional string playfield = 4;
+  bool calibrated = 5;
+  bool calibration_stale = 6;
+  bool frame_dark = 7;
+  // Stable registry enumeration number (UC-14.S-1). Absent
+  // (`HasField("number") == false`) only for a camera not yet
+  // registered -- mirrors `CameraState.number`'s `Optional[int]`.
+  optional int32 number = 8;
+}
+
+// One backend a probe could not interrogate, and why (UC-25.S-7).
+// Mirrors aprilcam.types.ProbeSkip.
+message ProbeSkip {
+  string backend = 1;
+  string reason = 2;
+}
+
+// ---------------------------------------------------------------------------
+// ListCameras
+// ---------------------------------------------------------------------------
+
+message ListCamerasRequest {}
+
+message ListCamerasResponse {
+  repeated CameraState cameras = 1;
+}
+
+// ---------------------------------------------------------------------------
+// ProbeCameras
+// ---------------------------------------------------------------------------
+
+message ProbeCamerasRequest {}
+
+message ProbeCamerasResponse {
+  repeated CameraState cameras = 1;
+  // Empty means the probe was genuinely complete (UC-25.S-7) -- never
+  // omit this field to mean "nothing to report".
+  repeated ProbeSkip skipped = 2;
+}
+
+// ---------------------------------------------------------------------------
+// GetFrame
+// ---------------------------------------------------------------------------
+
+message GetFrameRequest {
+  string camera = 1;
+  bool deskewed = 2;
+  // "jpeg" (default -- an empty string means "unset, use the default")
+  // or "png" (lossless, for test fixtures). See
+  // daemon.interfaces.Daemon.get_frame.
+  string encoding = 3;
+}
+
+message GetFrameResponse {
+  bytes data = 1;
+  int32 width = 2;
+  int32 height = 3;
+  // What was actually produced -- always echoes the request's resolved
+  // encoding this sprint (no server-side fallback substitution).
+  string encoding = 4;
+  double timestamp = 5;
+  bool deskewed = 6;
+  bool calibration_stale = 7;
+  bool frame_dark = 8;
+  // px_per_cm / world_extent / tags / annotations from
+  // aprilcam.types.ImageFrame are NOT carried this sprint -- they are
+  // only meaningful for deskewed/calibrated/detected frames, none of
+  // which this sprint's daemon slice produces (get_frame(deskewed=True)
+  // always fails explicitly; no detection loop exists yet). Stage 8
+  // adds them here, additively, when calibration and detection land.
+}
+
+// ---------------------------------------------------------------------------
+// GetStatus
+// ---------------------------------------------------------------------------
+
+message GetStatusRequest {}
+
+message GetStatusResponse {
+  bool running = 1;
+  repeated CameraState cameras = 2;
+  string config_dir = 3;
+  string state_dir = 4;
+}
