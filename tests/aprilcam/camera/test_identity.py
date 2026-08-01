@@ -197,6 +197,43 @@ def test_device_name_slug_never_carries_resolution():
 
 
 # ---------------------------------------------------------------------------
+# device_name_slug's no-all-digits invariant (ticket 021-002) -- daemon-side
+# number/slug addressing depends on a slug never being confusable with a
+# persistent registry number.
+# ---------------------------------------------------------------------------
+
+
+def test_device_name_slug_guards_a_bare_numeric_device_name():
+    assert device_name_slug("123") == "camera-123"
+    assert not device_name_slug("123").isdigit()
+
+
+def test_device_name_slug_guards_a_numeric_looking_device_name_with_symbols():
+    # "4-2" slugifies to "4-2" -- already non-digit (contains '-'), so
+    # the guard should not touch it (no double-prefixing).
+    assert device_name_slug("4-2") == "4-2"
+
+
+def test_name_resolution_slug_last_resort_tier_never_all_digits():
+    """The last-resort hardware-key tier is built from
+    ``device_name_slug`` and so inherits its guard whenever no
+    resolution is supplied."""
+    assert name_resolution_slug("123") == "camera-123"
+    assert not name_resolution_slug("123").isdigit()
+
+
+def test_resolve_identity_last_resort_tier_with_numeric_device_name():
+    """End-to-end through the actual fallback chain: a camera whose OS-
+    reported name is a bare number must not resolve to an all-digits
+    ``.slug`` -- that would collide with number-addressing in
+    ``daemon/service.py``'s ``_camera_for``."""
+    r = resolve_identity(0, name="123", enum_entries={}, profiler_entries={})
+    assert r.source == "name_resolution_slug"
+    assert r.slug == "camera-123"
+    assert not r.slug.isdigit()
+
+
+# ---------------------------------------------------------------------------
 # This Mac's actual cameras (UC-14.S-1) -- recorded enumeration snapshot
 # ---------------------------------------------------------------------------
 

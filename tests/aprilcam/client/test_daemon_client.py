@@ -36,7 +36,7 @@ from aprilcam.client.daemon_client import GrpcDaemon
 from aprilcam.config.directories import Directories
 from aprilcam.daemon.rpc import build_server
 from aprilcam.daemon.service import DaemonService
-from aprilcam.errors import ConnectionFailed, NotCalibrated, UnknownCamera
+from aprilcam.errors import CameraNotPresent, ConnectionFailed, NotCalibrated, UnknownCamera
 from aprilcam.proto import aprilcam_v2_pb2_grpc
 from aprilcam.types import CameraState, ImageFrame, ProbeReport
 from tests.aprilcam.camera.test_camera import FakeBackend
@@ -86,7 +86,26 @@ def service(directories, registry, held_camera):
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: FakeBackend(),
     )
-    return DaemonService(registry=registry, discovery=discovery, directories=directories, cameras=cameras)
+    return DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        cameras=cameras,
+        # Headless-safe: see test_service.py's identical note -- without
+        # this, _camera_for's _index_for falls through to real hardware
+        # enumeration for any registered-but-uncached camera.
+        identity_source=lambda: {0: identity},
+    )
+
+
+@pytest.fixture
+def absent_camera(registry: CameraRegistry):
+    """A registered-but-not-currently-enumerated camera -- see
+    test_service.py's identical fixture for the full rationale."""
+    identity = _identity("hw:absent", "Absent Camera")
+    slug = registry.resolve(identity)
+    number = registry.get(slug).number
+    return slug, number
 
 
 @pytest.fixture
@@ -177,16 +196,20 @@ def test_status_round_trip(client, directories, held_camera):
 # ---------------------------------------------------------------------------
 
 
-def test_get_frame_unknown_camera_raises_unknown_camera_with_fields_intact(client, held_camera):
+def test_get_frame_unknown_camera_raises_unknown_camera_with_fields_intact(
+    client, held_camera, registry
+):
     _, slug, _ = held_camera
+    number = registry.get(slug).number
 
     with pytest.raises(UnknownCamera) as excinfo:
         client.get_frame("no-such-camera")
 
     # The typed fields survive the round trip intact -- not just the
-    # message text: the registry's known slugs, not an empty tuple.
+    # message text: the registry's known cameras as "{number} {slug}"
+    # pairs (ticket 021-002), not an empty tuple and not bare slugs.
     assert excinfo.value.requested == "no-such-camera"
-    assert excinfo.value.available == (slug,)
+    assert excinfo.value.available == (f"{number} {slug}",)
 
 
 def test_get_frame_deskewed_raises_not_calibrated(client, held_camera):
@@ -194,6 +217,27 @@ def test_get_frame_deskewed_raises_not_calibrated(client, held_camera):
 
     with pytest.raises(NotCalibrated):
         client.get_frame(slug, deskewed=True)
+
+
+def test_get_frame_by_number_round_trip(client, held_camera, registry):
+    _, slug, _ = held_camera
+    number = registry.get(slug).number
+
+    frame = client.get_frame(str(number))
+
+    assert isinstance(frame, ImageFrame)
+    assert frame.data[:2] == b"\xff\xd8"
+
+
+def test_get_frame_camera_not_present_raises_camera_not_present_with_slug_intact(
+    client, absent_camera
+):
+    slug, _number = absent_camera
+
+    with pytest.raises(CameraNotPresent) as excinfo:
+        client.get_frame(slug)
+
+    assert excinfo.value.slug == slug
 
 
 def test_rpc_failure_after_server_shutdown_raises_connection_failed(service):

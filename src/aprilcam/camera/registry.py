@@ -289,6 +289,22 @@ class CameraRegistry(_CameraRegistryBase):
         """The record for ``slug``, or ``None`` if it is not registered."""
         return next((r for r in self._records.values() if r.slug == slug), None)
 
+    def get_by_number(self, number: int) -> Optional[CameraRecord]:
+        """The record currently holding enumeration ``number``, or
+        ``None`` if no record does (never issued, or the holder was
+        later :meth:`forget`-ten -- gaps are structural, not an error,
+        per the module docstring's "numbers are never reissued or
+        reshuffled" contract).
+
+        Mirrors :meth:`get`'s shape -- a linear scan over
+        ``self._records.values()``, the same "small registry, no new
+        index structure needed" reasoning as ``get``'s own docstring
+        note in the sprint plan. This is the daemon's number-addressing
+        half of ``_camera_for`` (``daemon/service.py``, ticket 021-002)
+        — ``get`` remains the slug half.
+        """
+        return next((r for r in self._records.values() if r.number == number), None)
+
     def records(self) -> Tuple[CameraRecord, ...]:
         """Every record, ordered by enumeration number (a stable listing
         order for ``camera list``, ticket 006)."""

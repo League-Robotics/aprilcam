@@ -186,6 +186,53 @@ def test_next_number_persists_and_clamps_against_stored_max(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# get_by_number() -- the number-addressing half of ticket 021-002
+# ---------------------------------------------------------------------------
+
+
+def test_get_by_number_round_trips_against_a_freshly_resolved_record(tmp_path):
+    reg = CameraRegistry(tmp_path)
+    slug = reg.resolve(_identity("hw:a", "Cam A"))
+    record = reg.get(slug)
+
+    assert reg.get_by_number(record.number) == record
+
+
+def test_get_by_number_returns_none_for_an_unassigned_number(tmp_path):
+    reg = CameraRegistry(tmp_path)
+    reg.resolve(_identity("hw:a", "Cam A"))
+
+    assert reg.get_by_number(999) is None
+
+
+def test_get_by_number_finds_the_right_record_among_several(tmp_path):
+    reg = CameraRegistry(tmp_path)
+    a_slug = reg.resolve(_identity("hw:a", "Cam A"))
+    b_slug = reg.resolve(_identity("hw:b", "Cam B"))
+    a_record = reg.get(a_slug)
+    b_record = reg.get(b_slug)
+
+    assert reg.get_by_number(a_record.number) == a_record
+    assert reg.get_by_number(b_record.number) == b_record
+
+
+def test_get_by_number_survives_a_gap_left_by_forget(tmp_path):
+    """Numbers are never reissued or reshuffled -- a gap left by forget
+    stays a gap, and get_by_number reports it as absent, not as some
+    other camera shifted into its place."""
+    reg = CameraRegistry(tmp_path)
+    a_slug = reg.resolve(_identity("hw:a", "Cam A"))
+    a_number = reg.get(a_slug).number
+    b_slug = reg.resolve(_identity("hw:b", "Cam B"))
+    b_record = reg.get(b_slug)
+
+    reg.forget(a_slug)
+
+    assert reg.get_by_number(a_number) is None
+    assert reg.get_by_number(b_record.number) == b_record
+
+
+# ---------------------------------------------------------------------------
 # forget() vs. absent-but-remembered (AC4)
 # ---------------------------------------------------------------------------
 

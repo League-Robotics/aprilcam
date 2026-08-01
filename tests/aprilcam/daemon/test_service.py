@@ -31,7 +31,7 @@ from aprilcam.config.directories import Directories
 from aprilcam.daemon.lifecycle import DaemonLifecycle
 from aprilcam.daemon.rpc import build_server
 from aprilcam.daemon.service import VALID_ENCODINGS, DaemonService
-from aprilcam.errors import NotCalibrated, UnknownCamera
+from aprilcam.errors import CameraNotPresent, NotCalibrated, UnknownCamera
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
 from tests.aprilcam.camera.test_camera import FakeBackend
 
@@ -83,7 +83,32 @@ def service(directories, registry, held_camera):
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: FakeBackend(),
     )
-    return DaemonService(registry=registry, discovery=discovery, directories=directories, cameras=cameras)
+    return DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        cameras=cameras,
+        # Headless-safe: without this, DaemonService's own
+        # identity_source defaults to real hardware enumeration
+        # (aprilcam.camera.identity.resolve_all). Only the held camera
+        # is "present" as far as _camera_for's _index_for lookup is
+        # concerned -- anything else registered but not in this dict
+        # is a registered-but-absent camera (CameraNotPresent tests
+        # below).
+        identity_source=lambda: {0: identity},
+    )
+
+
+@pytest.fixture
+def absent_camera(registry: CameraRegistry):
+    """A camera the registry remembers (assigned a slug and a number)
+    but that ``service``'s identity source does not currently
+    enumerate -- simulates an unplugged camera (UC-25), never held open
+    in ``service``'s ``cameras`` cache."""
+    identity = _identity("hw:absent", "Absent Camera")
+    slug = registry.resolve(identity)
+    number = registry.get(slug).number
+    return slug, number
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +167,59 @@ def test_get_frame_unknown_camera_raises_unknown_camera(service):
     with pytest.raises(UnknownCamera) as excinfo:
         service.get_frame("no-such-camera")
     assert excinfo.value.requested == "no-such-camera"
+
+
+# ---------------------------------------------------------------------------
+# Camera addressing by persistent number (ticket 021-002, SUC-005)
+# ---------------------------------------------------------------------------
+
+
+def test_get_frame_by_number_and_by_slug_return_frames_from_the_same_camera(
+    service, held_camera, registry
+):
+    _, slug, _ = held_camera
+    number = registry.get(slug).number
+
+    by_slug = service.get_frame(slug)
+    by_number = service.get_frame(str(number))
+
+    assert by_slug.data == by_number.data
+    assert by_slug.width == by_number.width and by_slug.height == by_number.height
+
+
+def test_get_frame_unknown_number_raises_unknown_camera_with_number_slug_available(
+    service, held_camera, registry
+):
+    _, slug, _ = held_camera
+    number = registry.get(slug).number
+
+    with pytest.raises(UnknownCamera) as excinfo:
+        service.get_frame("99")
+
+    assert excinfo.value.requested == "99"
+    assert excinfo.value.available == (f"{number} {slug}",)
+
+
+def test_get_frame_absent_registered_camera_by_slug_raises_camera_not_present(
+    service, absent_camera
+):
+    slug, _number = absent_camera
+
+    with pytest.raises(CameraNotPresent) as excinfo:
+        service.get_frame(slug)
+
+    assert excinfo.value.slug == slug
+
+
+def test_get_frame_absent_registered_camera_by_number_raises_camera_not_present(
+    service, absent_camera
+):
+    slug, number = absent_camera
+
+    with pytest.raises(CameraNotPresent) as excinfo:
+        service.get_frame(str(number))
+
+    assert excinfo.value.slug == slug
 
 
 def test_get_frame_deskewed_raises_not_calibrated(service, held_camera):
@@ -277,6 +355,46 @@ def test_rpc_get_frame_deskewed_maps_to_failed_precondition(stub, held_camera):
     assert excinfo.value.code() == grpc.StatusCode.FAILED_PRECONDITION
     metadata = dict(excinfo.value.trailing_metadata())
     assert metadata["aprilcam-error-type"] == "NotCalibrated"
+
+
+def test_rpc_get_frame_by_number_round_trip(stub, held_camera, registry):
+    _, slug, _ = held_camera
+    number = registry.get(slug).number
+
+    response = stub.GetFrame(aprilcam_v2_pb2.GetFrameRequest(camera=str(number)))
+
+    assert response.encoding == "jpeg"
+    assert response.data[:2] == b"\xff\xd8"
+
+
+def test_rpc_get_frame_camera_not_present_maps_to_failed_precondition_with_slug(
+    stub, absent_camera
+):
+    slug, _number = absent_camera
+
+    with pytest.raises(grpc.RpcError) as excinfo:
+        stub.GetFrame(aprilcam_v2_pb2.GetFrameRequest(camera=slug))
+
+    err = excinfo.value
+    assert err.code() == grpc.StatusCode.FAILED_PRECONDITION
+    metadata = dict(err.trailing_metadata())
+    assert metadata["aprilcam-error-type"] == "CameraNotPresent"
+    assert metadata["aprilcam-slug"] == slug
+
+
+def test_rpc_get_frame_camera_not_present_by_number_maps_to_failed_precondition(
+    stub, absent_camera
+):
+    slug, number = absent_camera
+
+    with pytest.raises(grpc.RpcError) as excinfo:
+        stub.GetFrame(aprilcam_v2_pb2.GetFrameRequest(camera=str(number)))
+
+    err = excinfo.value
+    assert err.code() == grpc.StatusCode.FAILED_PRECONDITION
+    metadata = dict(err.trailing_metadata())
+    assert metadata["aprilcam-error-type"] == "CameraNotPresent"
+    assert metadata["aprilcam-slug"] == slug
 
 
 # ---------------------------------------------------------------------------

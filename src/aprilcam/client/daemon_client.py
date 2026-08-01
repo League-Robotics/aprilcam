@@ -47,7 +47,13 @@ from aprilcam.client.models import (
     probe_report_from_proto,
 )
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
-from aprilcam.errors import AlreadyRunning, ConnectionFailed, NotCalibrated, UnknownCamera
+from aprilcam.errors import (
+    AlreadyRunning,
+    CameraNotPresent,
+    ConnectionFailed,
+    NotCalibrated,
+    UnknownCamera,
+)
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
 from aprilcam.types import CameraState, ImageFrame, ProbeReport
 
@@ -75,6 +81,8 @@ def _reconstruct_error(exc: grpc.RpcError, target: str) -> Exception:
             metadata.get("aprilcam-requested", ""),
             _split_available(metadata.get("aprilcam-available", "")),
         )
+    if error_type == "CameraNotPresent":
+        return CameraNotPresent(metadata.get("aprilcam-slug", "unknown"))
     if error_type == "NotCalibrated":
         return NotCalibrated(exc.details() or "camera not calibrated")
     return ConnectionFailed(target, reason=exc.details() or str(exc.code()))
