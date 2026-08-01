@@ -173,3 +173,125 @@ def test_origin_pixel_maps_to_world_origin_with_no_extra_shift():
 
     assert world.x == pytest.approx(0.0, abs=1e-9)
     assert world.y == pytest.approx(0.0, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# deskewed_output_size (ticket 022-005): the fixed-bounding-box sizing rule
+# ---------------------------------------------------------------------------
+
+
+def test_deskewed_output_size_main_playfield_is_exactly_800_by_532():
+    """The ticket's own worked example: 134.3 x 89.3 cm into an 800x800
+    box, aspect-preserved, width-constrained."""
+    width_px, height_px = geometry.deskewed_output_size(134.3, 89.3)
+
+    assert (width_px, height_px) == (800, 532)
+
+
+def test_deskewed_output_size_is_aspect_preserved_and_width_or_height_constrained():
+    """A field taller than it is wide is height-constrained instead --
+    proving the sizing rule picks whichever dimension is larger, not
+    always width."""
+    width_px, height_px = geometry.deskewed_output_size(50.0, 100.0, max_dimension_px=800)
+
+    assert height_px == 800  # the larger physical dimension hits the box exactly
+    assert width_px == pytest.approx(400, abs=1)  # half the height, aspect-preserved
+
+
+def test_deskewed_output_size_honours_a_max_dimension_override():
+    width_px, height_px = geometry.deskewed_output_size(100.0, 100.0, max_dimension_px=400)
+
+    assert (width_px, height_px) == (400, 400)
+
+
+def test_deskewed_output_size_rejects_non_positive_dimensions():
+    with pytest.raises(ValueError):
+        geometry.deskewed_output_size(0.0, 89.3)
+    with pytest.raises(ValueError):
+        geometry.deskewed_output_size(134.3, -1.0)
+
+
+# ---------------------------------------------------------------------------
+# world_to_deskewed_pixel (ticket 022-005): the anchor invariant. Permanent
+# geometry-convention suite, dev-plan Stage 6 -- never relaxed.
+# ---------------------------------------------------------------------------
+
+
+def test_anchor_invariant_field_nw_corner_maps_to_pixel_origin():
+    """``types.ImageFrame``'s own contract, checked directly: the
+    field's north-west corner, world (-width/2, +height/2), is image
+    (0, 0) -- main-playfield's own numbers (67.15, 44.65)."""
+    px_per_cm = 800 / 134.3
+
+    pixel = geometry.world_to_deskewed_pixel(
+        WorldPoint(x=-67.15, y=44.65), world_extent=(134.3, 89.3), px_per_cm=px_per_cm
+    )
+
+    assert pixel.x == pytest.approx(0.0, abs=1e-6)
+    assert pixel.y == pytest.approx(0.0, abs=1e-6)
+
+
+def test_anchor_invariant_field_se_corner_maps_to_the_output_canvas_corner():
+    px_per_cm = 800 / 134.3
+
+    pixel = geometry.world_to_deskewed_pixel(
+        WorldPoint(x=67.15, y=-44.65), world_extent=(134.3, 89.3), px_per_cm=px_per_cm
+    )
+
+    assert pixel.x == pytest.approx(800.0, abs=1e-6)
+    # Height is not width-constrained, so this lands close to, but not
+    # necessarily bit-exact at, 532 -- deskewed_output_size's own
+    # docstring explains why a non-square field's shorter dimension can
+    # be a sub-pixel off the exact scale.
+    assert pixel.y == pytest.approx(89.3 * px_per_cm, abs=1e-6)
+
+
+def test_anchor_invariant_field_centre_maps_to_the_output_centre():
+    width_cm, height_cm = 134.3, 89.3
+    px_per_cm = 800 / width_cm
+
+    pixel = geometry.world_to_deskewed_pixel(
+        WorldPoint(x=0.0, y=0.0), world_extent=(width_cm, height_cm), px_per_cm=px_per_cm
+    )
+
+    # Field centre (world origin) sits at exactly half the output's
+    # width/height, in pixels -- computed from the same px_per_cm, not
+    # a hand-rounded literal (800/2 == 400 is exact; the height half is
+    # not, since only width is guaranteed to hit the box exactly).
+    assert pixel.x == pytest.approx(800 / 2, abs=1e-6)
+    assert pixel.y == pytest.approx(height_cm / 2 * px_per_cm, abs=1e-6)
+
+
+def test_moving_east_increases_deskewed_pixel_x_the_mirror_catching_check():
+    """North is up, east is right (design.md Sec.6): a tag moved east
+    must appear further right on the deskewed image."""
+    extent = (134.3, 89.3)
+    px_per_cm = 800 / 134.3
+
+    west_ish = geometry.world_to_deskewed_pixel(
+        WorldPoint(x=-10.0, y=0.0), world_extent=extent, px_per_cm=px_per_cm
+    )
+    east_ish = geometry.world_to_deskewed_pixel(
+        WorldPoint(x=10.0, y=0.0), world_extent=extent, px_per_cm=px_per_cm
+    )
+
+    assert east_ish.x > west_ish.x
+
+
+def test_moving_north_decreases_deskewed_pixel_y_the_y_flip_catching_check():
+    """The single sanctioned y-flip, exercised directly: a tag moved
+    north (larger world y) must appear *higher* on the image -- a
+    *smaller* pixel-y, since image rows grow downward. Getting this
+    backwards is the silent north/south mirror this project fears most
+    (design.md Sec.6)."""
+    extent = (134.3, 89.3)
+    px_per_cm = 800 / 134.3
+
+    south_ish = geometry.world_to_deskewed_pixel(
+        WorldPoint(x=0.0, y=-10.0), world_extent=extent, px_per_cm=px_per_cm
+    )
+    north_ish = geometry.world_to_deskewed_pixel(
+        WorldPoint(x=0.0, y=10.0), world_extent=extent, px_per_cm=px_per_cm
+    )
+
+    assert north_ish.y < south_ish.y

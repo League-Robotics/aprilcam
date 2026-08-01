@@ -106,15 +106,14 @@ def probe_report_from_proto(msg: aprilcam_v2_pb2.ProbeCamerasResponse) -> ProbeR
 
 
 def image_frame_from_proto(msg: aprilcam_v2_pb2.GetFrameResponse) -> ImageFrame:
-    """See ``daemon.interfaces.Daemon.get_frame``. ``px_per_cm``/
-    ``world_extent``/``annotations`` are still not carried on the wire
-    this sprint (see ``aprilcam_v2.proto``'s ``GetFrameResponse``
-    comment); they stay at their ``types.py`` defaults (``None``) here
-    rather than being invented client-side. ``tags`` *is* carried now
-    (ticket 021-005) and round-trips via ``HasField("tags")`` --
-    ``None`` when detection has not run for this camera, a genuine
-    (possibly empty) :class:`~aprilcam.types.TagFrame` when it has --
-    never collapsing the two."""
+    """See ``daemon.interfaces.Daemon.get_frame``. ``annotations`` is
+    still not carried on the wire this sprint (the annotation store does
+    not exist yet -- sprint 022 Decision 5); it stays at its ``types.py``
+    default (``None``) here rather than being invented client-side.
+    ``tags`` (ticket 021-005) and ``px_per_cm``/``world_extent`` (ticket
+    022-005) all round-trip via ``HasField()`` -- ``None`` on this side
+    iff absent on the wire, never coerced to ``0.0``/empty, matching
+    ``types.py``'s Optional-vs-None discipline exactly."""
     return ImageFrame(
         data=msg.data,
         width=msg.width,
@@ -125,6 +124,12 @@ def image_frame_from_proto(msg: aprilcam_v2_pb2.GetFrameResponse) -> ImageFrame:
         calibration_stale=msg.calibration_stale,
         frame_dark=msg.frame_dark,
         tags=tag_frame_from_proto(msg.tags) if msg.HasField("tags") else None,
+        px_per_cm=msg.px_per_cm if msg.HasField("px_per_cm") else None,
+        world_extent=(
+            (msg.world_extent.width_cm, msg.world_extent.height_cm)
+            if msg.HasField("world_extent")
+            else None
+        ),
     )
 
 

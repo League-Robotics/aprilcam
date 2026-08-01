@@ -31,6 +31,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import cv2 as cv
 import grpc
 import numpy as np
 import pytest
@@ -1761,6 +1762,151 @@ def test_get_tags_on_a_calibrated_camera_reports_real_world_coordinates(director
     assert aruco_1.world.y == pytest.approx(expected_y, abs=0.5)
     assert aruco_1.world_corners is not None
     assert aruco_1.yaw_rad is not None
+
+
+# ---------------------------------------------------------------------------
+# Deskewed frames (ticket 022-005) -- Daemon.get_frame(deskewed=True), the
+# real implementation replacing sprint 020's unconditional NotCalibrated.
+# ---------------------------------------------------------------------------
+
+
+def test_get_frame_deskewed_returns_a_real_deskewed_image_once_calibrated(directories, registry):
+    # CALIBRATION_FRAME_COUNT reads for calibrate(), plus one more for
+    # this test's own get_frame(deskewed=True) call.
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(
+        registry, [frame] * (CALIBRATION_FRAME_COUNT + 1)
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True
+
+    image = service.get_frame(slug, deskewed=True, encoding="png")
+
+    assert image.deskewed is True
+    assert image.width == 800
+    assert image.height == 532
+    assert image.px_per_cm == pytest.approx(800 / 134.3)
+    assert image.world_extent == pytest.approx((134.3, 89.3))
+    assert image.data[:8] == b"\x89PNG\r\n\x1a\n"  # PNG signature -- a real image, not a placeholder
+    decoded = cv.imdecode(np.frombuffer(image.data, dtype=np.uint8), cv.IMREAD_COLOR)
+    assert decoded.shape == (532, 800, 3)
+
+
+def test_get_frame_deskewed_by_persistent_number_uses_the_calibrated_camera(directories, registry):
+    """SUC-005 number-or-slug addressing, on the deskewed branch too --
+    mirrors ticket 022-003's ``calibrate``/``get_calibration`` hotfix."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(
+        registry, [frame] * (CALIBRATION_FRAME_COUNT + 1)
+    )
+    number = registry.get(slug).number
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True
+
+    image = service.get_frame(str(number), deskewed=True)
+
+    assert image.deskewed is True
+    assert image.width == 800 and image.height == 532
+
+
+def test_get_frame_deskewed_embeds_the_latest_ring_buffer_entry_without_triggering_a_burst(
+    directories, registry
+):
+    """Same 'get_frame never triggers its own detection burst, only
+    embeds whatever is already buffered' contract as the raw path
+    (sprint 021 Decision 4) -- carried through the deskewed branch."""
+    # CALIBRATION_FRAME_COUNT reads for calibrate(), plus three more:
+    # this test's own two get_frame(deskewed=True) calls and the one
+    # get_tags() burst between them.
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(
+        registry, [frame] * (CALIBRATION_FRAME_COUNT + 3)
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True
+
+    before = service.get_frame(slug, deskewed=True)
+    assert before.tags is None  # nothing has triggered a burst yet
+
+    burst = service.get_tags(slug)
+    after = service.get_frame(slug, deskewed=True)
+
+    assert after.tags == burst
+
+
+def test_get_frame_deskewed_uncalibrated_never_touches_the_camera_backend(directories, registry):
+    """UC-06.S-3/UC-19.S-2, proven mechanically, not just documented: an
+    exploding ``backend_factory`` means any attempt to open a camera
+    backend fails the test loudly -- the same style
+    ``test_calibrate_with_no_playfield_link_raises_before_touching_camera_backend``
+    already established for ``calibrate``."""
+
+    def exploding_backend_factory(index: int):
+        raise AssertionError(
+            "must not open a camera backend for an uncalibrated deskewed request"
+        )
+
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(),
+        identity_source=lambda: {},
+        backend_factory=exploding_backend_factory,
+    )
+    service = DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        backend_factory=exploding_backend_factory,
+    )
+
+    with pytest.raises(NotCalibrated):
+        service.get_frame("never-registered-camera", deskewed=True)
+
+
+def test_get_frame_deskewed_missing_playfield_raises_not_calibrated(directories, registry):
+    """A calibration whose playfield the daemon no longer holds (the
+    calibration reloaded from ``calibration.json`` at restart, but the
+    playfield -- ephemeral, UC-02 -- was never re-pushed) cannot be
+    deskewed either: there is no width_cm/height_cm to warp against.
+    Reported as :class:`NotCalibrated`, not a new error type -- from a
+    caller's point of view "this camera cannot currently be deskewed"
+    is exactly what both cases mean. Proven camera-backend-untouched the
+    same mechanical way as the fully-uncalibrated case above."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True
+
+    def exploding_backend_factory(index: int):
+        raise AssertionError(
+            "must not open a camera backend when the calibrated playfield is gone"
+        )
+
+    fresh_discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(),
+        identity_source=lambda: {},
+        backend_factory=exploding_backend_factory,
+    )
+    restarted = DaemonService(
+        registry=registry,
+        discovery=fresh_discovery,
+        directories=directories,
+        backend_factory=exploding_backend_factory,
+    )
+    assert restarted.get_calibration(slug) is not None  # reloaded from calibration.json
+    assert restarted.list_playfields() == ()  # UC-02: never re-pushed this process
+
+    with pytest.raises(NotCalibrated):
+        restarted.get_frame(slug, deskewed=True)
 
 
 # ---------------------------------------------------------------------------

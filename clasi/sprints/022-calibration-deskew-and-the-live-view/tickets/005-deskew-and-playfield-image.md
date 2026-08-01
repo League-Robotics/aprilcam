@@ -1,7 +1,7 @@
 ---
 id: '005'
 title: Deskew and playfield image
-status: open
+status: done
 use-cases:
 - SUC-005
 depends-on:
@@ -63,33 +63,33 @@ deskew.py` (daemon-side) ends up using.
 
 ## Acceptance Criteria
 
-- [ ] `main-playfield`'s 134.3×89.3 cm field deskews to **exactly
+- [x] `main-playfield`'s 134.3×89.3 cm field deskews to **exactly
       800×532** (aspect-preserved into the 800×800 box) (UC-06.S-1,
       UC-19.S-1).
-- [ ] **North is up, east is right on the deskewed image** — verified
+- [x] **North is up, east is right on the deskewed image** — verified
       two ways: (1) a fixture tag surveyed north of another appears at
       a **smaller** pixel-y (image rows grow downward, exactly one
       y-flip inside the published mapping); (2) world (0,0) converted
       through the returned `px_per_cm`/`world_extent` metadata lands on
       AprilTag 1's known pixel position in the image, within tolerance.
-- [ ] `px_per_cm` reported in the response is **derived from the
+- [x] `px_per_cm` reported in the response is **derived from the
       actual output dimensions** (`frame_width / field_width_cm`),
       never a hardcoded constant — assert it matches for both
       `main-playfield`'s dimensions and a second, differently-sized
       synthetic playfield fixture.
-- [ ] A deskewed request on an **uncalibrated** camera still fails
+- [x] A deskewed request on an **uncalibrated** camera still fails
       explicitly with `NotCalibrated`; no file is written by the CLI
       and no raw frame is substituted (UC-06.S-3, UC-19.S-2) — this
       exact sprint-020 contract, regression-tested to confirm the new
       calibrated branch didn't loosen it.
-- [ ] `client/renderer.py`: rendering a fixture `ImageFrame` with a tag
+- [x] `client/renderer.py`: rendering a fixture `ImageFrame` with a tag
       at a known `world_corners` position produces drawn pixels at the
       expected neighborhood (pixel-level check against the frame's own
       published metadata, no live window needed).
-- [ ] `client/renderer.py` on a frame with `annotations=None` draws
+- [x] `client/renderer.py` on a frame with `annotations=None` draws
       only tags, raising nothing and producing no annotation output —
       confirms the inert path is genuinely a no-op, not an exception.
-- [ ] Every client module touched here still contains no `cv2` import
+- [x] Every client module touched here still contains no `cv2` import
       — extend the existing no-cv2-import sweep test (or add one if it
       doesn't yet exist at this point in the tree) to cover
       `client/renderer.py`.
