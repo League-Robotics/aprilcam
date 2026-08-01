@@ -63,6 +63,38 @@ empty result on any failure — this module never raises for an
 unsupported platform or a missing tool; at worst ``resolve_identity``
 returns the name+resolution slug.
 
+**Root-cause fix (ticket 021-007): macOS's ``location`` *is* its
+avfoundation_unique_id, always, without ``system_profiler``.** A
+production registry on this machine was found to have every physical
+camera registered *twice* — once under ``avf:<id>`` and once under
+``vidpid:<vid>:<pid>@<id>`` for the exact same ``<id>``. Root cause:
+``cv2-enumerate-cameras``'s macOS backend sets its enumeration ``path``
+to ``AVCaptureDevice.uniqueID()`` directly (see
+``cv2_enumerate_cameras/macos_backend.py``: ``path=d.uniqueID()`` — "macOS
+does not provide a path, but uniqueID persists with a device over
+time"). That is the *same string* ``system_profiler`` separately reports
+as "Unique ID" — not an independently-sourced fallback value. Before
+this fix, ``resolve_identity`` only trusted that value once
+``system_profiler``'s device-name match (``_macos_camera_profiles``)
+confirmed it; an occasional match miss (camera busy, a transient
+enumeration hiccup, a name that does not match byte-for-byte) fell
+through to the ``vid_pid_location`` tier, which embeds the *identical*
+id under a different key format — minting a second registry record for
+one physical camera depending only on which run's ``system_profiler``
+call happened to match. Below, ``location`` is now trusted directly as
+the ``avfoundation_unique_id`` tier on macOS whenever ``system_profiler``
+did not already backfill one, making resolution deterministic
+regardless of that subprocess's success — the tier used no longer
+depends on a side-channel matching step at all. This shortcut is
+darwin-only: on Linux, ``cv2-enumerate-cameras``' ``path`` is a
+``/dev/videoN`` device node (see ``linux_backend.py``), not a hardware
+id, and stays exactly as fallback-prone as the module docstring above
+already documents (``usb_location_path`` remains genuinely a fallback
+there). ``camera/registry.py`` additionally self-heals a registry
+already polluted by the pre-fix behaviour — see that module's
+``_reconcile_location_duplicates`` — since fixing this resolver alone
+does not un-duplicate a registry.json that already has both records.
+
 This module must not import OpenCV at module top level (only inside
 ``_enumerate_cv2``, lazily) and returns plain dataclasses only.
 """
@@ -436,6 +468,21 @@ def resolve_identity(
         return _result(f"avf:{avf_unique}", "avfoundation_unique_id", False)
     if serial:
         return _result(f"serial:{serial}", "usb_serial", False)
+
+    # 1b. Root-cause determinism fix (ticket 021-007, module docstring's
+    # "Root-cause fix" section): on macOS, cv2-enumerate-cameras' own
+    # `path` already *is* the AVFoundation uniqueID -- trust it directly
+    # rather than requiring system_profiler's name-keyed match (the
+    # `avf_unique`/`serial` checks above) to have succeeded first. This
+    # removes resolution's only dependency on that subprocess call's
+    # success for the common case (no serial reported at all -- true of
+    # every camera on this Mac), so the same physical camera resolves to
+    # the same hardware_key every run, whether or not the profiler match
+    # landed this time. Checked after, not instead of, `serial` so an
+    # explicit serial number (when system_profiler does report one)
+    # keeps its documented priority over a location-derived id.
+    if sys.platform == "darwin" and location:
+        return _result(f"avf:{location}", "avfoundation_unique_id", False)
 
     # 2. VID:PID + USB location-id.
     if vid is not None and pid is not None and location:
