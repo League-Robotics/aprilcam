@@ -1,20 +1,21 @@
 """``GrpcDaemon`` -- the ``Daemon`` base class, client side (ticket
 020-005; ``get_tags``/``get_tag``/``get_tag_history`` added by ticket
 021-005; ``set_playfield``/``get_playfield``/``list_playfields``/
-``set_camera_config``/``get_camera_config`` added by ticket 022-001): a
-typed wrapper over the generated gRPC stub for
+``set_camera_config``/``get_camera_config`` added by ticket 022-001;
+``calibrate``/``get_calibration`` added by ticket 022-003): a typed
+wrapper over the generated gRPC stub for
 ``list_cameras``, ``probe_cameras``, ``get_frame``, ``status``,
 ``get_tags``, ``get_tag``, ``get_tag_history``, ``set_playfield``,
 ``get_playfield``, ``list_playfields``, ``set_camera_config``,
-``get_camera_config``.
+``get_camera_config``, ``calibrate``, ``get_calibration``.
 
-**Only these twelve methods are implemented**, mirroring
+**Only these fourteen methods are implemented**, mirroring
 ``daemon.service.DaemonService``'s own stance: ``daemon.interfaces.
-Daemon`` is a much larger base class (calibration, streams,
-annotations, tag parameters, guides, ``reset_camera_config``,
-``find_feature``), and those are inherited as-is here rather than
-overridden -- calling one raises ``NotImplementedError`` naming itself
-instead of failing with a bare ``AttributeError``. ``isinstance(client,
+Daemon`` is a much larger base class (streams, annotations, tag
+parameters, guides, ``reset_camera_config``, ``find_feature``), and
+those are inherited as-is here rather than overridden -- calling one
+raises ``NotImplementedError`` naming itself instead of failing with a
+bare ``AttributeError``. ``isinstance(client,
 Daemon)`` is ``True``: this really is a ``Daemon``, an incomplete one
 this sprint, honestly so via the inherited stubs rather than by a
 Protocol's structural guess.
@@ -47,7 +48,11 @@ from typing import Optional, Tuple
 
 import grpc
 
+from aprilcam.calibration.calibration import Calibration
+from aprilcam.calibration.interfaces import CalibrationResult
 from aprilcam.client.models import (
+    calibration_from_proto,
+    calibration_result_from_proto,
     camera_config_from_proto,
     camera_states_from_proto,
     daemon_status_from_proto,
@@ -66,6 +71,7 @@ from aprilcam.errors import (
     AlreadyRunning,
     CameraNotPresent,
     ConnectionFailed,
+    NoPlayfieldLinked,
     NotCalibrated,
     UnknownCamera,
     UnknownPlayfield,
@@ -160,6 +166,8 @@ def _reconstruct_error(exc: grpc.RpcError, target: str) -> Exception:
             metadata.get("aprilcam-requested", ""),
             _split_available(metadata.get("aprilcam-available", "")),
         )
+    if error_type == "NoPlayfieldLinked":
+        return NoPlayfieldLinked(metadata.get("aprilcam-camera", "unknown"))
     return ConnectionFailed(target, reason=exc.details() or str(exc.code()))
 
 
@@ -271,6 +279,21 @@ class GrpcDaemon(Daemon):
         request = aprilcam_v2_pb2.GetCameraConfigRequest(camera=camera)
         response = self._call(self._stub.GetCameraConfig, request)
         return camera_config_from_proto(response.config)
+
+    def calibrate(self, camera: str) -> CalibrationResult:
+        request = aprilcam_v2_pb2.CalibrateRequest(camera=camera)
+        response = self._call(self._stub.Calibrate, request)
+        return calibration_result_from_proto(response.result)
+
+    def get_calibration(self, camera: str) -> Optional[Calibration]:
+        request = aprilcam_v2_pb2.GetCalibrationRequest(camera=camera)
+        response = self._call(self._stub.GetCalibration, request)
+        # Absent (never a fabricated/default Calibration) means never
+        # successfully calibrated -- same presence discipline as
+        # get_tag's Optional[TagRecord].
+        if not response.HasField("calibration"):
+            return None
+        return calibration_from_proto(response.calibration)
 
     # -- internals -----------------------------------------------------
 

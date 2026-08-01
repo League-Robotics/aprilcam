@@ -154,3 +154,26 @@ class AlreadyRunning(AprilCamError):
     def __init__(self, holder: str) -> None:
         self.holder = holder
         super().__init__(f"a daemon is already running: {holder}")
+
+
+class NoPlayfieldLinked(AprilCamError):
+    """A calibration was requested for a camera with no playfield link
+    (UC-15.S-2).
+
+    A **precondition failure**, distinct from a failed
+    ``calibration.interfaces.CalibrationResult`` -- raised before any
+    frame is captured or camera backend touched at all.
+    ``calibration.calibration.Calibrator.calibrate`` checks the camera's
+    playfield link *before* ever calling its injected frame source, so a
+    camera with no link never causes a single call into the camera
+    backend (the acceptance criterion this type exists to make provable,
+    not just documented).
+    """
+
+    def __init__(self, camera: str) -> None:
+        self.camera = camera
+        super().__init__(
+            f"camera {camera!r} has no playfield link; nothing to calibrate "
+            "-- push a camera config naming a playfield first "
+            "(aprilcam camera config <file>)"
+        )

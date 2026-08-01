@@ -33,6 +33,17 @@
 // import for a value this sprint only ever stores and echoes back,
 // never applies (Decision 1).
 //
+// Ticket 003 is the third: `Calibrate` / `GetCalibration`. Every vision
+// call happens inside the daemon (UC-04 main flow step 1: "the client
+// sends a command, not pixels") -- `CalibrateRequest` carries only a
+// camera name, never a frame. `CalibrationResult` mirrors
+// `aprilcam.calibration.interfaces.CalibrationResult` field for field
+// -- `missing_ids` is always the exact ids, never a count (UC-04.S-2).
+// `Calibration` mirrors `aprilcam.calibration.calibration.Calibration`:
+// the homography crosses as 9 `double`s (row-major) rather than a
+// nested-message matrix type, since nothing else in this file needs a
+// generic NxM matrix shape.
+//
 // Wire conventions this file follows (docs/design/design.md §6):
 //   - World-cm coordinates cross this boundary only inside `TagRecord`
 //     (`world`, `world_velocity`, `world_corners`), and every camera
@@ -127,6 +138,24 @@ service AprilCamV2 {
   // configured yet is NOT_FOUND, not a fabricated blank document (the
   // introspected-plus-blank template is out of scope this sprint).
   rpc GetCameraConfig (GetCameraConfigRequest) returns (GetCameraConfigResponse);
+
+  // Establish a camera's pixel<->world mapping against its linked
+  // playfield (UC-04, UC-15). All vision happens in the daemon; the
+  // client sends a camera name, not pixels. All-or-nothing against the
+  // playfield definition's required ArUco set -- `CalibrationResult.
+  // missing_ids` names exactly which ids were absent, never a count.
+  // `NoPlayfieldLinked` (a camera with no playfield link) maps to
+  // FAILED_PRECONDITION, distinct from an explicit-but-failed
+  // `CalibrationResult` (UC-15.S-2).
+  rpc Calibrate (CalibrateRequest) returns (CalibrateResponse);
+
+  // Fetch a camera's currently-held calibration, if any (UC-01, UC-05).
+  // Absent `GetCalibrationResponse.calibration`
+  // (`HasField("calibration") == false`) means the camera has never
+  // been successfully calibrated -- never a fabricated/default
+  // `Calibration`, mirroring `GetTagResponse.record`'s presence
+  // discipline.
+  rpc GetCalibration (GetCalibrationRequest) returns (GetCalibrationResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -440,4 +469,58 @@ message GetCameraConfigRequest {
 
 message GetCameraConfigResponse {
   CameraConfig config = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Calibration (ticket 022-003). Mirrors aprilcam.calibration.interfaces.
+// CalibrationResult / aprilcam.calibration.calibration.Calibration
+// field for field -- see this file's header comment.
+// ---------------------------------------------------------------------------
+
+message CalibrationResult {
+  bool succeeded = 1;
+  // ArUco ids matched to surveyed positions. Sorted ascending.
+  repeated int32 matched_ids = 2;
+  // Ids the playfield definition requires that were not detected --
+  // the exact ids, never a count (UC-04.S-2). Non-empty means failure.
+  repeated int32 missing_ids = 3;
+  optional double reprojection_error_cm = 4;
+  // Why a *complete-but-degenerate* solve failed (collinear markers,
+  // singular homography) -- absent when `missing_ids` alone explains
+  // the failure, or on success.
+  optional string reason = 5;
+}
+
+// A camera's established pixel<->world mapping. Mirrors
+// aprilcam.calibration.calibration.Calibration field for field.
+// `homography` is the solved pixel->world 3x3 matrix, row-major
+// (h[0..2] = row 0, h[3..5] = row 1, h[6..8] = row 2) -- exactly 9
+// values, always, since a 2D homography is fixed-shape and a nested
+// matrix message type would be unused generality.
+message Calibration {
+  bool stale = 1;
+  double calibrated_at = 2;
+  string playfield = 3;
+  repeated double homography = 4;
+  repeated int32 matched_ids = 5;
+  optional double reprojection_error_cm = 6;
+}
+
+message CalibrateRequest {
+  string camera = 1;
+}
+
+message CalibrateResponse {
+  CalibrationResult result = 1;
+}
+
+message GetCalibrationRequest {
+  string camera = 1;
+}
+
+message GetCalibrationResponse {
+  // Absent (`HasField("calibration") == false`) means this camera has
+  // never been successfully calibrated -- never a fabricated/default
+  // Calibration (see the RPC's own comment above).
+  Calibration calibration = 1;
 }

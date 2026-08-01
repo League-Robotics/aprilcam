@@ -35,6 +35,8 @@ from __future__ import annotations
 import json
 from typing import Optional, Tuple
 
+from aprilcam.calibration.calibration import Calibration
+from aprilcam.calibration.interfaces import CalibrationResult
 from aprilcam.config.interfaces import CameraConfig
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import DaemonStatus
@@ -54,6 +56,8 @@ from aprilcam.types import (
 )
 
 __all__ = [
+    "calibration_from_proto",
+    "calibration_result_from_proto",
     "camera_config_from_proto",
     "camera_state_from_proto",
     "camera_states_from_proto",
@@ -308,4 +312,44 @@ def camera_config_from_proto(msg: aprilcam_v2_pb2.CameraConfig) -> CameraConfig:
         name=msg.name,
         playfield=msg.playfield if msg.HasField("playfield") else None,
         settings=settings,
+    )
+
+
+def calibration_result_from_proto(msg: aprilcam_v2_pb2.CalibrationResult) -> CalibrationResult:
+    """The client-side mirror of ``daemon/rpc.py``'s
+    ``_calibration_result_to_proto`` -- field for field, in reverse.
+    ``missing_ids`` round-trips as the exact ids, never a count
+    (UC-04.S-2)."""
+    return CalibrationResult(
+        succeeded=msg.succeeded,
+        matched_ids=tuple(msg.matched_ids),
+        missing_ids=tuple(msg.missing_ids),
+        reprojection_error_cm=(
+            msg.reprojection_error_cm if msg.HasField("reprojection_error_cm") else None
+        ),
+        reason=msg.reason if msg.HasField("reason") else None,
+    )
+
+
+def calibration_from_proto(msg: aprilcam_v2_pb2.Calibration) -> Calibration:
+    """The client-side mirror of ``daemon/rpc.py``'s
+    ``_calibration_to_proto`` -- field for field, in reverse.
+    ``homography`` un-flattens the wire's 9 row-major doubles back into
+    :class:`~aprilcam.calibration.calibration.Calibration`'s
+    ``Tuple[Tuple[float, float, float], ...]`` shape."""
+    h = list(msg.homography)
+    homography = (
+        (h[0], h[1], h[2]),
+        (h[3], h[4], h[5]),
+        (h[6], h[7], h[8]),
+    )
+    return Calibration(
+        stale=msg.stale,
+        calibrated_at=msg.calibrated_at,
+        playfield=msg.playfield,
+        homography=homography,
+        matched_ids=tuple(msg.matched_ids),
+        reprojection_error_cm=(
+            msg.reprojection_error_cm if msg.HasField("reprojection_error_cm") else None
+        ),
     )

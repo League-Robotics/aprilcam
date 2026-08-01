@@ -98,6 +98,16 @@ class AprilCamV2Stub(object):
                 request_serializer=aprilcam__v2__pb2.GetCameraConfigRequest.SerializeToString,
                 response_deserializer=aprilcam__v2__pb2.GetCameraConfigResponse.FromString,
                 _registered_method=True)
+        self.Calibrate = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/Calibrate',
+                request_serializer=aprilcam__v2__pb2.CalibrateRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.CalibrateResponse.FromString,
+                _registered_method=True)
+        self.GetCalibration = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/GetCalibration',
+                request_serializer=aprilcam__v2__pb2.GetCalibrationRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.GetCalibrationResponse.FromString,
+                _registered_method=True)
 
 
 class AprilCamV2Servicer(object):
@@ -222,6 +232,32 @@ class AprilCamV2Servicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def Calibrate(self, request, context):
+        """Establish a camera's pixel<->world mapping against its linked
+        playfield (UC-04, UC-15). All vision happens in the daemon; the
+        client sends a camera name, not pixels. All-or-nothing against the
+        playfield definition's required ArUco set -- `CalibrationResult.
+        missing_ids` names exactly which ids were absent, never a count.
+        `NoPlayfieldLinked` (a camera with no playfield link) maps to
+        FAILED_PRECONDITION, distinct from an explicit-but-failed
+        `CalibrationResult` (UC-15.S-2).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetCalibration(self, request, context):
+        """Fetch a camera's currently-held calibration, if any (UC-01, UC-05).
+        Absent `GetCalibrationResponse.calibration`
+        (`HasField("calibration") == false`) means the camera has never
+        been successfully calibrated -- never a fabricated/default
+        `Calibration`, mirroring `GetTagResponse.record`'s presence
+        discipline.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_AprilCamV2Servicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -284,6 +320,16 @@ def add_AprilCamV2Servicer_to_server(servicer, server):
                     servicer.GetCameraConfig,
                     request_deserializer=aprilcam__v2__pb2.GetCameraConfigRequest.FromString,
                     response_serializer=aprilcam__v2__pb2.GetCameraConfigResponse.SerializeToString,
+            ),
+            'Calibrate': grpc.unary_unary_rpc_method_handler(
+                    servicer.Calibrate,
+                    request_deserializer=aprilcam__v2__pb2.CalibrateRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.CalibrateResponse.SerializeToString,
+            ),
+            'GetCalibration': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetCalibration,
+                    request_deserializer=aprilcam__v2__pb2.GetCalibrationRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.GetCalibrationResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -614,6 +660,60 @@ class AprilCamV2(object):
             '/aprilcam.v2.AprilCamV2/GetCameraConfig',
             aprilcam__v2__pb2.GetCameraConfigRequest.SerializeToString,
             aprilcam__v2__pb2.GetCameraConfigResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Calibrate(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/Calibrate',
+            aprilcam__v2__pb2.CalibrateRequest.SerializeToString,
+            aprilcam__v2__pb2.CalibrateResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetCalibration(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/GetCalibration',
+            aprilcam__v2__pb2.GetCalibrationRequest.SerializeToString,
+            aprilcam__v2__pb2.GetCalibrationResponse.FromString,
             options,
             channel_credentials,
             insecure,

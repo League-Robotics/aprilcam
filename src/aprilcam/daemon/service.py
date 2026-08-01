@@ -3,7 +3,20 @@ implementation for ``list_cameras``, ``probe_cameras``, ``get_frame``,
 ``status`` (ticket 020-004), plus ``get_tags``/``get_tag``/
 ``get_tag_history`` (ticket 021-004), plus ``set_playfield``/
 ``get_playfield``/``list_playfields``/``set_camera_config``/
-``get_camera_config`` (ticket 022-001).
+``get_camera_config`` (ticket 022-001), plus ``calibrate``/
+``get_calibration`` (ticket 022-003).
+
+**Calibration persistence** (ticket 022-003, UC-01's "calibration is
+file-backed, unlike pushed config"). All vision/homography work is
+delegated to ``calibration.calibration.Calibrator`` -- this class's job
+is exactly the three things that module boundary reserves for the
+daemon: resolving the camera and handing it frames (the ``capture_frames``
+callable ``Calibrator`` is constructed with), writing a successful
+result to ``<state_dir>/cameras/<camera>/calibration.json`` (atomic
+tmp+fsync+rename, mirroring ``camera/registry.py``'s ``_save``), and
+reloading every camera's ``calibration.json`` at construction time --
+"loaded at daemon startup", the same file-backed rule the module
+docstring above already describes for ``config.json``/registry.json.
 
 Delegates everything camera-shaped to ``camera/registry.py`` (ticket
 002) and ``Camera``/``CameraDiscovery`` (ticket 003) -- no identity
@@ -47,14 +60,20 @@ wire into.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
 import time
 from dataclasses import replace
-from typing import Callable, Dict, Optional, Tuple
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2 as cv
+import numpy as np
 
+from aprilcam.calibration.calibration import Calibration, Calibrator
+from aprilcam.calibration.interfaces import CalibrationResult
 from aprilcam.camera.backends import CaptureBackend
 from aprilcam.camera.backends.opencv_backend import OpenCVBackend
 from aprilcam.camera.camera import Camera
@@ -70,6 +89,18 @@ from aprilcam.playfield.playfield import Playfield
 from aprilcam.types import CameraState, ImageFrame, ProbeReport, TagFrame, TagId, TagRecord
 
 __all__ = ["DaemonService"]
+
+#: Name every camera's calibration file gets under
+#: ``<state_dir>/cameras/<camera>/`` -- design.md §7's storage layout.
+CALIBRATION_FILENAME = "calibration.json"
+
+#: How many frames :meth:`DaemonService._capture_calibration_frames`
+#: reads for one :meth:`DaemonService.calibrate` call -- see
+#: ``calibration.calibration.DEFAULT_CALIBRATION_FRAMES``'s docstring
+#: for provenance (mined from v1's real-camera-tuned default). Frames
+#: the camera fails to deliver (``Camera.read()`` returning ``None``)
+#: are simply not counted towards this budget's worth of usable frames.
+CALIBRATION_FRAME_COUNT = 30
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +164,15 @@ class DaemonService(Daemon):
         supplied -- tests that need to pin exactly how many detection
         bursts ran construct their own ``DetectionEngine`` with a
         substitutable ``detector_factory`` and pass it here.
+    calibrator:
+        The homography-solving engine (``calibration.calibration.
+        Calibrator``, ticket 022-003) that :meth:`calibrate` delegates
+        all vision/geometry work to. Defaults to a real ``Calibrator``
+        wired against this service's own ``_camera_configs``/
+        ``_playfields`` stores and :meth:`_capture_calibration_frames`
+        -- tests that want a substitutable frame source or camera-config
+        lookup construct their own ``Calibrator`` and pass it here
+        instead, the same override pattern ``detection`` above uses.
     """
 
     def __init__(
@@ -145,6 +185,7 @@ class DaemonService(Daemon):
         identity_source: Callable[[], Dict[int, CameraIdentity]] = resolve_all,
         backend_factory: Callable[[int], CaptureBackend] = _default_backend_factory,
         detection: Optional[DetectionEngine] = None,
+        calibrator: Optional[Calibrator] = None,
     ) -> None:
         self._registry = registry
         self._discovery = discovery
@@ -156,6 +197,13 @@ class DaemonService(Daemon):
         self._playfields: Dict[str, PlayfieldDefinitionIface] = {}
         self._camera_configs: Dict[str, CameraConfig] = {}
         self._lock = threading.Lock()
+        self._calibrator = calibrator if calibrator is not None else Calibrator(
+            get_camera_config=self._camera_config_for_calibration,
+            get_playfield=self._playfield_for_calibration,
+            capture_frames=self._capture_calibration_frames,
+        )
+        self._calibrations: Dict[str, Calibration] = {}
+        self._load_calibrations()
 
     # -- beyond the interface: CameraDiscovery's active_slugs wiring -----
 
@@ -442,6 +490,171 @@ class DaemonService(Daemon):
         with self._lock:
             config = self._camera_configs.get(slug)
         return config.playfield if config is not None else None
+
+    # -- calibration (ticket 022-003) --------------------------------------
+
+    def calibrate(self, camera: str) -> CalibrationResult:
+        """See ``daemon.interfaces.Daemon.calibrate``.
+
+        A thin wrapper: every vision/geometry decision (multi-frame
+        averaging, id matching, all-or-nothing acceptance, homography
+        solve, degenerate-geometry rejection) lives in
+        ``calibration.calibration.Calibrator``, injected as
+        ``self._calibrator`` -- this method's only job is to run it and,
+        on success, persist the result. ``NoPlayfieldLinked`` propagates
+        straight through from the calibrator (raised there before it
+        ever calls :meth:`_capture_calibration_frames`, so an unlinked
+        camera never reaches the camera backend at all -- UC-15.S-2).
+
+        A failed attempt (``result.succeeded is False``) leaves
+        ``calibration.json`` and this service's in-memory
+        ``self._calibrations`` entry for *camera* completely untouched
+        -- there is simply no write path taken on that branch, so "a
+        prior-good calibration survives a failed retry" (UC-04.S-2,
+        UC-15.S-3) holds by construction rather than by an explicit
+        guard.
+        """
+        result = self._calibrator.calibrate(camera)
+        if result.succeeded:
+            calibration = self._calibrator.get_calibration(camera)
+            assert calibration is not None, (
+                "Calibrator.calibrate() reported succeeded=True but "
+                "get_calibration() has nothing stored -- a Calibrator bug"
+            )
+            with self._lock:
+                self._calibrations[camera] = calibration
+            self._persist_calibration(camera, calibration)
+        return result
+
+    def get_calibration(self, camera: str) -> Optional[Calibration]:
+        """See ``daemon.interfaces.Daemon.get_calibration``.
+
+        Answers from this service's in-memory cache -- populated by a
+        successful :meth:`calibrate` call in this process, or by
+        :meth:`_load_calibrations` at construction time from whatever
+        ``calibration.json`` files already existed on disk (UC-01: a
+        calibrated camera stays calibrated across a daemon restart).
+        ``None`` for a camera that has never been calibrated -- never a
+        fabricated/default ``Calibration``, mirroring
+        :meth:`get_tag`'s "``None`` means not detected, never a
+        zero-valued record" discipline.
+        """
+        with self._lock:
+            return self._calibrations.get(camera)
+
+    def _camera_config_for_calibration(self, camera: str) -> Optional[CameraConfig]:
+        """``Calibrator``'s ``get_camera_config`` callable -- a locked
+        read of :attr:`_camera_configs`, the same store
+        :meth:`get_camera_config`/:meth:`_playfield_link` already read
+        under :attr:`_lock`."""
+        with self._lock:
+            return self._camera_configs.get(camera)
+
+    def _playfield_for_calibration(self, name: str) -> Optional[PlayfieldDefinitionIface]:
+        """``Calibrator``'s ``get_playfield`` callable -- a locked read
+        of :attr:`_playfields`."""
+        with self._lock:
+            return self._playfields.get(name)
+
+    def _capture_calibration_frames(self, camera: str) -> Tuple[np.ndarray, ...]:
+        """``Calibrator``'s ``capture_frames`` callable -- the one place
+        calibration touches a camera backend (the module boundary's
+        "camera frame access, handed in" rule). Resolves *camera* via
+        :meth:`_camera_for` (opening it on first use, exactly like
+        :meth:`get_frame`/:meth:`get_tags`) and reads up to
+        :data:`CALIBRATION_FRAME_COUNT` frames, skipping any individual
+        read that returns ``None`` (a transient capture miss) rather
+        than failing the whole capture -- ``Calibrator.calibrate`` is
+        the one that decides whether the frames actually collected are
+        enough (it raises if this returns nothing at all).
+
+        Never called for a camera with no playfield link: ``Calibrator.
+        calibrate`` raises ``NoPlayfieldLinked`` before this callable is
+        invoked, so :meth:`_camera_for` -- which can open a backend --
+        is never reached on that path (UC-15.S-2's "zero calls to the
+        camera backend").
+        """
+        cam = self._camera_for(camera)
+        frames: List[np.ndarray] = []
+        for _ in range(CALIBRATION_FRAME_COUNT):
+            frame = cam.read()
+            if frame is not None:
+                frames.append(frame)
+        return tuple(frames)
+
+    def _calibration_path(self, camera: str) -> Path:
+        """``<state_dir>/cameras/<camera>/calibration.json`` -- design.md
+        §7's storage layout, matching ``camera/registry.py``'s
+        ``<state_dir>/cameras/registry.json`` sibling layout (a
+        per-camera subdirectory, not a shared file, so one camera's
+        calibration can never collide with another's)."""
+        return self._directories.state_dir / "cameras" / camera / CALIBRATION_FILENAME
+
+    def _persist_calibration(self, camera: str, calibration: Calibration) -> None:
+        """Atomically write *calibration* to *camera*'s
+        ``calibration.json``: tmp file, ``fsync``, ``os.replace`` --
+        the same tmp+fsync+rename pattern ``camera/registry.py``'s
+        ``_save`` uses, so a crash between those steps leaves the prior
+        file (if any) exactly as it was, never half-written."""
+        path = self._calibration_path(camera)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise OSError(
+                f"cannot create calibration directory {path.parent}: {exc}"
+            ) from exc
+
+        text = json.dumps(calibration.to_dict(), indent=2, sort_keys=True) + "\n"
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except OSError as exc:
+            raise OSError(f"cannot write calibration file {path}: {exc}") from exc
+        finally:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:  # pragma: no cover - best-effort cleanup
+                pass
+
+    def _load_calibrations(self) -> None:
+        """Reload every camera's ``calibration.json`` at construction
+        time (UC-01: "reloads it at startup like any other file").
+        Scans ``<state_dir>/cameras/*/calibration.json`` directly rather
+        than going through the camera registry, so a calibration is
+        found regardless of whether this particular ``DaemonService``
+        instance has re-enumerated that camera yet -- the file, not the
+        registry, is the source of truth here. A missing ``state_dir``
+        (first run) or a corrupt/malformed calibration file is tolerated
+        by skipping it (logged as a warning), never by failing daemon
+        construction -- mirrors ``camera.registry.CameraRegistry``'s
+        "a corrupt file must never crash the daemon" stance.
+        """
+        cameras_dir = self._directories.state_dir / "cameras"
+        if not cameras_dir.is_dir():
+            return
+        for entry in sorted(cameras_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            path = entry / CALIBRATION_FILENAME
+            if not path.exists():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                calibration = Calibration.from_dict(data)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                logger.warning(
+                    "corrupt calibration file for %s at %s: %s -- ignoring",
+                    entry.name,
+                    path,
+                    exc,
+                )
+                continue
+            self._calibrations[entry.name] = calibration
 
     # -- beyond the interface: shutdown cleanup ----------------------------
 
