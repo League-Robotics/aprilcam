@@ -114,6 +114,8 @@ class _FakeDaemon:
     tag_frame: Optional[TagFrame] = None
     get_tags_raises: Optional[Exception] = None
     requested_tags_camera: Optional[str] = None
+    set_camera_config_raises: Optional[Exception] = None
+    pushed_camera_config: Optional[object] = None
 
     def list_cameras(self) -> Tuple[CameraState, ...]:
         return self.cameras
@@ -133,6 +135,11 @@ class _FakeDaemon:
         if self.get_tags_raises is not None:
             raise self.get_tags_raises
         return self.tag_frame if self.tag_frame is not None else _tag_frame()
+
+    def set_camera_config(self, config) -> None:
+        if self.set_camera_config_raises is not None:
+            raise self.set_camera_config_raises
+        self.pushed_camera_config = config
 
 
 @dataclass
@@ -675,4 +682,118 @@ def test_tags_h_prints_help_not_a_missing_hostname_error():
     parser = _build_parser()
     with pytest.raises(SystemExit) as excinfo:
         parser.parse_args(["camera", "tags", "some-camera", "-h"])
+    assert excinfo.value.code == 0
+
+
+# ---------------------------------------------------------------------------
+# camera config -- AC: ticket 022-001, push-only, playfield-link slice
+# ---------------------------------------------------------------------------
+
+
+class _FakeCameraConfigLoader:
+    """A ``ConfigLoader``-shaped double: returns a pre-built
+    ``CameraConfig`` (or raises) instead of touching a real file --
+    ``cmd_config`` is tested against this seam the same way every other
+    command here is tested against a fake ``Discovery``."""
+
+    def __init__(self, config=None, raises: Optional[Exception] = None):
+        self._config = config
+        self._raises = raises
+        self.requested_path = None
+
+    def load_camera_config(self, path):
+        self.requested_path = path
+        if self._raises is not None:
+            raise self._raises
+        return self._config
+
+    def load_playfield(self, path):  # pragma: no cover - not exercised here
+        raise NotImplementedError
+
+
+def test_config_pushes_the_loaded_document_and_reports_the_playfield(capsys, tmp_path):
+    from aprilcam.config.interfaces import CameraConfig
+
+    config = CameraConfig(
+        name="arducam-ov9782-usb-camera", playfield="main-playfield", settings={}
+    )
+    loader = _FakeCameraConfigLoader(config=config)
+    daemon = _FakeDaemon()
+    discovery = _FakeDiscovery(daemon=daemon)
+    file_path = tmp_path / "camera.json"
+
+    code = camera_cli.cmd_config(
+        _args(file=str(file_path)),
+        discovery_factory=lambda: discovery,
+        loader_factory=lambda: loader,
+    )
+
+    assert code == 0
+    assert loader.requested_path == Path(file_path)
+    assert daemon.pushed_camera_config == config
+    out = capsys.readouterr().out
+    assert "arducam-ov9782-usb-camera" in out
+    assert "main-playfield" in out
+
+
+def test_config_reports_no_playfield_when_the_document_carries_none(capsys, tmp_path):
+    from aprilcam.config.interfaces import CameraConfig
+
+    config = CameraConfig(name="hd-usb-camera", playfield=None, settings={})
+    loader = _FakeCameraConfigLoader(config=config)
+    discovery = _FakeDiscovery(daemon=_FakeDaemon())
+
+    code = camera_cli.cmd_config(
+        _args(file="camera.json"), discovery_factory=lambda: discovery, loader_factory=lambda: loader
+    )
+
+    assert code == 0
+    assert "(none)" in capsys.readouterr().out
+
+
+def test_config_malformed_document_is_rejected_before_any_rpc(capsys, tmp_path):
+    from aprilcam.errors import MalformedDocument
+
+    loader = _FakeCameraConfigLoader(raises=MalformedDocument("no 'name' field"))
+    daemon = _FakeDaemon()
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = camera_cli.cmd_config(
+        _args(file="bad.json"), discovery_factory=lambda: discovery, loader_factory=lambda: loader
+    )
+
+    assert code == 1
+    assert "no 'name' field" in capsys.readouterr().err
+    assert daemon.pushed_camera_config is None  # never reached the daemon
+
+
+def test_config_reports_a_daemon_side_rejection(capsys, tmp_path):
+    from aprilcam.config.interfaces import CameraConfig
+    from aprilcam.errors import UnknownCamera
+
+    config = CameraConfig(name="unknown-cam", playfield=None, settings={})
+    loader = _FakeCameraConfigLoader(config=config)
+    daemon = _FakeDaemon(set_camera_config_raises=UnknownCamera("unknown-cam", ("hd-usb-camera",)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = camera_cli.cmd_config(
+        _args(file="camera.json"), discovery_factory=lambda: discovery, loader_factory=lambda: loader
+    )
+
+    assert code == 1
+    assert "unknown-cam" in capsys.readouterr().err
+
+
+def test_config_is_wired_to_cmd_config():
+    parser = _build_parser()
+    args = parser.parse_args(["camera", "config", "camera.json"])
+    assert args.func is camera_cli.cmd_config
+    assert args.file == "camera.json"
+    assert args.daemon is None
+
+
+def test_config_h_prints_help_not_a_missing_hostname_error():
+    parser = _build_parser()
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["camera", "config", "camera.json", "-h"])
     assert excinfo.value.code == 0

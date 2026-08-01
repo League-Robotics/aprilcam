@@ -1,10 +1,13 @@
 """Thin gRPC wrapper over ``daemon/service.py`` (ticket 020-004; the
-tag-detection RPCs below are ticket 021-005).
+tag-detection RPCs below are ticket 021-005; ``SetPlayfield``/
+``GetPlayfield``/``ListPlayfields``/``SetCameraConfig``/
+``GetCameraConfig`` are ticket 022-001).
 
 Translates between ``proto/aprilcam_v2.proto``'s service (sprint 020's
 four RPCs -- ``ListCameras``, ``ProbeCameras``, ``GetFrame``,
 ``GetStatus`` -- plus sprint 021's ``GetTags``/``GetTag``/
-``GetTagHistory`` and the ``GetFrame`` tag embed) and
+``GetTagHistory`` and the ``GetFrame`` tag embed, plus sprint 022's
+playfield/camera-config RPCs above) and
 ``daemon.service.DaemonService`` method calls. Everything here is
 (de)serialization and error-code mapping; no business logic, no camera
 access, no registry/discovery/vision calls -- see the sprint
@@ -45,6 +48,7 @@ same ``_camera_for`` path ``GetFrame`` already uses.
 
 from __future__ import annotations
 
+import json
 import logging
 from concurrent import futures
 from pathlib import Path
@@ -52,6 +56,8 @@ from typing import Iterable
 
 import grpc
 
+from aprilcam.config.interfaces import CameraConfig
+from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
 from aprilcam.daemon.lifecycle import ControlPlaneListener
 from aprilcam.errors import (
@@ -60,7 +66,9 @@ from aprilcam.errors import (
     CameraNotPresent,
     NotCalibrated,
     UnknownCamera,
+    UnknownPlayfield,
 )
+from aprilcam.playfield.interfaces import Playfield
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
 from aprilcam.types import (
     CameraState,
@@ -86,6 +94,7 @@ logger = logging.getLogger(__name__)
 _STATUS_CODES = {
     AlreadyRunning: grpc.StatusCode.ALREADY_EXISTS,
     UnknownCamera: grpc.StatusCode.NOT_FOUND,
+    UnknownPlayfield: grpc.StatusCode.NOT_FOUND,
     NotCalibrated: grpc.StatusCode.FAILED_PRECONDITION,
     # Same "the operation cannot succeed given current state" semantics
     # as NotCalibrated -- the camera is known, just not present right
@@ -231,6 +240,102 @@ def _tag_frame_to_proto(frame: TagFrame) -> aprilcam_v2_pb2.TagFrame:
     )
 
 
+def _playfield_feature_entry_to_proto(
+    entry: PlayfieldFeatureEntry,
+) -> aprilcam_v2_pb2.PlayfieldFeatureEntry:
+    msg = aprilcam_v2_pb2.PlayfieldFeatureEntry(slug=entry.slug, x=entry.x, y=entry.y)
+    if entry.tag_id is not None:
+        msg.id = entry.tag_id
+    if entry.colour is not None:
+        msg.colour = entry.colour
+    return msg
+
+
+def _playfield_feature_entry_from_proto(
+    msg: aprilcam_v2_pb2.PlayfieldFeatureEntry,
+) -> PlayfieldFeatureEntry:
+    return PlayfieldFeatureEntry(
+        slug=msg.slug,
+        x=msg.x,
+        y=msg.y,
+        tag_id=msg.id if msg.HasField("id") else None,
+        colour=msg.colour if msg.HasField("colour") else None,
+    )
+
+
+def _playfield_definition_to_proto(definition: PlayfieldDefinition) -> aprilcam_v2_pb2.PlayfieldDefinition:
+    """Python -> proto, for a ``GetPlayfield``/``ListPlayfields``
+    response. Mirrors ``config.loader.PlayfieldDefinition``'s stored
+    per-section entries directly (see this module's proto-boundary
+    docstring and ``aprilcam_v2.proto``'s header comment for why this
+    is not built from the more abstract ``features()``/
+    ``required_aruco_ids()`` view)."""
+    return aprilcam_v2_pb2.PlayfieldDefinition(
+        name=definition.name,
+        width_cm=definition.width_cm,
+        height_cm=definition.height_cm,
+        april_tags=[_playfield_feature_entry_to_proto(e) for e in definition.april_tags],
+        aruco_tags=[_playfield_feature_entry_to_proto(e) for e in definition.aruco_tags],
+        rectangles=[_playfield_feature_entry_to_proto(e) for e in definition.rectangles],
+        dots=[_playfield_feature_entry_to_proto(e) for e in definition.dots],
+    )
+
+
+def _playfield_definition_from_proto(msg: aprilcam_v2_pb2.PlayfieldDefinition) -> PlayfieldDefinition:
+    """Proto -> Python, for an incoming ``SetPlayfieldRequest``. The
+    module docstring's "reading this module's own incoming requests"
+    exception applies here exactly as it already does for
+    :func:`_tag_id_from_proto`."""
+    return PlayfieldDefinition(
+        name=msg.name,
+        width_cm=msg.width_cm,
+        height_cm=msg.height_cm,
+        april_tags=tuple(_playfield_feature_entry_from_proto(e) for e in msg.april_tags),
+        aruco_tags=tuple(_playfield_feature_entry_from_proto(e) for e in msg.aruco_tags),
+        rectangles=tuple(_playfield_feature_entry_from_proto(e) for e in msg.rectangles),
+        dots=tuple(_playfield_feature_entry_from_proto(e) for e in msg.dots),
+    )
+
+
+def _playfield_entry_to_proto(playfield: Playfield) -> aprilcam_v2_pb2.PlayfieldEntry:
+    definition = playfield.definition
+    if not isinstance(definition, PlayfieldDefinition):
+        # Every definition DaemonService ever holds was built either by
+        # ConfigLoader.load_playfield or by _playfield_definition_from_proto
+        # below -- both always produce this concrete type. Not reachable
+        # through normal use; guards against a future Daemon
+        # implementation storing some other PlayfieldDefinition subclass
+        # this module would not know how to serialize.
+        raise TypeError(
+            f"cannot serialize playfield {playfield.name!r}: definition is "
+            f"{type(definition).__name__}, not aprilcam.config.loader.PlayfieldDefinition"
+        )
+    return aprilcam_v2_pb2.PlayfieldEntry(
+        name=playfield.name,
+        definition=_playfield_definition_to_proto(definition),
+        linked_cameras=list(playfield.linked_cameras()),
+    )
+
+
+def _camera_config_to_proto(config: CameraConfig) -> aprilcam_v2_pb2.CameraConfig:
+    """Python -> proto, for a ``GetCameraConfig`` response. ``settings``
+    crosses as JSON text -- see ``aprilcam_v2.proto``'s header comment."""
+    msg = aprilcam_v2_pb2.CameraConfig(name=config.name, settings_json=json.dumps(config.settings))
+    if config.playfield is not None:
+        msg.playfield = config.playfield
+    return msg
+
+
+def _camera_config_from_proto(msg: aprilcam_v2_pb2.CameraConfig) -> CameraConfig:
+    """Proto -> Python, for an incoming ``SetCameraConfigRequest``."""
+    settings = json.loads(msg.settings_json) if msg.settings_json else {}
+    return CameraConfig(
+        name=msg.name,
+        playfield=msg.playfield if msg.HasField("playfield") else None,
+        settings=settings,
+    )
+
+
 def _abort(context: grpc.ServicerContext, exc: Exception) -> None:
     """Map *exc* to a gRPC status and end the RPC. Never returns --
     ``context.abort`` raises internally; the ``except`` blocks in
@@ -246,6 +351,9 @@ def _abort(context: grpc.ServicerContext, exc: Exception) -> None:
     * :class:`AlreadyRunning`: + ``aprilcam-holder``.
     * :class:`UnknownCamera`: + ``aprilcam-requested``,
       ``aprilcam-available`` (comma-joined).
+    * :class:`~aprilcam.errors.UnknownPlayfield`: same two keys as
+      :class:`UnknownCamera` -- both derive from ``UnknownTarget`` and
+      share its ``requested``/``available`` shape.
     * :class:`CameraNotPresent`: + ``aprilcam-slug``.
     """
     if isinstance(exc, AprilCamError):
@@ -257,7 +365,7 @@ def _abort(context: grpc.ServicerContext, exc: Exception) -> None:
         metadata = [("aprilcam-error-type", type(exc).__name__)]
         if isinstance(exc, AlreadyRunning):
             metadata.append(("aprilcam-holder", exc.holder))
-        elif isinstance(exc, UnknownCamera):
+        elif isinstance(exc, (UnknownCamera, UnknownPlayfield)):
             metadata.append(("aprilcam-requested", exc.requested))
             metadata.append(("aprilcam-available", ",".join(exc.available)))
         elif isinstance(exc, CameraNotPresent):
@@ -347,6 +455,50 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
         return aprilcam_v2_pb2.GetTagHistoryResponse(
             history=[_tag_frame_to_proto(f) for f in history]
         )
+
+    def SetPlayfield(self, request, context):  # noqa: N802
+        definition = _playfield_definition_from_proto(request.definition)
+        try:
+            self._service.set_playfield(definition)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.SetPlayfieldResponse()
+        return aprilcam_v2_pb2.SetPlayfieldResponse()
+
+    def GetPlayfield(self, request, context):  # noqa: N802
+        try:
+            playfield = self._service.get_playfield(request.name)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.GetPlayfieldResponse()
+        return aprilcam_v2_pb2.GetPlayfieldResponse(playfield=_playfield_entry_to_proto(playfield))
+
+    def ListPlayfields(self, request, context):  # noqa: N802
+        try:
+            playfields = self._service.list_playfields()
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.ListPlayfieldsResponse()
+        return aprilcam_v2_pb2.ListPlayfieldsResponse(
+            playfields=[_playfield_entry_to_proto(p) for p in playfields]
+        )
+
+    def SetCameraConfig(self, request, context):  # noqa: N802
+        config = _camera_config_from_proto(request.config)
+        try:
+            self._service.set_camera_config(config)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.SetCameraConfigResponse()
+        return aprilcam_v2_pb2.SetCameraConfigResponse()
+
+    def GetCameraConfig(self, request, context):  # noqa: N802
+        try:
+            config = self._service.get_camera_config(request.camera)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.GetCameraConfigResponse()
+        return aprilcam_v2_pb2.GetCameraConfigResponse(config=_camera_config_to_proto(config))
 
 
 class _GrpcListener(ControlPlaneListener):

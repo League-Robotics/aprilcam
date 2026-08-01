@@ -23,6 +23,7 @@ detection instead).
 
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 import time
@@ -40,16 +41,42 @@ from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import CameraIdentity
 from aprilcam.camera.registry import CameraRegistry
 from aprilcam.config.directories import Directories
+from aprilcam.config.interfaces import CameraConfig
+from aprilcam.config.loader import ConfigLoader, PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.detection import DetectionEngine
 from aprilcam.daemon.interfaces import Daemon
 from aprilcam.daemon.lifecycle import DaemonLifecycle
 from aprilcam.daemon.rpc import build_server
 from aprilcam.daemon.service import VALID_ENCODINGS, DaemonService
-from aprilcam.errors import CameraNotPresent, NotCalibrated, UnknownCamera
+from aprilcam.errors import (
+    CameraNotPresent,
+    MalformedDocument,
+    NotCalibrated,
+    UnknownCamera,
+    UnknownPlayfield,
+)
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
 from aprilcam.types import PixelPoint, TagFamily, TagFrame, TagId, TagRecord, WorldPoint
 from aprilcam.vision.detector import Detection
 from tests.aprilcam.camera.test_camera import FakeBackend
+
+
+def _playfield_definition(
+    name: str = "main-playfield", aruco_ids: tuple = (1, 2, 3)
+) -> PlayfieldDefinition:
+    """A minimal but real ``PlayfieldDefinition`` -- enough for the
+    playfield/camera-config service tests below (ticket 022-001), which
+    care about the daemon's storage/dispatch behaviour, not document
+    parsing (``tests/aprilcam/config/test_loader.py`` covers that)."""
+    return PlayfieldDefinition(
+        name=name,
+        width_cm=100.0,
+        height_cm=80.0,
+        aruco_tags=tuple(
+            PlayfieldFeatureEntry(slug=f"u{i}", x=float(i), y=float(-i), tag_id=i)
+            for i in aruco_ids
+        ),
+    )
 
 
 def _frame() -> np.ndarray:
@@ -1079,3 +1106,329 @@ def test_rpc_get_frame_embeds_tags_round_trip(tag_stub_factory):
     assert frame_response.tags.frame_index == tags_response.tags.frame_index
     assert len(frame_response.tags.tags) == 1
     assert frame_response.tags.tags[0].tag.number == 7
+
+
+# ---------------------------------------------------------------------------
+# Playfields / camera config -- the minimal config-service slice
+# (ticket 022-001, sprint.md Architecture Decision 1 & 4)
+# ---------------------------------------------------------------------------
+
+
+def test_set_playfield_and_get_playfield_round_trip_reports_all_features(service):
+    definition = _playfield_definition()
+
+    service.set_playfield(definition)
+    fetched = service.get_playfield("main-playfield")
+
+    assert fetched.name == "main-playfield"
+    assert fetched.definition.features() == definition.features()
+    assert fetched.definition.required_aruco_ids() == (1, 2, 3)
+
+
+def test_set_playfield_with_the_real_main_playfield_document_round_trips_through_the_daemon(
+    service,
+):
+    """AC1 (UC-02.S-1), end to end through ``DaemonService`` -- not just
+    the loader (``tests/aprilcam/config/test_loader.py`` covers the
+    loader in isolation): push the real shipped document, fetch it
+    back, and check the exact acceptance-criteria coordinates."""
+    repo_root = Path(__file__).resolve().parents[3]
+    main_playfield_path = repo_root / "config" / "aprilcam-old" / "playfields" / "main-playfield.json"
+    definition = ConfigLoader().load_playfield(main_playfield_path)
+
+    service.set_playfield(definition)
+    fetched = service.get_playfield("main-playfield")
+
+    features = fetched.definition.features()
+    assert len(features) == 25
+    by_slug = {f.slug: f for f in features}
+    assert by_slug["aruco-northwest-u1"].position == WorldPoint(x=-67, y=44.65)
+    assert by_slug["aruco-southeast-u5"].position == WorldPoint(x=67, y=-44.65)
+    assert fetched.definition.required_aruco_ids() == tuple(range(1, 11))
+    assert fetched.linked_cameras() == ()
+
+
+def test_a_good_playfield_survives_a_later_rejected_push_attempt(service, tmp_path):
+    """AC2's full scenario (UC-02.S-2), end to end: a definition already
+    held is untouched by a later push whose document is malformed --
+    ``ConfigLoader.load_playfield`` raises ``MalformedDocument`` before
+    ``set_playfield`` is ever called, so the daemon's held state simply
+    never had a chance to change."""
+    good = _playfield_definition("main-playfield", aruco_ids=(1, 2, 3))
+    service.set_playfield(good)
+
+    bad_path = tmp_path / "bad-main-playfield.json"
+    bad_path.write_text(
+        json.dumps(
+            {
+                "name": "main-playfield",
+                "playfield": {"width_cm": 100.0, "height_cm": 80.0},
+                "aruco_tags": [
+                    {"slug": "u3", "id": 3, "x": -1, "y": -1},
+                    {"slug": "u3-dup", "id": 3, "x": 1, "y": 1},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(MalformedDocument):
+        definition = ConfigLoader().load_playfield(bad_path)
+        service.set_playfield(definition)  # never reached
+
+    fetched = service.get_playfield("main-playfield")
+    assert fetched.definition.required_aruco_ids() == (1, 2, 3)  # unchanged
+
+
+def test_list_playfields_includes_a_pushed_definition(service):
+    service.set_playfield(_playfield_definition())
+
+    playfields = service.list_playfields()
+
+    assert [p.name for p in playfields] == ["main-playfield"]
+
+
+def test_get_playfield_unknown_name_raises_unknown_playfield_listing_held_playfields(service):
+    service.set_playfield(_playfield_definition("main-playfield"))
+
+    with pytest.raises(UnknownPlayfield) as excinfo:
+        service.get_playfield("no-such-field")
+
+    assert excinfo.value.requested == "no-such-field"
+    assert excinfo.value.available == ("main-playfield",)
+
+
+def test_get_playfield_on_a_service_with_no_playfields_lists_none_available(service):
+    with pytest.raises(UnknownPlayfield) as excinfo:
+        service.get_playfield("main-playfield")
+    assert excinfo.value.available == ()
+
+
+def test_daemon_holds_two_differently_named_playfields_without_interference(service):
+    """Sprint.md Decision 4: no single-slot cardinality limit."""
+    field_a = _playfield_definition("field-a", aruco_ids=(1, 2))
+    field_b = _playfield_definition("field-b", aruco_ids=(5, 6, 7))
+
+    service.set_playfield(field_a)
+    service.set_playfield(field_b)
+
+    assert {p.name for p in service.list_playfields()} == {"field-a", "field-b"}
+    assert service.get_playfield("field-a").definition.required_aruco_ids() == (1, 2)
+    assert service.get_playfield("field-b").definition.required_aruco_ids() == (5, 6, 7)
+
+    # Replacing one by name never disturbs the other.
+    service.set_playfield(_playfield_definition("field-a", aruco_ids=(9,)))
+    assert service.get_playfield("field-a").definition.required_aruco_ids() == (9,)
+    assert service.get_playfield("field-b").definition.required_aruco_ids() == (5, 6, 7)
+
+
+def test_set_camera_config_links_camera_and_get_camera_config_echoes_it_back(service, held_camera):
+    _, slug, _ = held_camera
+    service.set_playfield(_playfield_definition())
+
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    fetched = service.get_camera_config(slug)
+
+    assert fetched.playfield == "main-playfield"
+
+
+def test_linked_playfield_reports_the_configured_camera(service, held_camera):
+    _, slug, _ = held_camera
+    service.set_playfield(_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+
+    assert service.get_playfield("main-playfield").linked_cameras() == (slug,)
+    assert service.list_playfields()[0].linked_cameras() == (slug,)
+
+
+def test_list_cameras_reports_the_playfield_link_after_set_camera_config(service, held_camera):
+    _, slug, _ = held_camera
+    assert service.list_cameras()[0].playfield is None  # not configured yet
+
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+
+    assert service.list_cameras()[0].playfield == "main-playfield"
+
+
+def test_camera_config_settings_round_trip_without_hardware_application(directories, registry):
+    """AC6: a pushed ``settings`` dict survives the round trip through
+    ``get_camera_config`` unchanged, but a spy ``set_property`` proves
+    zero setting-application calls reach the backend -- ``Decision 1``'s
+    "accepted and echoed back but never applied" is asserted here
+    behaviourally, not just by absence of a call in the source."""
+    identity = _identity("hw:spy", "Spy Camera")
+    slug = registry.resolve(identity)
+    number = registry.get(slug).number
+    backend = FakeBackend(read_queue=[_frame()])
+    calls: List[tuple] = []
+    backend.set_property = (  # type: ignore[method-assign]
+        lambda name, value: calls.append((name, value)) or True
+    )
+    cam = Camera(slug, backend, number=number)
+    cam.open()
+    cameras: Dict[str, Camera] = {slug: cam}
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(cameras.keys()),
+        identity_source=lambda: {0: identity},
+        backend_factory=lambda index: FakeBackend(),
+    )
+    service = DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        cameras=cameras,
+        identity_source=lambda: {0: identity},
+    )
+
+    service.set_camera_config(
+        CameraConfig(name=slug, playfield=None, settings={"exposure": 100, "gain": 2.5})
+    )
+    fetched = service.get_camera_config(slug)
+
+    assert fetched.settings == {"exposure": 100, "gain": 2.5}
+    assert calls == []  # zero setting-application calls
+
+
+def test_get_camera_config_unknown_camera_raises_unknown_camera(service):
+    with pytest.raises(UnknownCamera) as excinfo:
+        service.get_camera_config("never-configured")
+    assert excinfo.value.requested == "never-configured"
+    assert excinfo.value.available == ()
+
+
+def test_reset_camera_config_raises_not_implemented_never_a_silent_no_op(service, held_camera):
+    _, slug, _ = held_camera
+    with pytest.raises(NotImplementedError):
+        service.reset_camera_config(slug)
+
+
+def test_fresh_daemon_service_instance_has_no_playfields_or_camera_links(
+    directories, registry, held_camera
+):
+    """UC-02's ephemeral rule: a simulated restart (fresh ``DaemonService``
+    over the same registry/directories) starts with zero pushed
+    playfields and zero camera links -- disk, not RPC, is the source of
+    record, and this ticket writes nothing to disk."""
+    _, slug, cam = held_camera
+    cameras: Dict[str, Camera] = {slug: cam}
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(cameras.keys()),
+        identity_source=lambda: {},
+        backend_factory=lambda index: FakeBackend(),
+    )
+    original = DaemonService(registry=registry, discovery=discovery, directories=directories, cameras=cameras)
+    original.set_playfield(_playfield_definition())
+    original.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert original.list_playfields() != ()
+
+    restarted = DaemonService(
+        registry=registry, discovery=discovery, directories=directories, cameras=cameras
+    )
+
+    assert restarted.list_playfields() == ()
+    assert restarted.list_cameras()[0].playfield is None
+    with pytest.raises(UnknownCamera):
+        restarted.get_camera_config(slug)
+
+
+# ---------------------------------------------------------------------------
+# Playfields / camera config -- RPC round trips (ticket 022-001)
+# ---------------------------------------------------------------------------
+
+
+def _playfield_definition_msg(
+    name: str = "main-playfield", aruco_ids: tuple = (1, 2, 3)
+) -> aprilcam_v2_pb2.PlayfieldDefinition:
+    """A ``PlayfieldDefinition`` proto message, built by hand -- matches
+    this file's existing convention of constructing request messages
+    directly (e.g. ``aprilcam_v2_pb2.TagId(...)`` above) rather than
+    importing ``daemon/rpc.py``'s private converters into a test."""
+    return aprilcam_v2_pb2.PlayfieldDefinition(
+        name=name,
+        width_cm=100.0,
+        height_cm=80.0,
+        aruco_tags=[
+            aprilcam_v2_pb2.PlayfieldFeatureEntry(slug=f"u{i}", x=float(i), y=float(-i), id=i)
+            for i in aruco_ids
+        ],
+    )
+
+
+def _camera_config_msg(
+    name: str, *, playfield: Optional[str] = None, settings: Optional[dict] = None
+) -> aprilcam_v2_pb2.CameraConfig:
+    msg = aprilcam_v2_pb2.CameraConfig(name=name, settings_json=json.dumps(settings or {}))
+    if playfield is not None:
+        msg.playfield = playfield
+    return msg
+
+
+def test_rpc_set_playfield_and_get_playfield_round_trip(stub):
+    stub.SetPlayfield(aprilcam_v2_pb2.SetPlayfieldRequest(definition=_playfield_definition_msg()))
+
+    response = stub.GetPlayfield(aprilcam_v2_pb2.GetPlayfieldRequest(name="main-playfield"))
+
+    assert response.playfield.name == "main-playfield"
+    definition = response.playfield.definition
+    assert definition.width_cm == 100.0 and definition.height_cm == 80.0
+    assert sorted(e.id for e in definition.aruco_tags) == [1, 2, 3]
+    assert list(response.playfield.linked_cameras) == []
+
+
+def test_rpc_list_playfields_round_trip_holds_two(stub):
+    stub.SetPlayfield(
+        aprilcam_v2_pb2.SetPlayfieldRequest(definition=_playfield_definition_msg("field-a", (1,)))
+    )
+    stub.SetPlayfield(
+        aprilcam_v2_pb2.SetPlayfieldRequest(definition=_playfield_definition_msg("field-b", (2, 3)))
+    )
+
+    response = stub.ListPlayfields(aprilcam_v2_pb2.ListPlayfieldsRequest())
+
+    assert {p.name for p in response.playfields} == {"field-a", "field-b"}
+
+
+def test_rpc_get_playfield_unknown_name_maps_to_not_found(stub):
+    with pytest.raises(grpc.RpcError) as excinfo:
+        stub.GetPlayfield(aprilcam_v2_pb2.GetPlayfieldRequest(name="no-such-field"))
+
+    assert excinfo.value.code() == grpc.StatusCode.NOT_FOUND
+    metadata = dict(excinfo.value.trailing_metadata())
+    assert metadata["aprilcam-error-type"] == "UnknownPlayfield"
+    assert metadata["aprilcam-requested"] == "no-such-field"
+
+
+def test_rpc_get_playfield_reports_a_linked_camera(stub, held_camera):
+    _, slug, _ = held_camera
+    stub.SetPlayfield(aprilcam_v2_pb2.SetPlayfieldRequest(definition=_playfield_definition_msg()))
+    stub.SetCameraConfig(
+        aprilcam_v2_pb2.SetCameraConfigRequest(
+            config=_camera_config_msg(slug, playfield="main-playfield")
+        )
+    )
+
+    response = stub.GetPlayfield(aprilcam_v2_pb2.GetPlayfieldRequest(name="main-playfield"))
+
+    assert list(response.playfield.linked_cameras) == [slug]
+
+
+def test_rpc_set_camera_config_and_get_camera_config_round_trip_settings(stub, held_camera):
+    _, slug, _ = held_camera
+    pushed = _camera_config_msg(slug, playfield="main-playfield", settings={"exposure": 100, "gain": 2.5})
+    stub.SetCameraConfig(aprilcam_v2_pb2.SetCameraConfigRequest(config=pushed))
+
+    response = stub.GetCameraConfig(aprilcam_v2_pb2.GetCameraConfigRequest(camera=slug))
+
+    assert response.config.playfield == "main-playfield"
+    assert json.loads(response.config.settings_json) == {"exposure": 100, "gain": 2.5}
+
+
+def test_rpc_get_camera_config_unknown_camera_maps_to_not_found(stub):
+    with pytest.raises(grpc.RpcError) as excinfo:
+        stub.GetCameraConfig(aprilcam_v2_pb2.GetCameraConfigRequest(camera="never-configured"))
+
+    assert excinfo.value.code() == grpc.StatusCode.NOT_FOUND
+    metadata = dict(excinfo.value.trailing_metadata())
+    assert metadata["aprilcam-error-type"] == "UnknownCamera"

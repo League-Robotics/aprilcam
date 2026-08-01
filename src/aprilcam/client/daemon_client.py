@@ -1,18 +1,23 @@
 """``GrpcDaemon`` -- the ``Daemon`` base class, client side (ticket
 020-005; ``get_tags``/``get_tag``/``get_tag_history`` added by ticket
-021-005): a typed wrapper over the generated gRPC stub for
+021-005; ``set_playfield``/``get_playfield``/``list_playfields``/
+``set_camera_config``/``get_camera_config`` added by ticket 022-001): a
+typed wrapper over the generated gRPC stub for
 ``list_cameras``, ``probe_cameras``, ``get_frame``, ``status``,
-``get_tags``, ``get_tag``, ``get_tag_history``.
+``get_tags``, ``get_tag``, ``get_tag_history``, ``set_playfield``,
+``get_playfield``, ``list_playfields``, ``set_camera_config``,
+``get_camera_config``.
 
-**Only these seven methods are implemented**, mirroring
+**Only these twelve methods are implemented**, mirroring
 ``daemon.service.DaemonService``'s own stance: ``daemon.interfaces.
-Daemon`` is a much larger base class (playfields, calibration, tags,
-streams, annotations, tag parameters, guides), and those are inherited
-as-is here rather than overridden -- calling one raises
-``NotImplementedError`` naming itself instead of failing with a bare
-``AttributeError``. ``isinstance(client, Daemon)`` is ``True``: this
-really is a ``Daemon``, an incomplete one this sprint, honestly so via
-the inherited stubs rather than by a Protocol's structural guess.
+Daemon`` is a much larger base class (calibration, streams,
+annotations, tag parameters, guides, ``reset_camera_config``,
+``find_feature``), and those are inherited as-is here rather than
+overridden -- calling one raises ``NotImplementedError`` naming itself
+instead of failing with a bare ``AttributeError``. ``isinstance(client,
+Daemon)`` is ``True``: this really is a ``Daemon``, an incomplete one
+this sprint, honestly so via the inherited stubs rather than by a
+Protocol's structural guess.
 
 **Request marshalling lives here; response marshalling does not.** This
 module builds ``aprilcam_v2_pb2`` request messages directly (nothing
@@ -37,18 +42,25 @@ look the same from outside.
 
 from __future__ import annotations
 
+import json
 from typing import Optional, Tuple
 
 import grpc
 
 from aprilcam.client.models import (
+    camera_config_from_proto,
     camera_states_from_proto,
     daemon_status_from_proto,
     image_frame_from_proto,
+    playfield_from_proto,
+    playfields_from_proto,
     probe_report_from_proto,
     tag_frame_from_proto,
     tag_record_from_get_tag_response,
 )
+from aprilcam.config.interfaces import CameraConfig
+from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitionIface
+from aprilcam.config.loader import PlayfieldDefinition
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
 from aprilcam.errors import (
     AlreadyRunning,
@@ -56,7 +68,9 @@ from aprilcam.errors import (
     ConnectionFailed,
     NotCalibrated,
     UnknownCamera,
+    UnknownPlayfield,
 )
+from aprilcam.playfield.interfaces import Playfield
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
 from aprilcam.types import CameraState, ImageFrame, ProbeReport, TagFamily, TagFrame, TagId, TagRecord
 
@@ -77,6 +91,43 @@ _TAG_FAMILY_TO_PROTO = {
 
 def _tag_id_to_proto(tag: TagId) -> aprilcam_v2_pb2.TagId:
     return aprilcam_v2_pb2.TagId(family=_TAG_FAMILY_TO_PROTO[tag.family], number=tag.number)
+
+
+def _playfield_feature_entry_to_proto(entry) -> aprilcam_v2_pb2.PlayfieldFeatureEntry:
+    msg = aprilcam_v2_pb2.PlayfieldFeatureEntry(slug=entry.slug, x=entry.x, y=entry.y)
+    if entry.tag_id is not None:
+        msg.id = entry.tag_id
+    if entry.colour is not None:
+        msg.colour = entry.colour
+    return msg
+
+
+def _playfield_definition_to_proto(definition: PlayfieldDefinition) -> aprilcam_v2_pb2.PlayfieldDefinition:
+    """Request-building direction only (Python -> proto, for an
+    outgoing ``SetPlayfieldRequest``) -- duplicated, not shared, with
+    ``daemon/rpc.py``'s identically-shaped converter, matching this
+    module's own established pattern for ``_TAG_FAMILY_TO_PROTO``/
+    ``_tag_id_to_proto`` above: each side of the proto boundary owns its
+    own small conversion."""
+    return aprilcam_v2_pb2.PlayfieldDefinition(
+        name=definition.name,
+        width_cm=definition.width_cm,
+        height_cm=definition.height_cm,
+        april_tags=[_playfield_feature_entry_to_proto(e) for e in definition.april_tags],
+        aruco_tags=[_playfield_feature_entry_to_proto(e) for e in definition.aruco_tags],
+        rectangles=[_playfield_feature_entry_to_proto(e) for e in definition.rectangles],
+        dots=[_playfield_feature_entry_to_proto(e) for e in definition.dots],
+    )
+
+
+def _camera_config_to_proto(config: CameraConfig) -> aprilcam_v2_pb2.CameraConfig:
+    """Request-building direction only, for an outgoing
+    ``SetCameraConfigRequest``. ``settings`` crosses as JSON text (see
+    ``aprilcam_v2.proto``'s header comment)."""
+    msg = aprilcam_v2_pb2.CameraConfig(name=config.name, settings_json=json.dumps(config.settings))
+    if config.playfield is not None:
+        msg.playfield = config.playfield
+    return msg
 
 
 def _split_available(raw: str) -> Tuple[str, ...]:
@@ -104,6 +155,11 @@ def _reconstruct_error(exc: grpc.RpcError, target: str) -> Exception:
         return CameraNotPresent(metadata.get("aprilcam-slug", "unknown"))
     if error_type == "NotCalibrated":
         return NotCalibrated(exc.details() or "camera not calibrated")
+    if error_type == "UnknownPlayfield":
+        return UnknownPlayfield(
+            metadata.get("aprilcam-requested", ""),
+            _split_available(metadata.get("aprilcam-available", "")),
+        )
     return ConnectionFailed(target, reason=exc.details() or str(exc.code()))
 
 
@@ -179,6 +235,42 @@ class GrpcDaemon(Daemon):
             request.frames = frames
         response = self._call(self._stub.GetTagHistory, request)
         return tuple(tag_frame_from_proto(f) for f in response.history)
+
+    def set_playfield(self, definition: PlayfieldDefinitionIface) -> None:
+        if not isinstance(definition, PlayfieldDefinition):
+            # Every PlayfieldDefinition a caller has in hand came from
+            # ConfigLoader.load_playfield -- the only place that
+            # constructs one this sprint -- so this is always the
+            # concrete type in practice. Guards against a future
+            # PlayfieldDefinition subclass this module would not know
+            # how to serialize, the same defensive check
+            # ``daemon/rpc.py``'s ``_playfield_entry_to_proto`` makes.
+            raise TypeError(
+                f"cannot push playfield {definition.name!r}: got "
+                f"{type(definition).__name__}, not aprilcam.config.loader.PlayfieldDefinition"
+            )
+        request = aprilcam_v2_pb2.SetPlayfieldRequest(
+            definition=_playfield_definition_to_proto(definition)
+        )
+        self._call(self._stub.SetPlayfield, request)
+
+    def get_playfield(self, name: str) -> Playfield:
+        request = aprilcam_v2_pb2.GetPlayfieldRequest(name=name)
+        response = self._call(self._stub.GetPlayfield, request)
+        return playfield_from_proto(response.playfield)
+
+    def list_playfields(self) -> Tuple[Playfield, ...]:
+        response = self._call(self._stub.ListPlayfields, aprilcam_v2_pb2.ListPlayfieldsRequest())
+        return playfields_from_proto(response.playfields)
+
+    def set_camera_config(self, config: CameraConfig) -> None:
+        request = aprilcam_v2_pb2.SetCameraConfigRequest(config=_camera_config_to_proto(config))
+        self._call(self._stub.SetCameraConfig, request)
+
+    def get_camera_config(self, camera: str) -> CameraConfig:
+        request = aprilcam_v2_pb2.GetCameraConfigRequest(camera=camera)
+        response = self._call(self._stub.GetCameraConfig, request)
+        return camera_config_from_proto(response.config)
 
     # -- internals -----------------------------------------------------
 

@@ -15,6 +15,24 @@
 // anticipated, not a replacement. Treat every message/field number
 // below as permanent.
 //
+// Sprint 022 ticket 001 is the second such extension: SetPlayfield /
+// GetPlayfield / ListPlayfields / SetCameraConfig / GetCameraConfig,
+// the minimal config-service slice sprint.md's Architecture Decision 1
+// scopes for this sprint (playfields in full; camera config carrying
+// only the playfield link -- hardware-settings push is sprint 023).
+// `PlayfieldDefinition`/`PlayfieldFeatureEntry` mirror
+// `aprilcam.config.loader.PlayfieldDefinition`'s actual stored shape
+// (per-section entries with an id where one exists), not the more
+// abstract `aprilcam.config.interfaces.Feature`/`required_aruco_ids()`
+// view -- `Feature` deliberately carries no numeric id, and calibration
+// (ticket 003) needs exactly that id -> position mapping to survive a
+// push/fetch round trip, so the wire shape mirrors the concrete
+// implementation instead of dropping it. `CameraConfig.settings`
+// (`dict[str, Any]` in Python) crosses the wire as a JSON-encoded
+// string rather than `google.protobuf.Struct`, avoiding a well-known-type
+// import for a value this sprint only ever stores and echoes back,
+// never applies (Decision 1).
+//
 // Wire conventions this file follows (docs/design/design.md §6):
 //   - World-cm coordinates cross this boundary only inside `TagRecord`
 //     (`world`, `world_velocity`, `world_corners`), and every camera
@@ -84,6 +102,31 @@ service AprilCamV2 {
   // an explicit entry with an empty `TagFrame.tags` -- gaps are never
   // interpolated or silently dropped (UC-26.S-4).
   rpc GetTagHistory (GetTagHistoryRequest) returns (GetTagHistoryResponse);
+
+  // Adopt a playfield definition, in memory, keyed by its own `name`
+  // (UC-02). Rejected whole if malformed -- client-side validation
+  // (`config/loader.py`'s `ConfigLoader`) means a malformed document
+  // never reaches this RPC in practice (UC-23.S-4).
+  rpc SetPlayfield (SetPlayfieldRequest) returns (SetPlayfieldResponse);
+
+  // Fetch one playfield by name, plus its derived `linked_cameras`
+  // (UC-02). Unknown name -> NOT_FOUND, naming the playfields held.
+  rpc GetPlayfield (GetPlayfieldRequest) returns (GetPlayfieldResponse);
+
+  // Every playfield this daemon currently holds (Decision 4: no
+  // single-slot limit).
+  rpc ListPlayfields (ListPlayfieldsRequest) returns (ListPlayfieldsResponse);
+
+  // Push a camera config, in memory, keyed by its own `name`. This
+  // sprint's minimal slice (Decision 1): only `playfield` has any
+  // observable effect (linking the camera); `settings` round-trips
+  // through `GetCameraConfig` but is never applied to hardware.
+  rpc SetCameraConfig (SetCameraConfigRequest) returns (SetCameraConfigResponse);
+
+  // Fetch one camera's config as last pushed. A camera nobody has
+  // configured yet is NOT_FOUND, not a fabricated blank document (the
+  // introspected-plus-blank template is out of scope this sprint).
+  rpc GetCameraConfig (GetCameraConfigRequest) returns (GetCameraConfigResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -308,4 +351,93 @@ message GetTagHistoryRequest {
 
 message GetTagHistoryResponse {
   repeated TagFrame history = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Playfields (ticket 022-001)
+// ---------------------------------------------------------------------------
+
+// One entry from a playfield definition's april_tags / aruco_tags /
+// rectangles / dots array. Mirrors aprilcam.config.loader.
+// PlayfieldFeatureEntry, not aprilcam.config.interfaces.Feature -- see
+// this file's header comment for why. `id` is set for april_tags/
+// aruco_tags entries only (calibration ground truth); `colour` for
+// rectangles/dots entries only.
+message PlayfieldFeatureEntry {
+  string slug = 1;
+  double x = 2;
+  double y = 3;
+  optional int32 id = 4;
+  optional string colour = 5;
+}
+
+// A whole playfield definition document. Mirrors aprilcam.config.
+// loader.PlayfieldDefinition field-for-field.
+message PlayfieldDefinition {
+  string name = 1;
+  double width_cm = 2;
+  double height_cm = 3;
+  repeated PlayfieldFeatureEntry april_tags = 4;
+  repeated PlayfieldFeatureEntry aruco_tags = 5;
+  repeated PlayfieldFeatureEntry rectangles = 6;
+  repeated PlayfieldFeatureEntry dots = 7;
+}
+
+// A playfield the daemon knows about, as served. Mirrors aprilcam.
+// playfield.interfaces.Playfield: name + definition, plus
+// linked_cameras derived at serve time -- never stored in the
+// definition itself, so the two can never disagree.
+message PlayfieldEntry {
+  string name = 1;
+  PlayfieldDefinition definition = 2;
+  repeated string linked_cameras = 3;
+}
+
+message SetPlayfieldRequest {
+  PlayfieldDefinition definition = 1;
+}
+
+message SetPlayfieldResponse {}
+
+message GetPlayfieldRequest {
+  string name = 1;
+}
+
+message GetPlayfieldResponse {
+  PlayfieldEntry playfield = 1;
+}
+
+message ListPlayfieldsRequest {}
+
+message ListPlayfieldsResponse {
+  repeated PlayfieldEntry playfields = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Camera config -- minimal playfield-link slice (ticket 022-001,
+// Decision 1). Mirrors aprilcam.config.interfaces.CameraConfig, except
+// `settings` (Python `dict[str, Any]`) is carried as a JSON-encoded
+// string -- see this file's header comment.
+// ---------------------------------------------------------------------------
+
+message CameraConfig {
+  string name = 1;
+  optional string playfield = 2;
+  // JSON object text, e.g. "{}" for no settings. Stored and echoed
+  // back verbatim; never applied to hardware this sprint.
+  string settings_json = 3;
+}
+
+message SetCameraConfigRequest {
+  CameraConfig config = 1;
+}
+
+message SetCameraConfigResponse {}
+
+message GetCameraConfigRequest {
+  string camera = 1;
+}
+
+message GetCameraConfigResponse {
+  CameraConfig config = 1;
 }

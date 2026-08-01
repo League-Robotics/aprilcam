@@ -32,9 +32,13 @@ presence instead, see :func:`image_frame_from_proto`).
 
 from __future__ import annotations
 
+import json
 from typing import Optional, Tuple
 
+from aprilcam.config.interfaces import CameraConfig
+from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import DaemonStatus
+from aprilcam.playfield.playfield import Playfield
 from aprilcam.proto import aprilcam_v2_pb2
 from aprilcam.types import (
     CameraState,
@@ -50,10 +54,14 @@ from aprilcam.types import (
 )
 
 __all__ = [
+    "camera_config_from_proto",
     "camera_state_from_proto",
     "camera_states_from_proto",
     "daemon_status_from_proto",
     "image_frame_from_proto",
+    "playfield_definition_from_proto",
+    "playfield_from_proto",
+    "playfields_from_proto",
     "probe_report_from_proto",
     "tag_frame_from_proto",
     "tag_id_from_proto",
@@ -229,4 +237,75 @@ def daemon_status_from_proto(msg: aprilcam_v2_pb2.GetStatusResponse) -> DaemonSt
         cameras=camera_states_from_proto(msg.cameras),
         config_dir=msg.config_dir,
         state_dir=msg.state_dir,
+    )
+
+
+def _playfield_feature_entry_from_proto(
+    msg: aprilcam_v2_pb2.PlayfieldFeatureEntry,
+) -> PlayfieldFeatureEntry:
+    """The client-side mirror of ``daemon/rpc.py``'s
+    ``_playfield_feature_entry_to_proto`` -- field for field, in
+    reverse."""
+    return PlayfieldFeatureEntry(
+        slug=msg.slug,
+        x=msg.x,
+        y=msg.y,
+        tag_id=msg.id if msg.HasField("id") else None,
+        colour=msg.colour if msg.HasField("colour") else None,
+    )
+
+
+def playfield_definition_from_proto(msg: aprilcam_v2_pb2.PlayfieldDefinition) -> PlayfieldDefinition:
+    """The client-side mirror of ``daemon/rpc.py``'s
+    ``_playfield_definition_to_proto`` -- field for field, in reverse.
+    Reconstructs the same ``config.loader.PlayfieldDefinition`` concrete
+    type the server holds, so a push -> fetch round trip through a real
+    daemon compares equal the same way a same-process
+    ``load(x.to_dict()) == x`` check does (``config/loader.py``'s
+    module docstring)."""
+    return PlayfieldDefinition(
+        name=msg.name,
+        width_cm=msg.width_cm,
+        height_cm=msg.height_cm,
+        april_tags=tuple(_playfield_feature_entry_from_proto(e) for e in msg.april_tags),
+        aruco_tags=tuple(_playfield_feature_entry_from_proto(e) for e in msg.aruco_tags),
+        rectangles=tuple(_playfield_feature_entry_from_proto(e) for e in msg.rectangles),
+        dots=tuple(_playfield_feature_entry_from_proto(e) for e in msg.dots),
+    )
+
+
+def playfield_from_proto(msg: aprilcam_v2_pb2.PlayfieldEntry) -> Playfield:
+    """See ``daemon.interfaces.Daemon.get_playfield``. ``linked_cameras``
+    crosses the wire **already derived** (``daemon/rpc.py``'s
+    ``_playfield_entry_to_proto`` calls the server's own
+    ``Playfield.linked_cameras()`` before serializing) -- the client has
+    no camera-config store of its own to re-derive it from. Rather than
+    giving the client-side ``Playfield`` a second, wire-only code path,
+    this reconstructs a minimal synthetic ``camera_configs`` snapshot
+    (one bare entry per linked camera, naming this playfield) so
+    :meth:`~aprilcam.playfield.playfield.Playfield.linked_cameras`'s
+    single real implementation reproduces exactly the list the wire
+    carried, unchanged."""
+    return Playfield(
+        name=msg.name,
+        definition=playfield_definition_from_proto(msg.definition),
+        camera_configs=tuple(
+            CameraConfig(name=name, playfield=msg.name, settings={}) for name in msg.linked_cameras
+        ),
+    )
+
+
+def playfields_from_proto(msgs) -> Tuple[Playfield, ...]:
+    return tuple(playfield_from_proto(m) for m in msgs)
+
+
+def camera_config_from_proto(msg: aprilcam_v2_pb2.CameraConfig) -> CameraConfig:
+    """The client-side mirror of ``daemon/rpc.py``'s
+    ``_camera_config_to_proto``. ``settings`` crosses as JSON text (see
+    ``aprilcam_v2.proto``'s header comment)."""
+    settings = json.loads(msg.settings_json) if msg.settings_json else {}
+    return CameraConfig(
+        name=msg.name,
+        playfield=msg.playfield if msg.HasField("playfield") else None,
+        settings=settings,
     )

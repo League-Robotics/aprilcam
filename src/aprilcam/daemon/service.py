@@ -1,7 +1,9 @@
 """``DaemonService`` -- the ``Daemon`` base class's RPC-body
 implementation for ``list_cameras``, ``probe_cameras``, ``get_frame``,
 ``status`` (ticket 020-004), plus ``get_tags``/``get_tag``/
-``get_tag_history`` (ticket 021-004).
+``get_tag_history`` (ticket 021-004), plus ``set_playfield``/
+``get_playfield``/``list_playfields``/``set_camera_config``/
+``get_camera_config`` (ticket 022-001).
 
 Delegates everything camera-shaped to ``camera/registry.py`` (ticket
 002) and ``Camera``/``CameraDiscovery`` (ticket 003) -- no identity
@@ -59,10 +61,12 @@ from aprilcam.camera.camera import Camera
 from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import CameraIdentity, resolve_all
 from aprilcam.camera.registry import CameraRecord, CameraRegistry
-from aprilcam.config.interfaces import Directories
+from aprilcam.config.interfaces import CameraConfig, Directories
+from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitionIface
 from aprilcam.daemon.detection import DetectionEngine
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
-from aprilcam.errors import CameraNotPresent, NotCalibrated, UnknownCamera
+from aprilcam.errors import CameraNotPresent, NotCalibrated, UnknownCamera, UnknownPlayfield
+from aprilcam.playfield.playfield import Playfield
 from aprilcam.types import CameraState, ImageFrame, ProbeReport, TagFrame, TagId, TagRecord
 
 __all__ = ["DaemonService"]
@@ -85,8 +89,10 @@ class DaemonService(Daemon):
     """Concrete ``daemon.interfaces.Daemon`` (this sprint's slice only).
 
     Derives from ``Daemon`` (see that class's module docstring for the
-    base-class-vs-``Protocol`` design rule): the 23 methods this sprint
-    does not implement are inherited as-is, so calling one raises
+    base-class-vs-``Protocol`` design rule): the 15 methods this sprint
+    does not implement (calibration, streams, annotations, tag
+    parameters, guides, ``reset_camera_config``, ``find_feature``) are
+    inherited as-is, so calling one raises
     ``NotImplementedError`` naming the missing method rather than an
     ``AttributeError`` -- ``isinstance(service, Daemon)`` is also simply
     true now, mechanically, rather than a Protocol structural guess.
@@ -147,6 +153,8 @@ class DaemonService(Daemon):
         self._identity_source = identity_source
         self._backend_factory = backend_factory
         self._detection = detection if detection is not None else DetectionEngine()
+        self._playfields: Dict[str, PlayfieldDefinitionIface] = {}
+        self._camera_configs: Dict[str, CameraConfig] = {}
         self._lock = threading.Lock()
 
     # -- beyond the interface: CameraDiscovery's active_slugs wiring -----
@@ -172,14 +180,20 @@ class DaemonService(Daemon):
         probe. A slug this service already holds open reports its
         *live* ``Camera.state`` (which reflects self-heal exhaustion)
         rather than the coarser present/usable-from-enumeration guess
-        used for everything else.
+        used for everything else. ``playfield`` is overlaid from
+        whatever ``CameraConfig`` :meth:`set_camera_config` last held
+        for that slug (``None`` if never configured) -- SUC-001's "``
+        camera list`` shows the camera linked" -- rather than stored on
+        ``Camera`` itself, keeping the config-service link a pure
+        ``DaemonService``-level concern (ticket 022-001).
         """
         present = self._discovery.known_present()
         states = []
         for record in self._registry.records():
+            playfield = self._playfield_link(record.slug)
             held = self._cameras.get(record.slug)
             if held is not None:
-                states.append(held.state)
+                states.append(replace(held.state, playfield=playfield))
                 continue
             is_present = record.slug in present
             states.append(
@@ -187,7 +201,7 @@ class DaemonService(Daemon):
                     name=record.slug,
                     present=is_present,
                     usable=is_present,
-                    playfield=None,
+                    playfield=playfield,
                     calibrated=False,
                     number=record.number,
                 )
@@ -328,6 +342,106 @@ class DaemonService(Daemon):
             config_dir=str(self._directories.config_dir),
             state_dir=str(self._directories.state_dir),
         )
+
+    # -- playfields / camera config (ticket 022-001) ----------------------
+    #
+    # The minimal config-service slice sprint.md's Architecture Decision 1
+    # scopes for this sprint: playfields in full (held zero-or-more,
+    # keyed by name -- Decision 4), plus a camera-config slice carrying
+    # only the playfield link. Both stores are plain in-memory dicts,
+    # never written to disk (UC-01's ephemeral rule is structural here,
+    # not a policy this class has to remember -- there is simply no
+    # write path). ``reset_camera_config`` is deliberately *not*
+    # overridden -- the inherited ``Daemon.reset_camera_config`` already
+    # raises ``NotImplementedError`` naming itself, exactly the
+    # "explicitly not built this sprint, never a silent no-op" contract
+    # the ticket asks for.
+
+    def set_playfield(self, definition: PlayfieldDefinitionIface) -> None:
+        """See ``daemon.interfaces.Daemon.set_playfield``.
+
+        A single dict assignment, keyed by the document's own ``name``
+        -- atomic by construction, so there is no partial-apply case to
+        guard against here. Whole-document *validation* (malformed
+        JSON, no name, duplicate ArUco ids, field-size inconsistency)
+        already happened client-side in ``config.loader.ConfigLoader``
+        before *definition* was ever built (UC-23.S-4) -- by the time an
+        object reaches here it is a well-formed ``PlayfieldDefinition``.
+        Replacing an existing definition of the same name does not
+        (yet) mark any calibration against it stale -- no calibration
+        subsystem exists until ticket 003.
+        """
+        with self._lock:
+            self._playfields[definition.name] = definition
+
+    def get_playfield(self, name: str) -> Playfield:
+        """See ``daemon.interfaces.Daemon.get_playfield``. Raises
+        :class:`~aprilcam.errors.UnknownPlayfield`, naming every
+        playfield this daemon currently holds, for a name it does not
+        recognise."""
+        with self._lock:
+            definition = self._playfields.get(name)
+            camera_configs = tuple(self._camera_configs.values())
+        if definition is None:
+            raise UnknownPlayfield(name, tuple(sorted(self._playfields.keys())))
+        return Playfield(name=definition.name, definition=definition, camera_configs=camera_configs)
+
+    def list_playfields(self) -> Tuple[Playfield, ...]:
+        """See ``daemon.interfaces.Daemon.list_playfields``. Every held
+        definition (Decision 4: no single-slot limit), each wrapped
+        with the *same* camera-config snapshot so every entry's
+        ``linked_cameras()`` reflects one consistent moment."""
+        with self._lock:
+            definitions = tuple(self._playfields.values())
+            camera_configs = tuple(self._camera_configs.values())
+        return tuple(
+            Playfield(name=d.name, definition=d, camera_configs=camera_configs) for d in definitions
+        )
+
+    def get_camera_config(self, camera: str) -> CameraConfig:
+        """See ``daemon.interfaces.Daemon.get_camera_config``.
+
+        Answers from whatever :meth:`set_camera_config` last held for
+        *camera* -- this sprint builds no introspected-plus-blank
+        template (UC-03.S-1's full behaviour is out of scope, Decision
+        1), so a camera nobody has configured yet is honestly
+        :class:`~aprilcam.errors.UnknownCamera` rather than a
+        fabricated blank document, naming every camera this daemon
+        currently holds a config for.
+        """
+        with self._lock:
+            config = self._camera_configs.get(camera)
+            available = tuple(sorted(self._camera_configs.keys()))
+        if config is None:
+            raise UnknownCamera(camera, available)
+        return config
+
+    def set_camera_config(self, config: CameraConfig) -> None:
+        """See ``daemon.interfaces.Daemon.set_camera_config``.
+
+        This sprint's minimal slice (Decision 1): stores *config*
+        whole, keyed by its own ``name``, so :meth:`get_camera_config`/
+        :meth:`list_cameras`/a linked playfield's ``linked_cameras()``
+        all see the update immediately. ``config.settings`` is stored
+        and echoed back verbatim but **never applied to hardware** --
+        no ``Camera.apply_config`` call happens here, which is the
+        whole point of Decision 1's scoping (full settings push is
+        sprint 023). Accepts a config for a camera this daemon has
+        never enumerated (a config outliving, or arriving before, its
+        hardware is normal -- UC-25) and for a camera not currently
+        held open -- there is nothing to reconfigure on a closed
+        handle, only the link to record.
+        """
+        with self._lock:
+            self._camera_configs[config.name] = config
+
+    def _playfield_link(self, slug: str) -> Optional[str]:
+        """The playfield *slug* is currently linked to, per the last
+        :meth:`set_camera_config` push -- ``None`` if never configured.
+        """
+        with self._lock:
+            config = self._camera_configs.get(slug)
+        return config.playfield if config is not None else None
 
     # -- beyond the interface: shutdown cleanup ----------------------------
 
