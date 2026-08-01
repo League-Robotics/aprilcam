@@ -65,6 +65,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple, Union
 
 from aprilcam.camera.interfaces import CameraIdentity
+from aprilcam.camera.interfaces import CameraRegistry as _CameraRegistryBase
 from aprilcam.errors import UnknownCamera
 
 __all__ = ["CameraRecord", "CameraRegistry", "REGISTRY_FILENAME", "REGISTRY_VERSION"]
@@ -109,12 +110,16 @@ class CameraRecord:
 
     @classmethod
     def from_dict(cls, data: dict) -> "CameraRecord":
-        known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
+        known = {f for f in cls.__dataclass_fields__}
         return cls(**{k: v for k, v in data.items() if k in known})
 
 
-class CameraRegistry:
+class CameraRegistry(_CameraRegistryBase):
     """Concrete ``camera.interfaces.CameraRegistry``.
+
+    Derives from ``camera.interfaces.CameraRegistry`` (a plain base
+    class, not ``Protocol`` -- see ``daemon.interfaces``'s module
+    docstring for the design rule).
 
     Loads eagerly at construction, tolerating an absent or corrupt file
     by starting empty (matching v1 — a corrupt registry must never crash

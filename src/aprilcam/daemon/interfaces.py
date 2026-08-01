@@ -8,6 +8,53 @@ every consumer depends on it being up (``docs/design/adapters.md``).
 Capability belongs here only when it must: it needs camera access or
 vision, two adapters would otherwise duplicate it, or it must be computed
 once and shared.
+
+Interface design rule — base class vs. ``Protocol`` (read before
+converting or adding an interface anywhere in ``*/interfaces.py``)
+--------------------------------------------------------------------
+Two different sorts of contract live in this codebase's ``interfaces.py``
+modules, and they are deliberately handled two different ways:
+
+* **Behavioral interfaces with real implementations** — ``Daemon``,
+  ``DaemonLifecycle``, ``ImageStream``, ``TagStream`` here;
+  ``CameraDiscovery``, ``CameraRegistry``, ``Camera`` in
+  ``camera/interfaces.py``; ``Directories`` in ``config/interfaces.py``;
+  ``Discovery`` in ``client/interfaces.py`` — are **plain base
+  classes**, not ``typing.Protocol``. Their method bodies
+  ``raise NotImplementedError(...)`` instead of ``...``.
+  Implementations *derive* from them: a real, mechanical connection, so
+  ``isinstance`` is truthful and calling an unimplemented method fails
+  loudly with a clear message at the call site instead of an
+  ``AttributeError`` you have to trace back to a missing method.
+
+  **Do NOT use ``abc.ABC`` / ``@abstractmethod`` for these — deliberate,
+  not an oversight.** The v2 rebuild is staged over many sprints, and
+  e.g. ``DaemonService`` implements only 4 of ``Daemon``'s 27 methods on
+  purpose; the rest belong to later sprints. ``ABC`` would make the
+  class un-instantiable until all 27 existed, forcing 23 hollow
+  ``raise NotImplementedError`` stubs onto ``DaemonService`` just to
+  satisfy the metaclass — which would make the object *look* complete
+  when it is not. A plain base class allows an honest partial
+  implementation while still failing loudly on the parts that are not
+  built yet. If you are tempted to "fix" this to ``ABC`` because an
+  un-instantiable abstract base class feels more rigorous: don't.
+  Re-read this paragraph first.
+
+* **Value-shaped protocols satisfied by frozen dataclasses** —
+  ``DaemonStatus`` here; ``DaemonInfo`` in ``client/interfaces.py``;
+  ``CameraIdentity`` in ``camera/interfaces.py``; ``ConfigDocument``,
+  ``CameraConfig``, ``PlayfieldDefinition``, ``Feature`` in
+  ``config/interfaces.py`` — **stay ``typing.Protocol``**. Converting
+  these is a real hazard: if the base class declares ``slug`` as a
+  ``@property`` and a ``@dataclass`` subclass declares a ``slug``
+  field, the property object becomes the dataclass field's *default
+  value*, silently breaking the class. Structural typing is the right
+  tool for values, not a lesser substitute to "fix".
+
+Before converting any Protocol here to a base class, check *every*
+concrete implementation. If even one is a ``@dataclass`` whose fields
+would shadow the Protocol's declared properties, leave it as
+``Protocol``.
 """
 
 from __future__ import annotations
@@ -30,8 +77,7 @@ from aprilcam.types import (
 )
 
 
-@runtime_checkable
-class ImageStream(Protocol):
+class ImageStream:
     """A subscription to frames. Closing it unsubscribes.
 
     Defined here, next to the method that returns it: unsubscription is
@@ -39,25 +85,43 @@ class ImageStream(Protocol):
     subscriber leaves, the daemon drops that product to idle — so
     holding a stream open costs the daemon real work and releasing it
     matters.
+
+    A plain base class, not ``Protocol`` — see the module docstring's
+    design rule. No implementation exists yet (streaming is a later
+    sprint); this is here so whichever sprint adds one derives from it
+    rather than duck-typing against the shape.
     """
 
-    def __iter__(self) -> Iterator[ImageFrame]: ...
+    def __iter__(self) -> Iterator[ImageFrame]:
+        raise NotImplementedError(f"{type(self).__name__} does not implement ImageStream.__iter__")
 
-    def close(self) -> None: ...
-
-
-@runtime_checkable
-class TagStream(Protocol):
-    """A subscription to tag detections. Closing it unsubscribes."""
-
-    def __iter__(self) -> Iterator[TagFrame]: ...
-
-    def close(self) -> None: ...
+    def close(self) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not implement ImageStream.close")
 
 
-@runtime_checkable
-class Daemon(Protocol):
+class TagStream:
+    """A subscription to tag detections. Closing it unsubscribes.
+
+    A plain base class, not ``Protocol`` — see the module docstring's
+    design rule. No implementation exists yet (streaming is a later
+    sprint).
+    """
+
+    def __iter__(self) -> Iterator[TagFrame]:
+        raise NotImplementedError(f"{type(self).__name__} does not implement TagStream.__iter__")
+
+    def close(self) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not implement TagStream.close")
+
+
+class Daemon:
     """The control plane every client talks to.
+
+    A plain base class, not ``Protocol`` — see the module docstring's
+    design rule. Every method below ``raise``\\ s ``NotImplementedError``
+    by default; a concrete subclass overrides only the methods it has
+    actually built, and calling an unbuilt one fails loudly rather than
+    with a bare ``AttributeError``.
 
     One daemon per machine (enforced by a lock). It advertises itself
     over mDNS so clients can discover it without configuration.
@@ -78,7 +142,7 @@ class Daemon(Protocol):
         likewise listed, so "plugged in and broken" stays distinguishable
         from "not plugged in".
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.list_cameras")
 
     def probe_cameras(self) -> ProbeReport:
         """Force a deep re-interrogation of all backends (UC-25).
@@ -88,9 +152,10 @@ class Daemon(Protocol):
         partial result, is **named in the report** rather than presented
         as a complete probe (UC-25.S-7).
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.probe_cameras")
 
-    def get_camera_config(self, camera: str) -> CameraConfig: ...
+    def get_camera_config(self, camera: str) -> CameraConfig:
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.get_camera_config")
 
     def set_camera_config(self, config: CameraConfig) -> None:
         """Apply a whole camera config, immediately, in memory.
@@ -99,7 +164,7 @@ class Daemon(Protocol):
         name the camera separately (UC-23). Unsupported settings fail the
         **entire** push (UC-03).
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.set_camera_config")
 
     def reset_camera_config(self, camera: str) -> None:
         """Re-apply the stored on-disk config, discarding live overrides.
@@ -108,13 +173,15 @@ class Daemon(Protocol):
         ``ResetCameraConfig``. How an experiment ends without a daemon
         restart: the disk document wins again, immediately.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.reset_camera_config")
 
     # -- playfields ------------------------------------------------------
 
-    def list_playfields(self) -> tuple[Playfield, ...]: ...
+    def list_playfields(self) -> tuple[Playfield, ...]:
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.list_playfields")
 
-    def get_playfield(self, name: str) -> Playfield: ...
+    def get_playfield(self, name: str) -> Playfield:
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.get_playfield")
 
     def set_playfield(self, definition: PlayfieldDefinition) -> None:
         """Adopt a playfield definition, in memory, targeted by its name.
@@ -123,7 +190,7 @@ class Daemon(Protocol):
         intact (UC-02.S-2). Replacing a definition that an existing
         calibration was computed against marks that calibration stale.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.set_playfield")
 
     def find_feature(self, playfield: str, query: str) -> tuple[Feature, ...]:
         """Where is the blue dot (UC-08) — spec §4.1's ``WhereIs``.
@@ -134,7 +201,7 @@ class Daemon(Protocol):
         Ambiguity returns every match, never an arbitrary pick
         (UC-08.S-2); no match returns empty (UC-08.S-3).
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.find_feature")
 
     # -- calibration -----------------------------------------------------
 
@@ -143,9 +210,10 @@ class Daemon(Protocol):
 
         All vision happens here; the caller sends a command, not pixels.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.calibrate")
 
-    def get_calibration(self, camera: str) -> Optional[Calibration]: ...
+    def get_calibration(self, camera: str) -> Optional[Calibration]:
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.get_calibration")
 
     # -- perception ------------------------------------------------------
 
@@ -170,7 +238,7 @@ class Daemon(Protocol):
         looks plausible but is not deskewed is how someone starts
         trusting wrong coordinates.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.get_frame")
 
     def get_tag(self, camera: str, tag: TagId) -> Optional[TagRecord]:
         """One tag by family and id (UC-09).
@@ -179,7 +247,7 @@ class Daemon(Protocol):
         with a tag detected at world ``(0, 0)`` — hence Optional rather
         than a zero-valued record.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.get_tag")
 
     def get_tags(self, camera: str) -> TagFrame:
         """**All** currently detected tags (UC-10).
@@ -187,7 +255,7 @@ class Daemon(Protocol):
         No count, no limit, no pagination — hence no truncation ordering
         to define. An empty field returns an empty frame, not an error.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.get_tags")
 
     def get_tag_history(
         self, camera: str, tag: Optional[TagId] = None, frames: Optional[int] = None
@@ -206,7 +274,7 @@ class Daemon(Protocol):
         records. Interpolating across a gap would invent motion that did
         not happen.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.get_tag_history")
 
     # -- streams ---------------------------------------------------------
 
@@ -223,7 +291,7 @@ class Daemon(Protocol):
 
         Frame geometry is stable for the life of the stream.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.stream_images")
 
     def stream_tags(self, camera: str) -> TagStream:
         """Subscribe to tag detections (UC-11).
@@ -236,7 +304,7 @@ class Daemon(Protocol):
         in-band, via ``TagFrame.calibration_stale`` (UC-11.S-3): a
         stream has no side channel, so the flag rides in the payload.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.stream_tags")
 
     # -- tag parameters --------------------------------------------------
 
@@ -253,9 +321,10 @@ class Daemon(Protocol):
         start, every session** — the same reconnect ritual as
         re-drawing annotations (UC-28.S-4).
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.register_tag")
 
-    def list_tag_parameters(self) -> dict[TagId, MountParameters]: ...
+    def list_tag_parameters(self) -> dict[TagId, MountParameters]:
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.list_tag_parameters")
 
     def unregister_tag(self, tag: TagId) -> None:
         """Forget a mount registration; the tag reports as itself again.
@@ -264,7 +333,7 @@ class Daemon(Protocol):
         grows — a tag moved to a different robot mid-session would keep
         the old robot's mount until a daemon restart.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.unregister_tag")
 
     # -- annotations -----------------------------------------------------
     #
@@ -289,11 +358,11 @@ class Daemon(Protocol):
         accepts registrations for tags not yet seen — the
         accept-and-hold analogy for playfields is recorded, not chosen.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.put_annotation")
 
     def remove_annotation(self, playfield: str, layer: str, id: str) -> None:
         """Delete one annotation. Removing an absent key is a no-op."""
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.remove_annotation")
 
     def replace_layer(
         self, playfield: str, layer: str, annotations: tuple[Annotation, ...]
@@ -304,7 +373,7 @@ class Daemon(Protocol):
         and no consumer ever sees a half-updated layer — frames embed
         the old set or the new one, never a mix.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.replace_layer")
 
     def clear_annotations(
         self, playfield: str, layer: Optional[str] = None
@@ -314,7 +383,7 @@ class Daemon(Protocol):
         Clearing a layer that does not exist is a **no-op, not an
         error** — a known-empty state is the caller's actual goal.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.clear_annotations")
 
     def get_annotations(
         self, playfield: str, layer: Optional[str] = None
@@ -328,7 +397,7 @@ class Daemon(Protocol):
         No ``stream_annotations`` exists in v2 by decision — embedded
         frames are the publish channel and this is the query.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.get_annotations")
 
     # -- self-description ------------------------------------------------
 
@@ -342,7 +411,7 @@ class Daemon(Protocol):
         yet" needs it over the wire, and each negative answer names
         which precondition failed (UC-05.S-2).
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.status")
 
     def get_guide(self, name: Optional[str] = None) -> str:
         """The packaged instructions (UC-27).
@@ -353,12 +422,21 @@ class Daemon(Protocol):
         software. Shipping them with the system is what stops them
         drifting from a document nobody updated.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.get_guide")
 
 
-@runtime_checkable
-class DaemonLifecycle(Protocol):
+class DaemonLifecycle:
     """Starting and stopping the daemon process (UC-13).
+
+    A plain base class, not ``Protocol`` — see the module docstring's
+    design rule. Two independent implementations derive from this (the
+    server-side ``daemon.lifecycle.DaemonLifecycle`` and the client-side
+    ``client.lifecycle.DaemonLifecycle`` — see their module docstrings
+    for why the same name, same base, and genuinely different mechanics
+    are correct here), both implementing every method, so there are no
+    ``NotImplementedError`` stubs left in practice — the base class
+    still exists for the mechanical ``isinstance`` connection and so a
+    future third implementation fails loudly on anything it skips.
 
     Process lifecycle is **local-only**. A remote daemon is started over
     SSH, not by this API — which is why ``aprilcam daemon start -d
@@ -372,11 +450,13 @@ class DaemonLifecycle(Protocol):
         with **no cameras and no configuration is success**, not an
         error — configuration can arrive before hardware.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement DaemonLifecycle.start")
 
-    def stop(self) -> None: ...
+    def stop(self) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not implement DaemonLifecycle.stop")
 
-    def status(self) -> "DaemonStatus": ...
+    def status(self) -> "DaemonStatus":
+        raise NotImplementedError(f"{type(self).__name__} does not implement DaemonLifecycle.status")
 
 
 @runtime_checkable
@@ -386,6 +466,14 @@ class DaemonStatus(Protocol):
     The diagnostic someone reaches for when positions look wrong, so each
     negative answer must name **which** precondition failed and what to
     do about it — not merely report "not ready".
+
+    **Deliberately still a ``Protocol``** — see the module docstring's
+    design rule. Every concrete implementation
+    (``daemon.service.SimpleDaemonStatus``, ``client.models.
+    RemoteDaemonStatus``, ``client.lifecycle._LocalStatus``) is a frozen
+    ``@dataclass`` whose fields share names with the properties declared
+    below; making this a base class would turn each of those properties
+    into the corresponding dataclass field's default value.
     """
 
     @property

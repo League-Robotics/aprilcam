@@ -51,6 +51,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 from aprilcam.camera.backends import CaptureBackend
+from aprilcam.camera.interfaces import Camera as _CameraBase
 from aprilcam.config.interfaces import CameraConfig
 from aprilcam.errors import UnsupportedSetting
 from aprilcam.types import CameraState
@@ -92,8 +93,12 @@ class SimpleCameraConfig:
         return {"name": self.name, "playfield": self.playfield, "settings": dict(self.settings)}
 
 
-class Camera:
+class Camera(_CameraBase):
     """Concrete ``camera.interfaces.Camera``.
+
+    Derives from ``camera.interfaces.Camera`` (a plain base class, not
+    ``Protocol`` -- see ``daemon.interfaces``'s module docstring for the
+    design rule).
 
     Parameters
     ----------

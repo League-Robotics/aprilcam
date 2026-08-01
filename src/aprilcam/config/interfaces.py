@@ -13,6 +13,18 @@ pushed over RPC is a live override that is discarded on restart. The
 daemon never writes config: the config root is human-owned and not
 writable by it, which makes the ephemeral rule structural rather than a
 policy the daemon has to remember.
+
+See ``aprilcam.daemon.interfaces``'s module docstring for the base-class-
+vs-``Protocol`` design rule applied below: ``Directories`` is a
+behavioral interface with an ordinary-class implementation
+(``config.directories.Directories``), so it is a plain base class.
+``ConfigDocument``, ``CameraConfig``, ``PlayfieldDefinition``, and
+``Feature`` stay ``Protocol`` — they are value shapes, and at least one
+implementation (``camera.camera.SimpleCameraConfig``, a frozen
+``@dataclass``) has fields that would collide with declared properties
+exactly as that rule describes. ``ConfigLoader`` also stays ``Protocol``
+— no concrete implementation exists yet to check (out of this pass's
+scope).
 """
 
 from __future__ import annotations
@@ -166,9 +178,10 @@ class ConfigLoader(Protocol):
     def load_playfield(self, path: Path) -> PlayfieldDefinition: ...
 
 
-@runtime_checkable
-class Directories(Protocol):
+class Directories:
     """Where files live (``docs/design/configuration.md``).
+
+    A plain base class, not ``Protocol`` — see the module docstring.
 
     Two roots, split by **who writes them**:
 
@@ -184,12 +197,14 @@ class Directories(Protocol):
     """
 
     @property
-    def config_dir(self) -> Path: ...
+    def config_dir(self) -> Path:
+        raise NotImplementedError(f"{type(self).__name__} does not implement Directories.config_dir")
 
     @property
-    def state_dir(self) -> Path: ...
+    def state_dir(self) -> Path:
+        raise NotImplementedError(f"{type(self).__name__} does not implement Directories.state_dir")
 
     @property
     def socket_dir(self) -> Path:
         """Runtime plumbing. Not configurable — nobody needs to choose."""
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Directories.socket_dir")

@@ -97,8 +97,49 @@ dev = [
     "ipykernel>=7.2.0",
     "jupyter>=1.1.1",
     "matplotlib>=3.10.9",
+    "mypy>=1.13",
     "nbconvert>=7.17.1",
     "pandas>=2.3.3",
     "pytest>=9.0.2",
     "pytest-asyncio>=0.24",
 ]
+
+# Pragmatic strictness: catches real bugs (unreachable code, bad
+# Optional handling, mismatched returns, wrong argument types) without
+# demanding full annotation coverage or `--strict`'s wall of noise on
+# code that talks to unstubbed third-party libraries (cv2, grpc, the
+# generated protobuf modules). `tests/test_typing.py` shells out to
+# this and is what `uv run pytest` exercises; run `uv run mypy`
+# directly for the same check on its own.
+[tool.mypy]
+python_version = "3.10"
+files = ["src/aprilcam"]
+exclude = ["^archive/", "^src/aprilcam/proto/"]
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+strict_equality = true
+
+# Third-party libraries that ship no type stubs and have none available
+# on PyPI for this project's pin. Targeted per-module, not a blanket
+# `ignore_missing_imports` — a real stub landing for any one of these
+# should start being checked again without anyone having to notice and
+# remove a global switch. Add an entry here only once a module is
+# actually imported from `src/aprilcam` — `mypy --warn-unused-configs`
+# flags an override for a module nothing imports yet.
+[[tool.mypy.overrides]]
+module = ["cv2.*", "cv2_enumerate_cameras.*", "grpc.*"]
+ignore_missing_imports = true
+
+# Generated gRPC/protobuf code (`aprilcam/proto/*_pb2*.py`): dynamically
+# built at import time via protobuf's reflection machinery, so its
+# module-level names are invisible to static analysis regardless of
+# stubs. Excluded from direct checking above; here it is additionally
+# treated as `Any` wherever the rest of the tree imports it (the proto
+# boundary in `client/models.py` / `daemon/rpc.py` / `client/
+# daemon_client.py` is exactly the chokepoint meant to absorb this).
+[[tool.mypy.overrides]]
+module = ["aprilcam.proto.*"]
+follow_imports = "skip"

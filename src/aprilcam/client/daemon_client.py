@@ -1,15 +1,17 @@
-"""``GrpcDaemon`` -- the ``Daemon`` Protocol, client side (ticket
+"""``GrpcDaemon`` -- the ``Daemon`` base class, client side (ticket
 020-005): a typed wrapper over ticket 004's generated gRPC stub for
 this sprint's four RPCs (``list_cameras``, ``probe_cameras``,
 ``get_frame``, ``status``).
 
 **Only this sprint's four methods are implemented**, mirroring
 ``daemon.service.DaemonService``'s own stance: ``daemon.interfaces.
-Daemon`` is a much larger Protocol (playfields, calibration, tags,
-streams, annotations, tag parameters, guides), and those are simply
-absent here rather than stubbed with ``NotImplementedError`` -- an
-``isinstance(client, Daemon)`` check honestly reports ``False`` until
-they land.
+Daemon`` is a much larger base class (playfields, calibration, tags,
+streams, annotations, tag parameters, guides), and those are inherited
+as-is here rather than overridden -- calling one raises
+``NotImplementedError`` naming itself instead of failing with a bare
+``AttributeError``. ``isinstance(client, Daemon)`` is ``True``: this
+really is a ``Daemon``, an incomplete one this sprint, honestly so via
+the inherited stubs rather than by a Protocol's structural guess.
 
 **Request marshalling lives here; response marshalling does not.** This
 module builds ``aprilcam_v2_pb2`` request messages directly (nothing
@@ -44,7 +46,7 @@ from aprilcam.client.models import (
     image_frame_from_proto,
     probe_report_from_proto,
 )
-from aprilcam.daemon.interfaces import DaemonStatus
+from aprilcam.daemon.interfaces import Daemon, DaemonStatus
 from aprilcam.errors import AlreadyRunning, ConnectionFailed, NotCalibrated, UnknownCamera
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
 from aprilcam.types import CameraState, ImageFrame, ProbeReport
@@ -78,9 +80,16 @@ def _reconstruct_error(exc: grpc.RpcError, target: str) -> Exception:
     return ConnectionFailed(target, reason=exc.details() or str(exc.code()))
 
 
-class GrpcDaemon:
+class GrpcDaemon(Daemon):
     """Concrete ``daemon.interfaces.Daemon`` (this sprint's slice only),
     driven by an already-connected gRPC stub.
+
+    Derives from ``Daemon`` (see that class's module docstring for the
+    base-class-vs-``Protocol`` design rule), mirroring
+    ``daemon.service.DaemonService``'s own stance: the methods this
+    sprint does not implement are inherited as-is and raise
+    ``NotImplementedError`` naming themselves if called, rather than
+    disappearing into a bare ``AttributeError``.
 
     Parameters
     ----------
