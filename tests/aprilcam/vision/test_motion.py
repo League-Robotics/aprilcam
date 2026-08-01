@@ -1,9 +1,14 @@
 """Tests for ``aprilcam.vision.motion`` (ticket 021-004).
 
 Pure-function tests against synthetic ``(timestamp, WorldPoint)``
-sequences -- never through the daemon, since nothing in this sprint is
-calibrated and ``compute_motion`` is never invoked with a real world
-position anywhere in ``daemon/detection.py`` (module docstring).
+sequences -- exercising this module in isolation, the way sprint 021
+wrote it before any calibration subsystem existed. ``daemon/
+detection.py`` now calls :func:`compute_motion` for real on a calibrated
+camera's buffered tag history (ticket 022-004); that real call path is
+pinned in ``tests/aprilcam/daemon/test_detection.py`` instead of here,
+so this module's own contract (its behaviour as a pure function of a
+position sequence) stays tested independently of ``daemon/`` or any
+calibration fixture.
 """
 
 from __future__ import annotations

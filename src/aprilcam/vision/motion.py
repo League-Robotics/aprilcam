@@ -7,14 +7,18 @@ Pure kinematics, independent of detection and calibration status (sprint
 ``daemon/`` -- it operates entirely on ``(timestamp, WorldPoint)`` pairs
 a caller already has in hand.
 
-**Wired but inert this sprint.** No calibration subsystem exists yet
-(sprint 021), so every ``TagRecord`` this sprint carries ``world=None``
--- nothing in ``daemon/detection.py`` ever calls :func:`compute_motion`
-with a real position sequence. It is built and tested now, against
-synthetic ``WorldPoint`` sequences, so the calibration sprint activates
-it rather than writing it from scratch (sprint.md Step 3's module table:
-"its purpose ... is real and deferred only by calibration's absence, not
-by design uncertainty").
+**Built inert in sprint 021, activated in sprint 022 (ticket 022-004).**
+No calibration subsystem existed in sprint 021, so every ``TagRecord``
+that sprint carried ``world=None`` and nothing called
+:func:`compute_motion` with a real position sequence -- it was built and
+tested purely against synthetic ``WorldPoint`` sequences (sprint.md Step
+3's module table: "its purpose ... is real and deferred only by
+calibration's absence, not by design uncertainty"). ``daemon/
+detection.py``'s ``DetectionEngine.run_burst`` now calls this function
+for real, for every calibrated hit, with that tag's buffered
+world-position history plus its new sample -- no change to this
+module's own math was needed to activate it, exactly as sprint 021
+predicted.
 
 **Heading convention** (``types.py`` module docstring, restated here
 since this is the one place it is actually computed): ``heading_rad =
