@@ -1,10 +1,16 @@
 ---
 id: '021'
 title: Tag detection and tag queries
-status: ticketing
+status: closed
 branch: sprint/021-tag-detection-and-tag-queries
 worktree: false
-use-cases: [UC-09, UC-10, UC-26, UC-14, UC-20, UC-25]
+use-cases:
+- UC-09
+- UC-10
+- UC-26
+- UC-14
+- UC-20
+- UC-25
 issues:
 - tag-detection-and-tag-queries.md
 - cameras-referenceable-by-persistent-number.md
