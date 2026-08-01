@@ -1,7 +1,7 @@
 ---
 id: '020'
 title: Daemon bring-up with basic camera CLI
-status: planning-docs
+status: closed
 branch: sprint/020-daemon-bring-up-with-basic-camera-cli
 worktree: false
 use-cases: []
