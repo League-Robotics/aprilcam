@@ -48,7 +48,7 @@ from aprilcam.daemon.detection import DetectionEngine
 from aprilcam.daemon.interfaces import Daemon
 from aprilcam.daemon.lifecycle import DaemonLifecycle
 from aprilcam.daemon.rpc import build_server
-from aprilcam.daemon.service import VALID_ENCODINGS, DaemonService
+from aprilcam.daemon.service import CALIBRATION_FRAME_COUNT, VALID_ENCODINGS, DaemonService
 from aprilcam.errors import (
     CameraNotPresent,
     MalformedDocument,
@@ -1716,6 +1716,51 @@ def test_fresh_daemon_service_with_no_calibration_file_reports_none(directories,
     service = DaemonService(registry=registry, discovery=discovery, directories=directories)
 
     assert service.get_calibration("never-calibrated-camera") is None
+
+
+# ---------------------------------------------------------------------------
+# World coordinates through DaemonService's real DetectionEngine wiring
+# (ticket 022-004) -- get_tags on a calibrated camera
+# ---------------------------------------------------------------------------
+
+
+def test_get_tags_on_a_calibrated_camera_reports_real_world_coordinates(directories, registry):
+    """The one-line production wiring this ticket adds --
+    ``DaemonService``'s default ``DetectionEngine`` receives
+    ``calibration_lookup=self.get_calibration`` -- exercised end to end:
+    calibrate a camera, then ask ``get_tags`` for the very next burst
+    against that same now-calibrated camera, and confirm the returned
+    records carry real world coordinates rather than sprint 021's
+    pixel-only shape. ``test_detection.py`` covers ``DetectionEngine`` in
+    isolation with an injected ``calibration_lookup``; this is the one
+    place the actual ``DaemonService`` wiring itself is checked, using
+    the real (default, no ``detection=`` override) engine a production
+    daemon process constructs."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    # CALIBRATION_FRAME_COUNT reads for calibrate(), plus one more for
+    # get_tags' own burst -- the same rendered image serves both, since
+    # real ArUco detection/homography is what's under test here, not
+    # distinct per-call imagery.
+    identity, slug, cam, _backend = _open_camera_with_frames(
+        registry, [frame] * (CALIBRATION_FRAME_COUNT + 1)
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+
+    result = service.calibrate(slug)
+    assert result.succeeded is True
+
+    tag_frame = service.get_tags(slug)
+
+    aruco_1 = next(r for r in tag_frame.tags if r.tag == TagId(family=TagFamily.ARUCO, number=1))
+    assert aruco_1.calibrated is True
+    assert aruco_1.world is not None
+    expected_x, expected_y = MAIN_PLAYFIELD_ARUCO_POSITIONS[1]
+    assert aruco_1.world.x == pytest.approx(expected_x, abs=0.5)
+    assert aruco_1.world.y == pytest.approx(expected_y, abs=0.5)
+    assert aruco_1.world_corners is not None
+    assert aruco_1.yaw_rad is not None
 
 
 # ---------------------------------------------------------------------------

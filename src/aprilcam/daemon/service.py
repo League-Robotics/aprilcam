@@ -193,7 +193,17 @@ class DaemonService(Daemon):
         self._cameras: Dict[str, Camera] = cameras if cameras is not None else {}
         self._identity_source = identity_source
         self._backend_factory = backend_factory
-        self._detection = detection if detection is not None else DetectionEngine()
+        # ``calibration_lookup=self.get_calibration``: a bound-method
+        # reference, resolved at call time, not at this line -- safe to
+        # pass before ``self._calibrations``/``self._lock`` exist below,
+        # since ``DetectionEngine`` never calls it during construction,
+        # only from a later ``run_burst`` (ticket 022-004, module
+        # docstring's "threaded through" section). Callers that pass
+        # their own ``detection=`` (tests pinning burst counts) own their
+        # engine's ``calibration_lookup`` themselves.
+        self._detection = (
+            detection if detection is not None else DetectionEngine(calibration_lookup=self.get_calibration)
+        )
         self._playfields: Dict[str, PlayfieldDefinitionIface] = {}
         self._camera_configs: Dict[str, CameraConfig] = {}
         self._lock = threading.Lock()
