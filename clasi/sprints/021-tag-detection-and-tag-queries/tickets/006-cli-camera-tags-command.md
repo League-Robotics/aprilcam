@@ -1,9 +1,11 @@
 ---
 id: '006'
 title: 'CLI: camera tags command'
-status: open
-use-cases: [SUC-004]
-depends-on: ['005']
+status: in-progress
+use-cases:
+- SUC-004
+depends-on:
+- '005'
 github-issue: ''
 issue: tag-detection-and-tag-queries.md
 completes_issue: false
