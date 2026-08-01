@@ -456,9 +456,17 @@ class DaemonService(Daemon):
         :class:`~aprilcam.errors.UnknownCamera` rather than a
         fabricated blank document, naming every camera this daemon
         currently holds a config for.
+
+        *camera* accepts a persistent number or a slug (SUC-005),
+        resolved via :meth:`_resolve_slug_if_known` before the lookup
+        -- ``_camera_configs`` is keyed by slug only, so an unresolved
+        number would otherwise never match a real link. The error still
+        names whatever *camera* the caller actually typed, not the
+        resolved slug.
         """
+        slug = self._resolve_slug_if_known(camera)
         with self._lock:
-            config = self._camera_configs.get(camera)
+            config = self._camera_configs.get(slug)
             available = tuple(sorted(self._camera_configs.keys()))
         if config is None:
             raise UnknownCamera(camera, available)
@@ -506,6 +514,19 @@ class DaemonService(Daemon):
         ever calls :meth:`_capture_calibration_frames`, so an unlinked
         camera never reaches the camera backend at all -- UC-15.S-2).
 
+        *camera* accepts a persistent number or a slug (SUC-005) --
+        resolved to the canonical slug via :meth:`_resolve_slug_if_known`
+        **before** anything else happens, and that resolved slug is what
+        gets passed to the calibrator and used as the
+        ``self._calibrations``/``calibration.json`` key. Without this,
+        a number token never matches ``_camera_configs`` (keyed by slug
+        only) and every numbered camera reports the misleading
+        ``NoPlayfieldLinked`` regardless of whether it is actually
+        linked -- ticket 022-003's addressing regression, fixed here so
+        every other camera-config-addressed method inherits the same
+        resolution rather than re-implementing it (see
+        :meth:`_resolve_slug_if_known`'s docstring).
+
         A failed attempt (``result.succeeded is False``) leaves
         ``calibration.json`` and this service's in-memory
         ``self._calibrations`` entry for *camera* completely untouched
@@ -514,16 +535,17 @@ class DaemonService(Daemon):
         UC-15.S-3) holds by construction rather than by an explicit
         guard.
         """
-        result = self._calibrator.calibrate(camera)
+        slug = self._resolve_slug_if_known(camera)
+        result = self._calibrator.calibrate(slug)
         if result.succeeded:
-            calibration = self._calibrator.get_calibration(camera)
+            calibration = self._calibrator.get_calibration(slug)
             assert calibration is not None, (
                 "Calibrator.calibrate() reported succeeded=True but "
                 "get_calibration() has nothing stored -- a Calibrator bug"
             )
             with self._lock:
-                self._calibrations[camera] = calibration
-            self._persist_calibration(camera, calibration)
+                self._calibrations[slug] = calibration
+            self._persist_calibration(slug, calibration)
         return result
 
     def get_calibration(self, camera: str) -> Optional[Calibration]:
@@ -538,9 +560,17 @@ class DaemonService(Daemon):
         fabricated/default ``Calibration``, mirroring
         :meth:`get_tag`'s "``None`` means not detected, never a
         zero-valued record" discipline.
+
+        *camera* accepts a persistent number or a slug (SUC-005),
+        resolved via :meth:`_resolve_slug_if_known` -- ``self.
+        _calibrations`` is always keyed by the resolved slug (see
+        :meth:`calibrate`), so looking it up by the raw token would
+        silently report "never calibrated" for a numbered camera that
+        actually is.
         """
+        slug = self._resolve_slug_if_known(camera)
         with self._lock:
-            return self._calibrations.get(camera)
+            return self._calibrations.get(slug)
 
     def _camera_config_for_calibration(self, camera: str) -> Optional[CameraConfig]:
         """``Calibrator``'s ``get_camera_config`` callable -- a locked
@@ -733,6 +763,43 @@ class DaemonService(Daemon):
         if token.isdigit():
             return self._registry.get_by_number(int(token))
         return self._registry.get(token)
+
+    def _resolve_slug_if_known(self, token: str) -> str:
+        """*token* (a persistent number or a slug, SUC-005 addressing)
+        resolved to its canonical registry slug when the registry
+        recognises it -- otherwise *token* itself, unchanged.
+
+        The shared number-or-slug resolution point every
+        camera-**config**-addressed method needs (:meth:`get_camera_config`,
+        :meth:`calibrate`, :meth:`get_calibration`) -- built on the same
+        :meth:`_record_for` :meth:`_camera_for` already uses, so a token
+        resolves identically everywhere rather than each method
+        re-deciding "is this a number" for itself.
+
+        **Hotfix, ticket 022-003.** ``calibrate``/``get_calibration``/
+        ``get_camera_config`` originally looked up ``self._camera_configs``/
+        ``self._calibrations`` keyed by the *raw* token -- both stores
+        are keyed by slug only (``set_camera_config``'s ``self.
+        _camera_configs[config.name] = config``, ``config.name`` always
+        a slug; :meth:`_persist_calibration`/:meth:`_load_calibrations`
+        likewise). A valid persistent number therefore matched nothing,
+        and ``calibrate`` reported the misleading ``NoPlayfieldLinked``
+        for a camera that *was* linked, addressed the only way that
+        happened not to work.
+
+        Deliberately **soft**: unlike :meth:`_camera_for` (which raises
+        :class:`~aprilcam.errors.UnknownCamera` for an unresolvable
+        token, appropriate once hardware access follows), this never
+        raises. A token the registry has never seen at all is passed
+        through unchanged, so a downstream not-found error still names
+        exactly what the caller typed and existing "unknown token"
+        error shapes are undisturbed -- e.g. :meth:`get_camera_config`'s
+        ``available`` lists cameras with a pushed config, not every
+        registered camera, and stays that way for a token this method
+        cannot resolve either.
+        """
+        record = self._record_for(token)
+        return record.slug if record is not None else token
 
     def _available(self) -> Tuple[str, ...]:
         """Every known camera, formatted ``"{number} {slug}"`` for

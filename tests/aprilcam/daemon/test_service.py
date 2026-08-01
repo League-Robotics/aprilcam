@@ -1239,6 +1239,24 @@ def test_set_camera_config_links_camera_and_get_camera_config_echoes_it_back(ser
     assert fetched.playfield == "main-playfield"
 
 
+def test_get_camera_config_by_persistent_number_reaches_the_same_config_as_by_slug(
+    service, held_camera, registry
+):
+    """Regression (team-lead verification, ticket 022-003 hotfix):
+    ``_camera_configs`` is keyed by slug only, so looking a config up by
+    the raw token silently missed a valid persistent number. Number and
+    slug addressing must reach the identical config (SUC-005)."""
+    _, slug, _ = held_camera
+    number = registry.get(slug).number
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+
+    by_number = service.get_camera_config(str(number))
+    by_slug = service.get_camera_config(slug)
+
+    assert by_number == by_slug
+    assert by_number.playfield == "main-playfield"
+
+
 def test_linked_playfield_reports_the_configured_camera(service, held_camera):
     _, slug, _ = held_camera
     service.set_playfield(_playfield_definition())
@@ -1523,6 +1541,39 @@ def test_calibrate_end_to_end_succeeds_and_persists_calibration_json(directories
     assert all(len(row) == 3 for row in data["homography"])
 
 
+def test_calibrate_by_persistent_number_reaches_the_same_camera_as_by_slug(directories, registry):
+    """Regression (team-lead verification, ticket 022-003 hotfix):
+    ``camera calibrate 3`` failed with a misleading ``NoPlayfieldLinked``
+    against a camera that *was* linked (per ``camera list``), because
+    ``calibrate``/``get_calibration`` looked ``_camera_configs``/
+    ``_calibrations`` up by the raw token -- both slug-keyed only, so a
+    persistent number never matched. Number and slug addressing must
+    reach the identical camera, the identical stored ``Calibration``,
+    and the identical ``calibration.json`` file (not two separate
+    entries, one keyed "3")."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    number = registry.get(slug).number
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+
+    result = service.calibrate(str(number))
+
+    assert result.succeeded is True
+    assert result.matched_ids == tuple(range(1, 11))
+
+    by_number = service.get_calibration(str(number))
+    by_slug = service.get_calibration(slug)
+    assert by_number is not None
+    assert by_number == by_slug
+
+    # Exactly one file, under the canonical slug -- never a second one
+    # keyed by the literal number token.
+    assert _calibration_path(directories, slug).exists()
+    assert not _calibration_path(directories, str(number)).exists()
+
+
 def test_calibrate_failure_does_not_write_calibration_json(directories, registry):
     """UC-04.S-2: one id occluded -> explicit failure, no calibration
     stored on disk or in memory."""
@@ -1692,6 +1743,26 @@ def test_rpc_calibrate_and_get_calibration_round_trip(directories, registry):
     assert get_response.calibration.stale is False
     assert len(get_response.calibration.homography) == 9
     assert list(get_response.calibration.matched_ids) == list(range(1, 11))
+
+
+def test_rpc_calibrate_by_persistent_number_round_trip(directories, registry):
+    """The exact live reproduction (team-lead verification): ``camera
+    calibrate 3`` over the real wire, against a camera ``camera list``
+    already shows linked, must succeed identically to addressing it by
+    slug -- end to end through ``daemon/rpc.py``, not just
+    ``DaemonService`` in-process."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    number = registry.get(slug).number
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+
+    with _bind_stub(service) as stub:
+        response = stub.Calibrate(aprilcam_v2_pb2.CalibrateRequest(camera=str(number)))
+
+    assert response.result.succeeded is True
+    assert list(response.result.matched_ids) == list(range(1, 11))
 
 
 def test_rpc_calibrate_failure_names_missing_ids_exactly(directories, registry):
