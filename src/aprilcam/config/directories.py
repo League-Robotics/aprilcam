@@ -63,6 +63,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Union
 
+from aprilcam.config.interfaces import Directories as _DirectoriesBase
+
 __all__ = ["Directories"]
 
 logger = logging.getLogger(__name__)
@@ -174,8 +176,12 @@ def _resolve_socket_dir() -> _Resolved:
     return _Resolved(Path(tempfile.gettempdir()) / f"aprilcam-{uid}", "fallback")
 
 
-class Directories:
+class Directories(_DirectoriesBase):
     """Concrete :class:`aprilcam.config.interfaces.Directories`.
+
+    Derives from ``config.interfaces.Directories`` (a plain base class,
+    not ``Protocol`` -- see ``daemon.interfaces``'s module docstring for
+    the design rule).
 
     Resolution happens once, eagerly, at construction — matching
     "reports which roots it resolved at startup" — and the result is

@@ -44,6 +44,7 @@ from aprilcam.camera.backends import CaptureBackend
 from aprilcam.camera.backends.opencv_backend import OpenCVBackend
 from aprilcam.camera.camera import Camera
 from aprilcam.camera.identity import CameraIdentity, resolve_all
+from aprilcam.camera.interfaces import CameraDiscovery as _CameraDiscoveryBase
 from aprilcam.camera.registry import CameraRegistry
 from aprilcam.types import CameraState, ProbeReport, ProbeSkip
 
@@ -60,8 +61,12 @@ def _default_backend_factory(index: int) -> CaptureBackend:
     return OpenCVBackend(index)
 
 
-class CameraDiscovery:
+class CameraDiscovery(_CameraDiscoveryBase):
     """Concrete ``camera.interfaces.CameraDiscovery``.
+
+    Derives from ``camera.interfaces.CameraDiscovery`` (a plain base
+    class, not ``Protocol`` -- see ``daemon.interfaces``'s module
+    docstring for the design rule).
 
     Parameters
     ----------

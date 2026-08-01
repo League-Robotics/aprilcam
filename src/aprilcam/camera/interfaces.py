@@ -6,6 +6,16 @@ A client that wants pixels asks the daemon for a frame.
 The three concerns here are deliberately separate: *identity* (which
 physical camera is this, stably), *discovery* (what is attached right
 now), and *control* (open it, configure it, read from it).
+
+See ``aprilcam.daemon.interfaces``'s module docstring for the base-class-
+vs-``Protocol`` design rule applied below: ``CameraRegistry``,
+``CameraDiscovery``, and ``Camera`` are behavioral interfaces with
+ordinary-class implementations (``camera.registry.CameraRegistry``,
+``camera.discovery.CameraDiscovery``, ``camera.camera.Camera``), so they
+are plain base classes. ``CameraIdentity`` stays ``Protocol`` — its
+implementation (``camera.identity.CameraIdentity``) is a frozen
+``@dataclass`` whose ``slug``/``device_name`` fields would collide with
+declared properties exactly as that rule describes.
 """
 
 from __future__ import annotations
@@ -21,6 +31,11 @@ from aprilcam.types import CameraState, ProbeReport
 @runtime_checkable
 class CameraIdentity(Protocol):
     """A stable name for a physical camera.
+
+    Deliberately still a ``Protocol`` — its implementation,
+    ``camera.identity.CameraIdentity``, is a frozen ``@dataclass`` whose
+    ``slug``/``device_name`` fields share names with the properties
+    declared below. See the module docstring.
 
     Derived through a fallback chain — libcamera id, then serial /
     AVFoundation unique id, then ``vid:pid@location``, and finally a
@@ -47,9 +62,10 @@ class CameraIdentity(Protocol):
         ...
 
 
-@runtime_checkable
-class CameraRegistry(Protocol):
+class CameraRegistry:
     """The persistent identity → camera mapping.
+
+    A plain base class, not ``Protocol`` — see the module docstring.
 
     Lives in the **state** directory: regenerable, daemon-owned, never
     hand-edited. Delete it and re-probing rebuilds it.
@@ -62,7 +78,7 @@ class CameraRegistry(Protocol):
         slug, and enumeration numbers never shuffle when a new camera
         appears.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement CameraRegistry.resolve")
 
     def forget(self, slug: str) -> None:
         """Drop a camera from the registry entirely.
@@ -71,12 +87,13 @@ class CameraRegistry(Protocol):
         absent camera keeps its entry and is flagged not-present, because
         a config outliving its hardware is normal (UC-25).
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement CameraRegistry.forget")
 
 
-@runtime_checkable
-class CameraDiscovery(Protocol):
+class CameraDiscovery:
     """Finding out what cameras exist (UC-25).
+
+    A plain base class, not ``Protocol`` — see the module docstring.
 
     Two mechanisms, both needed:
 
@@ -108,30 +125,35 @@ class CameraDiscovery(Protocol):
         that is serving live streams; the timed-out backend likewise
         lands in ``skipped``.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement CameraDiscovery.probe")
 
     def watch(self) -> None:
         """Begin passive hotplug watching for the daemon's lifetime."""
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement CameraDiscovery.watch")
 
 
-@runtime_checkable
-class Camera(Protocol):
+class Camera:
     """One physical camera, owned end to end.
+
+    A plain base class, not ``Protocol`` — see the module docstring.
 
     The object the daemon manages one-of-per-camera. Owns its backend,
     its configuration, and its calibration when it has one.
     """
 
     @property
-    def slug(self) -> str: ...
+    def slug(self) -> str:
+        raise NotImplementedError(f"{type(self).__name__} does not implement Camera.slug")
 
     @property
-    def state(self) -> CameraState: ...
+    def state(self) -> CameraState:
+        raise NotImplementedError(f"{type(self).__name__} does not implement Camera.state")
 
-    def open(self) -> None: ...
+    def open(self) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not implement Camera.open")
 
-    def close(self) -> None: ...
+    def close(self) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not implement Camera.close")
 
     def read(self) -> Optional[np.ndarray]:
         """Grab one raw frame, or ``None`` if the read failed.
@@ -141,7 +163,7 @@ class Camera(Protocol):
         happens when that budget is exhausted (mark dead? keep trying?)
         is unspecified and needs deciding.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Camera.read")
 
     def apply_config(self, config: CameraConfig) -> None:
         """Apply a whole config document to the hardware, immediately.
@@ -158,7 +180,7 @@ class Camera(Protocol):
         balance off before WB temperature. Getting this wrong is how a
         setting silently does nothing (UC-03.S-3).
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Camera.apply_config")
 
     def effective_config(self) -> CameraConfig:
         """What is actually in force, introspected from the hardware.
@@ -168,8 +190,8 @@ class Camera(Protocol):
         document every camera configuration starts from (UC-03.S-1,
         UC-25).
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Camera.effective_config")
 
     def reset(self) -> None:
         """Re-apply the stored on-disk config, discarding live overrides."""
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Camera.reset")

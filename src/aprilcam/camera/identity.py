@@ -389,10 +389,15 @@ def resolve_identity(
         libcamera_entries = _probe_libcamera()
     lc = libcamera_entries.get(index)
     if lc is not None:
-        dev_name = lc.name or lc.camera_id
+        # A distinct local name from the ``dev_name`` bound below: that
+        # one is genuinely Optional[str] (unknown until enum/profiler
+        # lookups run), this one is always str (``lc.camera_id`` is a
+        # non-optional fallback) -- reusing one name across both would
+        # make mypy unify them to a single (wrong) declared type.
+        lc_dev_name = lc.name or lc.camera_id
         return CameraIdentity(
-            slug=device_name_slug(dev_name),
-            device_name=dev_name,
+            slug=device_name_slug(lc_dev_name),
+            device_name=lc_dev_name,
             hardware_key=f"libcamera:{lc.camera_id}",
             source="libcamera_id",
             is_fallback=False,

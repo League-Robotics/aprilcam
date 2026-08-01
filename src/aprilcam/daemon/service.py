@@ -1,6 +1,6 @@
-"""``DaemonService`` -- the ``Daemon`` Protocol's RPC-body implementation
-for this sprint's narrow slice (ticket 020-004): ``list_cameras``,
-``probe_cameras``, ``get_frame``, ``status``.
+"""``DaemonService`` -- the ``Daemon`` base class's RPC-body
+implementation for this sprint's narrow slice (ticket 020-004):
+``list_cameras``, ``probe_cameras``, ``get_frame``, ``status``.
 
 Delegates everything camera-shaped to ``camera/registry.py`` (ticket
 002) and ``Camera``/``CameraDiscovery`` (ticket 003) -- no identity
@@ -9,12 +9,19 @@ duplicated here (sprint architecture's module table: this module's
 boundary is "RPC method bodies... Outside: camera hardware access").
 
 **Only this sprint's four methods are implemented.** ``daemon.
-interfaces.Daemon`` is a much larger Protocol (playfields, calibration,
+interfaces.Daemon`` is a much larger base class (playfields, calibration,
 tags, streams, annotations, tag parameters, guides) -- those belong to
 later sprints per the sprint architecture's Out-of-Scope section, and
-are simply absent from :class:`DaemonService` rather than stubbed with
-``NotImplementedError``, so ``isinstance(service, Daemon)`` honestly
-reports ``False`` until they land instead of pretending conformance.
+are simply absent from :class:`DaemonService`, inherited as-is from
+``Daemon``. Calling one of them here raises ``NotImplementedError``
+naming the missing method (``daemon.interfaces``'s module docstring
+explains why this is a plain base class and not ``abc.ABC``:
+un-instantiable until all 27 methods existed would force 23 hollow
+stubs, which is worse than an honest partial implementation).
+``isinstance(service, Daemon)`` is ``True`` -- :class:`DaemonService`
+really is a ``Daemon``, just an incomplete one; the per-method
+``NotImplementedError`` is what keeps that honest rather than
+pretending full conformance.
 
 **Long-lived ``Camera`` instances, held open.** ``get_frame`` opens a
 camera *at most once*: the first successful open is cached in
@@ -48,6 +55,7 @@ from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import CameraIdentity, resolve_all
 from aprilcam.camera.registry import CameraRecord, CameraRegistry
 from aprilcam.config.interfaces import Directories
+from aprilcam.daemon.interfaces import Daemon
 from aprilcam.errors import NotCalibrated, UnknownCamera
 from aprilcam.types import CameraState, ImageFrame, ProbeReport
 
@@ -77,8 +85,15 @@ def _default_backend_factory(index: int) -> CaptureBackend:
     return OpenCVBackend(index)
 
 
-class DaemonService:
+class DaemonService(Daemon):
     """Concrete ``daemon.interfaces.Daemon`` (this sprint's slice only).
+
+    Derives from ``Daemon`` (see that class's module docstring for the
+    base-class-vs-``Protocol`` design rule): the 23 methods this sprint
+    does not implement are inherited as-is, so calling one raises
+    ``NotImplementedError`` naming the missing method rather than an
+    ``AttributeError`` -- ``isinstance(service, Daemon)`` is also simply
+    true now, mechanically, rather than a Protocol structural guess.
 
     Parameters
     ----------

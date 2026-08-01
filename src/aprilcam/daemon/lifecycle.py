@@ -72,6 +72,7 @@ from pathlib import Path
 from typing import Callable, Optional, Protocol, Tuple, runtime_checkable
 
 from aprilcam.config.interfaces import Directories
+from aprilcam.daemon.interfaces import DaemonLifecycle as _DaemonLifecycleBase
 from aprilcam.daemon.interfaces import DaemonStatus
 from aprilcam.errors import AlreadyRunning
 
@@ -135,8 +136,14 @@ class _NotRunningStatus:
         return self._state_dir
 
 
-class DaemonLifecycle:
+class DaemonLifecycle(_DaemonLifecycleBase):
     """See the module docstring for the client-side/server-side split.
+
+    Derives from ``daemon.interfaces.DaemonLifecycle`` (see that
+    module's design-rule docstring): a plain base class, not
+    ``Protocol``, so ``isinstance(instance, daemon.interfaces.
+    DaemonLifecycle)`` is a real inheritance check rather than a
+    structural guess.
 
     Parameters
     ----------

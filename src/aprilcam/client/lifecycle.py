@@ -107,6 +107,7 @@ from typing import Callable, Optional, Tuple
 
 from aprilcam.client.discovery import Discovery, probe_lock_holder, probe_socket_reachable
 from aprilcam.config.directories import Directories
+from aprilcam.daemon.interfaces import DaemonLifecycle as _DaemonLifecycleBase
 from aprilcam.daemon.interfaces import DaemonStatus
 from aprilcam.daemon.lifecycle import LOCK_FILENAME, SOCKET_FILENAME
 from aprilcam.errors import AlreadyRunning, AprilCamError, ConnectionFailed
@@ -147,9 +148,15 @@ def _holder_pid(holder: str) -> Optional[int]:
         return None
 
 
-class DaemonLifecycle:
+class DaemonLifecycle(_DaemonLifecycleBase):
     """See the module docstring for the client-side/server-side split
     and the local-only decision.
+
+    Derives from ``daemon.interfaces.DaemonLifecycle`` (see that
+    module's design-rule docstring): a plain base class, not
+    ``Protocol``, so this and ``daemon.lifecycle.DaemonLifecycle`` are
+    both mechanically real ``DaemonLifecycle``\\ s, not two classes that
+    merely happen to share a shape.
 
     Parameters
     ----------

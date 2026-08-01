@@ -10,6 +10,17 @@ the reverse.
 generation works on any install, but no client module may import it —
 the daemon is the sole vision authority. That is now a discipline the
 tests enforce rather than something packaging enforces for us.
+
+See ``aprilcam.daemon.interfaces``'s module docstring for the base-class-
+vs-``Protocol`` design rule applied below: ``Discovery`` is a behavioral
+interface with a single, ordinary-class implementation
+(``client.discovery.Discovery``), so it is a plain base class.
+``DaemonInfo``, ``Guides``, and ``Renderer`` stay ``Protocol`` —
+``DaemonInfo`` because its implementation (``client.discovery.
+LocalDaemonInfo``) is a frozen ``@dataclass`` whose fields would collide
+with declared properties exactly as that rule describes; ``Guides`` and
+``Renderer`` because neither has a concrete implementation yet to check
+against (out of this pass's scope).
 """
 
 from __future__ import annotations
@@ -22,7 +33,13 @@ from aprilcam.types import Annotation, ImageFrame
 
 @runtime_checkable
 class DaemonInfo(Protocol):
-    """A daemon found on the network (UC-13)."""
+    """A daemon found on the network (UC-13).
+
+    Deliberately still a ``Protocol`` — its implementation,
+    ``client.discovery.LocalDaemonInfo``, is a frozen ``@dataclass``
+    whose fields (``host``, ``port``, ``is_local``, ``reachable``) share
+    names with the properties declared below. See the module docstring.
+    """
 
     @property
     def host(self) -> str: ...
@@ -43,9 +60,11 @@ class DaemonInfo(Protocol):
         ...
 
 
-@runtime_checkable
-class Discovery(Protocol):
-    """Finding daemons (UC-13)."""
+class Discovery:
+    """Finding daemons (UC-13).
+
+    A plain base class, not ``Protocol`` — see the module docstring.
+    """
 
     def find_all(self) -> tuple[DaemonInfo, ...]:
         """Discover daemons via mDNS.
@@ -58,7 +77,7 @@ class Discovery(Protocol):
         send someone hunting for a dead daemon instead of a network
         problem.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Discovery.find_all")
 
     def connect(self, host: Optional[str] = None) -> Daemon:
         """Connect to a named daemon, or the local one if unnamed.
@@ -67,7 +86,7 @@ class Discovery(Protocol):
         explicit host beats ``APRILCAM_DAEMON_HOST``
         (``docs/design/configuration.md``).
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Discovery.connect")
 
 
 # ImageStream and TagStream live in aprilcam.daemon.interfaces, next to

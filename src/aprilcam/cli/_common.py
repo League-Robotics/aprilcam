@@ -16,6 +16,7 @@ import argparse
 import sys
 from typing import Callable, Optional, Protocol, Tuple, TypeVar, runtime_checkable
 
+from aprilcam.daemon.interfaces import Daemon
 from aprilcam.errors import AprilCamError
 from aprilcam.types import CameraState, ProbeReport
 
@@ -60,7 +61,7 @@ class _DaemonInfoLike(Protocol):
 class _DiscoveryLike(Protocol):
     def find_all(self) -> Tuple[_DaemonInfoLike, ...]: ...
 
-    def connect(self, host: Optional[str] = None) -> object: ...
+    def connect(self, host: Optional[str] = None) -> Daemon: ...
 
 
 def add_daemon_option(parser: argparse.ArgumentParser) -> None:
@@ -186,7 +187,7 @@ def print_probe_report(report: ProbeReport) -> None:
 
 def fan_out(
     discovery: _DiscoveryLike,
-    call: Callable[[object], T],
+    call: Callable[[Daemon], T],
     render: Callable[[str, T], None],
 ) -> int:
     """Run *call* against every daemon ``discovery.find_all()`` reports.

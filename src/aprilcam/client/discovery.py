@@ -47,6 +47,7 @@ from typing import Callable, Optional, Tuple
 import grpc
 
 from aprilcam.client.daemon_client import GrpcDaemon
+from aprilcam.client.interfaces import Discovery as _DiscoveryBase
 from aprilcam.config.directories import Directories
 from aprilcam.daemon.interfaces import Daemon
 from aprilcam.daemon.lifecycle import LOCK_FILENAME, SOCKET_FILENAME
@@ -149,9 +150,13 @@ class LocalDaemonInfo:
     reachable: bool
 
 
-class Discovery:
+class Discovery(_DiscoveryBase):
     """Concrete ``client.interfaces.Discovery``. See the module
     docstring for Architecture Decision 2 and the connect precedence.
+
+    Derives from ``client.interfaces.Discovery`` (a plain base class,
+    not ``Protocol`` -- see ``daemon.interfaces``'s module docstring for
+    the design rule).
 
     Parameters
     ----------
