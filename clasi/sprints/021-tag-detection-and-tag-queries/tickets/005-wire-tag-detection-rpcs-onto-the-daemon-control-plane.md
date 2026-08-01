@@ -1,9 +1,13 @@
 ---
 id: '005'
 title: Wire tag-detection RPCs onto the daemon control plane
-status: open
-use-cases: [SUC-001, SUC-002, SUC-003]
-depends-on: ['004']
+status: done
+use-cases:
+- SUC-001
+- SUC-002
+- SUC-003
+depends-on:
+- '004'
 github-issue: ''
 issue: tag-detection-and-tag-queries.md
 completes_issue: false
@@ -32,7 +36,7 @@ stated evolution rule.
 
 ## Acceptance Criteria
 
-- [ ] `proto/aprilcam_v2.proto` gains: `GetTags(GetTagsRequest) ->
+- [x] `proto/aprilcam_v2.proto` gains: `GetTags(GetTagsRequest) ->
       GetTagsResponse`, `GetTag(GetTagRequest) -> GetTagResponse`,
       `GetTagHistory(GetTagHistoryRequest) -> GetTagHistoryResponse`;
       `TagId` (family enum or string + number), `TagRecord`
@@ -41,15 +45,15 @@ stated evolution rule.
       as `optional`, `pixel`/`pixel_corners` populated,
       `calibrated` as a plain `bool`), `TagFrame` (`tags` repeated,
       `timestamp`, `frame_index`, `calibration_stale`).
-- [ ] `GetFrameResponse` gains an `optional TagFrame tags = 9` field
+- [x] `GetFrameResponse` gains an `optional TagFrame tags = 9` field
       (next available field number — verify against the current file
       before assigning) to carry ticket 004's `ImageFrame.tags` embed;
       no existing field is renumbered.
-- [ ] Regenerated via `scripts/compile_proto.py`; generated
+- [x] Regenerated via `scripts/compile_proto.py`; generated
       `aprilcam_v2_pb2.py`/`aprilcam_v2_pb2_grpc.py` committed per the
       existing convention (these files are checked in, not
       gitignored — confirm against current repo state).
-- [ ] `daemon/rpc.py`'s `_Servicer` gains `GetTags`/`GetTag`/
+- [x] `daemon/rpc.py`'s `_Servicer` gains `GetTags`/`GetTag`/
       `GetTagHistory` methods, each: try/except around the
       `DaemonService` call, `_abort(context, exc)` on failure
       (reusing the existing `_STATUS_CODES` map — `UnknownCamera` and
@@ -59,23 +63,23 @@ stated evolution rule.
       following the existing `_camera_state_to_proto` pattern
       (optional fields set only when not `None`, matching
       `HasField()` semantics).
-- [ ] `client/models.py` gains `tag_record_from_proto`/
+- [x] `client/models.py` gains `tag_record_from_proto`/
       `tag_frame_from_proto` — the reverse, field-for-field, following
       `camera_state_from_proto`'s existing pattern exactly (including
       the `HasField()` → `None` discipline for optional fields).
-- [ ] `client/daemon_client.py`'s `GrpcDaemon` gains `get_tags`,
+- [x] `client/daemon_client.py`'s `GrpcDaemon` gains `get_tags`,
       `get_tag`, `get_tag_history` methods matching the `Daemon` base
       class signatures, each building the request message and calling
       through `self._call(...)` exactly like the existing four
       methods; `get_frame`'s response marshalling picks up the new
       `tags` field via `image_frame_from_proto`.
-- [ ] RPC round-trip tests (real `grpc.Server` over a `tmp_path` unix
+- [x] RPC round-trip tests (real `grpc.Server` over a `tmp_path` unix
       socket, real generated stub — matching `test_service.py`'s
       `stub` fixture pattern) cover all three new RPCs plus the
       `GetFrame` tag-embed addition, including the not-detected
       (`get_tag` → `None`/empty response) and unknown-camera error
       paths across the wire.
-- [ ] `uv run mypy` stays clean (note: `aprilcam.proto.*` is
+- [x] `uv run mypy` stays clean (note: `aprilcam.proto.*` is
       `follow_imports = "skip"` in `pyproject.toml`'s mypy config —
       generated code is exempt, but every hand-written module that
       touches it is not). `uv run pytest` stays green.

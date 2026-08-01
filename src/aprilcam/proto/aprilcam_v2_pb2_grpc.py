@@ -58,6 +58,21 @@ class AprilCamV2Stub(object):
                 request_serializer=aprilcam__v2__pb2.GetStatusRequest.SerializeToString,
                 response_deserializer=aprilcam__v2__pb2.GetStatusResponse.FromString,
                 _registered_method=True)
+        self.GetTags = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/GetTags',
+                request_serializer=aprilcam__v2__pb2.GetTagsRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.GetTagsResponse.FromString,
+                _registered_method=True)
+        self.GetTag = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/GetTag',
+                request_serializer=aprilcam__v2__pb2.GetTagRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.GetTagResponse.FromString,
+                _registered_method=True)
+        self.GetTagHistory = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/GetTagHistory',
+                request_serializer=aprilcam__v2__pb2.GetTagHistoryRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.GetTagHistoryResponse.FromString,
+                _registered_method=True)
 
 
 class AprilCamV2Servicer(object):
@@ -103,6 +118,40 @@ class AprilCamV2Servicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetTags(self, request, context):
+        """Every tag currently detected on a named camera (UC-10). Triggers
+        exactly one demand-driven detection burst per call
+        (`daemon/detection.py`) and appends it to that camera's ring
+        buffer; an idle field returns an empty `TagFrame`, never an error.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetTag(self, request, context):
+        """One tag, by family and id (UC-09). Runs the same single burst
+        `GetTags` would (so the "exactly one burst per call" budget is
+        shared, not doubled) and filters it for the requested tag.
+        Absent `GetTagResponse.record` (`HasField("record") == false`,
+        never a zero-valued `TagRecord`) means the tag was not detected
+        this burst.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetTagHistory(self, request, context):
+        """Recent per-frame history from a camera's ring buffer (UC-26). A
+        pure buffer read -- triggers no new detection burst. A buffer with
+        fewer entries than requested returns everything available, not an
+        error. A frame where the (optionally) requested tag was absent is
+        an explicit entry with an empty `TagFrame.tags` -- gaps are never
+        interpolated or silently dropped (UC-26.S-4).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_AprilCamV2Servicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -125,6 +174,21 @@ def add_AprilCamV2Servicer_to_server(servicer, server):
                     servicer.GetStatus,
                     request_deserializer=aprilcam__v2__pb2.GetStatusRequest.FromString,
                     response_serializer=aprilcam__v2__pb2.GetStatusResponse.SerializeToString,
+            ),
+            'GetTags': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetTags,
+                    request_deserializer=aprilcam__v2__pb2.GetTagsRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.GetTagsResponse.SerializeToString,
+            ),
+            'GetTag': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetTag,
+                    request_deserializer=aprilcam__v2__pb2.GetTagRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.GetTagResponse.SerializeToString,
+            ),
+            'GetTagHistory': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetTagHistory,
+                    request_deserializer=aprilcam__v2__pb2.GetTagHistoryRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.GetTagHistoryResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -239,6 +303,87 @@ class AprilCamV2(object):
             '/aprilcam.v2.AprilCamV2/GetStatus',
             aprilcam__v2__pb2.GetStatusRequest.SerializeToString,
             aprilcam__v2__pb2.GetStatusResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetTags(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/GetTags',
+            aprilcam__v2__pb2.GetTagsRequest.SerializeToString,
+            aprilcam__v2__pb2.GetTagsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetTag(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/GetTag',
+            aprilcam__v2__pb2.GetTagRequest.SerializeToString,
+            aprilcam__v2__pb2.GetTagResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetTagHistory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/GetTagHistory',
+            aprilcam__v2__pb2.GetTagHistoryRequest.SerializeToString,
+            aprilcam__v2__pb2.GetTagHistoryResponse.FromString,
             options,
             channel_credentials,
             insecure,
