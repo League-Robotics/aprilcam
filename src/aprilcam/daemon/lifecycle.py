@@ -20,7 +20,7 @@ once it *is* the daemon. It is **not** the CLI-facing implementation
 spawns/signals ``daemon/__main__.py`` as a subprocess from the
 *caller's* process, and blocks on subprocess/socket readiness rather
 than on lock acquisition. Both are legitimate, independent
-implementations of the same Protocol -- one is "the mechanics that run
+implementations of the same base class -- one is "the mechanics that run
 once you are the daemon process," the other is "how an outside process
 starts/stops that process." Conflating them would mean the CLI's
 ``daemon start`` never returns: this class's ``start()`` returns as
@@ -69,7 +69,7 @@ import fcntl
 import logging
 import os
 from pathlib import Path
-from typing import Callable, Optional, Protocol, Tuple, runtime_checkable
+from typing import Callable, Optional
 
 from aprilcam.config.interfaces import Directories
 from aprilcam.daemon.interfaces import DaemonLifecycle as _DaemonLifecycleBase
@@ -91,49 +91,33 @@ LOCK_FILENAME = "daemon.lock"
 SOCKET_FILENAME = "control.sock"
 
 
-@runtime_checkable
-class ControlPlaneListener(Protocol):
+class ControlPlaneListener:
     """The minimal surface this module needs from a control-plane
-    server object -- structurally satisfied by ``grpc.Server`` (wrapped
-    by ``daemon.rpc.build_server``).
+    server object -- implemented by ``daemon.rpc._GrpcListener``, which
+    wraps a ``grpc.Server``.
 
-    Named here, not imported from ``grpc``, so this module -- and its
-    headless unit tests -- carry no gRPC (or camera, or cv2) import at
-    all: a bare fake with just these two methods exercises every lock/
-    shutdown behaviour this ticket's ``test_lifecycle.py`` covers,
-    which is the whole point of keeping "camera enumeration, RPC
-    dispatch" outside this module's boundary (sprint architecture's
-    module table).
+    A plain base class, not ``Protocol`` -- see ``daemon.interfaces``'s
+    module docstring for the design rule -- but the base class lives
+    *here*, not in ``daemon/rpc.py``, and ``daemon/rpc.py`` imports it
+    (the reverse of ``daemon/rpc.py``'s own gRPC import), so this
+    module -- and its headless unit tests -- still carry no gRPC (or
+    camera, or cv2) import at all: a bare fake deriving from this class
+    with just these two methods exercises every lock/shutdown behaviour
+    this ticket's ``test_lifecycle.py`` covers, which is the whole point
+    of keeping "camera enumeration, RPC dispatch" outside this module's
+    boundary (sprint architecture's module table). Converting this from
+    ``Protocol`` to a base class does not add a gRPC import here: it
+    only requires that whoever builds a real listener (``daemon.rpc.
+    _GrpcListener``) derive from it, which that module already imports
+    ``daemon.lifecycle`` to do without creating a cycle (this module
+    never imports ``daemon.rpc``).
     """
 
-    def start(self) -> None: ...
+    def start(self) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not implement ControlPlaneListener.start")
 
-    def stop(self, grace: float) -> None: ...
-
-
-class _NotRunningStatus:
-    """Concrete ``DaemonStatus`` for ``DaemonLifecycle.status()`` before
-    a ``start()``, or after a ``stop()``."""
-
-    def __init__(self, *, config_dir: str, state_dir: str) -> None:
-        self._config_dir = config_dir
-        self._state_dir = state_dir
-
-    @property
-    def running(self) -> bool:
-        return False
-
-    @property
-    def cameras(self) -> Tuple:
-        return ()
-
-    @property
-    def config_dir(self) -> str:
-        return self._config_dir
-
-    @property
-    def state_dir(self) -> str:
-        return self._state_dir
+    def stop(self, grace: float) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not implement ControlPlaneListener.stop")
 
 
 class DaemonLifecycle(_DaemonLifecycleBase):
@@ -294,7 +278,9 @@ class DaemonLifecycle(_DaemonLifecycleBase):
         """
         if self._running:
             return self._status_source()
-        return _NotRunningStatus(
+        return DaemonStatus(
+            running=False,
+            cameras=(),
             config_dir=str(self._directories.config_dir),
             state_dir=str(self._directories.state_dir),
         )

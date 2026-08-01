@@ -29,7 +29,8 @@ import grpc
 import pytest
 
 from aprilcam.client.daemon_client import GrpcDaemon
-from aprilcam.client.discovery import Discovery, LocalDaemonInfo
+from aprilcam.client.discovery import Discovery
+from aprilcam.client.interfaces import DaemonInfo
 from aprilcam.config.directories import Directories
 from aprilcam.daemon.lifecycle import LOCK_FILENAME, SOCKET_FILENAME
 from aprilcam.errors import ConnectionFailed, DiscoveryFailed
@@ -115,7 +116,7 @@ def test_find_all_lists_a_held_but_unreachable_daemon(directories: Directories):
 
         results = discovery.find_all()
 
-        assert results == (LocalDaemonInfo(host="localhost", port=0, is_local=True, reachable=False),)
+        assert results == (DaemonInfo(host="localhost", port=0, is_local=True, reachable=False),)
     finally:
         _release_lock(lock_fd)
 

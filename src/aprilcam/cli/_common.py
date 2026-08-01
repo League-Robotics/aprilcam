@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Callable, Optional, Protocol, Tuple, TypeVar, runtime_checkable
+from typing import Callable, Optional, Tuple, TypeVar
 
+from aprilcam.client.interfaces import Discovery
 from aprilcam.daemon.interfaces import Daemon
 from aprilcam.errors import AprilCamError
 from aprilcam.types import CameraState, ProbeReport
@@ -41,27 +42,6 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 
 T = TypeVar("T")
-
-
-@runtime_checkable
-class _DaemonInfoLike(Protocol):
-    """The slice of ``client.interfaces.DaemonInfo`` :func:`fan_out`
-    needs -- named locally so this module carries no import of
-    ``client/discovery.py`` (a plain structural Protocol is enough for
-    what is, here, just argument shaping)."""
-
-    @property
-    def host(self) -> str: ...
-
-    @property
-    def is_local(self) -> bool: ...
-
-
-@runtime_checkable
-class _DiscoveryLike(Protocol):
-    def find_all(self) -> Tuple[_DaemonInfoLike, ...]: ...
-
-    def connect(self, host: Optional[str] = None) -> Daemon: ...
 
 
 def add_daemon_option(parser: argparse.ArgumentParser) -> None:
@@ -186,7 +166,7 @@ def print_probe_report(report: ProbeReport) -> None:
 
 
 def fan_out(
-    discovery: _DiscoveryLike,
+    discovery: Discovery,
     call: Callable[[Daemon], T],
     render: Callable[[str, T], None],
 ) -> int:

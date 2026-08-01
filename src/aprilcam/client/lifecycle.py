@@ -1,4 +1,4 @@
-"""``DaemonLifecycle`` -- the ``DaemonLifecycle`` Protocol, client side
+"""``DaemonLifecycle`` -- the ``DaemonLifecycle`` base class, client side
 (ticket 020-005): local process control by spawning and signalling
 ``python -m aprilcam.daemon`` from the *caller's* process.
 
@@ -101,9 +101,8 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional
 
 from aprilcam.client.discovery import Discovery, probe_lock_holder, probe_socket_reachable
 from aprilcam.config.directories import Directories
@@ -111,7 +110,6 @@ from aprilcam.daemon.interfaces import DaemonLifecycle as _DaemonLifecycleBase
 from aprilcam.daemon.interfaces import DaemonStatus
 from aprilcam.daemon.lifecycle import LOCK_FILENAME, SOCKET_FILENAME
 from aprilcam.errors import AlreadyRunning, AprilCamError, ConnectionFailed
-from aprilcam.types import CameraState
 
 __all__ = ["DaemonLifecycle"]
 
@@ -120,18 +118,6 @@ logger = logging.getLogger(__name__)
 _DEFAULT_START_TIMEOUT = 10.0
 _DEFAULT_STOP_TIMEOUT = 10.0
 _DEFAULT_POLL_INTERVAL = 0.05
-
-
-@dataclass(frozen=True)
-class _LocalStatus:
-    """Concrete ``daemon.interfaces.DaemonStatus`` for the local process
-    view, assembled without any RPC (not running, or running but not
-    yet/no longer answering)."""
-
-    running: bool
-    cameras: Tuple[CameraState, ...]
-    config_dir: str
-    state_dir: str
 
 
 def _holder_pid(holder: str) -> Optional[int]:
@@ -316,7 +302,7 @@ class DaemonLifecycle(_DaemonLifecycleBase):
         """
         holder = self._lock_holder(self.lock_path)
         if holder is None:
-            return _LocalStatus(
+            return DaemonStatus(
                 running=False,
                 cameras=(),
                 config_dir=str(self._directories.config_dir),
@@ -326,7 +312,7 @@ class DaemonLifecycle(_DaemonLifecycleBase):
             daemon = self._discovery.connect(None)
             return daemon.status()
         except AprilCamError:
-            return _LocalStatus(
+            return DaemonStatus(
                 running=True,
                 cameras=(),
                 config_dir=str(self._directories.config_dir),

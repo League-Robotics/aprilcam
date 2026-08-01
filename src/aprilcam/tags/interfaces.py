@@ -12,19 +12,27 @@ daemon. Generation writes images; it never reads them.
 The dictionaries are fixed system-wide (spec §4.10): AprilTag **36h11**
 and ArUco **4x4** — a family in ``TagId`` fully determines the
 dictionary, so no dictionary parameter appears here.
+
+See ``aprilcam.daemon.interfaces``'s module docstring for the interface
+design rule applied below: ``TagGenerator`` is purely behavioral, so it
+is a plain base class. No concrete implementation exists yet (out of
+this pass's scope); converting now means the sprint that adds one
+derives rather than duck-types.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol, runtime_checkable
 
 from aprilcam.types import TagFamily
 
 
-@runtime_checkable
-class TagGenerator(Protocol):
-    """Produces printable fiducial images at a known physical size."""
+class TagGenerator:
+    """Produces printable fiducial images at a known physical size.
+
+    A plain base class, not ``Protocol`` — see ``daemon.interfaces``'s
+    module docstring for the design rule.
+    """
 
     def valid_ids(self, family: TagFamily) -> range:
         """The family's dictionary range.
@@ -34,7 +42,7 @@ class TagGenerator(Protocol):
         raises ``InvalidTagId`` (``aprilcam.errors``) and writes
         nothing.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement TagGenerator.valid_ids")
 
     def generate(
         self,
@@ -59,4 +67,4 @@ class TagGenerator(Protocol):
 
         Open (UC-21): PDF output for multi-tag sheets, as v1 had.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement TagGenerator.generate")

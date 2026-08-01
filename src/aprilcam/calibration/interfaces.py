@@ -7,19 +7,31 @@ v2 they trigger it over RPC and report the result.
 The invariants below are the ones ``docs/design/specification.md`` §7
 calls sacrosanct. They cost enormous effort to get right, and every sign
 and axis in a change here is guilty until proven innocent.
+
+See ``aprilcam.daemon.interfaces``'s module docstring for the interface
+design rule applied below: ``CalibrationResult`` and ``Calibration`` are
+value-shaped, so they are frozen ``@dataclass``\\ es declaring fields
+(``Calibration.to_world``/``to_pixel`` are real behaviour over those
+fields, so they stay methods -- not properties -- with
+``NotImplementedError`` bodies until a sprint implements them).
+``Calibrator`` and ``Deskewer`` are behavioral, so they are plain base
+classes. No concrete implementation of any of these four exists yet
+(calibration is a later sprint); converting now means that sprint
+derives from a real class instead of duck-typing against a shape.
 """
 
 from __future__ import annotations
 
-from typing import Optional, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 
 from aprilcam.types import PixelPoint, WorldPoint
 
 
-@runtime_checkable
-class CalibrationResult(Protocol):
+@dataclass(frozen=True, kw_only=True)
+class CalibrationResult:
     """The outcome of a calibration attempt — explicitly good or bad.
 
     There is **no partial calibration**. Either every ArUco fiducial the
@@ -27,49 +39,36 @@ class CalibrationResult(Protocol):
     computed, or the attempt failed and nothing was stored (UC-04).
     """
 
-    @property
-    def succeeded(self) -> bool: ...
+    succeeded: bool
+    matched_ids: tuple[int, ...]
+    """ArUco ids found and matched to surveyed positions."""
+    missing_ids: tuple[int, ...]
+    """Specified ids that were **not** found.
 
-    @property
-    def matched_ids(self) -> tuple[int, ...]:
-        """ArUco ids found and matched to surveyed positions."""
-        ...
+    Non-empty means failure. Reported by id rather than as a count so
+    the developer knows which marker to uncover (UC-04.S-2) — "9 of
+    10 found" is not actionable; "ArUco 6 missing" is.
+    """
+    reprojection_error_cm: Optional[float] = None
+    """How far surveyed markers land from where they should.
 
-    @property
-    def missing_ids(self) -> tuple[int, ...]:
-        """Specified ids that were **not** found.
+    Open (UC-04): completeness is necessary but may not be
+    sufficient. A complete-but-sloppy solve is still a bad solve, so
+    there is probably also a maximum acceptable error — that
+    threshold is undecided.
+    """
+    reason: Optional[str] = None
+    """Why a failure failed, when ids alone don't say.
 
-        Non-empty means failure. Reported by id rather than as a count so
-        the developer knows which marker to uncover (UC-04.S-2) — "9 of
-        10 found" is not actionable; "ArUco 6 missing" is.
-        """
-        ...
-
-    @property
-    def reprojection_error_cm(self) -> Optional[float]:
-        """How far surveyed markers land from where they should.
-
-        Open (UC-04): completeness is necessary but may not be
-        sufficient. A complete-but-sloppy solve is still a bad solve, so
-        there is probably also a maximum acceptable error — that
-        threshold is undecided.
-        """
-        ...
-
-    @property
-    def reason(self) -> Optional[str]:
-        """Why a failure failed, when ids alone don't say.
-
-        ``missing_ids`` covers the common case; this covers the rest —
-        a complete-but-degenerate solve (collinear markers, singular
-        homography) must name its problem, not report failure with
-        every id present and leave the developer to guess.
-        """
-        ...
+    ``missing_ids`` covers the common case; this covers the rest —
+    a complete-but-degenerate solve (collinear markers, singular
+    homography) must name its problem, not report failure with
+    every id present and leave the developer to guess.
+    """
 
 
-@runtime_checkable
-class Calibration(Protocol):
+@dataclass(frozen=True, kw_only=True)
+class Calibration:
     """A camera's established mapping between its pixels and the world.
 
     **File-backed**: written by the daemon to the state directory and
@@ -77,6 +76,28 @@ class Calibration(Protocol):
     restarts (UC-01). This is why calibration survives while pushed
     config does not — the rule is file-backed vs in-memory, not
     config vs calibration.
+    """
+
+    stale: bool
+    """Whether the camera or field has moved since calibrating.
+
+    Advisory but important: stale means reported coordinates may be
+    wrong while still looking entirely reasonable. Consumers must be
+    told rather than silently served plausible garbage
+    (UC-11.S-3) — the worst failure mode in the system.
+    """
+    calibrated_at: float
+    """When this mapping was solved — provenance, not decoration.
+
+    "Ready" without "as of when, against what" is how a January
+    calibration silently serves a March field (UC-05.S-1).
+    """
+    playfield: str
+    """The playfield definition this was solved against.
+
+    The other half of provenance: replacing this definition is what
+    marks the calibration stale (UC-02), so the calibration must
+    name which definition it believes in.
     """
 
     def to_world(self, pixel: PixelPoint) -> WorldPoint:
@@ -88,46 +109,19 @@ class Calibration(Protocol):
         easiest way to break everything downstream while producing
         plausible-looking numbers.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Calibration.to_world")
 
     def to_pixel(self, world: WorldPoint) -> PixelPoint:
         """Inverse of :meth:`to_world`, for rendering."""
-        ...
-
-    @property
-    def stale(self) -> bool:
-        """Whether the camera or field has moved since calibrating.
-
-        Advisory but important: stale means reported coordinates may be
-        wrong while still looking entirely reasonable. Consumers must be
-        told rather than silently served plausible garbage
-        (UC-11.S-3) — the worst failure mode in the system.
-        """
-        ...
-
-    @property
-    def calibrated_at(self) -> float:
-        """When this mapping was solved — provenance, not decoration.
-
-        "Ready" without "as of when, against what" is how a January
-        calibration silently serves a March field (UC-05.S-1).
-        """
-        ...
-
-    @property
-    def playfield(self) -> str:
-        """The playfield definition this was solved against.
-
-        The other half of provenance: replacing this definition is what
-        marks the calibration stale (UC-02), so the calibration must
-        name which definition it believes in.
-        """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Calibration.to_pixel")
 
 
-@runtime_checkable
-class Calibrator(Protocol):
-    """Runs calibration for a camera against its playfield."""
+class Calibrator:
+    """Runs calibration for a camera against its playfield.
+
+    A plain base class, not ``Protocol`` — see ``daemon.interfaces``'s
+    module docstring for the design rule.
+    """
 
     def calibrate(self, camera_slug: str) -> CalibrationResult:
         """Detect fiducials, match to surveyed positions, solve.
@@ -139,12 +133,14 @@ class Calibrator(Protocol):
 
         A failed attempt leaves any existing good calibration untouched.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Calibrator.calibrate")
 
 
-@runtime_checkable
-class Deskewer(Protocol):
+class Deskewer:
     """Produces the top-down playfield image (UC-06, UC-19).
+
+    A plain base class, not ``Protocol`` — see ``daemon.interfaces``'s
+    module docstring for the design rule.
 
     Sizing is a **fixed bounding box**: the field rectangle is scaled
     aspect-preserved to fit (default 800×800, per-playfield override), so
@@ -160,4 +156,5 @@ class Deskewer(Protocol):
     mapping, and never again in client code.
     """
 
-    def deskew(self, frame: np.ndarray) -> np.ndarray: ...
+    def deskew(self, frame: np.ndarray) -> np.ndarray:
+        raise NotImplementedError(f"{type(self).__name__} does not implement Deskewer.deskew")

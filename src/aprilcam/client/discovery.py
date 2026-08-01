@@ -40,13 +40,13 @@ from __future__ import annotations
 import fcntl
 import logging
 import os
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 import grpc
 
 from aprilcam.client.daemon_client import GrpcDaemon
+from aprilcam.client.interfaces import DaemonInfo
 from aprilcam.client.interfaces import Discovery as _DiscoveryBase
 from aprilcam.config.directories import Directories
 from aprilcam.daemon.interfaces import Daemon
@@ -58,7 +58,6 @@ __all__ = [
     "APRILCAM_DAEMON_HOST_ENV",
     "DEFAULT_DAEMON_PORT",
     "Discovery",
-    "LocalDaemonInfo",
     "probe_lock_holder",
     "probe_socket_reachable",
 ]
@@ -139,17 +138,6 @@ def probe_socket_reachable(socket_path: Path, timeout: float = _DEFAULT_PROBE_TI
         channel.close()
 
 
-@dataclass(frozen=True)
-class LocalDaemonInfo:
-    """Concrete ``client.interfaces.DaemonInfo`` for the local-only
-    probe :meth:`Discovery.find_all` performs this sprint."""
-
-    host: str
-    port: int
-    is_local: bool
-    reachable: bool
-
-
 class Discovery(_DiscoveryBase):
     """Concrete ``client.interfaces.Discovery``. See the module
     docstring for Architecture Decision 2 and the connect precedence.
@@ -204,7 +192,7 @@ class Discovery(_DiscoveryBase):
 
     # -- client.interfaces.Discovery --------------------------------------
 
-    def find_all(self) -> Tuple[LocalDaemonInfo, ...]:
+    def find_all(self) -> Tuple[DaemonInfo, ...]:
         """See ``client.interfaces.Discovery.find_all``. See the module
         docstring for Architecture Decision 2: at most one entry, the
         local daemon, never a network probe."""
@@ -215,7 +203,7 @@ class Discovery(_DiscoveryBase):
         if holder is None:
             return ()
         reachable = self._socket_reachable(self.socket_path)
-        return (LocalDaemonInfo(host="localhost", port=0, is_local=True, reachable=reachable),)
+        return (DaemonInfo(host="localhost", port=0, is_local=True, reachable=reachable),)
 
     def connect(self, host: Optional[str] = None) -> Daemon:
         """See ``client.interfaces.Discovery.connect``. Direct connect,

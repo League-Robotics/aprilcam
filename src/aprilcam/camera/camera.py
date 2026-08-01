@@ -8,7 +8,7 @@ introspection role, but restructured around composition over a
 work uniformly across the USB/AVFoundation, v4l2-loopback, and (future)
 libcamera backends in ``camera/backends/`` (module table, sprint 020
 architecture: "each backend changes independently... this is why they
-stay separate small adapters behind the ``Camera`` Protocol").
+stay separate small adapters behind the ``Camera`` base class").
 
 **Self-heal reopen, unified across backends (a deliberate simplification
 of v1).** v1's ``daemon/camera_pipeline.py`` split self-heal in two:
@@ -37,15 +37,14 @@ through OpenCV — not a verified per-camera-model settable-key list
 deferred to the config-push ticket per the sprint architecture's Open
 Question 1). Nothing in this sprint's CLI or daemon RPC surface calls
 ``apply_config`` with a client-supplied document; it exists here so the
-``Camera`` Protocol is fully satisfied and so the ordering/atomicity
-rules in its docstring are honoured by *something* runnable, not left
-purely aspirational.
+``Camera`` base class's contract is fully satisfied and so the
+ordering/atomicity rules in its docstring are honoured by *something*
+runnable, not left purely aspirational.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -56,7 +55,7 @@ from aprilcam.config.interfaces import CameraConfig
 from aprilcam.errors import UnsupportedSetting
 from aprilcam.types import CameraState
 
-__all__ = ["Camera", "SimpleCameraConfig"]
+__all__ = ["Camera"]
 
 logger = logging.getLogger(__name__)
 
@@ -73,24 +72,6 @@ MAX_REOPENS = 10
 #: must be switched to manual before an exposure value will stick, and
 #: auto-white-balance off before WB temperature").
 _GATE_KEYS = ("auto_exposure", "auto_white_balance")
-
-
-@dataclass(frozen=True)
-class SimpleCameraConfig:
-    """Minimal concrete ``config.interfaces.CameraConfig``.
-
-    This sprint's whole config surface (``Camera.effective_config``);
-    there is no ``ConfigLoader``/on-disk round trip wired yet (the
-    config-push ticket owns that), so this dataclass only needs to
-    satisfy the read side of the Protocol.
-    """
-
-    name: str
-    playfield: Optional[str]
-    settings: Dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {"name": self.name, "playfield": self.playfield, "settings": dict(self.settings)}
 
 
 class Camera(_CameraBase):
@@ -258,14 +239,14 @@ class Camera(_CameraBase):
             "frame_width": size[0] if size else None,
             "frame_height": size[1] if size else None,
         }
-        return SimpleCameraConfig(name=self._slug, playfield=self._playfield, settings=settings)
+        return CameraConfig(name=self._slug, playfield=self._playfield, settings=settings)
 
     def apply_config(self, config: CameraConfig) -> None:
         """See ``camera.interfaces.Camera.apply_config``.
 
         Not called by any CLI command or daemon RPC this sprint (the
         config-push loop, UC-03, is out of scope) -- implemented so the
-        ``Camera`` Protocol's ordering/atomicity contract is real, not
+        ``Camera`` base class's ordering/atomicity contract is real, not
         aspirational, for whenever it is wired in.
         """
         if not self._backend.is_open:
@@ -313,7 +294,7 @@ class Camera(_CameraBase):
         """Setting names the backend itself claims to support.
 
         Delegates to the backend's own ``settable_names()`` (beyond the
-        ``CaptureBackend`` Protocol, like ``get_property``/``set_property``
+        ``CaptureBackend`` base class, like ``get_property``/``set_property``
         -- a backend with none of these, e.g. v4l2 loopback, is simply
         polled as having no settable keys at all).
         """

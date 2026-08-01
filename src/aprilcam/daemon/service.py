@@ -43,7 +43,6 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Tuple
 
 import cv2 as cv
@@ -55,11 +54,11 @@ from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import CameraIdentity, resolve_all
 from aprilcam.camera.registry import CameraRecord, CameraRegistry
 from aprilcam.config.interfaces import Directories
-from aprilcam.daemon.interfaces import Daemon
+from aprilcam.daemon.interfaces import Daemon, DaemonStatus
 from aprilcam.errors import NotCalibrated, UnknownCamera
 from aprilcam.types import CameraState, ImageFrame, ProbeReport
 
-__all__ = ["DaemonService", "SimpleDaemonStatus"]
+__all__ = ["DaemonService"]
 
 logger = logging.getLogger(__name__)
 
@@ -69,16 +68,6 @@ logger = logging.getLogger(__name__)
 VALID_ENCODINGS = ("jpeg", "png")
 
 _CV_EXTENSION = {"jpeg": ".jpg", "png": ".png"}
-
-
-@dataclass(frozen=True)
-class SimpleDaemonStatus:
-    """Concrete ``daemon.interfaces.DaemonStatus``, this sprint's shape."""
-
-    running: bool
-    cameras: Tuple[CameraState, ...]
-    config_dir: str
-    state_dir: str
 
 
 def _default_backend_factory(index: int) -> CaptureBackend:
@@ -142,7 +131,7 @@ class DaemonService(Daemon):
         self._backend_factory = backend_factory
         self._lock = threading.Lock()
 
-    # -- beyond the Protocol: CameraDiscovery's active_slugs wiring -------
+    # -- beyond the interface: CameraDiscovery's active_slugs wiring -----
 
     def active_slugs(self) -> frozenset:
         """Slugs this service currently holds a ``Camera`` open for.
@@ -201,7 +190,7 @@ class DaemonService(Daemon):
         ``deskewed=True`` fails explicitly with :class:`NotCalibrated`
         every time this sprint -- no calibration subsystem exists yet,
         so every camera is uncalibrated by construction (matches the
-        Protocol docstring's "never silently substitutes a raw frame").
+        base class docstring's "never silently substitutes a raw frame").
         An unrecognised ``encoding`` is a plain ``ValueError`` (not one
         of ``errors.py``'s named types -- it is a caller-side argument
         mistake, not a domain failure the RPC boundary needs client
@@ -235,7 +224,7 @@ class DaemonService(Daemon):
             deskewed=False,
         )
 
-    def status(self) -> SimpleDaemonStatus:
+    def status(self) -> DaemonStatus:
         """See ``daemon.interfaces.Daemon.status``.
 
         ``running`` is always ``True`` here: this method only executes
@@ -244,18 +233,18 @@ class DaemonService(Daemon):
         service view -- ``DaemonLifecycle.status()`` is the separate,
         local-only "is anything running at all" check).
         """
-        return SimpleDaemonStatus(
+        return DaemonStatus(
             running=True,
             cameras=self.list_cameras(),
             config_dir=str(self._directories.config_dir),
             state_dir=str(self._directories.state_dir),
         )
 
-    # -- beyond the Protocol: shutdown cleanup -----------------------------
+    # -- beyond the interface: shutdown cleanup ----------------------------
 
     def close(self) -> None:
         """Close every held-open camera. Not part of the ``Daemon``
-        Protocol -- ``daemon/lifecycle.py``'s ``on_stop`` hook calls
+        base class -- ``daemon/lifecycle.py``'s ``on_stop`` hook calls
         this during a clean shutdown so no backend handle outlives the
         process that opened it."""
         with self._lock:

@@ -1,12 +1,13 @@
 """Tests for ``aprilcam.daemon.lifecycle`` (ticket 020-004).
 
 Fully headless: :class:`_FakeListener` stands in for a real
-``grpc.Server`` (this module's ``ControlPlaneListener`` Protocol is
-exactly two methods for this reason), so these tests exercise the
-flock/``AlreadyRunning``/shutdown-ordering mechanics without any gRPC
-or camera import at all. Every test uses ``tmp_path``-derived lock and
-socket paths so it can never collide with a real daemon running on the
-machine executing the suite (this ticket's Testing section requirement).
+``grpc.Server`` (``daemon.lifecycle.ControlPlaneListener``, the base
+class it structurally mirrors, is exactly two methods for this reason),
+so these tests exercise the flock/``AlreadyRunning``/shutdown-ordering
+mechanics without any gRPC or camera import at all. Every test uses
+``tmp_path``-derived lock and socket paths so it can never collide with
+a real daemon running on the machine executing the suite (this ticket's
+Testing section requirement).
 """
 
 from __future__ import annotations

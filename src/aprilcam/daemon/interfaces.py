@@ -9,23 +9,31 @@ Capability belongs here only when it must: it needs camera access or
 vision, two adapters would otherwise duplicate it, or it must be computed
 once and shared.
 
-Interface design rule — base class vs. ``Protocol`` (read before
-converting or adding an interface anywhere in ``*/interfaces.py``)
+Interface design rule — every interface is connected by inheritance
+(read before converting or adding an interface anywhere in
+``*/interfaces.py``)
 --------------------------------------------------------------------
-Two different sorts of contract live in this codebase's ``interfaces.py``
-modules, and they are deliberately handled two different ways:
+This codebase declares no ``typing.Protocol``. Every interface, of
+either shape below, is a real class that its implementations *derive*
+from — a mechanical connection, so ``isinstance`` is truthful and there
+is never a base and an unrelated same-named implementation that merely
+happen to look alike (the bug this rule replaces: ``camera/
+interfaces.py`` used to declare a structural ``CameraIdentity`` while
+``camera/identity.py`` declared an entirely different dataclass of the
+same name — two classes, zero relationship). Two shapes of contract
+live in this codebase's ``interfaces.py`` modules, handled two
+different ways:
 
 * **Behavioral interfaces with real implementations** — ``Daemon``,
   ``DaemonLifecycle``, ``ImageStream``, ``TagStream`` here;
   ``CameraDiscovery``, ``CameraRegistry``, ``Camera`` in
   ``camera/interfaces.py``; ``Directories`` in ``config/interfaces.py``;
   ``Discovery`` in ``client/interfaces.py`` — are **plain base
-  classes**, not ``typing.Protocol``. Their method bodies
-  ``raise NotImplementedError(...)`` instead of ``...``.
-  Implementations *derive* from them: a real, mechanical connection, so
-  ``isinstance`` is truthful and calling an unimplemented method fails
-  loudly with a clear message at the call site instead of an
-  ``AttributeError`` you have to trace back to a missing method.
+  classes**. Their method bodies ``raise NotImplementedError(...)``
+  instead of ``...``. Implementations derive from them, so calling an
+  unimplemented method fails loudly with a clear message at the call
+  site instead of an ``AttributeError`` you have to trace back to a
+  missing method.
 
   **Do NOT use ``abc.ABC`` / ``@abstractmethod`` for these — deliberate,
   not an oversight.** The v2 rebuild is staged over many sprints, and
@@ -40,26 +48,50 @@ modules, and they are deliberately handled two different ways:
   un-instantiable abstract base class feels more rigorous: don't.
   Re-read this paragraph first.
 
-* **Value-shaped protocols satisfied by frozen dataclasses** —
-  ``DaemonStatus`` here; ``DaemonInfo`` in ``client/interfaces.py``;
-  ``CameraIdentity`` in ``camera/interfaces.py``; ``ConfigDocument``,
-  ``CameraConfig``, ``PlayfieldDefinition``, ``Feature`` in
-  ``config/interfaces.py`` — **stay ``typing.Protocol``**. Converting
-  these is a real hazard: if the base class declares ``slug`` as a
-  ``@property`` and a ``@dataclass`` subclass declares a ``slug``
-  field, the property object becomes the dataclass field's *default
-  value*, silently breaking the class. Structural typing is the right
-  tool for values, not a lesser substitute to "fix".
+* **Value-shaped interfaces** — ``DaemonStatus`` here; ``DaemonInfo`` in
+  ``client/interfaces.py``; ``CameraIdentity`` in
+  ``camera/interfaces.py``; ``ConfigDocument``, ``CameraConfig``,
+  ``PlayfieldDefinition``, ``Feature`` in ``config/interfaces.py``;
+  ``Calibration``, ``CalibrationResult`` in
+  ``calibration/interfaces.py`` — are **frozen ``@dataclass``\\ es
+  declaring fields**, not properties. Implementations either derive
+  from the interface dataclass (adding fields the base does not have)
+  or, when their shape is identical, simply *are* the interface
+  dataclass — there is no separate "implementation" class at all
+  (``camera.identity.CameraIdentity`` is an import of
+  ``camera.interfaces.CameraIdentity``, not a second definition of it;
+  where a sprint's implementation was previously a same-shaped sibling
+  dataclass — e.g. ``daemon.service.SimpleDaemonStatus`` next to this
+  module's ``DaemonStatus`` — it has been deleted in favour of
+  constructing this class directly).
 
-Before converting any Protocol here to a base class, check *every*
-concrete implementation. If even one is a ``@dataclass`` whose fields
-would shadow the Protocol's declared properties, leave it as
-``Protocol``.
+  **Why fields, never properties, on these dataclasses.** A ``@property``
+  is a data descriptor. If a base class declared ``slug`` as a
+  ``@property`` and a ``@dataclass`` subclass declared a ``slug``
+  field, the property object would become that field's *default
+  value* — and because a data descriptor takes precedence over instance
+  ``__dict__``, every read of ``instance.slug`` would call the
+  property's getter (which typically raises or returns the wrong thing)
+  instead of returning the stored field. The dataclass would be
+  silently broken, not loudly. Declaring plain fields instead sidesteps
+  the hazard entirely: a field and a subclass's same-named field simply
+  agree. Regular *methods* (not properties) are unaffected by this and
+  are used freely on these dataclasses for real computed behaviour
+  (e.g. a distance calculation over two fields) or, for a method with no
+  implementation yet, the same ``raise NotImplementedError(...)`` body
+  as the behavioral interfaces above.
+
+  All of these dataclasses use ``@dataclass(frozen=True, kw_only=True)``:
+  ``kw_only=True`` sidesteps the "non-default field cannot follow a
+  default field" ordering problem across a chain of subclasses adding
+  fields, at the cost of construction being keyword-only everywhere —
+  an accepted, codebase-wide trade.
 """
 
 from __future__ import annotations
 
-from typing import Iterator, Optional, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import Iterator, Optional
 
 from aprilcam.calibration.interfaces import Calibration, CalibrationResult
 from aprilcam.config.interfaces import CameraConfig, Feature, PlayfieldDefinition
@@ -459,33 +491,27 @@ class DaemonLifecycle:
         raise NotImplementedError(f"{type(self).__name__} does not implement DaemonLifecycle.status")
 
 
-@runtime_checkable
-class DaemonStatus(Protocol):
+@dataclass(frozen=True, kw_only=True)
+class DaemonStatus:
     """Whether the system is ready to answer questions (UC-05).
 
     The diagnostic someone reaches for when positions look wrong, so each
     negative answer must name **which** precondition failed and what to
     do about it — not merely report "not ready".
 
-    **Deliberately still a ``Protocol``** — see the module docstring's
-    design rule. Every concrete implementation
+    A frozen dataclass, directly constructed — see the module docstring's
+    design rule. There used to be three same-shaped sibling dataclasses
     (``daemon.service.SimpleDaemonStatus``, ``client.models.
-    RemoteDaemonStatus``, ``client.lifecycle._LocalStatus``) is a frozen
-    ``@dataclass`` whose fields share names with the properties declared
-    below; making this a base class would turn each of those properties
-    into the corresponding dataclass field's default value.
+    RemoteDaemonStatus``, ``client.lifecycle._LocalStatus``, plus
+    ``daemon.lifecycle._NotRunningStatus``) each merely structurally
+    matching this one; since all four had identical fields, they have
+    been deleted in favour of every call site constructing
+    :class:`DaemonStatus` itself — one class, not four that happen to
+    agree.
     """
 
-    @property
-    def running(self) -> bool: ...
-
-    @property
-    def cameras(self) -> tuple[CameraState, ...]: ...
-
-    @property
-    def config_dir(self) -> str:
-        """Resolved config root, reported so the cascade is never a mystery."""
-        ...
-
-    @property
-    def state_dir(self) -> str: ...
+    running: bool
+    cameras: tuple[CameraState, ...]
+    config_dir: str
+    """Resolved config root, reported so the cascade is never a mystery."""
+    state_dir: str

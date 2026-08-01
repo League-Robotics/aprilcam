@@ -23,14 +23,13 @@ discipline field for field.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Tuple
 
+from aprilcam.daemon.interfaces import DaemonStatus
 from aprilcam.proto import aprilcam_v2_pb2
 from aprilcam.types import CameraState, ImageFrame, ProbeReport, ProbeSkip
 
 __all__ = [
-    "RemoteDaemonStatus",
     "camera_state_from_proto",
     "camera_states_from_proto",
     "daemon_status_from_proto",
@@ -89,21 +88,12 @@ def image_frame_from_proto(msg: aprilcam_v2_pb2.GetFrameResponse) -> ImageFrame:
     )
 
 
-@dataclass(frozen=True)
-class RemoteDaemonStatus:
-    """Concrete ``daemon.interfaces.DaemonStatus``, assembled client-side
-    from a ``GetStatusResponse``. The wire-answered counterpart to
-    ``daemon.service.SimpleDaemonStatus`` -- same shape, different
-    origin (a real RPC round trip rather than a same-process call)."""
-
-    running: bool
-    cameras: Tuple[CameraState, ...]
-    config_dir: str
-    state_dir: str
-
-
-def daemon_status_from_proto(msg: aprilcam_v2_pb2.GetStatusResponse) -> RemoteDaemonStatus:
-    return RemoteDaemonStatus(
+def daemon_status_from_proto(msg: aprilcam_v2_pb2.GetStatusResponse) -> DaemonStatus:
+    """Assemble a ``daemon.interfaces.DaemonStatus`` client-side from a
+    ``GetStatusResponse`` -- the wire-answered counterpart to
+    ``daemon.service.DaemonService.status()``'s same-process
+    construction of the same class."""
+    return DaemonStatus(
         running=msg.running,
         cameras=camera_states_from_proto(msg.cameras),
         config_dir=msg.config_dir,

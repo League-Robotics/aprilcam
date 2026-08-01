@@ -30,6 +30,18 @@ The practical rule, from
 **convert, don't rewrite blindly — and don't copy blindly either.** Read v1,
 understand what it knew, then write the v2 version.
 
+# Interfaces: no `typing.Protocol`, ever
+
+Every class in a `src/aprilcam/*/interfaces.py` module is a real base class
+that implementations *derive* from — never a `typing.Protocol`. Behavioral
+interfaces are plain classes whose methods `raise NotImplementedError(...)`;
+value-shaped interfaces are frozen `@dataclass(frozen=True, kw_only=True)`
+declaring fields, never properties (a `@property` on a base class silently
+breaks a `@dataclass` subclass that declares a same-named field — it becomes
+that field's default value). See
+[`src/aprilcam/daemon/interfaces.py`](src/aprilcam/daemon/interfaces.py)'s
+module docstring for the full rule and the reasoning.
+
 # Knowledge base
 
 Hard-won operational experience — non-obvious fixes, host/environment setup, and
