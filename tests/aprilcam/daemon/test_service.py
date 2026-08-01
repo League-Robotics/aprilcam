@@ -35,6 +35,7 @@ import grpc
 import numpy as np
 import pytest
 
+from aprilcam.calibration.calibration import Calibration
 from aprilcam.camera import identity as identity_module
 from aprilcam.camera.camera import Camera
 from aprilcam.camera.discovery import CameraDiscovery
@@ -51,6 +52,7 @@ from aprilcam.daemon.service import VALID_ENCODINGS, DaemonService
 from aprilcam.errors import (
     CameraNotPresent,
     MalformedDocument,
+    NoPlayfieldLinked,
     NotCalibrated,
     UnknownCamera,
     UnknownPlayfield,
@@ -58,6 +60,11 @@ from aprilcam.errors import (
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
 from aprilcam.types import PixelPoint, TagFamily, TagFrame, TagId, TagRecord, WorldPoint
 from aprilcam.vision.detector import Detection
+from tests.aprilcam.calibration.test_calibration import (
+    MAIN_PLAYFIELD_ARUCO_POSITIONS,
+    main_playfield_definition,
+    render_playfield_frame,
+)
 from tests.aprilcam.camera.test_camera import FakeBackend
 
 
@@ -1432,3 +1439,292 @@ def test_rpc_get_camera_config_unknown_camera_maps_to_not_found(stub):
     assert excinfo.value.code() == grpc.StatusCode.NOT_FOUND
     metadata = dict(excinfo.value.trailing_metadata())
     assert metadata["aprilcam-error-type"] == "UnknownCamera"
+
+
+# ---------------------------------------------------------------------------
+# Calibration (ticket 022-003) -- DaemonService.calibrate/get_calibration,
+# calibration.json persistence/reload, RPC round trips.
+#
+# Real ArUco detection + a real homography solve throughout: every frame
+# below is rendered by ``tests/aprilcam/calibration/test_calibration.py``'s
+# ``render_playfield_frame`` (real cv2.aruco markers at known pixel
+# positions), read back through a ``FakeBackend``-driven ``Camera`` exactly
+# the way a real one would be -- the only thing "fake" here is the camera
+# hardware, never the vision or the geometry.
+# ---------------------------------------------------------------------------
+
+
+def _open_camera_with_frames(
+    registry: CameraRegistry,
+    frames: List[np.ndarray],
+    *,
+    hardware_key: str = "hw:cal",
+    device_name: str = "Cal Camera",
+):
+    """Like ``held_camera`` above, but with caller-chosen frames (real
+    rendered ArUco images, for calibration) instead of blank ones --
+    and returns the ``FakeBackend`` too, so a test can queue additional
+    frames for a second ``calibrate()`` call (e.g. the failed-retry
+    tests) without reaching into ``Camera``'s private internals."""
+    identity = _identity(hardware_key, device_name)
+    slug = registry.resolve(identity)
+    number = registry.get(slug).number
+    backend = FakeBackend(read_queue=list(frames))
+    cam = Camera(slug, backend, number=number)
+    cam.open()
+    return identity, slug, cam, backend
+
+
+def _service_with_camera(directories, registry, identity, slug, cam) -> DaemonService:
+    cameras: Dict[str, Camera] = {slug: cam}
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(cameras.keys()),
+        identity_source=lambda: {0: identity},
+        backend_factory=lambda index: FakeBackend(),
+    )
+    return DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        cameras=cameras,
+        identity_source=lambda: {0: identity},
+    )
+
+
+def _calibration_path(directories: Directories, slug: str) -> Path:
+    return directories.state_dir / "cameras" / slug / "calibration.json"
+
+
+def test_calibrate_end_to_end_succeeds_and_persists_calibration_json(directories, registry):
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+
+    result = service.calibrate(slug)
+
+    assert result.succeeded is True
+    assert result.matched_ids == tuple(range(1, 11))
+    assert result.missing_ids == ()
+
+    calibration = service.get_calibration(slug)
+    assert calibration is not None
+    assert calibration.playfield == "main-playfield"
+    assert calibration.matched_ids == tuple(range(1, 11))
+
+    path = _calibration_path(directories, slug)
+    assert path.exists()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["playfield"] == "main-playfield"
+    assert data["matched_ids"] == list(range(1, 11))
+    assert len(data["homography"]) == 3
+    assert all(len(row) == 3 for row in data["homography"])
+
+
+def test_calibrate_failure_does_not_write_calibration_json(directories, registry):
+    """UC-04.S-2: one id occluded -> explicit failure, no calibration
+    stored on disk or in memory."""
+    positions = dict(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    del positions[6]
+    frame = render_playfield_frame(positions)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+
+    result = service.calibrate(slug)
+
+    assert result.succeeded is False
+    assert result.missing_ids == (6,)
+    assert service.get_calibration(slug) is None
+    assert not _calibration_path(directories, slug).exists()
+
+
+def test_a_failed_retry_leaves_calibration_json_byte_identical(directories, registry):
+    """The Definition of Done's own acceptance criterion: a failed
+    retry never overwrites or clears an existing good
+    ``calibration.json`` -- checked at the byte level, not merely "some
+    calibration still exists"."""
+    good_frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, backend = _open_camera_with_frames(registry, [good_frame])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+
+    first_result = service.calibrate(slug)
+    assert first_result.succeeded is True
+    path = _calibration_path(directories, slug)
+    before = path.read_bytes()
+
+    partial_positions = dict(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    del partial_positions[3]
+    backend._queue.append(render_playfield_frame(partial_positions))
+
+    retry_result = service.calibrate(slug)
+    assert retry_result.succeeded is False
+    assert retry_result.missing_ids == (3,)
+
+    after = path.read_bytes()
+    assert after == before
+    # The in-memory cache is untouched too, not just the file.
+    assert service.get_calibration(slug) == Calibration.from_dict(json.loads(before))
+
+
+def test_calibrate_with_no_playfield_link_raises_before_touching_camera_backend(
+    directories, registry
+):
+    """UC-15.S-2: a precondition failure, not a calibration failure --
+    proven with an exploding ``backend_factory`` so any attempt to open
+    a camera backend fails the test loudly rather than being merely
+    unasserted."""
+
+    def exploding_backend_factory(index: int):
+        raise AssertionError("must not open a camera backend when NoPlayfieldLinked applies")
+
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(),
+        identity_source=lambda: {},
+        backend_factory=exploding_backend_factory,
+    )
+    service = DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        backend_factory=exploding_backend_factory,
+    )
+
+    with pytest.raises(NoPlayfieldLinked) as excinfo:
+        service.calibrate("never-configured-camera")
+
+    assert excinfo.value.camera == "never-configured-camera"
+
+
+def test_calibrate_camera_linked_but_playfield_never_pushed_raises_no_playfield_linked(
+    directories, registry, held_camera
+):
+    """A camera config names a playfield the daemon does not currently
+    hold -- the same precondition class as no link at all."""
+    _, slug, cam = held_camera
+    cameras: Dict[str, Camera] = {slug: cam}
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(cameras.keys()),
+        identity_source=lambda: {},
+        backend_factory=lambda index: FakeBackend(),
+    )
+    service = DaemonService(
+        registry=registry, discovery=discovery, directories=directories, cameras=cameras
+    )
+    service.set_camera_config(CameraConfig(name=slug, playfield="ghost-field", settings={}))
+
+    with pytest.raises(NoPlayfieldLinked):
+        service.calibrate(slug)
+
+
+def test_fresh_daemon_service_reloads_calibration_json_after_a_simulated_restart(
+    directories, registry
+):
+    """UC-01: calibration is file-backed and survives a restart, unlike
+    pushed playfields/camera configs (in-memory, ephemeral)."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    service.calibrate(slug)
+    original = service.get_calibration(slug)
+    assert original is not None
+
+    fresh_discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(),
+        identity_source=lambda: {},
+        backend_factory=lambda index: FakeBackend(),
+    )
+    restarted = DaemonService(registry=registry, discovery=fresh_discovery, directories=directories)
+
+    reloaded = restarted.get_calibration(slug)
+
+    assert reloaded == original  # provenance (calibrated_at, playfield) and homography, byte for byte
+    assert reloaded.calibrated_at == original.calibrated_at
+    assert reloaded.playfield == "main-playfield"
+    # UC-02's ephemeral rule still holds for everything else -- only
+    # calibration is file-backed.
+    assert restarted.list_playfields() == ()
+    with pytest.raises(UnknownCamera):
+        restarted.get_camera_config(slug)
+
+
+def test_fresh_daemon_service_with_no_calibration_file_reports_none(directories, registry):
+    discovery = CameraDiscovery(
+        registry, active_slugs=lambda: frozenset(), identity_source=lambda: {}, backend_factory=lambda index: FakeBackend()
+    )
+    service = DaemonService(registry=registry, discovery=discovery, directories=directories)
+
+    assert service.get_calibration("never-calibrated-camera") is None
+
+
+# ---------------------------------------------------------------------------
+# Calibration -- RPC round trips (ticket 022-003)
+# ---------------------------------------------------------------------------
+
+
+def test_rpc_calibrate_and_get_calibration_round_trip(directories, registry):
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+
+    with _bind_stub(service) as stub:
+        calibrate_response = stub.Calibrate(aprilcam_v2_pb2.CalibrateRequest(camera=slug))
+        assert calibrate_response.result.succeeded is True
+        assert list(calibrate_response.result.matched_ids) == list(range(1, 11))
+        assert calibrate_response.result.HasField("reprojection_error_cm")
+
+        get_response = stub.GetCalibration(aprilcam_v2_pb2.GetCalibrationRequest(camera=slug))
+
+    assert get_response.HasField("calibration")
+    assert get_response.calibration.playfield == "main-playfield"
+    assert get_response.calibration.stale is False
+    assert len(get_response.calibration.homography) == 9
+    assert list(get_response.calibration.matched_ids) == list(range(1, 11))
+
+
+def test_rpc_calibrate_failure_names_missing_ids_exactly(directories, registry):
+    positions = dict(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    del positions[6]
+    frame = render_playfield_frame(positions)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+
+    with _bind_stub(service) as stub:
+        response = stub.Calibrate(aprilcam_v2_pb2.CalibrateRequest(camera=slug))
+
+    assert response.result.succeeded is False
+    assert list(response.result.missing_ids) == [6]
+
+
+def test_rpc_get_calibration_absent_when_never_calibrated(stub, held_camera):
+    _, slug, _ = held_camera
+
+    response = stub.GetCalibration(aprilcam_v2_pb2.GetCalibrationRequest(camera=slug))
+
+    assert response.HasField("calibration") is False
+
+
+def test_rpc_calibrate_no_playfield_linked_maps_to_failed_precondition(stub, held_camera):
+    _, slug, _ = held_camera  # never linked to a playfield
+
+    with pytest.raises(grpc.RpcError) as excinfo:
+        stub.Calibrate(aprilcam_v2_pb2.CalibrateRequest(camera=slug))
+
+    assert excinfo.value.code() == grpc.StatusCode.FAILED_PRECONDITION
+    metadata = dict(excinfo.value.trailing_metadata())
+    assert metadata["aprilcam-error-type"] == "NoPlayfieldLinked"
+    assert metadata["aprilcam-camera"] == slug

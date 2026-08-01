@@ -70,6 +70,7 @@ from aprilcam.cli._common import (
     print_probe_report,
     report_error,
 )
+from aprilcam.cli import calibrate as calibrate_cli
 from aprilcam.client.discovery import Discovery
 from aprilcam.config.interfaces import ConfigLoader
 from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
@@ -420,3 +421,8 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     add_daemon_option(p_view)
     add_all_option(p_view, note=" (refused -- viewing is single-target)")
     p_view.set_defaults(func=cmd_view)
+
+    # ``calibrate`` lives in its own module (cli/calibrate.py, ticket
+    # 022-003) but is grouped under this ``camera`` subparser tree --
+    # see that module's docstring for why.
+    calibrate_cli.add_subparser(sub)
