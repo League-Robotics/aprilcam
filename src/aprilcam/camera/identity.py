@@ -321,14 +321,32 @@ class _LibcameraEntry:
 def _probe_libcamera() -> Dict[int, _LibcameraEntry]:
     """Enumerate libcamera devices, keyed by position/index.
 
-    Always empty for now: no v2 backend reads ``/sys`` or shells out to
-    the ``cam`` tool yet (ticket 003's ``camera/backends`` work, per the
-    sprint architecture's module table). Kept as a real call site — not
-    a comment — so wiring the real probe later is a one-function change
-    here; ``resolve_identity``'s ``libcamera_entries`` injection point is
-    already exercised by ``test_identity.py``'s fixtures.
+    Ticket 020-003 wired this to
+    ``camera.backends.libcamera.list_loopback_cameras()`` — the
+    ``/sys``-based, subprocess-free enumeration of labelled
+    v4l2loopback devices a Pi's out-of-process ``libcamerasrc`` bridge
+    creates (see that module's docstring for what was and was not
+    ported this ticket: enumeration only, no ``cam``-tool "gst mode",
+    no capture backend yet). This is a safe, no-behaviour-change swap
+    on every machine that has no ``/sys/class/video4linux`` tree —
+    this Mac included, where ``list_loopback_cameras()`` degrades to
+    ``[]`` via a plain ``glob`` miss, same as the empty-dict stub this
+    replaced. Never raises: any unexpected failure degrades to empty,
+    matching this module's "every source function degrades on failure"
+    rule.
     """
-    return {}
+    try:
+        from aprilcam.camera.backends.libcamera import list_loopback_cameras  # noqa: PLC0415
+    except Exception:
+        return {}
+    try:
+        devices = list_loopback_cameras()
+    except Exception:
+        return {}
+    return {
+        d.position: _LibcameraEntry(camera_id=d.camera_id, name=d.model)
+        for d in devices
+    }
 
 
 # ---------------------------------------------------------------------------
