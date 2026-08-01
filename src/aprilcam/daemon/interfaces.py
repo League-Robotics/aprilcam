@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Iterator, Optional, Protocol, runtime_checkable
 
 from aprilcam.calibration.interfaces import Calibration, CalibrationResult
-from aprilcam.config.interfaces import CameraConfig, PlayfieldDefinition
+from aprilcam.config.interfaces import CameraConfig, Feature, PlayfieldDefinition
 from aprilcam.playfield.interfaces import Playfield
 from aprilcam.types import (
     Annotation,
@@ -23,10 +23,36 @@ from aprilcam.types import (
     CameraState,
     ImageFrame,
     MountParameters,
+    ProbeReport,
     TagFrame,
     TagId,
     TagRecord,
 )
+
+
+@runtime_checkable
+class ImageStream(Protocol):
+    """A subscription to frames. Closing it unsubscribes.
+
+    Defined here, next to the method that returns it: unsubscription is
+    a **daemon-visible event**, not client bookkeeping. When the last
+    subscriber leaves, the daemon drops that product to idle — so
+    holding a stream open costs the daemon real work and releasing it
+    matters.
+    """
+
+    def __iter__(self) -> Iterator[ImageFrame]: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class TagStream(Protocol):
+    """A subscription to tag detections. Closing it unsubscribes."""
+
+    def __iter__(self) -> Iterator[TagFrame]: ...
+
+    def close(self) -> None: ...
 
 
 @runtime_checkable
@@ -54,8 +80,14 @@ class Daemon(Protocol):
         """
         ...
 
-    def probe_cameras(self) -> tuple[CameraState, ...]:
-        """Force a deep re-interrogation of all backends (UC-25)."""
+    def probe_cameras(self) -> ProbeReport:
+        """Force a deep re-interrogation of all backends (UC-25).
+
+        Returns a report, not a bare list: a backend skipped to protect
+        live subscribers, or a wedged subprocess timed out into a
+        partial result, is **named in the report** rather than presented
+        as a complete probe (UC-25.S-7).
+        """
         ...
 
     def get_camera_config(self, camera: str) -> CameraConfig: ...
@@ -66,6 +98,15 @@ class Daemon(Protocol):
         Targeted by the document's own ``name`` — the caller does not
         name the camera separately (UC-23). Unsupported settings fail the
         **entire** push (UC-03).
+        """
+        ...
+
+    def reset_camera_config(self, camera: str) -> None:
+        """Re-apply the stored on-disk config, discarding live overrides.
+
+        The RPC face of ``Camera.reset()`` — spec §4.1's
+        ``ResetCameraConfig``. How an experiment ends without a daemon
+        restart: the disk document wins again, immediately.
         """
         ...
 
@@ -84,6 +125,17 @@ class Daemon(Protocol):
         """
         ...
 
+    def find_feature(self, playfield: str, query: str) -> tuple[Feature, ...]:
+        """Where is the blue dot (UC-08) — spec §4.1's ``WhereIs``.
+
+        The RPC face of ``FeatureQuery.find``: fuzzy match by name,
+        colour, kind, or cardinal, answered from the **surveyed
+        definition, not vision** — no camera or calibration required.
+        Ambiguity returns every match, never an arbitrary pick
+        (UC-08.S-2); no match returns empty (UC-08.S-3).
+        """
+        ...
+
     # -- calibration -----------------------------------------------------
 
     def calibrate(self, camera: str) -> CalibrationResult:
@@ -97,12 +149,21 @@ class Daemon(Protocol):
 
     # -- perception ------------------------------------------------------
 
-    def get_frame(self, camera: str, *, deskewed: bool = False) -> ImageFrame:
+    def get_frame(
+        self, camera: str, *, deskewed: bool = False, encoding: str = "jpeg"
+    ) -> ImageFrame:
         """One frame from a named camera (UC-06).
 
         **Camera-addressed, always** — there is no default camera and no
         playfield-resolves-the-camera shortcut, even when a playfield has
         exactly one camera.
+
+        ``encoding`` selects the delivered format: ``"jpeg"`` (default)
+        for ordinary capture, ``"png"`` for **lossless** frames — test
+        fixtures (UC-17.S-1) must not carry JPEG artefacts into
+        detection tests. The returned ``ImageFrame.encoding`` reports
+        what was actually produced. One-shot capture only; streams are
+        JPEG, where per-frame loss is the accepted trade.
 
         A deskewed request on an uncalibrated camera **fails explicitly**
         and never silently substitutes a raw frame. A raw frame that
@@ -151,7 +212,7 @@ class Daemon(Protocol):
 
     def stream_images(
         self, camera: str, *, deskewed: bool = False
-    ) -> Iterator[ImageFrame]:
+    ) -> ImageStream:
         """Subscribe to frames until the consumer stops (UC-07).
 
         Computed **once and shared**: two subscribers to the same
@@ -164,14 +225,16 @@ class Daemon(Protocol):
         """
         ...
 
-    def stream_tags(self, camera: str) -> Iterator[TagFrame]:
+    def stream_tags(self, camera: str) -> TagStream:
         """Subscribe to tag detections (UC-11).
 
         Change-driven and rate-capped, with a **heartbeat** so a quiet
         field stays distinguishable from a dead stream.
 
         If calibration goes stale mid-stream the subscriber is told
-        rather than silently receiving plausible wrong positions.
+        rather than silently receiving plausible wrong positions —
+        in-band, via ``TagFrame.calibration_stale`` (UC-11.S-3): a
+        stream has no side channel, so the flag rides in the payload.
         """
         ...
 
@@ -193,6 +256,15 @@ class Daemon(Protocol):
         ...
 
     def list_tag_parameters(self) -> dict[TagId, MountParameters]: ...
+
+    def unregister_tag(self, tag: TagId) -> None:
+        """Forget a mount registration; the tag reports as itself again.
+
+        Absent key is a no-op. Without this, a session's registry only
+        grows — a tag moved to a different robot mid-session would keep
+        the old robot's mount until a daemon restart.
+        """
+        ...
 
     # -- annotations -----------------------------------------------------
     #
@@ -259,6 +331,18 @@ class Daemon(Protocol):
         ...
 
     # -- self-description ------------------------------------------------
+
+    def status(self) -> "DaemonStatus":
+        """Readiness, queryable by **any** client, remote included
+        (UC-05).
+
+        ``DaemonLifecycle.status()`` is the local process view — is
+        something running on *this* machine. This is the service view:
+        a robot program on another host asking "can I trust positions
+        yet" needs it over the wire, and each negative answer names
+        which precondition failed (UC-05.S-2).
+        """
+        ...
 
     def get_guide(self, name: Optional[str] = None) -> str:
         """The packaged instructions (UC-27).

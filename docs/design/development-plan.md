@@ -20,6 +20,39 @@ produces a component with its own independent test suite. This is a
 brownfield rebuild done **in place, in a worktree** — every stage says
 what is **reused** from v1, what is **rewritten**, and what is **new**.
 
+> **Build-order revision (2026-07-31, stakeholder): vertical slices.**
+> Delivery order is no longer stage-by-stage bottom-up. The daemon and
+> the CLI are built **together**, sprint by sprint — every sprint that
+> gives the daemon a capability also delivers that capability's CLI
+> surface, so each sprint ends with something a person can run (and the
+> CLI/Python parity rule is exercised from day one instead of at Stage
+> 11). The **MCP server comes after** the daemon + CLI basics; the
+> viewer stays last. The stages below remain the catalog of *what* —
+> reuse/rewrite decisions, tests, exit criteria — and sprints draw from
+> them; per-stage test detail still applies to whichever slice of a
+> stage a sprint takes.
+>
+> Sprint sequence (first sprint firm, rest indicative):
+>
+> 1. **Sprint 020 — Daemon bring-up + basic camera CLI.** A daemon that
+>    starts, enumerates, and serves raw frames, driven from the shell:
+>    lifecycle (`daemon start|stop|status`, flock singleton, control
+>    plane), camera identity/registry/discovery, raw capture, and the
+>    minimum client library under `aprilcam daemon …`, `camera list`,
+>    `camera probe`, `camera image`. Draws on stages 0, 1 (targeted
+>    demolition), 2, 3 (capture + effective-config parts), and 8
+>    (lifecycle slice). Use cases: UC-14, UC-17, UC-25 (probe/hotplug
+>    basics), UC-13 and UC-01 in their local-lifecycle parts.
+> 2. Detection + tag queries with `playfield tags` (stages 4–5 + slice
+>    of 8).
+> 3. Calibration, deskew, playfield definitions with `camera calibrate`
+>    / `playfield image` (stages 6–7, 9 slice).
+> 4. Config service + annotations (`camera/playfield config`,
+>    `playfield annotations`; stage 9 + annotation store).
+> 5. **MCP server** over the now-proven daemon + client (stage 11's MCP
+>    half).
+> 6. Viewer + restructure/cleanup (stages 10 renderer, 12).
+
 Read this before anything else — it is the operating philosophy of the
 whole rebuild:
 

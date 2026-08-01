@@ -76,6 +76,18 @@ When a command does fan out, **every row is labelled with its daemon**,
 and one unreachable daemon does not fail the whole command — it is
 reported as unreachable alongside the results that did come back.
 
+### Playfield commands resolve their camera
+
+`playfield view`, `playfield image`, and `playfield tags` name no
+camera, but the daemon API is **camera-addressed, always** — the UC-06
+decision stands, with no daemon-side shortcut. The resolution is the
+**CLI's, client-side** (resolved 2026-07-31): it reads the camera→
+playfield links from `CameraState`; exactly one linked, present camera
+→ use it; zero or several → error naming the linked cameras, with
+`--camera` to disambiguate. The implicitness lives in the shell, where
+a human can see and correct it — never in the daemon, where it would
+become a wrong answer that looks right.
+
 ---
 
 ### UC-13 — Discover and manage daemons

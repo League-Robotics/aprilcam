@@ -128,11 +128,19 @@ class TagRecord:
 
 @dataclass(frozen=True)
 class TagFrame:
-    """Every tag detected in a single frame, with when it was captured."""
+    """Every tag detected in a single frame, with when it was captured.
+
+    ``calibration_stale`` is the in-band staleness carrier (UC-11.S-3,
+    UC-18): when calibration goes stale mid-stream, the subscriber is
+    told *in the payload* rather than silently receiving plausible
+    wrong positions. Streams have no side channel — if the flag is not
+    in the frame, the promise cannot be kept.
+    """
 
     tags: tuple[TagRecord, ...]
     timestamp: float
     frame_index: int
+    calibration_stale: bool = False
 
 
 @dataclass(frozen=True)
@@ -257,6 +265,19 @@ class ImageFrame:
     which is why the daemon publishes world coordinates plus metadata
     rather than pre-baked pixel positions.
 
+    **The anchor invariant** (what makes the conversion exact): a
+    deskewed frame spans *exactly* the field rectangle — image ``(0,
+    0)`` is the field's north-west corner, world ``(-width/2,
+    +height/2)`` with ``world_extent = (width, height)``; north is up,
+    east is right, and world→pixel flips y exactly once, inside this
+    mapping. Scale plus this anchor is the whole conversion; without
+    the anchor stated, ``px_per_cm`` alone would leave the origin to
+    be guessed.
+
+    ``frame_dark`` carries the darkness advisory in-band, tied to
+    *this* frame — the ``CameraState`` flag says the camera has been
+    producing dark frames; this says the frame in hand is one of them.
+
     **Frames carry tags.** When detection is running on the source
     camera, ``tags`` is the :class:`TagFrame` from the detection pass
     nearest this frame's capture (normally the same frame) — so one
@@ -290,6 +311,8 @@ class ImageFrame:
     world_extent: Optional[tuple[float, float]] = None
     tags: Optional[TagFrame] = None
     annotations: Optional[AnnotationSet] = None
+    calibration_stale: bool = False
+    frame_dark: bool = False
 
 
 @dataclass(frozen=True)
@@ -339,3 +362,34 @@ class CameraState:
     calibrated: bool
     calibration_stale: bool = False
     frame_dark: bool = False
+    number: Optional[int] = None
+    """Stable registry enumeration (UC-14.S-1).
+
+    Assigned once by the registry and **never reshuffled** when cameras
+    come and go — the number a developer scribbles on a sticky note must
+    still mean the same camera next week. ``None`` only for a camera not
+    yet registered.
+    """
+
+
+@dataclass(frozen=True)
+class ProbeSkip:
+    """One backend a probe could not interrogate, and why (UC-25.S-7)."""
+
+    backend: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class ProbeReport:
+    """What a probe found, and what it honestly could not check.
+
+    ``CameraDiscovery.probe``'s contract — skip a backend rather than
+    disturb live subscribers, time out a wedged subprocess into a
+    partial result — is only keepable if the result can *say so*. A
+    bare camera list would present a partial probe as a complete one
+    (UC-25.S-7). ``skipped`` empty means the probe really was complete.
+    """
+
+    cameras: tuple[CameraState, ...]
+    skipped: tuple[ProbeSkip, ...] = ()

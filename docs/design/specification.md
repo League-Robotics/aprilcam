@@ -140,7 +140,7 @@ metadata (principle 5).
 
 - **gRPC control plane** (unix socket + TCP 5280, mDNS-advertised):
   camera lifecycle, one-shot queries (`CaptureFrame`, `GetTags`,
-  `GetObjects`, `WhereIs`), stream endpoint allocation, calibration
+  `GetObjects`, `WhereIs`, `GetStatus`), stream endpoint allocation, calibration
   trigger *(new in v2 — see 4.4)*, mobile-tag registry, the annotation
   store *(new in v2 — decision 8: `PutAnnotation`, `RemoveAnnotation`,
   `ReplaceLayer`, `ClearAnnotations`, `GetAnnotations`, all

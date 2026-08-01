@@ -146,6 +146,27 @@ class Feature(Protocol):
 
 
 @runtime_checkable
+class ConfigLoader(Protocol):
+    """Turns files back into documents — the inverse of ``to_dict``.
+
+    This is the client-side half of the push path (UC-23): the CLI and
+    Python programs read a document from disk *here*, then hand it to
+    ``Daemon.set_camera_config`` / ``set_playfield``. Validation happens
+    **before any RPC**: unparseable JSON or a document with no ``name``
+    raises ``MalformedDocument`` (``aprilcam.errors``) client-side — the
+    daemon never sees a file the loader would reject (UC-23.S-4).
+
+    The round-trip contract binds both directions:
+    ``load(x.to_dict()) == x``. A dump that does not re-load verbatim is
+    a bug in whichever side broke the symmetry (UC-24.S-1).
+    """
+
+    def load_camera_config(self, path: Path) -> CameraConfig: ...
+
+    def load_playfield(self, path: Path) -> PlayfieldDefinition: ...
+
+
+@runtime_checkable
 class Directories(Protocol):
     """Where files live (``docs/design/configuration.md``).
 

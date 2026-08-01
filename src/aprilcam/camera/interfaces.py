@@ -15,7 +15,7 @@ from typing import Optional, Protocol, runtime_checkable
 import numpy as np
 
 from aprilcam.config.interfaces import CameraConfig
-from aprilcam.types import CameraState
+from aprilcam.types import CameraState, ProbeReport
 
 
 @runtime_checkable
@@ -94,16 +94,19 @@ class CameraDiscovery(Protocol):
     **invalidates cached knowledge**.
     """
 
-    def probe(self) -> tuple[CameraState, ...]:
+    def probe(self) -> ProbeReport:
         """Re-interrogate all backends and refresh the camera list.
 
         Must not disturb live subscribers: re-enumeration cannot mean
         dropping streams (UC-25.S-7). If a backend cannot be interrogated
-        without disturbing an open camera, skip it and say so.
+        without disturbing an open camera, skip it and say so — "say so"
+        is the report's ``skipped`` entries, which is why this returns a
+        :class:`ProbeReport` and not a bare camera list.
 
         Must not hang the daemon either — a wedged ``cam`` subprocess
         times out into a partial result rather than blocking a process
-        that is serving live streams.
+        that is serving live streams; the timed-out backend likewise
+        lands in ``skipped``.
         """
         ...
 

@@ -26,6 +26,15 @@ documents state the intent.
 Planned, not yet written: client library (Python module surface), viewer
 internals, MCP tool surface in detail.
 
+**Interface sufficiency traces** —
+[daemon-interface-trace.md](daemon-interface-trace.md) ·
+[cli-interface-trace.md](cli-interface-trace.md): per-use-case
+verification that the interface skeletons in `src/aprilcam/` can
+actually execute these use cases, tracing from each entry point down
+through objects and methods. Deficits found on 2026-07-31 were resolved
+directly in the skeletons the same day; the traces record both the
+finding and the resolution.
+
 **Numbering is global, not per-file.** UC-13 continues after UC-12
 regardless of which subsystem file it lands in, so a reference like
 UC-09.S-3 is unambiguous across the whole set.

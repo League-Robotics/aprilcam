@@ -56,6 +56,17 @@ class CalibrationResult(Protocol):
         """
         ...
 
+    @property
+    def reason(self) -> Optional[str]:
+        """Why a failure failed, when ids alone don't say.
+
+        ``missing_ids`` covers the common case; this covers the rest —
+        a complete-but-degenerate solve (collinear markers, singular
+        homography) must name its problem, not report failure with
+        every id present and leave the developer to guess.
+        """
+        ...
+
 
 @runtime_checkable
 class Calibration(Protocol):
@@ -91,6 +102,25 @@ class Calibration(Protocol):
         wrong while still looking entirely reasonable. Consumers must be
         told rather than silently served plausible garbage
         (UC-11.S-3) — the worst failure mode in the system.
+        """
+        ...
+
+    @property
+    def calibrated_at(self) -> float:
+        """When this mapping was solved — provenance, not decoration.
+
+        "Ready" without "as of when, against what" is how a January
+        calibration silently serves a March field (UC-05.S-1).
+        """
+        ...
+
+    @property
+    def playfield(self) -> str:
+        """The playfield definition this was solved against.
+
+        The other half of provenance: replacing this definition is what
+        marks the calibration stale (UC-02), so the calibration must
+        name which definition it believes in.
         """
         ...
 

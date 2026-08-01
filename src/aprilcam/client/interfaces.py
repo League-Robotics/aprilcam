@@ -14,10 +14,10 @@ tests enforce rather than something packaging enforces for us.
 
 from __future__ import annotations
 
-from typing import Iterator, Optional, Protocol, runtime_checkable
+from typing import Optional, Protocol, runtime_checkable
 
 from aprilcam.daemon.interfaces import Daemon
-from aprilcam.types import Annotation, ImageFrame, TagFrame
+from aprilcam.types import Annotation, ImageFrame
 
 
 @runtime_checkable
@@ -70,27 +70,28 @@ class Discovery(Protocol):
         ...
 
 
-@runtime_checkable
-class ImageStream(Protocol):
-    """A subscription to frames. Closing it unsubscribes.
+# ImageStream and TagStream live in aprilcam.daemon.interfaces, next to
+# the Daemon methods that return them — unsubscription is a
+# daemon-visible event, not client bookkeeping.
 
-    When the last subscriber leaves, the daemon drops to idle capture —
-    so holding a stream open costs the daemon real work and releasing it
-    matters.
+
+@runtime_checkable
+class Guides(Protocol):
+    """The packaged instructions, readable with **no daemon** (UC-27).
+
+    UC-27.S-1 is explicit: an agent's first question may be "what is
+    this and how do I use it?", asked before any daemon exists — so the
+    guides ship with the software and this accessor needs nothing but
+    the package. ``Daemon.get_guide`` serves the same texts over the
+    wire (open there: whether a daemon augments them with live facts).
     """
 
-    def __iter__(self) -> Iterator[ImageFrame]: ...
+    def get(self, name: Optional[str] = None) -> str:
+        """A guide's text. Unknown name raises ``UnknownGuide``,
+        naming the guides that exist (UC-27.S-3)."""
+        ...
 
-    def close(self) -> None: ...
-
-
-@runtime_checkable
-class TagStream(Protocol):
-    """A subscription to tag detections. Closing it unsubscribes."""
-
-    def __iter__(self) -> Iterator[TagFrame]: ...
-
-    def close(self) -> None: ...
+    def available(self) -> tuple[str, ...]: ...
 
 
 @runtime_checkable
