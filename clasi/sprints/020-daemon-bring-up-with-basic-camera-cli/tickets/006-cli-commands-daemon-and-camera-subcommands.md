@@ -1,9 +1,15 @@
 ---
 id: '006'
 title: 'CLI commands: daemon and camera subcommands'
-status: open
-use-cases: [UC-01, UC-13, UC-14, UC-17, UC-25]
-depends-on: ['005']
+status: done
+use-cases:
+- UC-01
+- UC-13
+- UC-14
+- UC-17
+- UC-25
+depends-on:
+- '005'
 github-issue: ''
 issue: daemon-bring-up-with-basic-camera-cli.md
 completes_issue: true
@@ -55,33 +61,33 @@ stub established.
 
 ## Acceptance Criteria
 
-- [ ] UC-13.S-3 — `daemon status` (not running) → `daemon start` →
+- [x] UC-13.S-3 — `daemon status` (not running) → `daemon start` →
       `daemon status` (running, camera count) → `daemon stop` round
       trips correctly on this Mac.
-- [ ] UC-13.S-4 — `aprilcam daemon start -d pi-field.local` (or any
+- [x] UC-13.S-4 — `aprilcam daemon start -d pi-field.local` (or any
       non-local host) refuses with a message pointing at SSH; nothing
       is started.
-- [ ] UC-14.S-1 — `aprilcam camera list` on this Mac with both cameras
+- [x] UC-14.S-1 — `aprilcam camera list` on this Mac with both cameras
       attached lists `arducam-ov9782-usb-camera` and `hd-usb-camera`
       with their enumeration numbers.
-- [ ] UC-14.S-3 / UC-14.S-4 — `camera list --all` fans out with
+- [x] UC-14.S-3 / UC-14.S-4 — `camera list --all` fans out with
       per-row daemon labels; one unreachable daemon during fan-out is
       reported without failing the rows that did answer (test this with
       a second local daemon instance bound to an alternate socket
       path, standing in for a second host, plus one named `-d` target
       that is deliberately unreachable).
-- [ ] UC-25.S-1 / UC-25.S-2 — `camera probe` against both real cameras
+- [x] UC-25.S-1 / UC-25.S-2 — `camera probe` against both real cameras
       reports each with its derived name and settings, independently.
-- [ ] UC-17.S-1 — `camera image arducam-ov9782-usb-camera -o frame.png
+- [x] UC-17.S-1 — `camera image arducam-ov9782-usb-camera -o frame.png
       --encoding png` writes a lossless PNG.
-- [ ] UC-17.S-2 — default invocation streams raw bytes to stdout,
+- [x] UC-17.S-2 — default invocation streams raw bytes to stdout,
       pipeable (`| file` or similar smoke check).
-- [ ] UC-17.S-3 — a `--base64` (or equivalent) flag emits base64 to
+- [x] UC-17.S-3 — a `--base64` (or equivalent) flag emits base64 to
       stdout.
-- [ ] UC-17.S-4 — raw-bytes mode to an attached terminal (simulate via
+- [x] UC-17.S-4 — raw-bytes mode to an attached terminal (simulate via
       `isatty` mock) refuses rather than dumping binary, unless an
       explicit override flag is passed.
-- [ ] Every error path above surfaces the specific `aprilcam.errors`
+- [x] Every error path above surfaces the specific `aprilcam.errors`
       type's message content (holder name, unknown camera + available
       list, etc.) — not a generic "command failed."
 
