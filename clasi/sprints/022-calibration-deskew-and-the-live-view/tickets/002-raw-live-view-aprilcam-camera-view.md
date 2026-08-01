@@ -1,7 +1,7 @@
 ---
 id: '002'
 title: 'Raw live view: aprilcam camera view'
-status: open
+status: done
 use-cases:
 - SUC-002
 depends-on: []
@@ -49,21 +49,21 @@ only, no cv2, no drawing.
 
 ## Acceptance Criteria
 
-- [ ] `aprilcam camera view arducam-ov9782-usb-camera` opens a window
+- [x] `aprilcam camera view arducam-ov9782-usb-camera` opens a window
       showing live raw frames with camera settings applied
       (exposure/gain/WB as currently configured) and **no deskew, no
       tag boundaries/hats, no annotations** — verified even when the
       same camera has an active, recently-queried ring buffer
       (detection running) (UC-16 "raw means raw," UC-16.S-1).
-- [ ] Closing the window stops polling; the daemon returns to idle
+- [x] Closing the window stops polling; the daemon returns to idle
       capture for that camera once no other subscriber remains.
-- [ ] Run with no display available, the command exits with a clear
+- [x] Run with no display available, the command exits with a clear
       error naming `camera image` as the alternative, not a
       GUI-toolkit stack trace (UC-16.S-3).
-- [ ] `aprilcam camera view --all` is refused, explaining that viewing
+- [x] `aprilcam camera view --all` is refused, explaining that viewing
       is single-target (UC-16 fan-out rule, matching `camera
       calibrate`'s `--all` refusal in ticket 003).
-- [ ] Frames too dark to see anything are still displayed, with the
+- [x] Frames too dark to see anything are still displayed, with the
       advisory `frame_dark` flag surfaced in the window/output rather
       than left for the developer to guess.
 

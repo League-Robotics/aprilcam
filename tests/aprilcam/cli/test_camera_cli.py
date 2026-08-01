@@ -37,6 +37,7 @@ from aprilcam.types import (
     TagRecord,
     WorldPoint,
 )
+from aprilcam.view.viewer import NoDisplayAvailable
 
 
 def _camera(name: str = "arducam-ov9782-usb-camera", number: int = 1, **overrides) -> CameraState:
@@ -796,4 +797,143 @@ def test_config_h_prints_help_not_a_missing_hostname_error():
     parser = _build_parser()
     with pytest.raises(SystemExit) as excinfo:
         parser.parse_args(["camera", "config", "camera.json", "-h"])
+    assert excinfo.value.code == 0
+
+
+# ---------------------------------------------------------------------------
+# camera view -- AC: UC-16.S-1/S-3, ticket 022-002. Headless throughout:
+# ``run_view`` is injected exactly like ``discovery_factory`` elsewhere in
+# this file, so none of these tests ever touch ``view/viewer.py``'s real
+# poll loop or GUI toolkit -- that machinery has its own headless tests in
+# ``tests/aprilcam/view/test_viewer.py``.
+# ---------------------------------------------------------------------------
+
+
+def test_view_refuses_all_before_ever_connecting(capsys):
+    class _ExplodingDiscovery:
+        def connect(self, host=None):
+            raise AssertionError("must not connect when --all is refused up front")
+
+    code = camera_cli.cmd_view(_args(all=True), discovery_factory=lambda: _ExplodingDiscovery())
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "--all" in err
+    assert "single" in err.lower()
+
+
+def test_view_connects_and_hands_the_connected_daemon_to_run_view():
+    daemon = _FakeDaemon()
+    discovery = _FakeDiscovery(daemon=daemon)
+    calls = []
+
+    code = camera_cli.cmd_view(
+        _args(camera="arducam-ov9782-usb-camera"),
+        discovery_factory=lambda: discovery,
+        run_view=lambda camera, connected: calls.append((camera, connected)),
+    )
+
+    assert code == 0
+    assert calls == [("arducam-ov9782-usb-camera", daemon)]
+
+
+def test_view_passes_the_daemon_flag_through_to_connect():
+    discovery = _FakeDiscovery(daemon=_FakeDaemon())
+
+    camera_cli.cmd_view(
+        _args(daemon="pi-field.local"),
+        discovery_factory=lambda: discovery,
+        run_view=lambda camera, connected: None,
+    )
+
+    assert discovery.connected_with == "pi-field.local"
+
+
+def test_view_reports_a_connection_failure_without_ever_calling_run_view(capsys):
+    discovery = _FakeDiscovery(connect_raises=ConnectionFailed("pi-field.local", reason="refused"))
+    calls = []
+
+    code = camera_cli.cmd_view(
+        _args(daemon="pi-field.local"),
+        discovery_factory=lambda: discovery,
+        run_view=lambda camera, connected: calls.append((camera, connected)),
+    )
+
+    assert code == 1
+    assert calls == []
+    err = capsys.readouterr().err
+    assert "pi-field.local" in err and "refused" in err
+
+
+def test_view_no_display_points_at_camera_image_instead_of_a_backtrace(capsys):
+    """UC-16.S-3: a clear message naming ``camera image``, not a
+    toolkit backtrace."""
+    discovery = _FakeDiscovery(daemon=_FakeDaemon())
+
+    def raising_run_view(camera, connected):
+        raise NoDisplayAvailable("no $DISPLAY or $WAYLAND_DISPLAY set")
+
+    code = camera_cli.cmd_view(
+        _args(camera="arducam-ov9782-usb-camera"),
+        discovery_factory=lambda: discovery,
+        run_view=raising_run_view,
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "camera image" in err
+    assert "arducam-ov9782-usb-camera" in err
+
+
+def test_view_surfaces_a_typed_error_raised_mid_view(capsys):
+    discovery = _FakeDiscovery(daemon=_FakeDaemon())
+
+    def raising_run_view(camera, connected):
+        raise CameraNotPresent(camera)
+
+    code = camera_cli.cmd_view(
+        _args(camera="hd-usb-camera"),
+        discovery_factory=lambda: discovery,
+        run_view=raising_run_view,
+    )
+
+    assert code == 1
+    assert "not currently present" in capsys.readouterr().err
+
+
+def test_view_is_wired_to_cmd_view():
+    parser = _build_parser()
+    args = parser.parse_args(["camera", "view", "arducam-ov9782-usb-camera"])
+    assert args.func is camera_cli.cmd_view
+    assert args.camera == "arducam-ov9782-usb-camera"
+    assert args.all is False
+    assert args.daemon is None
+
+
+def test_view_requires_a_camera_positional_argument():
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["camera", "view"])
+
+
+def test_view_accepts_a_persistent_number_as_the_camera_token():
+    parser = _build_parser()
+    args = parser.parse_args(["camera", "view", "3"])
+    assert args.camera == "3"
+
+
+def test_view_accepts_all_at_parse_time_but_cmd_view_refuses_it_at_runtime():
+    """``--all`` is wired onto this subparser (so ``-h`` documents it
+    and the refusal message can explain itself, matching ``camera
+    image --all``'s pattern) -- argparse accepts it; ``cmd_view`` is
+    what refuses it, exercised above."""
+    parser = _build_parser()
+    args = parser.parse_args(["camera", "view", "some-camera", "--all"])
+    assert args.all is True
+
+
+def test_view_h_prints_help_not_a_missing_hostname_error():
+    parser = _build_parser()
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["camera", "view", "some-camera", "-h"])
     assert excinfo.value.code == 0

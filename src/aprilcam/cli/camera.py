@@ -1,10 +1,19 @@
-"""``aprilcam camera list|probe|image|tags`` (tickets 020-006, 021-006).
+"""``aprilcam camera list|probe|image|tags|view`` (tickets 020-006,
+021-006, 022-002).
 
 Thin argv-to-client-call shells over ``client/discovery.py`` (ticket
 020-005) -- ``adapters.md``'s "adapters hold no authoritative state,
 adapters do no vision" rules apply throughout. Every RPC-shaped call
 here is one line; the rest is argv shaping, output formatting, and
 mapping typed ``aprilcam.errors`` values to exit codes.
+
+**``camera view`` (ticket 022-002).** ``cmd_view`` itself makes no RPC
+call directly -- it connects (or reports why it could not) and then
+hands the connected ``Daemon`` to ``view/viewer.py``'s
+``run_raw_view``, which owns the poll loop. See that module's docstring
+for the "raw means raw" and headless-detection design; see this
+module's ``cmd_view`` docstring for the CLI-boundary contract
+(``--all`` refusal, the UC-16.S-3 headless message).
 
 **``camera image``'s destinations.** One frame, three destinations
 (UC-17): a file (``-o FILE``), base64 to stdout (``--base64``), or raw
@@ -64,10 +73,20 @@ from aprilcam.cli._common import (
 from aprilcam.client.discovery import Discovery
 from aprilcam.config.interfaces import ConfigLoader
 from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
+from aprilcam.daemon.interfaces import Daemon
 from aprilcam.errors import AprilCamError
 from aprilcam.types import TagFrame, TagRecord
+from aprilcam.view import viewer
 
-__all__ = ["add_subparser", "cmd_list", "cmd_probe", "cmd_image", "cmd_tags", "cmd_config"]
+__all__ = [
+    "add_subparser",
+    "cmd_list",
+    "cmd_probe",
+    "cmd_image",
+    "cmd_tags",
+    "cmd_config",
+    "cmd_view",
+]
 
 
 def cmd_list(
@@ -292,6 +311,53 @@ def cmd_config(
     return EXIT_OK
 
 
+def cmd_view(
+    args: argparse.Namespace,
+    *,
+    discovery_factory: Callable[[], Discovery] = Discovery,
+    run_view: Callable[[str, Daemon], None] = viewer.run_raw_view,
+) -> int:
+    """``aprilcam camera view <camera> [-d HOST]`` (UC-16, ticket
+    022-002).
+
+    Opens a poll-driven window (``view/viewer.py``) showing *camera*'s
+    raw frames -- camera settings applied, nothing else drawn or
+    warped (UC-16 "raw means raw"). ``--all`` is refused up front,
+    before any connection is attempted -- viewing is single-target,
+    matching ``cli.md``'s fan-out rule (a live video window has no
+    sensible multi-daemon meaning) and the refusal ``camera calibrate
+    --all`` gets in ticket 003. A headless host (no display) fails with
+    a message pointing at ``camera image`` instead of a GUI-toolkit
+    backtrace (UC-16.S-3).
+    """
+    if args.all:
+        print(
+            "error: 'camera view' is single-target -- a live video "
+            "window has no sensible multi-daemon meaning (UC-16 "
+            "fan-out rule). Drop --all and name one camera.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+
+    try:
+        daemon = discovery_factory().connect(args.daemon)
+    except AprilCamError as exc:
+        return report_error(exc)
+
+    try:
+        run_view(args.camera, daemon)
+    except viewer.NoDisplayAvailable as exc:
+        print(
+            f"error: no display available ({exc}) -- run 'aprilcam camera "
+            f"image {args.camera}' instead (UC-16.S-3).",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    except AprilCamError as exc:
+        return report_error(exc)
+    return EXIT_OK
+
+
 def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     """Wire ``camera list|probe|image|tags`` into the top-level parser."""
     parser = subparsers.add_parser(
@@ -346,3 +412,11 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     p_config.add_argument("file", help="path to a camera config JSON file")
     add_daemon_option(p_config)
     p_config.set_defaults(func=cmd_config)
+
+    p_view = sub.add_parser(
+        "view", help="open a live raw-video window (UC-16 -- 'raw means raw', no --all)"
+    )
+    p_view.add_argument("camera", help="camera name (slug or persistent number)")
+    add_daemon_option(p_view)
+    add_all_option(p_view, note=" (refused -- viewing is single-target)")
+    p_view.set_defaults(func=cmd_view)
