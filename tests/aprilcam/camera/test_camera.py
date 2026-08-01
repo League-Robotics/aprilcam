@@ -17,13 +17,9 @@ import numpy as np
 import pytest
 
 from aprilcam.camera.backends.opencv_backend import property_map
-from aprilcam.camera.camera import (
-    FAILURE_THRESHOLD,
-    MAX_REOPENS,
-    Camera,
-    SimpleCameraConfig,
-)
+from aprilcam.camera.camera import FAILURE_THRESHOLD, MAX_REOPENS, Camera
 from aprilcam.camera.interfaces import Camera as CameraProtocol
+from aprilcam.config.interfaces import CameraConfig
 from aprilcam.errors import UnsupportedSetting
 
 
@@ -276,8 +272,8 @@ def test_effective_config_reports_none_dims_when_not_open():
     assert cfg.settings["frame_height"] is None
 
 
-def test_simple_camera_config_round_trips_to_dict():
-    cfg = SimpleCameraConfig(name="cam-a", playfield=None, settings={"k": 1})
+def test_camera_config_round_trips_to_dict():
+    cfg = CameraConfig(name="cam-a", playfield=None, settings={"k": 1})
     d = cfg.to_dict()
     assert d == {"name": "cam-a", "playfield": None, "settings": {"k": 1}}
 
@@ -289,7 +285,7 @@ def test_simple_camera_config_round_trips_to_dict():
 
 def test_apply_config_requires_open_camera():
     cam = Camera("cam-a", FakeBackend())
-    cfg = SimpleCameraConfig(name="cam-a", playfield=None, settings={})
+    cfg = CameraConfig(name="cam-a", playfield=None, settings={})
     with pytest.raises(RuntimeError):
         cam.apply_config(cfg)
 
@@ -297,7 +293,7 @@ def test_apply_config_requires_open_camera():
 def test_apply_config_unknown_key_raises_unsupported_setting():
     cam = Camera("cam-a", FakeBackend())
     cam.open()
-    cfg = SimpleCameraConfig(name="cam-a", playfield=None, settings={"not_a_real_key": 1})
+    cfg = CameraConfig(name="cam-a", playfield=None, settings={"not_a_real_key": 1})
     with pytest.raises(UnsupportedSetting) as exc_info:
         cam.apply_config(cfg)
     assert exc_info.value.key == "not_a_real_key"
@@ -315,7 +311,7 @@ def test_apply_config_applies_gate_keys_before_dependents():
         return original_set(name, value)
 
     backend.set_property = spy_set  # type: ignore[method-assign]
-    cfg = SimpleCameraConfig(
+    cfg = CameraConfig(
         name="cam-a",
         playfield=None,
         settings={"exposure": 100, "auto_exposure": 1},
@@ -328,7 +324,7 @@ def test_apply_config_blank_settings_are_skipped():
     backend = FakeBackend()
     cam = Camera("cam-a", backend)
     cam.open()
-    cfg = SimpleCameraConfig(name="cam-a", playfield=None, settings={"gain": None})
+    cfg = CameraConfig(name="cam-a", playfield=None, settings={"gain": None})
     cam.apply_config(cfg)  # no error, nothing pushed
     assert backend.get_property("gain") is None
 
@@ -346,7 +342,7 @@ def test_apply_config_rolls_back_on_mid_push_failure():
         return True
 
     backend.set_property = failing_set  # type: ignore[method-assign]
-    cfg = SimpleCameraConfig(
+    cfg = CameraConfig(
         name="cam-a", playfield=None, settings={"gain": 9.0, "exposure": 100}
     )
     with pytest.raises(UnsupportedSetting):
@@ -382,11 +378,11 @@ def test_apply_config_backend_without_settings_surface_rejects_any_push():
     backend = NoSettingsBackend()
     cam = Camera("cam-a", backend)
     cam.open()
-    cfg = SimpleCameraConfig(name="cam-a", playfield=None, settings={"gain": 1})
+    cfg = CameraConfig(name="cam-a", playfield=None, settings={"gain": 1})
     with pytest.raises(UnsupportedSetting):
         cam.apply_config(cfg)
     # An empty push against such a backend is fine -- nothing to reject.
-    cam.apply_config(SimpleCameraConfig(name="cam-a", playfield=None, settings={}))
+    cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={}))
 
 
 def test_reset_is_a_documented_noop():

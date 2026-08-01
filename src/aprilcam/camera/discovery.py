@@ -3,7 +3,7 @@
 Converts the backend-enumeration and failure-diagnosis helpers from
 ``archive/src/aprilcam/camera/camutil.py`` (``list_cameras``,
 ``get_device_name``, ``diagnose_camera_failure``) into the shape of the
-``CameraDiscovery`` Protocol (``camera/interfaces.py``): ``probe()``
+``CameraDiscovery`` base class (``camera/interfaces.py``): ``probe()``
 (active, deep, on demand) and ``watch()`` (passive, continuous,
 started once). Both build on ``camera/identity.py``'s enumeration
 sources and ``camera/registry.py``'s persisted identity -> slug/number
@@ -112,7 +112,7 @@ class CameraDiscovery(_CameraDiscoveryBase):
         self._watch_thread: Optional[threading.Thread] = None
         self._watch_stop = threading.Event()
 
-    # -- CameraDiscovery Protocol -------------------------------------------
+    # -- CameraDiscovery interface -------------------------------------------
 
     def probe(self) -> ProbeReport:
         """See ``camera.interfaces.CameraDiscovery.probe``.
@@ -209,7 +209,7 @@ class CameraDiscovery(_CameraDiscoveryBase):
         """Camera slugs this instance currently believes are attached.
 
         Refreshed by both ``probe()`` and the background ``watch()``
-        poll. Not part of the ``CameraDiscovery`` Protocol -- ticket
+        poll. Not part of ``CameraDiscovery``'s declared interface -- ticket
         004's daemon service reads this to answer ``list_cameras``
         without re-probing on every call, which is the entire point of
         ``watch()`` existing (UC-25.S-5: hotplug needs no probe).
@@ -220,7 +220,7 @@ class CameraDiscovery(_CameraDiscoveryBase):
     def stop_watch(self) -> None:
         """Stop the passive watch thread.
 
-        Not part of the ``CameraDiscovery`` Protocol (which has no
+        Not part of ``CameraDiscovery``'s declared interface (which has no
         stop method -- process teardown is ``daemon/lifecycle.py``'s
         job, ticket 004). Exists for tests and for a clean shutdown
         path once that ticket wires one in.

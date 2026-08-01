@@ -33,7 +33,7 @@ from typing import Dict, Optional, Set, Tuple
 import cv2 as cv
 import numpy as np
 
-from . import CaptureBackend  # noqa: F401  (Protocol this module satisfies)
+from . import CaptureBackend
 
 __all__ = ["OpenCVBackend", "default_backend_priority", "property_map"]
 
@@ -75,8 +75,12 @@ def property_map() -> Dict[str, int]:
     }
 
 
-class OpenCVBackend:
+class OpenCVBackend(CaptureBackend):
     """Adapts ``cv2.VideoCapture`` to :class:`CaptureBackend`.
+
+    Derives from ``CaptureBackend`` (a plain base class, not
+    ``Protocol`` -- see ``daemon.interfaces``'s module docstring for the
+    design rule).
 
     Parameters
     ----------
@@ -167,7 +171,7 @@ class OpenCVBackend:
             return None
         return (w, h)
 
-    # -- best-effort settings, beyond the CaptureBackend Protocol --------
+    # -- best-effort settings, beyond the CaptureBackend base class -----
     # Used only by Camera.apply_config()/effective_config() (camera.py),
     # never called directly by discovery or by anything client-facing.
 

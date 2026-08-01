@@ -1,10 +1,11 @@
 """Stable per-camera identity resolution — the fallback chain (UC-14, UC-25).
 
 Converted from ``archive/src/aprilcam/camera/identity.py`` (v1, 407
-lines). Implements the ``CameraIdentity`` Protocol declared in
-``camera/interfaces.py``: ``.slug`` (a readable, human-facing name) and
-``.device_name`` (the raw OS-reported descriptor, explicitly **not** the
-identity).
+lines). Resolves the ``CameraIdentity`` frozen dataclass declared in
+``camera/interfaces.py`` (this module imports it rather than declaring
+its own — see that module's docstring): ``.slug`` (a readable,
+human-facing name) and ``.device_name`` (the raw OS-reported descriptor,
+explicitly **not** the identity).
 
 Two different questions, two different fields
 -----------------------------------------------
@@ -16,8 +17,8 @@ This module answers two questions that must never be conflated:
    source resolved it. This is :attr:`CameraIdentity.slug`.
 2. **"Is this the same physical camera I saw before?"** — the fallback
    chain below, from most to least trustworthy. This is
-   :attr:`CameraIdentity.hardware_key`, a field beyond the Protocol's
-   minimum contract that :mod:`aprilcam.camera.registry` reads as its
+   :attr:`CameraIdentity.hardware_key`, the field
+   :mod:`aprilcam.camera.registry` reads as its
    primary key so a replugged camera resolves to the same registry entry
    (UC-25.S-3), while two identical-model cameras on different ports
    still get *different* hardware keys (their ``location`` differs) even
@@ -74,6 +75,8 @@ import sys
 from dataclasses import dataclass
 from typing import Dict, Optional
 
+from aprilcam.camera.interfaces import CameraIdentity
+
 __all__ = [
     "CameraIdentity",
     "device_name_slug",
@@ -123,41 +126,6 @@ def name_resolution_slug(
     if width and height:
         return f"{base}-{int(width)}x{int(height)}"
     return base
-
-
-# ---------------------------------------------------------------------------
-# Result schema
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class CameraIdentity:
-    """Concrete, per-observation identity for one physical camera.
-
-    Satisfies ``camera.interfaces.CameraIdentity`` (``slug``,
-    ``device_name``); the remaining fields are this module's own —
-    :mod:`aprilcam.camera.registry` reads ``hardware_key`` as its
-    dedup/stability key, and the rest are diagnostics carried through
-    for ``CameraState``/probe reporting in later tickets.
-
-    ``slug`` is always device-name-derived and readable
-    (``arducam-ov9782-usb-camera``). ``hardware_key`` is the
-    fallback-chain result (``source`` names which tier produced it) and
-    is what actually varies with hardware source: ``avf:...``,
-    ``serial:...``, ``vidpid:vvvv:pppp@loc``, ``loc:...``, or
-    ``name:<slug>``.
-    """
-
-    slug: str
-    device_name: str
-    hardware_key: str
-    source: str
-    is_fallback: bool
-    vid: Optional[int] = None
-    pid: Optional[int] = None
-    serial: Optional[str] = None
-    location: Optional[str] = None
-    avfoundation_unique_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

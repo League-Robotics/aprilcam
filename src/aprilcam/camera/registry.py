@@ -18,12 +18,12 @@ this module owns, not a promise that survives deleting its own storage.
 Two keys, two jobs (mirrors ``camera/identity.py``'s "two different
 questions")
 -----------------------------------------------------------------------
-* ``hardware_key`` (``CameraIdentity.hardware_key``, a field beyond the
-  Protocol's minimum contract) is the **primary key** — "is this the
-  same physical camera I saw before." A replugged camera with a real
-  serial or AVFoundation id resolves to the same record (UC-25.S-3).
-* ``slug`` (``CameraIdentity.slug``, the Protocol contract, and this
-  module's return value) is the **readable, registry-assigned** name —
+* ``hardware_key`` (``CameraIdentity.hardware_key``) is the **primary
+  key** — "is this the same physical camera I saw before." A replugged
+  camera with a real serial or AVFoundation id resolves to the same
+  record (UC-25.S-3).
+* ``slug`` (``CameraIdentity.slug``, and this module's return value) is
+  the **readable, registry-assigned** name —
   usually identical to the identity's proposed slug, except when a
   *different* ``hardware_key`` proposes a slug already owned by a live
   record (two identical camera models on different ports — UC-25's
@@ -212,17 +212,17 @@ class CameraRegistry(_CameraRegistryBase):
             except OSError:
                 pass
 
-    # -- CameraRegistry Protocol -------------------------------------------
+    # -- CameraRegistry interface --------------------------------------------
 
     def resolve(self, identity: CameraIdentity) -> str:
         """See ``camera.interfaces.CameraRegistry.resolve``.
 
-        Keys on ``identity.hardware_key`` when present (the concrete
-        :class:`aprilcam.camera.identity.CameraIdentity` this module is
-        designed to work with always provides it); falls back to
-        ``identity.slug`` for a bare Protocol-conforming object with
-        nothing more specific to key on — the same degraded behaviour
-        v1 documented for cameras with no distinguishing hardware info.
+        Keys on ``identity.hardware_key``, which every
+        :class:`~aprilcam.camera.interfaces.CameraIdentity` provides;
+        the ``or identity.slug`` fallback below is defensive only —
+        ``hardware_key`` is a required field — and keeps the same
+        degraded behaviour v1 documented for cameras with no
+        distinguishing hardware info if it were ever empty.
         """
         hardware_key = getattr(identity, "hardware_key", None) or identity.slug
         if not hardware_key:
@@ -283,7 +283,7 @@ class CameraRegistry(_CameraRegistryBase):
         del self._records[key]
         self._save()
 
-    # -- beyond the Protocol: read access for callers/tests -----------------
+    # -- beyond the interface: read access for callers/tests -----------------
 
     def get(self, slug: str) -> Optional[CameraRecord]:
         """The record for ``slug``, or ``None`` if it is not registered."""

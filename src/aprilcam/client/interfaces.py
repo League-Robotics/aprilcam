@@ -11,53 +11,46 @@ generation works on any install, but no client module may import it —
 the daemon is the sole vision authority. That is now a discipline the
 tests enforce rather than something packaging enforces for us.
 
-See ``aprilcam.daemon.interfaces``'s module docstring for the base-class-
-vs-``Protocol`` design rule applied below: ``Discovery`` is a behavioral
-interface with a single, ordinary-class implementation
-(``client.discovery.Discovery``), so it is a plain base class.
-``DaemonInfo``, ``Guides``, and ``Renderer`` stay ``Protocol`` —
-``DaemonInfo`` because its implementation (``client.discovery.
-LocalDaemonInfo``) is a frozen ``@dataclass`` whose fields would collide
-with declared properties exactly as that rule describes; ``Guides`` and
-``Renderer`` because neither has a concrete implementation yet to check
-against (out of this pass's scope).
+See ``aprilcam.daemon.interfaces``'s module docstring for the interface
+design rule applied below: ``Discovery`` is a behavioral interface with
+a single, ordinary-class implementation (``client.discovery.
+Discovery``), so it is a plain base class. ``DaemonInfo`` is
+value-shaped, so it is a frozen ``@dataclass`` declaring fields —
+``client.discovery``'s former ``LocalDaemonInfo`` was exactly the same
+shape, so it has been deleted in favour of constructing ``DaemonInfo``
+here directly (``client/discovery.py`` does exactly that; see that
+module's docstring). ``Guides`` and ``Renderer`` are behavioral, so they
+are plain base classes; neither has a concrete implementation yet to
+derive from (out of this pass's scope), but converting them now means a
+future implementation derives rather than duck-types.
 """
 
 from __future__ import annotations
 
-from typing import Optional, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import Optional
 
 from aprilcam.daemon.interfaces import Daemon
 from aprilcam.types import Annotation, ImageFrame
 
 
-@runtime_checkable
-class DaemonInfo(Protocol):
+@dataclass(frozen=True, kw_only=True)
+class DaemonInfo:
     """A daemon found on the network (UC-13).
 
-    Deliberately still a ``Protocol`` — its implementation,
-    ``client.discovery.LocalDaemonInfo``, is a frozen ``@dataclass``
-    whose fields (``host``, ``port``, ``is_local``, ``reachable``) share
-    names with the properties declared below. See the module docstring.
+    Concrete and directly constructed (see the module docstring) — there
+    is no separate implementation class.
     """
 
-    @property
-    def host(self) -> str: ...
+    host: str
+    port: int
+    is_local: bool
+    reachable: bool
+    """Whether it answered, as opposed to merely advertising.
 
-    @property
-    def port(self) -> int: ...
-
-    @property
-    def is_local(self) -> bool: ...
-
-    @property
-    def reachable(self) -> bool:
-        """Whether it answered, as opposed to merely advertising.
-
-        A daemon that advertises but does not respond is exactly what a
-        developer needs to see, so it is listed rather than filtered out.
-        """
-        ...
+    A daemon that advertises but does not respond is exactly what a
+    developer needs to see, so it is listed rather than filtered out.
+    """
 
 
 class Discovery:
@@ -94,9 +87,11 @@ class Discovery:
 # daemon-visible event, not client bookkeeping.
 
 
-@runtime_checkable
-class Guides(Protocol):
+class Guides:
     """The packaged instructions, readable with **no daemon** (UC-27).
+
+    A plain base class, not ``Protocol`` — see ``daemon.interfaces``'s
+    module docstring for the design rule.
 
     UC-27.S-1 is explicit: an agent's first question may be "what is
     this and how do I use it?", asked before any daemon exists — so the
@@ -108,14 +103,17 @@ class Guides(Protocol):
     def get(self, name: Optional[str] = None) -> str:
         """A guide's text. Unknown name raises ``UnknownGuide``,
         naming the guides that exist (UC-27.S-3)."""
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Guides.get")
 
-    def available(self) -> tuple[str, ...]: ...
+    def available(self) -> tuple[str, ...]:
+        raise NotImplementedError(f"{type(self).__name__} does not implement Guides.available")
 
 
-@runtime_checkable
-class Renderer(Protocol):
+class Renderer:
     """Rasterizes a frame's embedded overlays to an image, client-side.
+
+    A plain base class, not ``Protocol`` — see ``daemon.interfaces``'s
+    module docstring for the design rule.
 
     **Authoring lives in the daemon; rendering lives here** (spec §9
     #8, UC-28). This replaces the old ``Canvas``: clients no longer
@@ -155,4 +153,4 @@ class Renderer(Protocol):
         overlays): the same ``Annotation`` types, never sent to the
         daemon — the old Canvas capability without a second vocabulary.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement Renderer.render")

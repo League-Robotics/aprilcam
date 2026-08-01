@@ -1,6 +1,6 @@
 """Resolves ``config_dir``, ``state_dir``, and ``socket_dir``.
 
-Implements the ``Directories`` Protocol
+Implements the ``Directories`` base class
 (``src/aprilcam/config/interfaces.py``) per the two-directory model in
 ``docs/design/configuration.md``:
 

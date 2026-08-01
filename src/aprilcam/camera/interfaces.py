@@ -7,20 +7,24 @@ The three concerns here are deliberately separate: *identity* (which
 physical camera is this, stably), *discovery* (what is attached right
 now), and *control* (open it, configure it, read from it).
 
-See ``aprilcam.daemon.interfaces``'s module docstring for the base-class-
-vs-``Protocol`` design rule applied below: ``CameraRegistry``,
-``CameraDiscovery``, and ``Camera`` are behavioral interfaces with
-ordinary-class implementations (``camera.registry.CameraRegistry``,
-``camera.discovery.CameraDiscovery``, ``camera.camera.Camera``), so they
-are plain base classes. ``CameraIdentity`` stays ``Protocol`` — its
-implementation (``camera.identity.CameraIdentity``) is a frozen
-``@dataclass`` whose ``slug``/``device_name`` fields would collide with
-declared properties exactly as that rule describes.
+See ``aprilcam.daemon.interfaces``'s module docstring for the interface
+design rule applied below: ``CameraRegistry``, ``CameraDiscovery``, and
+``Camera`` are behavioral interfaces with ordinary-class implementations
+(``camera.registry.CameraRegistry``, ``camera.discovery.CameraDiscovery``,
+``camera.camera.Camera``), so they are plain base classes.
+``CameraIdentity`` is value-shaped, so it is a frozen ``@dataclass``
+declaring fields rather than properties — and, since its concrete
+producer (``camera.identity.resolve_identity``) needs no fields beyond
+these, ``camera.identity`` imports this exact class rather than
+declaring a second one of the same name. There used to be two different
+``CameraIdentity`` classes (this one, structural; ``camera.identity``'s,
+a dataclass) that merely happened to share a name — they are now one.
 """
 
 from __future__ import annotations
 
-from typing import Optional, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 
@@ -28,14 +32,17 @@ from aprilcam.config.interfaces import CameraConfig
 from aprilcam.types import CameraState, ProbeReport
 
 
-@runtime_checkable
-class CameraIdentity(Protocol):
+@dataclass(frozen=True, kw_only=True)
+class CameraIdentity:
     """A stable name for a physical camera.
 
-    Deliberately still a ``Protocol`` — its implementation,
-    ``camera.identity.CameraIdentity``, is a frozen ``@dataclass`` whose
-    ``slug``/``device_name`` fields share names with the properties
-    declared below. See the module docstring.
+    Produced by ``camera.identity.resolve_identity``/``resolve_all`` —
+    see that module's docstring for the fallback-chain algorithm that
+    fills in these fields. Declared here, in the subsystem's interface
+    module, because every other module that needs "a camera identity"
+    (``camera.registry.CameraRegistry.resolve``, ``camera.discovery``)
+    should depend on the contract, not on the resolver that happens to
+    produce it.
 
     Derived through a fallback chain — libcamera id, then serial /
     AVFoundation unique id, then ``vid:pid@location``, and finally a
@@ -51,15 +58,47 @@ class CameraIdentity(Protocol):
     identical cameras with no serial numbers — names can collide. The
     registry must disambiguate rather than silently merge two cameras
     into one entry.
+
+    Two different questions, two different fields (``camera.identity``'s
+    module docstring goes into this in more depth):
+
+    * **"What should a human call this camera?"** — always the
+      device-name slug, regardless of which hardware source resolved
+      it. This is :attr:`slug`.
+    * **"Is this the same physical camera I saw before?"** — the
+      fallback chain, from most to least trustworthy, recorded in
+      :attr:`hardware_key` / :attr:`source`. :mod:`aprilcam.camera.
+      registry` reads :attr:`hardware_key` as its primary key.
+
+    Fields beyond ``slug``/``device_name``:
+
+    hardware_key:
+        The fallback-chain result (``avf:...``, ``serial:...``,
+        ``vidpid:vvvv:pppp@loc``, ``loc:...``, or ``name:<slug>``) —
+        what actually varies with hardware source, and what
+        :mod:`aprilcam.camera.registry` keys on for dedup/stability.
+    source:
+        Which fallback tier produced ``hardware_key`` (e.g.
+        ``"libcamera_id"``, ``"usb_serial"``, ``"name_resolution_slug"``).
+    is_fallback:
+        Whether ``hardware_key`` came from a tier that is not genuinely
+        unique to this physical device (a USB-port move or
+        re-enumeration can produce a new key) — tiers 3-5 of the chain.
+    vid, pid, serial, location, avfoundation_unique_id:
+        Raw per-source diagnostics carried through for probe reporting;
+        each is ``None`` when its source did not contribute.
     """
 
-    @property
-    def slug(self) -> str: ...
-
-    @property
-    def device_name(self) -> str:
-        """OS-reported hardware descriptor. **Not** the identity."""
-        ...
+    slug: str
+    device_name: str
+    hardware_key: str
+    source: str
+    is_fallback: bool
+    vid: Optional[int] = None
+    pid: Optional[int] = None
+    serial: Optional[str] = None
+    location: Optional[str] = None
+    avfoundation_unique_id: Optional[str] = None
 
 
 class CameraRegistry:

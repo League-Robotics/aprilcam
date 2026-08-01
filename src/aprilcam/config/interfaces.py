@@ -14,29 +14,32 @@ daemon never writes config: the config root is human-owned and not
 writable by it, which makes the ephemeral rule structural rather than a
 policy the daemon has to remember.
 
-See ``aprilcam.daemon.interfaces``'s module docstring for the base-class-
-vs-``Protocol`` design rule applied below: ``Directories`` is a
-behavioral interface with an ordinary-class implementation
-(``config.directories.Directories``), so it is a plain base class.
-``ConfigDocument``, ``CameraConfig``, ``PlayfieldDefinition``, and
-``Feature`` stay ``Protocol`` — they are value shapes, and at least one
-implementation (``camera.camera.SimpleCameraConfig``, a frozen
-``@dataclass``) has fields that would collide with declared properties
-exactly as that rule describes. ``ConfigLoader`` also stays ``Protocol``
-— no concrete implementation exists yet to check (out of this pass's
-scope).
+See ``aprilcam.daemon.interfaces``'s module docstring for the interface
+design rule applied below: ``Directories`` is a behavioral interface
+with an ordinary-class implementation (``config.directories.
+Directories``), so it is a plain base class. ``ConfigDocument``,
+``CameraConfig``, ``PlayfieldDefinition``, and ``Feature`` are
+value-shaped, so they are frozen ``@dataclass``\\ es declaring fields.
+``CameraConfig`` needed no separate "implementation" dataclass —
+``camera.camera``'s former ``SimpleCameraConfig`` was exactly the same
+shape, so it has been deleted in favour of constructing ``CameraConfig``
+here directly (``camera/camera.py`` does exactly that). ``ConfigLoader``
+is behavioral (a plain base class) — no concrete implementation exists
+yet to check (out of this pass's scope), but converting it now means a
+future implementation derives rather than duck-types.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional, Protocol, runtime_checkable
+from typing import Any, Optional
 
 from aprilcam.types import WorldPoint
 
 
-@runtime_checkable
-class ConfigDocument(Protocol):
+@dataclass(frozen=True, kw_only=True)
+class ConfigDocument:
     """A whole configuration document that knows its own target.
 
     Documents move **whole, in both directions**. There are no
@@ -46,16 +49,14 @@ class ConfigDocument(Protocol):
     to prevent.
     """
 
-    @property
-    def name(self) -> str:
-        """The camera slug or playfield slug this document configures.
+    name: str
+    """The camera slug or playfield slug this document configures.
 
-        A document without a name is **rejected** (UC-23.S-4). The target
-        is never inferred from the filename: a file copied to
-        ``backup.json`` would otherwise push to a camera called
-        ``backup``.
-        """
-        ...
+    A document without a name is **rejected** (UC-23.S-4). The target
+    is never inferred from the filename: a file copied to
+    ``backup.json`` would otherwise push to a camera called
+    ``backup``.
+    """
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize in exact on-disk format.
@@ -64,44 +65,46 @@ class ConfigDocument(Protocol):
         install → restart → identical config (UC-24.S-1). Output must be
         loadable verbatim, including ``name``.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement ConfigDocument.to_dict")
 
 
-@runtime_checkable
-class CameraConfig(ConfigDocument, Protocol):
+@dataclass(frozen=True, kw_only=True)
+class CameraConfig(ConfigDocument):
     """Everything adjustable about one camera (UC-03).
 
     **Per-camera, never shared.** Two identical cameras side by side are
     configured independently; there is no class-wide or inherited config.
     The settable keys a camera reports are *that camera's* keys, since
     different hardware exposes different controls.
+
+    Concrete and directly constructed (see the module docstring) — there
+    is no separate implementation class the way there is for
+    ``PlayfieldDefinition``.
     """
 
-    @property
-    def playfield(self) -> Optional[str]:
-        """Which playfield this camera observes, if any.
+    playfield: Optional[str]
+    """Which playfield this camera observes, if any.
 
-        A camera observes exactly one playfield; a playfield has zero or
-        more cameras. Calibration requires this to be set — with no
-        playfield there is no coordinate system to map to and nothing to
-        calibrate (UC-15.S-2).
-        """
-        ...
+    A camera observes exactly one playfield; a playfield has zero or
+    more cameras. Calibration requires this to be set — with no
+    playfield there is no coordinate system to map to and nothing to
+    calibrate (UC-15.S-2).
+    """
+    settings: dict[str, Any] = field(default_factory=dict)
+    """Hardware controls: exposure, gain, white balance, resolution.
 
-    @property
-    def settings(self) -> dict[str, Any]:
-        """Hardware controls: exposure, gain, white balance, resolution.
+    A fetched config reports **every settable key, blank when unset**
+    (UC-03.S-1) — self-describing, so a client can discover what is
+    adjustable without prior knowledge. This is the template every
+    camera configuration starts from (UC-25).
+    """
 
-        A fetched config reports **every settable key, blank when unset**
-        (UC-03.S-1) — self-describing, so a client can discover what is
-        adjustable without prior knowledge. This is the template every
-        camera configuration starts from (UC-25).
-        """
-        ...
+    def to_dict(self) -> dict[str, Any]:
+        return {"name": self.name, "playfield": self.playfield, "settings": dict(self.settings)}
 
 
-@runtime_checkable
-class PlayfieldDefinition(ConfigDocument, Protocol):
+@dataclass(frozen=True, kw_only=True)
+class PlayfieldDefinition(ConfigDocument):
     """The surveyed ground truth for one playfield (UC-02).
 
     Feature roles are **not** interchangeable:
@@ -114,17 +117,20 @@ class PlayfieldDefinition(ConfigDocument, Protocol):
     position is what the definition says it is — vision never confirms
     it is still physically there. That limitation should be understood
     rather than hidden.
+
+    No concrete implementation exists yet (out of this pass's scope);
+    ``features``/``required_aruco_ids`` raise ``NotImplementedError``
+    until one derives from this and overrides them.
     """
 
-    @property
-    def width_cm(self) -> float: ...
-
-    @property
-    def height_cm(self) -> float: ...
+    width_cm: float
+    height_cm: float
 
     def features(self) -> tuple["Feature", ...]:
         """Every surveyed feature: tags, rectangles, dots."""
-        ...
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement PlayfieldDefinition.features"
+        )
 
     def required_aruco_ids(self) -> tuple[int, ...]:
         """The ArUco ids a camera must see for calibration to succeed.
@@ -135,31 +141,27 @@ class PlayfieldDefinition(ConfigDocument, Protocol):
         to observe, and a homography from it would be silently wrong
         somewhere.
         """
-        ...
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement PlayfieldDefinition.required_aruco_ids"
+        )
 
 
-@runtime_checkable
-class Feature(Protocol):
+@dataclass(frozen=True, kw_only=True)
+class Feature:
     """One surveyed thing on the playfield, at a known world position."""
 
-    @property
-    def slug(self) -> str: ...
-
-    @property
-    def kind(self) -> str:
-        """``april_tag``, ``aruco_tag``, ``rectangle``, or ``dot``."""
-        ...
-
-    @property
-    def position(self) -> WorldPoint: ...
-
-    @property
-    def colour(self) -> Optional[str]: ...
+    slug: str
+    kind: str
+    """``april_tag``, ``aruco_tag``, ``rectangle``, or ``dot``."""
+    position: WorldPoint
+    colour: Optional[str] = None
 
 
-@runtime_checkable
-class ConfigLoader(Protocol):
+class ConfigLoader:
     """Turns files back into documents — the inverse of ``to_dict``.
+
+    A plain base class, not ``Protocol`` — see ``daemon.interfaces``'s
+    module docstring for the design rule.
 
     This is the client-side half of the push path (UC-23): the CLI and
     Python programs read a document from disk *here*, then hand it to
@@ -173,9 +175,11 @@ class ConfigLoader(Protocol):
     a bug in whichever side broke the symmetry (UC-24.S-1).
     """
 
-    def load_camera_config(self, path: Path) -> CameraConfig: ...
+    def load_camera_config(self, path: Path) -> CameraConfig:
+        raise NotImplementedError(f"{type(self).__name__} does not implement ConfigLoader.load_camera_config")
 
-    def load_playfield(self, path: Path) -> PlayfieldDefinition: ...
+    def load_playfield(self, path: Path) -> PlayfieldDefinition:
+        raise NotImplementedError(f"{type(self).__name__} does not implement ConfigLoader.load_playfield")
 
 
 class Directories:

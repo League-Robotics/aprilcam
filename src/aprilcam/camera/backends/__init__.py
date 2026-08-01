@@ -11,10 +11,10 @@ vice versa (module table: "each backend changes independently of the
 others").
 
 :class:`CaptureBackend` is deliberately smaller than the public
-``Camera`` Protocol (``camera/interfaces.py``) — no ``apply_config``,
+``Camera`` base class (``camera/interfaces.py``) — no ``apply_config``,
 no ``state``, no self-heal policy. Those live one layer up. A backend
-is not itself ``Camera``-Protocol-conformant and is never handed
-directly to a client; ``camera.py`` is the only consumer.
+does not itself derive from ``Camera`` and is never handed directly to
+a client; ``camera.py`` is the only consumer.
 
 **Backends in this package, and what shipped this ticket (020-003):**
 
@@ -50,16 +50,19 @@ directly to a client; ``camera.py`` is the only consumer.
 
 from __future__ import annotations
 
-from typing import Optional, Protocol, Tuple, runtime_checkable
+from typing import Optional, Tuple
 
 import numpy as np
 
 __all__ = ["CaptureBackend"]
 
 
-@runtime_checkable
-class CaptureBackend(Protocol):
+class CaptureBackend:
     """The internal surface every ``backends/*.py`` adapter provides.
+
+    A plain base class, not ``Protocol`` — see ``daemon.interfaces``'s
+    module docstring for the design rule. ``OpenCVBackend`` and
+    ``V4l2LoopbackBackend`` derive from it explicitly.
 
     Three methods, on purpose: a backend is *just* device I/O. Nothing
     here reports settings, nothing here decides how many times to
@@ -71,7 +74,7 @@ class CaptureBackend(Protocol):
     @property
     def is_open(self) -> bool:
         """Whether the device is currently open."""
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement CaptureBackend.is_open")
 
     def open(self) -> None:
         """Open the device.
@@ -83,7 +86,7 @@ class CaptureBackend(Protocol):
         reports ``usable=False`` on any exception, ``present`` coming
         from enumeration rather than from this call succeeding.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement CaptureBackend.open")
 
     def read(self) -> Optional[np.ndarray]:
         """One frame, or ``None`` on a read failure.
@@ -95,11 +98,11 @@ class CaptureBackend(Protocol):
         consecutive-failure counter without translating exception
         types per backend.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement CaptureBackend.read")
 
     def close(self) -> None:
         """Release the device. Safe to call when not open (no-op)."""
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement CaptureBackend.close")
 
     def frame_size(self) -> Optional[Tuple[int, int]]:
         """``(width, height)`` once open, else ``None``.
@@ -108,4 +111,4 @@ class CaptureBackend(Protocol):
         reporting (AC3) — never guessed, only read back from the open
         device.
         """
-        ...
+        raise NotImplementedError(f"{type(self).__name__} does not implement CaptureBackend.frame_size")

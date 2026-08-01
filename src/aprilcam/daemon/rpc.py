@@ -42,6 +42,7 @@ from typing import Iterable
 import grpc
 
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
+from aprilcam.daemon.lifecycle import ControlPlaneListener
 from aprilcam.errors import AlreadyRunning, AprilCamError, NotCalibrated, UnknownCamera
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
 from aprilcam.types import CameraState, ImageFrame, ProbeReport
@@ -196,12 +197,19 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
         return _status_to_proto(status)
 
 
-class _GrpcListener:
+class _GrpcListener(ControlPlaneListener):
     """Adapts ``grpc.Server`` to ``daemon.lifecycle.ControlPlaneListener``
     (``start()`` / ``stop(grace)``), waiting for full shutdown inside
     ``stop()`` so the caller's next action -- e.g. a restart's fresh
     :func:`build_server` re-binding the same socket path -- never races
-    the previous server's teardown."""
+    the previous server's teardown.
+
+    Derives from ``ControlPlaneListener`` (a plain base class -- see
+    ``daemon.interfaces``'s module docstring for the design rule) so
+    this is a mechanically real ``ControlPlaneListener``, not merely a
+    structural match -- while ``daemon/lifecycle.py`` itself still
+    imports no gRPC (this module imports *it*, not the other way
+    around)."""
 
     def __init__(self, server: grpc.Server) -> None:
         self._server = server

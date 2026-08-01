@@ -34,7 +34,7 @@ from typing import Optional, Tuple
 import cv2 as cv
 import numpy as np
 
-from . import CaptureBackend  # noqa: F401  (Protocol this module satisfies)
+from . import CaptureBackend
 
 __all__ = ["V4l2LoopbackBackend"]
 
@@ -85,8 +85,12 @@ def _query_format(device: str) -> Tuple[int, int, str]:
     return width, height, pixfmt
 
 
-class V4l2LoopbackBackend:
+class V4l2LoopbackBackend(CaptureBackend):
     """Adapts ``v4l2-ctl --stream-to=-`` to :class:`CaptureBackend`.
+
+    Derives from ``CaptureBackend`` (a plain base class, not
+    ``Protocol`` -- see ``daemon.interfaces``'s module docstring for the
+    design rule).
 
     Parameters
     ----------
