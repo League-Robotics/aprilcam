@@ -1,19 +1,30 @@
-"""Tests for ``aprilcam.view.viewer`` (ticket 022-002).
+"""Tests for ``aprilcam.view.viewer`` (ticket 022-002; ``run_playfield_view``
+added by ticket 022-006).
 
 Headless throughout, per the ticket's testing plan and this project's
-GUI-test rule: :class:`PollLoop`/:func:`run_raw_view` are exercised
-against a fake ``Window``/``Daemon`` pair (no real GUI toolkit
-instantiated), and the headless-detection branch is triggered by
-monkeypatching the environment rather than by actually removing a
-display. ``TkWindow.__init__``'s fast headless path is asserted to
-short-circuit *before* ``tk.Tk()`` is ever called, by making a real
-call an assertion failure. The one test that opens a genuine window
+GUI-test rule: :class:`PollLoop`/:func:`run_raw_view`/
+:func:`run_playfield_view` are exercised against a fake
+``Window``/``Daemon`` pair (no real GUI toolkit instantiated), and the
+headless-detection branch is triggered by monkeypatching the
+environment rather than by actually removing a display.
+``TkWindow.__init__``'s fast headless path is asserted to short-circuit
+*before* ``tk.Tk()`` is ever called, by making a real call an assertion
+failure. The one test that opens a genuine window
 (``test_tkwindow_opens_shows_and_closes_a_real_window``) is marked
 ``@pytest.mark.camera`` so it is excluded from the baseline headless
 run (``pytest -m 'not camera'``), matching this project's existing
 convention for anything that needs real hardware/display -- it is not
 about camera hardware specifically, but reuses the one marker the
 baseline command already deselects.
+
+The ``run_playfield_view`` section below reuses ``client/renderer.py``'s
+real ``Renderer`` (not a fake) for the geometry-sensitive tests -- it is
+cv2-free and pure Pillow/math, so it costs nothing to run headless, and
+using the real thing is what makes the "moves right/up on screen as the
+tag moves east/north" check (UC-18.S-1, sprint.md's mirror-catching
+Success Criterion) a genuine end-to-end poll->render->display check
+rather than one more unit test of the renderer in isolation (already
+covered by ``tests/aprilcam/client/test_renderer.py``).
 """
 
 from __future__ import annotations
@@ -22,11 +33,23 @@ import io
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+import numpy as np
 import pytest
 from PIL import Image
 
+from aprilcam.calibration.geometry import world_to_deskewed_pixel
+from aprilcam.client.renderer import Renderer
+from aprilcam.errors import NotCalibrated
 from aprilcam.view import viewer
-from aprilcam.types import ImageFrame, PixelPoint, TagFamily, TagFrame, TagId, TagRecord
+from aprilcam.types import (
+    ImageFrame,
+    PixelPoint,
+    TagFamily,
+    TagFrame,
+    TagId,
+    TagRecord,
+    WorldPoint,
+)
 
 # ---------------------------------------------------------------------------
 # Test doubles
@@ -110,10 +133,51 @@ class _BoomDaemon:
         raise RuntimeError("camera disconnected")
 
 
+@dataclass
+class _FakePlayfieldDaemon:
+    """A ``Daemon``-shaped double exposing ``get_tags``/``get_frame`` --
+    all ``run_playfield_view`` needs (see ``view/viewer.py``'s
+    ``_fetch_playfield``). ``calls`` records call *order* across both
+    methods, which is what the poll-sequencing acceptance criterion
+    (get_tags before each get_frame) actually asserts on."""
+
+    frames: List[ImageFrame] = field(default_factory=list)
+    get_frame_raises: Optional[Exception] = None
+    calls: List[str] = field(default_factory=list)
+    requested_camera: Optional[str] = None
+    requested_deskewed: List[bool] = field(default_factory=list)
+    get_tags_calls: int = 0
+
+    def get_tags(self, camera: str) -> TagFrame:
+        self.calls.append("get_tags")
+        self.get_tags_calls += 1
+        self.requested_camera = camera
+        return TagFrame(tags=(), timestamp=0.0, frame_index=self.get_tags_calls)
+
+    def get_frame(self, camera: str, *, deskewed: bool = False, encoding: str = "jpeg") -> ImageFrame:
+        self.calls.append("get_frame")
+        self.requested_camera = camera
+        self.requested_deskewed.append(deskewed)
+        if self.get_frame_raises is not None:
+            raise self.get_frame_raises
+        index = min(len(self.requested_deskewed) - 1, len(self.frames) - 1)
+        return self.frames[index]
+
+
+class _PassThroughRenderer:
+    """A ``client.interfaces.Renderer`` double that returns the frame's
+    own bytes unchanged -- for tests that only care about poll
+    sequencing / status surfacing, not real pixel rendering."""
+
+    def render(self, frame: ImageFrame, *, layers=None, extra=()) -> bytes:
+        return frame.data
+
+
 def _image_frame(
     data: bytes = b"raw-bytes",
     *,
     frame_dark: bool = False,
+    calibration_stale: bool = False,
     tags: Optional[TagFrame] = None,
 ) -> ImageFrame:
     return ImageFrame(
@@ -123,6 +187,7 @@ def _image_frame(
         encoding="jpeg",
         timestamp=0.0,
         frame_dark=frame_dark,
+        calibration_stale=calibration_stale,
         tags=tags,
     )
 
@@ -338,6 +403,298 @@ def test_run_raw_view_closes_the_window_even_when_the_loop_raises():
         )
 
     assert window.close_called is True
+
+
+# ---------------------------------------------------------------------------
+# run_playfield_view -- UC-18 wiring (ticket 022-006): get_tags-then-
+# get_frame(deskewed=True) sequencing, no-raw-frame-fallback on
+# NotCalibrated, calibration_stale surfacing, and the live
+# poll->render->display geometry check.
+# ---------------------------------------------------------------------------
+
+
+def test_run_playfield_view_calls_get_tags_before_each_get_frame_deskewed_true():
+    daemon = _FakePlayfieldDaemon(frames=[_image_frame(data=b"f1"), _image_frame(data=b"f2")])
+    window = _FakeWindow(close_after_frames=2)
+
+    viewer.run_playfield_view(
+        "arducam-ov9782-usb-camera",
+        daemon,
+        renderer_factory=_PassThroughRenderer,
+        window_factory=lambda title: window,
+        poll_hz=_FAST_POLL_HZ,
+    )
+
+    assert daemon.calls == ["get_tags", "get_frame", "get_tags", "get_frame"]
+    assert daemon.requested_deskewed == [True, True]
+    assert daemon.requested_camera == "arducam-ov9782-usb-camera"
+    assert window.shown == [b"f1", b"f2"]
+
+
+def test_run_playfield_view_never_falls_back_to_a_raw_frame_when_uncalibrated():
+    """UC-18.S-2: the error propagates and no ``deskewed=False`` request
+    was ever made -- the mechanical proof that a raw-frame substitute
+    cannot happen on this path (see ``_fetch_playfield``'s docstring)."""
+    daemon = _FakePlayfieldDaemon(get_frame_raises=NotCalibrated("'cam' is not calibrated"))
+    window = _FakeWindow(close_after_frames=None)
+
+    with pytest.raises(NotCalibrated):
+        viewer.run_playfield_view(
+            "cam",
+            daemon,
+            renderer_factory=_PassThroughRenderer,
+            window_factory=lambda title: window,
+            poll_hz=_FAST_POLL_HZ,
+        )
+
+    assert daemon.calls == ["get_tags", "get_frame"]
+    assert False not in daemon.requested_deskewed  # never asked for a raw frame
+    assert window.shown == []  # the failed tick never reached Window.show
+    assert window.close_called is True  # cleanup still happens, exactly like run_raw_view
+
+
+def test_run_playfield_view_surfaces_calibration_stale_as_a_status():
+    """UC-18's stale-mid-view failure mode: surfaced, not silently
+    ignored -- a visible status indicator is sufficient (the ticket does
+    not require stopping the view)."""
+    daemon = _FakePlayfieldDaemon(frames=[_image_frame(data=b"stale-frame", calibration_stale=True)])
+    window = _FakeWindow(close_after_frames=1)
+
+    viewer.run_playfield_view(
+        "cam",
+        daemon,
+        renderer_factory=_PassThroughRenderer,
+        window_factory=lambda title: window,
+        poll_hz=_FAST_POLL_HZ,
+    )
+
+    assert window.shown == [b"stale-frame"]  # still displayed, not withheld
+    assert window.statuses[0] is not None
+    assert "stale" in window.statuses[0].lower()
+
+
+def test_run_playfield_view_still_surfaces_a_dark_frame_advisory():
+    daemon = _FakePlayfieldDaemon(frames=[_image_frame(data=b"dark-frame", frame_dark=True)])
+    window = _FakeWindow(close_after_frames=1)
+
+    viewer.run_playfield_view(
+        "cam",
+        daemon,
+        renderer_factory=_PassThroughRenderer,
+        window_factory=lambda title: window,
+        poll_hz=_FAST_POLL_HZ,
+    )
+
+    assert window.statuses[0] is not None
+    assert "dark" in window.statuses[0].lower()
+
+
+def test_run_playfield_view_propagates_no_display_available_before_any_daemon_call():
+    daemon = _FakePlayfieldDaemon(frames=[_image_frame()])
+
+    def boom_factory(title: str) -> viewer.Window:
+        raise viewer.NoDisplayAvailable("no $DISPLAY or $WAYLAND_DISPLAY set")
+
+    with pytest.raises(viewer.NoDisplayAvailable):
+        viewer.run_playfield_view("cam", daemon, window_factory=boom_factory)
+
+    assert daemon.calls == []
+
+
+def test_run_playfield_view_closes_the_window_even_when_the_loop_raises():
+    class _BoomPlayfieldDaemon:
+        def get_tags(self, camera: str) -> TagFrame:
+            return TagFrame(tags=(), timestamp=0.0, frame_index=0)
+
+        def get_frame(self, camera: str, *, deskewed: bool = False, encoding: str = "jpeg") -> ImageFrame:
+            raise RuntimeError("camera disconnected")
+
+    window = _FakeWindow(close_after_frames=None)
+
+    with pytest.raises(RuntimeError, match="camera disconnected"):
+        viewer.run_playfield_view(
+            "cam", _BoomPlayfieldDaemon(), window_factory=lambda title: window, poll_hz=_FAST_POLL_HZ
+        )
+
+    assert window.close_called is True
+
+
+def test_run_playfield_view_stops_polling_once_the_window_closes():
+    """Closing the window stops new poll ticks -- the fourth acceptance
+    criterion's other half (opening starts them, closing stops them)."""
+    daemon = _FakePlayfieldDaemon(
+        frames=[_image_frame(data=b"f1"), _image_frame(data=b"f2"), _image_frame(data=b"f3")]
+    )
+    window = _FakeWindow(close_after_frames=2)
+
+    viewer.run_playfield_view(
+        "cam",
+        daemon,
+        renderer_factory=_PassThroughRenderer,
+        window_factory=lambda title: window,
+        poll_hz=_FAST_POLL_HZ,
+    )
+
+    assert daemon.get_tags_calls == 2  # not 3 -- no tick after the window reports closed
+
+
+# -- the live geometry check, through the real Renderer -----------------
+
+#: Deliberately simple numbers for hand-checking, matching
+#: ``tests/aprilcam/client/test_renderer.py``'s own fixture style.
+_GEO_WIDTH_PX, _GEO_HEIGHT_PX = 500, 400
+_GEO_WIDTH_CM, _GEO_HEIGHT_CM = 100.0, 80.0
+_GEO_PX_PER_CM = _GEO_WIDTH_PX / _GEO_WIDTH_CM  # 5.0
+_GEO_BACKGROUND = (200, 200, 200)
+_TAG_HALF_CM = 5.0
+
+
+def _solid_deskewed_png() -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (_GEO_WIDTH_PX, _GEO_HEIGHT_PX), _GEO_BACKGROUND).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _front_edge_midpoint(center: WorldPoint) -> WorldPoint:
+    """The midpoint of the tag's front edge -- a boundary *line*, so
+    (unlike the tag's own centre) it is actually drawn-on pixel by
+    ``_draw_tag``'s ``draw.polygon(..., outline=...)`` call, matching
+    ``test_renderer.py``'s own sampling point."""
+    return WorldPoint(center.x, center.y + _TAG_HALF_CM)
+
+
+def _tag_record_at(center: WorldPoint) -> TagRecord:
+    front_left = WorldPoint(center.x - _TAG_HALF_CM, center.y + _TAG_HALF_CM)
+    front_right = WorldPoint(center.x + _TAG_HALF_CM, center.y + _TAG_HALF_CM)
+    back_right = WorldPoint(center.x + _TAG_HALF_CM, center.y - _TAG_HALF_CM)
+    back_left = WorldPoint(center.x - _TAG_HALF_CM, center.y - _TAG_HALF_CM)
+    return TagRecord(
+        tag=TagId(TagFamily.APRILTAG, 1),
+        world=center,
+        heading_rad=None,
+        world_velocity=None,
+        speed=None,
+        timestamp=0.0,
+        calibrated=True,
+        yaw_rad=0.0,
+        world_corners=(front_left, front_right, back_right, back_left),
+    )
+
+
+def _deskewed_frame_with_tag_at(center: WorldPoint) -> ImageFrame:
+    record = _tag_record_at(center)
+    return ImageFrame(
+        data=_solid_deskewed_png(),
+        width=_GEO_WIDTH_PX,
+        height=_GEO_HEIGHT_PX,
+        encoding="png",
+        timestamp=0.0,
+        deskewed=True,
+        px_per_cm=_GEO_PX_PER_CM,
+        world_extent=(_GEO_WIDTH_CM, _GEO_HEIGHT_CM),
+        tags=TagFrame(tags=(record,), timestamp=0.0, frame_index=0),
+    )
+
+
+def _decode_png(png_bytes: bytes) -> np.ndarray:
+    return np.asarray(Image.open(io.BytesIO(png_bytes)).convert("RGB"))
+
+
+def _mean_color_near(image: np.ndarray, x: float, y: float, *, radius: int = 3) -> np.ndarray:
+    height, width = image.shape[:2]
+    x0, x1 = max(0, int(x) - radius), min(width, int(x) + radius + 1)
+    y0, y1 = max(0, int(y) - radius), min(height, int(y) + radius + 1)
+    patch = image[y0:y1, x0:x1]
+    assert patch.size > 0
+    return patch.reshape(-1, patch.shape[-1]).mean(axis=0)
+
+
+def test_run_playfield_view_draws_apriltag_1_at_the_image_centre_for_a_centred_world_position():
+    """UC-18.S-1: AprilTag 1, at the field's surveyed centre (world
+    (0, 0)), is drawn at the image centre -- the anchor-invariant check,
+    now exercised through the full poll->render->display path with the
+    real ``client/renderer.py`` ``Renderer`` rather than calling
+    ``Renderer.render()`` directly (that direct check is
+    ``test_renderer.py``'s job; this one proves the viewer's own wiring
+    does not lose or shift it)."""
+    frame = _deskewed_frame_with_tag_at(WorldPoint(0.0, 0.0))
+    daemon = _FakePlayfieldDaemon(frames=[frame])
+    window = _FakeWindow(close_after_frames=1)
+
+    viewer.run_playfield_view(
+        "arducam",
+        daemon,
+        renderer_factory=Renderer,
+        window_factory=lambda title: window,
+        poll_hz=_FAST_POLL_HZ,
+    )
+
+    image = _decode_png(window.shown[0])
+    front_edge_midpoint = _front_edge_midpoint(WorldPoint(0.0, 0.0))
+    predicted = world_to_deskewed_pixel(
+        front_edge_midpoint, world_extent=(_GEO_WIDTH_CM, _GEO_HEIGHT_CM), px_per_cm=_GEO_PX_PER_CM
+    )
+    # World (0, 0)'s front-edge midpoint is directly above the image
+    # centre by exactly the tag's half-width in pixels -- both land
+    # squarely in the centre neighbourhood of a 500x400 image.
+    assert abs(predicted.x - _GEO_WIDTH_PX / 2) < 1.0
+    patch = _mean_color_near(image, predicted.x, predicted.y)
+    background = np.array(_GEO_BACKGROUND, dtype=np.float64)
+    assert np.linalg.norm(patch.astype(np.float64) - background) > 30
+
+
+def test_run_playfield_view_moves_the_drawn_tag_right_and_up_as_the_physical_tag_moves_east_and_north():
+    """The mirror-catching check (sprint.md Success Criteria / this
+    ticket's second acceptance criterion), now verified end-to-end
+    through the full poll->render->display path across two successive
+    poll ticks: a tag moved east is drawn further right on the second
+    frame than the first; moved north, further up."""
+    start = WorldPoint(0.0, 0.0)
+    moved = WorldPoint(10.0, 8.0)  # east (+x) and north (+y)
+    daemon = _FakePlayfieldDaemon(
+        frames=[_deskewed_frame_with_tag_at(start), _deskewed_frame_with_tag_at(moved)]
+    )
+    window = _FakeWindow(close_after_frames=2)
+
+    viewer.run_playfield_view(
+        "arducam",
+        daemon,
+        renderer_factory=Renderer,
+        window_factory=lambda title: window,
+        poll_hz=_FAST_POLL_HZ,
+    )
+
+    assert len(window.shown) == 2
+    before = _decode_png(window.shown[0])
+    after = _decode_png(window.shown[1])
+
+    extent = (_GEO_WIDTH_CM, _GEO_HEIGHT_CM)
+    predicted_start = world_to_deskewed_pixel(
+        _front_edge_midpoint(start), world_extent=extent, px_per_cm=_GEO_PX_PER_CM
+    )
+    predicted_moved = world_to_deskewed_pixel(
+        _front_edge_midpoint(moved), world_extent=extent, px_per_cm=_GEO_PX_PER_CM
+    )
+    assert predicted_moved.x > predicted_start.x  # east -> right on screen
+    assert predicted_moved.y < predicted_start.y  # north -> up on screen (smaller pixel-y)
+
+    background = np.array(_GEO_BACKGROUND, dtype=np.float64)
+
+    def _drawn(image: np.ndarray, x: float, y: float) -> bool:
+        patch = _mean_color_near(image, x, y)
+        return bool(np.linalg.norm(patch.astype(np.float64) - background) > 30)
+
+    # Frame 1: something is drawn at the start position...
+    assert _drawn(before, predicted_start.x, predicted_start.y)
+    # ...and nothing is drawn yet at the position the tag has not
+    # reached (the two positions are far enough apart, relative to the
+    # drawn tag's own footprint, that this is a real distinction).
+    assert not _drawn(before, predicted_moved.x, predicted_moved.y)
+
+    # Frame 2: the drawing has followed the tag to its new position...
+    assert _drawn(after, predicted_moved.x, predicted_moved.y)
+    # ...and is no longer at the old one.
+    assert not _drawn(after, predicted_start.x, predicted_start.y)
 
 
 # ---------------------------------------------------------------------------

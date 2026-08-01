@@ -24,13 +24,22 @@ all (to put them on screen, not to process them). See
 encoded bytes in, pixels on screen) and :class:`PollLoop` (fetch, show,
 wait, repeat, until the window closes) know nothing about *what* the
 raw view vs. the deskewed+tags view fetch or how it was produced --
-only :func:`run_raw_view` and its private ``_fetch_raw`` below are
-specific to this ticket. Ticket 006's ``playfield view`` reuses
+only :func:`run_raw_view`/:func:`run_playfield_view` and their private
+``_fetch_raw``/``_fetch_playfield`` below are specific to a view kind.
+Ticket 006's ``playfield view`` (:func:`run_playfield_view`) reuses
 ``Window``/``PollLoop`` unchanged and supplies a different ``fetch``
 callable (``get_tags`` then ``get_frame(deskewed=True)``, rendered
 through ``client/renderer.py`` into PNG bytes) -- the loop, timing, and
 window lifecycle stay identical, exactly as sprint.md's Step 3 table
 describes the "Live viewing" responsibility.
+
+**``playfield view``'s "raw means raw" counterpart: never fall back.**
+:func:`_fetch_playfield` only ever calls ``get_frame`` with
+``deskewed=True`` and has no ``except`` around ``NotCalibrated`` --
+so an uncalibrated camera's error propagates out of :func:`run_playfield_view`
+untouched, and a raw-frame substitute is structurally impossible on this
+path, not merely avoided by discipline (UC-18.S-2's central rule,
+mirrored from UC-16's "raw means raw" the other direction).
 
 **"Raw means raw" is enforced by omission, not by a switch.**
 ``_fetch_raw`` never reads ``ImageFrame.tags`` at all, even though a
@@ -73,6 +82,8 @@ from typing import Callable, Optional
 
 from PIL import Image, ImageTk
 
+from aprilcam.client.interfaces import Renderer as RendererBase
+from aprilcam.client.renderer import Renderer as PillowRenderer
 from aprilcam.daemon.interfaces import Daemon
 
 __all__ = [
@@ -83,6 +94,7 @@ __all__ = [
     "TkWindow",
     "PollLoop",
     "run_raw_view",
+    "run_playfield_view",
 ]
 
 #: Decision 3 (sprint.md): a starting guess, not a tuned constant --
@@ -375,5 +387,82 @@ def run_raw_view(
     window = window_factory(f"aprilcam camera view -- {camera}")
     try:
         PollLoop(window, lambda: _fetch_raw(daemon, camera), poll_hz=poll_hz).run()
+    finally:
+        window.close()
+
+
+def _fetch_playfield(daemon: Daemon, camera: str, renderer: RendererBase) -> PolledFrame:
+    """One poll tick's deskewed+tags payload (UC-18, ticket 022-006).
+
+    Calls ``get_tags`` first -- triggering a fresh detection burst,
+    since ``get_frame`` alone never does (sprint 021's Decision 4) --
+    then ``get_frame(camera, deskewed=True)``, and hands the resulting
+    frame to *renderer* (``client/renderer.py``'s tag-drawing half of
+    ``Renderer.render()``) to produce the displayed PNG bytes. See the
+    module docstring's "never fall back" note: this function has no
+    ``except`` around ``get_frame`` and never calls it with
+    ``deskewed=False``, so :class:`~aprilcam.errors.NotCalibrated`
+    propagates to the caller untouched.
+
+    ``calibration_stale`` (UC-18's stale-mid-view failure mode) and
+    ``frame_dark`` both surface as the window's advisory status line --
+    never drawn onto the image itself, same as :func:`_fetch_raw`'s
+    ``frame_dark`` handling.
+    """
+    daemon.get_tags(camera)
+    frame = daemon.get_frame(camera, deskewed=True)
+    data = renderer.render(frame)
+
+    status_parts = []
+    if frame.calibration_stale:
+        status_parts.append(
+            "calibration stale -- re-run 'aprilcam camera calibrate' (UC-18)"
+        )
+    if frame.frame_dark:
+        status_parts.append("frame dark -- image may be hard to see")
+    status = "; ".join(status_parts) if status_parts else None
+
+    return PolledFrame(data=data, status=status)
+
+
+def run_playfield_view(
+    camera: str,
+    daemon: Daemon,
+    *,
+    renderer_factory: Callable[[], RendererBase] = PillowRenderer,
+    window_factory: Callable[[str], Window] = TkWindow,
+    poll_hz: float = DEFAULT_POLL_HZ,
+) -> None:
+    """``playfield view`` (UC-18, ticket 022-006): open a window and
+    poll ``get_tags(camera)`` then ``get_frame(camera, deskewed=True)``
+    at *poll_hz*, rendering each frame's embedded tag boundaries and
+    "hats" through *renderer_factory* (``client/renderer.py`` by
+    default) before display -- reusing :class:`PollLoop`/:class:`Window`
+    unchanged (module docstring's "ticket-006 reuse seam").
+
+    As a side effect, opening this view is what makes the target
+    camera's ring buffer start filling at roughly the poll rate for as
+    long as the window stays open (sprint.md Decision 3's consequence,
+    sprint 021's Open Question 3): every tick's ``get_tags`` call is a
+    fresh detection burst request.
+
+    Raises :class:`NoDisplayAvailable` if no display can be opened
+    (propagated from *window_factory*, i.e. before any daemon call is
+    made). Raises :class:`~aprilcam.errors.NotCalibrated` if *camera* is
+    not calibrated -- propagated from the first poll tick's
+    ``get_frame`` call (i.e. after the window has already opened, since
+    calibration state is only knowable from the daemon), **never**
+    caught here to substitute a raw frame (see :func:`_fetch_playfield`).
+    ``cli/playfield.py`` is the boundary that turns either exception
+    into a UC-18-worded message. Any other
+    ``aprilcam.errors.AprilCamError`` raised mid-view propagates the
+    same way, after the window is closed.
+    """
+    renderer = renderer_factory()
+    window = window_factory(f"aprilcam playfield view -- {camera}")
+    try:
+        PollLoop(
+            window, lambda: _fetch_playfield(daemon, camera, renderer), poll_hz=poll_hz
+        ).run()
     finally:
         window.close()
