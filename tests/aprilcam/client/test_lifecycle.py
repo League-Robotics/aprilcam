@@ -339,7 +339,22 @@ def test_start_stop_status_round_trip_against_a_real_daemon_process(
     try:
         status = lifecycle.status()
         assert status.running is True
-        assert status.cameras == ()  # no fixture cameras required for this check
+        # No fixture cameras *required* for this check -- but this
+        # spawns a genuine subprocess against real ``Directories()``, so
+        # on a machine that happens to have cameras physically attached
+        # (this Mac does), the daemon's initial enumeration legitimately
+        # finds them. Since 020-007's readiness-race fix, that
+        # enumeration always completes *before* the control-plane socket
+        # becomes reachable, so ``status.cameras`` here is never a
+        # mid-enumeration partial read -- it is either genuinely empty
+        # (headless CI) or the real, complete attached set (this Mac).
+        # This test's purpose is the start/status/stop process round
+        # trip, not a camera census (that is
+        # test_lifecycle_integration.py's job, marked
+        # ``@pytest.mark.camera``), so it asserts shape rather than a
+        # hard-coded empty/non-empty expectation either way.
+        assert isinstance(status.cameras, tuple)
+        assert all(c.name for c in status.cameras)
 
         # A second instance, same directories/env, is refused and names
         # the holder -- AlreadyRunning surviving unchanged through a

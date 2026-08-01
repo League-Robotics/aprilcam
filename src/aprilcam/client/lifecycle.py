@@ -56,6 +56,41 @@ spawned subprocess inherits the *same* environment this process has
 or a test has set -- apply identically on both sides, which is what
 makes the two ``Directories()`` resolutions agree without this module
 ever needing to pass a path across the process boundary itself.
+
+**The start-readiness race, and why the fix lives in ``daemon/
+lifecycle.py`` instead of here (020-007).** :meth:`start` below waits
+for :func:`~aprilcam.client.discovery.probe_socket_reachable` to return
+``True`` and then returns success -- "the control-plane socket accepts
+a connection" is this method's entire definition of ready. This
+sprint's acceptance pass found that a real, human-shaped sequence --
+``aprilcam daemon start`` immediately followed by ``aprilcam camera
+list`` -- could observe an empty registry on this machine's AVFoundation
+backend, because the server-side ``DaemonLifecycle.start()``
+(``daemon/lifecycle.py``) used to build and start the control-plane
+listener *before* running its initial camera enumeration: the socket
+was reachable, and RPCs were already being dispatched on the listener's
+own thread pool, while the enumeration that populates the registry was
+still in flight on a different thread. Two layers could have absorbed
+the fix: this method could poll something richer than raw socket
+reachability (e.g. a real RPC, retried until the reported camera set
+stabilises), or the daemon could simply not open the socket until it
+is genuinely ready to answer. The latter was chosen: ``daemon/
+lifecycle.py``'s ``start()`` now runs the initial enumeration *before*
+building the listener, so socket-reachable and enumeration-complete
+become the same event -- fixing the race for *every* reader of that
+signal (this class, a bare ``grpc.channel_ready_future``, a future
+health-check RPC), not just this one call site. A client-side retry
+loop would have had to guess at a stabilisation heuristic (how many
+consecutive identical answers count as "settled"?) and would only have
+fixed the callers that used it; moving the line in the daemon fixes it
+structurally, once, for the whole system. See that module's docstring
+("Ordering: enumeration before the listener") for the fix itself and
+``tests/aprilcam/daemon/test_lifecycle.py``'s
+``test_start_calls_watch_before_building_the_control_plane_listener``
+for its regression test. This class needed no code change as a result
+-- :meth:`start` here was already correct given a daemon whose socket
+reachability *means* readiness; it was the daemon's promise that was
+broken.
 """
 
 from __future__ import annotations

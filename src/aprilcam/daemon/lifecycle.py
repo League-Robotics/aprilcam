@@ -27,14 +27,37 @@ starts/stops that process." Conflating them would mean the CLI's
 soon as the control plane is up; the block-until-shutdown loop lives in
 ``daemon/__main__.py``, mirroring v1's ``DaemonServer.run()``.
 
-**Ordering: lock before listener, always.** ``start()`` acquires the
-flock first and only then builds/starts the control-plane listener.
-This is what makes ``AlreadyRunning`` the failure a second instance
-actually sees (UC-01.S-3) rather than a socket-bind-in-use error that
-could equally mean a stale, uncleaned socket file from a crashed prior
-run -- the two failure modes must never be confusable, and the second
-instance must never touch the socket path at all (UC-01.S-3's "does
-not disturb the running daemon" promise).
+**Ordering: lock before anything else, always.** ``start()`` acquires
+the flock first and only then does any camera-discovery or
+control-plane work. This is what makes ``AlreadyRunning`` the failure a
+second instance actually sees (UC-01.S-3) rather than a socket-bind-in-
+use error that could equally mean a stale, uncleaned socket file from a
+crashed prior run -- the two failure modes must never be confusable,
+and the second instance must never touch the socket path at all
+(UC-01.S-3's "does not disturb the running daemon" promise).
+
+**Ordering: enumeration before the listener (020-007 regression fix).**
+``start()`` runs the synchronous half of ``watch`` -- the initial
+active camera probe (``daemon/__main__.py``'s ``enumerate_then_watch``)
+-- **before** building and starting the control-plane listener, not
+after. Earlier this sprint the order was reversed (listener up first,
+enumeration second), which opened a real, observed race: the moment
+``listener.start()`` returns, a gRPC channel to the socket succeeds and
+RPCs are already being dispatched on the listener's own thread pool,
+concurrently with this method's calling thread still running the
+(synchronous, sometimes multi-second on AVFoundation) initial probe.
+``client/lifecycle.py``'s ``start()`` treats "the socket accepts a
+connection" as its sole readiness signal, so it could return success --
+and a caller-issued ``camera list`` immediately after could reach a
+daemon whose registry was still empty. Starting enumeration first means
+the control-plane socket does not exist at all until the daemon
+genuinely knows its cameras, so *any* readiness signal built on socket
+reachability -- this client's included -- is automatically correct with
+no client-side change required. See ``client/lifecycle.py``'s module
+docstring and ``tests/aprilcam/client/test_lifecycle.py`` for the
+client-side half of this fix's verification, and
+``test_start_calls_watch_before_building_the_control_plane_listener``
+below for the ordering regression test.
 
 **The lock is never unlinked** (matches v1): removing it would reopen a
 create+lock race between the unlink and the next daemon's open+flock.
@@ -204,17 +227,23 @@ class DaemonLifecycle:
 
         Order: acquire the singleton lock (raising :class:`AlreadyRunning`
         naming the existing holder on contention, per the module
-        docstring); only then build and start the control-plane
-        listener; only then start passive camera watching, if wired.
-        Starting with **no cameras and no configuration is success**
-        (UC-01.S-2) -- nothing here inspects camera count at all.
+        docstring); only then run the initial camera enumeration and
+        start passive watching, if wired; only then build and start the
+        control-plane listener -- see the module docstring's "Ordering:
+        enumeration before the listener" section for why this order
+        (not "listener, then enumerate") is what makes the control
+        plane's own reachability a trustworthy readiness signal. Starting
+        with **no cameras and no configuration is success** (UC-01.S-2)
+        -- nothing here inspects camera count at all, so an empty-field
+        start is neither slower nor different in kind from a populated
+        one.
         """
         self._acquire_lock()
+        if self._watch is not None:
+            self._watch()
         listener = self._build_listener()
         listener.start()
         self._listener = listener
-        if self._watch is not None:
-            self._watch()
         self._running = True
         logger.info(
             "daemon lifecycle started: lock=%s socket=%s", self._lock_path, self._socket_path
@@ -223,13 +252,15 @@ class DaemonLifecycle:
     def stop(self) -> None:
         """See ``daemon.interfaces.DaemonLifecycle.stop``.
 
-        Reverse order of ``start()``: watching first, then the listener
-        (grace period for in-flight RPCs), then any held-camera cleanup
-        (``on_stop``), then the lock last -- so a racing second
-        ``start()`` can never observe a released lock while the old
-        listener is still mid-shutdown. Safe to call when not running
-        (a no-op), matching UC-13's "stop when not running: succeed
-        quietly."
+        Shutdown order (independent of ``start()``'s own ordering, per
+        020-007): stop passive watching first, so no further discovery
+        updates land mid-shutdown; then the listener (grace period for
+        in-flight RPCs), so no new RPC can be dispatched afterward; then
+        any held-camera cleanup (``on_stop``); then the lock last -- so
+        a racing second ``start()`` can never observe a released lock
+        while the old listener is still mid-shutdown. Safe to call when
+        not running (a no-op), matching UC-13's "stop when not running:
+        succeed quietly."
         """
         if not self._running:
             return

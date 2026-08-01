@@ -90,8 +90,37 @@ def test_start_with_no_cameras_and_no_config_succeeds(tmp_path):
 
     lifecycle.start()
 
-    assert events == ["build_listener", "watch"]
+    # "watch" (the initial active enumeration, synchronous, plus handing
+    # off to passive watching) runs *before* "build_listener" -- see
+    # test_start_calls_watch_before_building_the_control_plane_listener
+    # below for why this order is load-bearing, not incidental.
+    assert events == ["watch", "build_listener"]
     assert lifecycle.status() == "running-status"
+
+
+def test_start_calls_watch_before_building_the_control_plane_listener(tmp_path):
+    """Regression test (ticket 020-007): the client-side readiness
+    signal (``client/lifecycle.py``) treats "the control-plane socket
+    accepts a connection" as "the daemon is ready" -- so if the listener
+    were built/started *before* the initial camera enumeration
+    completes, a caller could see the socket become reachable, issue a
+    ``camera list``/``daemon status`` RPC, and observe an empty or
+    partial registry even though the daemon's own hardware is fully
+    enumerable. This test locks in the fix: the listener (and therefore
+    the socket becoming reachable at all) is built strictly after
+    ``watch`` -- which runs the synchronous enumeration -- has returned,
+    for every ``start()`` call, not just the first.
+    """
+    events: List[str] = []
+    lifecycle = _make_lifecycle(tmp_path, events=events)
+
+    lifecycle.start()
+    assert events.index("watch") < events.index("build_listener")
+
+    lifecycle.stop()
+    events.clear()
+    lifecycle.start()
+    assert events.index("watch") < events.index("build_listener")
 
 
 def test_start_marks_the_listener_started(tmp_path):
