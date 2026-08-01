@@ -1,7 +1,7 @@
 ---
 id: '022'
 title: Calibration, deskew, and the live view
-status: planning-docs
+status: closed
 branch: sprint/022-calibration-deskew-and-the-live-view
 worktree: false
 use-cases:
