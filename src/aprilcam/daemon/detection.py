@@ -40,13 +40,39 @@ not skipped by oversight.
 dictionary index) -- sprint.md Architecture Decision 2. No code in this
 module ever constructs or interprets a negative tag id.
 
-**Every record this sprint is honestly uncalibrated.** No calibration
-subsystem exists yet, so ``world``, ``heading_rad``, ``world_velocity``,
-``speed``, ``yaw_rad``, and ``world_corners`` are ``None`` on every
-``TagRecord`` :func:`_build_tag_record` produces; ``calibrated`` is
-always ``False``. Only ``pixel``/``pixel_corners`` are populated. This is
-the correct, honest output for an uncalibrated camera, not a partial
-implementation (sprint.md Decision 2 / this sprint's issue).
+**World coordinates, when a calibration exists (ticket 022-004).**
+:meth:`DetectionEngine.run_burst` asks its injected
+``calibration_lookup`` for *slug*'s current
+``calibration.interfaces.Calibration`` on every burst -- never cached
+across bursts, so a camera that becomes calibrated (or whose
+calibration goes stale) mid-session is reflected on the very next call,
+not just the next process restart. When one exists, :func:`_build_tag_record`
+converts ``pixel``/``pixel_corners`` through ``Calibration.to_world``
+to populate ``world``/``world_corners`` (preserving corner order --
+never independently recomputed), derives ``yaw_rad`` from the observed
+front edge (``world_corners[0]`` -> ``world_corners[1]``, the same
+``atan2``, 0=east, CCW-positive convention as heading), and sets
+``calibrated=True``. :meth:`run_burst` then hands this tag's
+world-position history -- the ring buffer's already-buffered entries for
+this exact tag, plus this burst's own new sample -- to
+``vision.motion.compute_motion`` (sprint 021, inert until now) to fill in
+``heading_rad``/``world_velocity``/``speed``, which stay ``None`` until a
+second calibrated sample exists for that tag -- and (ticket 022-007,
+real-hardware finding) ``heading_rad``/``world_velocity`` stay ``None``
+even with a second sample if the two are within
+``vision.motion.MIN_RELIABLE_DISPLACEMENT_CM`` of each other: a
+physically stationary tag jitters by a small, real amount between
+bursts, and that module's docstring works through why a direction
+derived from jitter is worse than no direction at all, while ``speed``
+alone is still safe to report honestly at that magnitude. **An
+uncalibrated camera's path is completely untouched**: ``calibration_lookup``
+returning ``None``
+(the default, and every case before ticket 003's calibration engine
+existed) reproduces sprint 021's output byte-for-byte -- ``world``,
+``heading_rad``, ``world_velocity``, ``speed``, ``yaw_rad``, and
+``world_corners`` all ``None``, ``calibrated=False``, only
+``pixel``/``pixel_corners`` populated. This is a conditional branch
+added around sprint 021's code, not a rewrite of it.
 
 **Accepted scope boundary: the ring buffer is query-driven, not
 wall-clock-bounded, this sprint** (sprint.md Open Question 3). Because a
@@ -62,16 +88,20 @@ buffer at frame rate.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections import deque
-from typing import Callable, Deque, Dict, Optional, Tuple
+from dataclasses import replace
+from typing import Callable, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from aprilcam.calibration.interfaces import Calibration
 from aprilcam.camera.interfaces import Camera
-from aprilcam.types import PixelPoint, TagFrame, TagId, TagRecord
+from aprilcam.types import PixelPoint, TagFrame, TagId, TagRecord, WorldPoint
 from aprilcam.vision.detector import Detection, TagDetector
+from aprilcam.vision.motion import compute_motion
 from aprilcam.vision.pipeline import PipelineConfig, run_pipeline
 
 __all__ = ["RING_BUFFER_SIZE", "DetectionEngine"]
@@ -90,9 +120,30 @@ RING_BUFFER_SIZE = 300
 #: times detection actually runs without needing real pixel data.
 DetectorFactory = Callable[[], TagDetector]
 
+#: A callable that resolves a camera slug -> its currently-held
+#: ``Calibration``, or ``None`` if that camera has never been
+#: calibrated -- ``daemon.service.DaemonService.get_calibration`` in
+#: production (module docstring's "threaded through" section), a fixture
+#: lookup or a plain fake in tests. Called fresh on every
+#: :meth:`DetectionEngine.run_burst`, never cached, so a newly-completed
+#: calibration takes effect on the very next burst.
+CalibrationLookup = Callable[[str], Optional[Calibration]]
+
 
 def _default_detector_factory() -> TagDetector:
     return TagDetector()
+
+
+def _default_calibration_lookup(slug: str) -> Optional[Calibration]:
+    """No calibration subsystem wired in -- every camera is uncalibrated.
+
+    The default for both :class:`DetectionEngine`'s own constructor and
+    every pre-ticket-004 test/caller that never passed
+    ``calibration_lookup`` at all: reproduces sprint 021's
+    always-uncalibrated behaviour exactly (module docstring's regression
+    guarantee).
+    """
+    return None
 
 
 def _pixel_corners(
@@ -106,27 +157,81 @@ def _pixel_corners(
     return (pts[0], pts[1], pts[2], pts[3])
 
 
-def _build_tag_record(detection: Detection, *, timestamp: float) -> TagRecord:
-    """One raw ``Detection`` -> one ``TagRecord``, honestly uncalibrated.
+def _front_edge_yaw(
+    world_corners: Tuple[WorldPoint, WorldPoint, WorldPoint, WorldPoint]
+) -> float:
+    """``yaw_rad`` from the observed front edge, in world space.
 
-    See the module docstring's "every record this sprint is honestly
-    uncalibrated" section -- ``world``/``heading_rad``/``world_velocity``/
-    ``speed``/``yaw_rad``/``world_corners`` are all ``None`` and
-    ``calibrated`` is ``False``; only ``pixel``/``pixel_corners`` carry
-    real data.
+    ``design.md`` Sec.6 / ``types.TagRecord``'s corner-order contract:
+    ``world_corners[0]`` is front-left, ``world_corners[1]`` is
+    front-right, and the ``0 -> 1`` edge is the front edge the hat sits
+    on. ``atan2`` over that edge vector, 0=east CCW-positive -- the same
+    numeric convention ``vision.motion.compute_motion`` uses for
+    ``heading_rad`` (``types.py``'s module docstring), applied here to
+    orientation rather than motion.
     """
+    front_left, front_right = world_corners[0], world_corners[1]
+    return math.atan2(front_right.y - front_left.y, front_right.x - front_left.x)
+
+
+def _build_tag_record(
+    detection: Detection, *, timestamp: float, calibration: Optional[Calibration]
+) -> TagRecord:
+    """One raw ``Detection`` -> one ``TagRecord``.
+
+    *calibration* ``None`` reproduces sprint 021's honestly-uncalibrated
+    output exactly: ``world``/``heading_rad``/``world_velocity``/
+    ``speed``/``yaw_rad``/``world_corners`` all ``None``, ``calibrated``
+    ``False``, only ``pixel``/``pixel_corners`` populated.
+
+    A real *calibration* populates ``world`` (via ``Calibration.to_world``
+    on the detection's centre), ``world_corners`` (the same conversion
+    applied to each of the four ``pixel_corners`` in order -- never
+    independently recomputed), and ``yaw_rad`` (:func:`_front_edge_yaw`
+    on those ``world_corners``), and sets ``calibrated=True``.
+    ``heading_rad``/``world_velocity``/``speed`` are left ``None`` here
+    regardless -- :meth:`DetectionEngine.run_burst` fills those in once
+    it has assembled this tag's world-position history, which this
+    module-level function has no access to (it builds one record from
+    one detection, not a tag's history across bursts).
+    """
+    tag = TagId(family=detection.family, number=detection.number)
+    pixel_corners = _pixel_corners(detection.corners)
+
+    if calibration is None:
+        return TagRecord(
+            tag=tag,
+            world=None,
+            heading_rad=None,
+            world_velocity=None,
+            speed=None,
+            timestamp=timestamp,
+            pixel=detection.center,
+            calibrated=False,
+            yaw_rad=None,
+            world_corners=None,
+            pixel_corners=pixel_corners,
+        )
+
+    world = calibration.to_world(detection.center)
+    world_corners = (
+        calibration.to_world(pixel_corners[0]),
+        calibration.to_world(pixel_corners[1]),
+        calibration.to_world(pixel_corners[2]),
+        calibration.to_world(pixel_corners[3]),
+    )
     return TagRecord(
-        tag=TagId(family=detection.family, number=detection.number),
-        world=None,
+        tag=tag,
+        world=world,
         heading_rad=None,
         world_velocity=None,
         speed=None,
         timestamp=timestamp,
         pixel=detection.center,
-        calibrated=False,
-        yaw_rad=None,
-        world_corners=None,
-        pixel_corners=_pixel_corners(detection.corners),
+        calibrated=True,
+        yaw_rad=_front_edge_yaw(world_corners),
+        world_corners=world_corners,
+        pixel_corners=pixel_corners,
     )
 
 
@@ -154,6 +259,16 @@ class DetectionEngine:
         camera" section). Overridable so tests can substitute a
         call-counting double without needing real pixel data or a real
         ``cv2.aruco`` build.
+    calibration_lookup:
+        Resolves a camera slug -> its currently-held ``Calibration``, or
+        ``None`` if uncalibrated (module docstring's "world coordinates,
+        when a calibration exists" section). Defaults to
+        :func:`_default_calibration_lookup` (always ``None``), which is
+        exactly sprint 021's behaviour -- every existing caller that
+        constructs a ``DetectionEngine`` without this parameter keeps
+        producing honestly-uncalibrated records. ``daemon.service.
+        DaemonService`` wires its own ``get_calibration`` in here for a
+        real daemon process.
     """
 
     def __init__(
@@ -162,10 +277,12 @@ class DetectionEngine:
         buffer_size: int = RING_BUFFER_SIZE,
         pipeline_config: Optional[PipelineConfig] = None,
         detector_factory: DetectorFactory = _default_detector_factory,
+        calibration_lookup: CalibrationLookup = _default_calibration_lookup,
     ) -> None:
         self._buffer_size = buffer_size
         self._pipeline_config = pipeline_config
         self._detector_factory = detector_factory
+        self._calibration_lookup = calibration_lookup
         self._buffers: Dict[str, Deque[TagFrame]] = {}
         self._detectors: Dict[str, TagDetector] = {}
         self._frame_counts: Dict[str, int] = {}
@@ -185,6 +302,23 @@ class DetectionEngine:
         available" contract exactly, for the same reason: a capture
         failure is not "zero tags detected" and must not be recorded as
         one -- no buffer entry is appended when this raises).
+
+        When ``calibration_lookup(slug)`` returns a real ``Calibration``
+        (module docstring), each hit's ``world``/``world_corners``/
+        ``yaw_rad``/``calibrated`` are populated by :func:`_build_tag_record`,
+        and this method then assembles that tag's world-position history
+        -- every already-buffered entry for the same ``TagId`` with a
+        non-``None`` ``world``, oldest to newest, plus this burst's own
+        new sample last -- and hands it to
+        ``vision.motion.compute_motion`` to fill in
+        ``heading_rad``/``world_velocity``/``speed``. A tag with no prior
+        calibrated history (its first calibrated sighting) gets a
+        one-entry history, so ``compute_motion`` correctly reports all
+        three as ``None`` rather than a fabricated zero (its own
+        "insufficient history" contract, sprint 021). An uncalibrated
+        camera skips this step entirely: ``record.world is None`` short-
+        circuits before any history is gathered or ``compute_motion`` is
+        ever called, leaving sprint 021's path untouched.
         """
         frame = camera.read()
         if frame is None:
@@ -195,8 +329,13 @@ class DetectionEngine:
         detections = detector.detect(gray, scale=rescale.scale)
 
         timestamp = time.time()
+        calibration = self._calibration_lookup(slug)
         records = tuple(
-            _build_tag_record(detection, timestamp=timestamp) for detection in detections
+            self._finish_record(
+                _build_tag_record(detection, timestamp=timestamp, calibration=calibration),
+                slug=slug,
+            )
+            for detection in detections
         )
         tag_frame = TagFrame(
             tags=records,
@@ -205,6 +344,43 @@ class DetectionEngine:
         )
         self._append(slug, tag_frame)
         return tag_frame
+
+    def _finish_record(self, record: TagRecord, *, slug: str) -> TagRecord:
+        """Fill in *record*'s motion fields from its tag's world-position
+        history, when it has one (``run_burst``'s docstring).
+
+        A no-op (returns *record* unchanged) for an uncalibrated hit --
+        ``record.world is None`` is exactly ``_build_tag_record``'s
+        signal that no calibration applied, and motion is meaningless
+        without world positions.
+        """
+        if record.world is None:
+            return record
+
+        history = self._history_for_tag(slug, record.tag)
+        history.append((record.timestamp, record.world))
+        velocity, speed, heading_rad = compute_motion(history)
+        return replace(record, heading_rad=heading_rad, world_velocity=velocity, speed=speed)
+
+    def _history_for_tag(self, slug: str, tag: TagId) -> List[Tuple[float, WorldPoint]]:
+        """*tag*'s already-buffered ``(timestamp, world)`` samples for
+        *slug*, oldest to newest -- the ring buffer as it stands
+        **before** this burst's new ``TagFrame`` is appended (``_append``
+        runs after every record in the new burst is finished). Only
+        entries with a non-``None`` ``world`` count: a buffered frame
+        from before this camera was calibrated (or a frame where this
+        tag was uncalibrated for some other reason) cannot contribute a
+        world position to a finite-difference velocity.
+        """
+        with self._lock:
+            buf = self._buffers.get(slug)
+            frames = tuple(buf) if buf is not None else ()
+        return [
+            (frame_record.timestamp, frame_record.world)
+            for frame in frames
+            for frame_record in frame.tags
+            if frame_record.tag == tag and frame_record.world is not None
+        ]
 
     def history(self, slug: str) -> Tuple[TagFrame, ...]:
         """Every buffered ``TagFrame`` for *slug*, oldest to newest.

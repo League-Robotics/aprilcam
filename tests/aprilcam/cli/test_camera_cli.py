@@ -37,6 +37,7 @@ from aprilcam.types import (
     TagRecord,
     WorldPoint,
 )
+from aprilcam.view.viewer import NoDisplayAvailable
 
 
 def _camera(name: str = "arducam-ov9782-usb-camera", number: int = 1, **overrides) -> CameraState:
@@ -82,20 +83,32 @@ def _uncalibrated_record(
 
 
 def _calibrated_record(
-    family: TagFamily = TagFamily.APRILTAG, number: int = 1, wx: float = 10.0, wy: float = -5.0
+    family: TagFamily = TagFamily.APRILTAG,
+    number: int = 1,
+    wx: float = 10.0,
+    wy: float = -5.0,
+    heading_rad: Optional[float] = 0.5,
+    speed: Optional[float] = 12.5,
+    yaw_rad: Optional[float] = 0.2,
 ) -> TagRecord:
-    """A record shaped as a future calibration sprint would produce --
-    exercises ``_format_tag_row``'s calibrated branch, unreachable via
-    a real daemon this sprint but real code, not a stub."""
+    """A record shaped as a real calibrated camera produces this sprint
+    (ticket 022-003 onward) -- exercises ``_format_tag_row``'s
+    calibrated branch. ``heading_rad``/``speed``/``yaw_rad`` are
+    overridable so tests can shape the "stationary tag" case (ticket
+    022-007): ``heading_rad=None`` with a real ``speed``/``yaw_rad``,
+    exactly what ``vision.motion.compute_motion`` now reports for a tag
+    whose two most recent samples are within
+    ``MIN_RELIABLE_DISPLACEMENT_CM`` of each other."""
     return TagRecord(
         tag=TagId(family, number),
         world=WorldPoint(wx, wy),
-        heading_rad=0.5,
+        heading_rad=heading_rad,
         world_velocity=None,
-        speed=12.5,
+        speed=speed,
         timestamp=0.0,
         pixel=PixelPoint(1.0, 2.0),
         calibrated=True,
+        yaw_rad=yaw_rad,
     )
 
 
@@ -114,6 +127,8 @@ class _FakeDaemon:
     tag_frame: Optional[TagFrame] = None
     get_tags_raises: Optional[Exception] = None
     requested_tags_camera: Optional[str] = None
+    set_camera_config_raises: Optional[Exception] = None
+    pushed_camera_config: Optional[object] = None
 
     def list_cameras(self) -> Tuple[CameraState, ...]:
         return self.cameras
@@ -133,6 +148,11 @@ class _FakeDaemon:
         if self.get_tags_raises is not None:
             raise self.get_tags_raises
         return self.tag_frame if self.tag_frame is not None else _tag_frame()
+
+    def set_camera_config(self, config) -> None:
+        if self.set_camera_config_raises is not None:
+            raise self.set_camera_config_raises
+        self.pushed_camera_config = config
 
 
 @dataclass
@@ -496,9 +516,8 @@ def test_tags_distinguishes_apriltag_and_aruco_of_the_same_number(capsys):
 
 
 def test_tags_calibrated_record_prints_world_position_not_the_uncalibrated_flag(capsys):
-    """The calibrated branch is real code -- unreachable via a real
-    daemon this sprint, but tested so a later calibration sprint
-    activates it rather than writing it (see the module docstring)."""
+    """The calibrated branch, exercised against a real daemon since
+    ticket 022-003 activated calibration."""
     record = _calibrated_record(wx=10.0, wy=-5.0)
     daemon = _FakeDaemon(tag_frame=_tag_frame((record,)))
     discovery = _FakeDiscovery(daemon=daemon)
@@ -508,6 +527,49 @@ def test_tags_calibrated_record_prints_world_position_not_the_uncalibrated_flag(
     out = capsys.readouterr().out
     assert "UNCALIBRATED" not in out
     assert "world=(10.0, -5.0)" in out
+
+
+def test_tags_calibrated_record_prints_yaw_ahead_of_heading_and_speed(capsys):
+    """Ticket 022-007 acceptance criterion: the CLI shows ``yaw_rad``
+    (the tag's own facing direction) alongside ``heading_rad`` (motion
+    direction) -- previously ``yaw`` was silently absent from
+    ``camera tags`` output entirely, even though ``TagRecord`` already
+    carried it (ticket 022-004)."""
+    record = _calibrated_record(wx=10.0, wy=-5.0, yaw_rad=0.2, heading_rad=0.5, speed=12.5)
+    daemon = _FakeDaemon(tag_frame=_tag_frame((record,)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    camera_cli.cmd_tags(_args(), discovery_factory=lambda: discovery)
+
+    out = capsys.readouterr().out
+    assert "yaw=0.200" in out
+    assert "heading=0.500" in out
+    assert "speed=12.50" in out
+    assert out.index("yaw=") < out.index("heading="), "yaw must print ahead of heading"
+
+
+def test_tags_stationary_tag_shows_undefined_heading_but_a_real_yaw_and_speed(capsys):
+    """Ticket 022-007 defect B, end to end through the CLI: a tag whose
+    two most recent samples are within
+    ``vision.motion.MIN_RELIABLE_DISPLACEMENT_CM`` of each other now
+    carries ``heading_rad=None`` (undefined -- not a confident-looking
+    noise-driven angle) from ``vision.motion.compute_motion``, while
+    ``yaw_rad`` (orientation, not motion -- unaffected by this fix) and
+    ``speed`` (honestly near-zero, not suppressed) stay populated. The
+    CLI must render that distinction, not collapse it: a dash for the
+    undefined heading, real numbers for yaw and speed."""
+    record = _calibrated_record(
+        wx=-67.1, wy=0.0, heading_rad=None, speed=0.0004, yaw_rad=-1.633
+    )
+    daemon = _FakeDaemon(tag_frame=_tag_frame((record,)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    camera_cli.cmd_tags(_args(), discovery_factory=lambda: discovery)
+
+    out = capsys.readouterr().out
+    assert "yaw=-1.633" in out
+    assert "heading=-" in out
+    assert "speed=0.00" in out
 
 
 def test_tags_with_nothing_detected_prints_an_empty_result_not_an_error(capsys):
@@ -675,4 +737,257 @@ def test_tags_h_prints_help_not_a_missing_hostname_error():
     parser = _build_parser()
     with pytest.raises(SystemExit) as excinfo:
         parser.parse_args(["camera", "tags", "some-camera", "-h"])
+    assert excinfo.value.code == 0
+
+
+# ---------------------------------------------------------------------------
+# camera config -- AC: ticket 022-001, push-only, playfield-link slice
+# ---------------------------------------------------------------------------
+
+
+class _FakeCameraConfigLoader:
+    """A ``ConfigLoader``-shaped double: returns a pre-built
+    ``CameraConfig`` (or raises) instead of touching a real file --
+    ``cmd_config`` is tested against this seam the same way every other
+    command here is tested against a fake ``Discovery``."""
+
+    def __init__(self, config=None, raises: Optional[Exception] = None):
+        self._config = config
+        self._raises = raises
+        self.requested_path = None
+
+    def load_camera_config(self, path):
+        self.requested_path = path
+        if self._raises is not None:
+            raise self._raises
+        return self._config
+
+    def load_playfield(self, path):  # pragma: no cover - not exercised here
+        raise NotImplementedError
+
+
+def test_config_pushes_the_loaded_document_and_reports_the_playfield(capsys, tmp_path):
+    from aprilcam.config.interfaces import CameraConfig
+
+    config = CameraConfig(
+        name="arducam-ov9782-usb-camera", playfield="main-playfield", settings={}
+    )
+    loader = _FakeCameraConfigLoader(config=config)
+    daemon = _FakeDaemon()
+    discovery = _FakeDiscovery(daemon=daemon)
+    file_path = tmp_path / "camera.json"
+
+    code = camera_cli.cmd_config(
+        _args(file=str(file_path)),
+        discovery_factory=lambda: discovery,
+        loader_factory=lambda: loader,
+    )
+
+    assert code == 0
+    assert loader.requested_path == Path(file_path)
+    assert daemon.pushed_camera_config == config
+    out = capsys.readouterr().out
+    assert "arducam-ov9782-usb-camera" in out
+    assert "main-playfield" in out
+
+
+def test_config_reports_no_playfield_when_the_document_carries_none(capsys, tmp_path):
+    from aprilcam.config.interfaces import CameraConfig
+
+    config = CameraConfig(name="hd-usb-camera", playfield=None, settings={})
+    loader = _FakeCameraConfigLoader(config=config)
+    discovery = _FakeDiscovery(daemon=_FakeDaemon())
+
+    code = camera_cli.cmd_config(
+        _args(file="camera.json"), discovery_factory=lambda: discovery, loader_factory=lambda: loader
+    )
+
+    assert code == 0
+    assert "(none)" in capsys.readouterr().out
+
+
+def test_config_malformed_document_is_rejected_before_any_rpc(capsys, tmp_path):
+    from aprilcam.errors import MalformedDocument
+
+    loader = _FakeCameraConfigLoader(raises=MalformedDocument("no 'name' field"))
+    daemon = _FakeDaemon()
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = camera_cli.cmd_config(
+        _args(file="bad.json"), discovery_factory=lambda: discovery, loader_factory=lambda: loader
+    )
+
+    assert code == 1
+    assert "no 'name' field" in capsys.readouterr().err
+    assert daemon.pushed_camera_config is None  # never reached the daemon
+
+
+def test_config_reports_a_daemon_side_rejection(capsys, tmp_path):
+    from aprilcam.config.interfaces import CameraConfig
+    from aprilcam.errors import UnknownCamera
+
+    config = CameraConfig(name="unknown-cam", playfield=None, settings={})
+    loader = _FakeCameraConfigLoader(config=config)
+    daemon = _FakeDaemon(set_camera_config_raises=UnknownCamera("unknown-cam", ("hd-usb-camera",)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = camera_cli.cmd_config(
+        _args(file="camera.json"), discovery_factory=lambda: discovery, loader_factory=lambda: loader
+    )
+
+    assert code == 1
+    assert "unknown-cam" in capsys.readouterr().err
+
+
+def test_config_is_wired_to_cmd_config():
+    parser = _build_parser()
+    args = parser.parse_args(["camera", "config", "camera.json"])
+    assert args.func is camera_cli.cmd_config
+    assert args.file == "camera.json"
+    assert args.daemon is None
+
+
+def test_config_h_prints_help_not_a_missing_hostname_error():
+    parser = _build_parser()
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["camera", "config", "camera.json", "-h"])
+    assert excinfo.value.code == 0
+
+
+# ---------------------------------------------------------------------------
+# camera view -- AC: UC-16.S-1/S-3, ticket 022-002. Headless throughout:
+# ``run_view`` is injected exactly like ``discovery_factory`` elsewhere in
+# this file, so none of these tests ever touch ``view/viewer.py``'s real
+# poll loop or GUI toolkit -- that machinery has its own headless tests in
+# ``tests/aprilcam/view/test_viewer.py``.
+# ---------------------------------------------------------------------------
+
+
+def test_view_refuses_all_before_ever_connecting(capsys):
+    class _ExplodingDiscovery:
+        def connect(self, host=None):
+            raise AssertionError("must not connect when --all is refused up front")
+
+    code = camera_cli.cmd_view(_args(all=True), discovery_factory=lambda: _ExplodingDiscovery())
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "--all" in err
+    assert "single" in err.lower()
+
+
+def test_view_connects_and_hands_the_connected_daemon_to_run_view():
+    daemon = _FakeDaemon()
+    discovery = _FakeDiscovery(daemon=daemon)
+    calls = []
+
+    code = camera_cli.cmd_view(
+        _args(camera="arducam-ov9782-usb-camera"),
+        discovery_factory=lambda: discovery,
+        run_view=lambda camera, connected: calls.append((camera, connected)),
+    )
+
+    assert code == 0
+    assert calls == [("arducam-ov9782-usb-camera", daemon)]
+
+
+def test_view_passes_the_daemon_flag_through_to_connect():
+    discovery = _FakeDiscovery(daemon=_FakeDaemon())
+
+    camera_cli.cmd_view(
+        _args(daemon="pi-field.local"),
+        discovery_factory=lambda: discovery,
+        run_view=lambda camera, connected: None,
+    )
+
+    assert discovery.connected_with == "pi-field.local"
+
+
+def test_view_reports_a_connection_failure_without_ever_calling_run_view(capsys):
+    discovery = _FakeDiscovery(connect_raises=ConnectionFailed("pi-field.local", reason="refused"))
+    calls = []
+
+    code = camera_cli.cmd_view(
+        _args(daemon="pi-field.local"),
+        discovery_factory=lambda: discovery,
+        run_view=lambda camera, connected: calls.append((camera, connected)),
+    )
+
+    assert code == 1
+    assert calls == []
+    err = capsys.readouterr().err
+    assert "pi-field.local" in err and "refused" in err
+
+
+def test_view_no_display_points_at_camera_image_instead_of_a_backtrace(capsys):
+    """UC-16.S-3: a clear message naming ``camera image``, not a
+    toolkit backtrace."""
+    discovery = _FakeDiscovery(daemon=_FakeDaemon())
+
+    def raising_run_view(camera, connected):
+        raise NoDisplayAvailable("no $DISPLAY or $WAYLAND_DISPLAY set")
+
+    code = camera_cli.cmd_view(
+        _args(camera="arducam-ov9782-usb-camera"),
+        discovery_factory=lambda: discovery,
+        run_view=raising_run_view,
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "camera image" in err
+    assert "arducam-ov9782-usb-camera" in err
+
+
+def test_view_surfaces_a_typed_error_raised_mid_view(capsys):
+    discovery = _FakeDiscovery(daemon=_FakeDaemon())
+
+    def raising_run_view(camera, connected):
+        raise CameraNotPresent(camera)
+
+    code = camera_cli.cmd_view(
+        _args(camera="hd-usb-camera"),
+        discovery_factory=lambda: discovery,
+        run_view=raising_run_view,
+    )
+
+    assert code == 1
+    assert "not currently present" in capsys.readouterr().err
+
+
+def test_view_is_wired_to_cmd_view():
+    parser = _build_parser()
+    args = parser.parse_args(["camera", "view", "arducam-ov9782-usb-camera"])
+    assert args.func is camera_cli.cmd_view
+    assert args.camera == "arducam-ov9782-usb-camera"
+    assert args.all is False
+    assert args.daemon is None
+
+
+def test_view_requires_a_camera_positional_argument():
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["camera", "view"])
+
+
+def test_view_accepts_a_persistent_number_as_the_camera_token():
+    parser = _build_parser()
+    args = parser.parse_args(["camera", "view", "3"])
+    assert args.camera == "3"
+
+
+def test_view_accepts_all_at_parse_time_but_cmd_view_refuses_it_at_runtime():
+    """``--all`` is wired onto this subparser (so ``-h`` documents it
+    and the refusal message can explain itself, matching ``camera
+    image --all``'s pattern) -- argparse accepts it; ``cmd_view`` is
+    what refuses it, exercised above."""
+    parser = _build_parser()
+    args = parser.parse_args(["camera", "view", "some-camera", "--all"])
+    assert args.all is True
+
+
+def test_view_h_prints_help_not_a_missing_hostname_error():
+    parser = _build_parser()
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["camera", "view", "some-camera", "-h"])
     assert excinfo.value.code == 0

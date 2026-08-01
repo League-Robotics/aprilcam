@@ -15,6 +15,35 @@
 // anticipated, not a replacement. Treat every message/field number
 // below as permanent.
 //
+// Sprint 022 ticket 001 is the second such extension: SetPlayfield /
+// GetPlayfield / ListPlayfields / SetCameraConfig / GetCameraConfig,
+// the minimal config-service slice sprint.md's Architecture Decision 1
+// scopes for this sprint (playfields in full; camera config carrying
+// only the playfield link -- hardware-settings push is sprint 023).
+// `PlayfieldDefinition`/`PlayfieldFeatureEntry` mirror
+// `aprilcam.config.loader.PlayfieldDefinition`'s actual stored shape
+// (per-section entries with an id where one exists), not the more
+// abstract `aprilcam.config.interfaces.Feature`/`required_aruco_ids()`
+// view -- `Feature` deliberately carries no numeric id, and calibration
+// (ticket 003) needs exactly that id -> position mapping to survive a
+// push/fetch round trip, so the wire shape mirrors the concrete
+// implementation instead of dropping it. `CameraConfig.settings`
+// (`dict[str, Any]` in Python) crosses the wire as a JSON-encoded
+// string rather than `google.protobuf.Struct`, avoiding a well-known-type
+// import for a value this sprint only ever stores and echoes back,
+// never applies (Decision 1).
+//
+// Ticket 003 is the third: `Calibrate` / `GetCalibration`. Every vision
+// call happens inside the daemon (UC-04 main flow step 1: "the client
+// sends a command, not pixels") -- `CalibrateRequest` carries only a
+// camera name, never a frame. `CalibrationResult` mirrors
+// `aprilcam.calibration.interfaces.CalibrationResult` field for field
+// -- `missing_ids` is always the exact ids, never a count (UC-04.S-2).
+// `Calibration` mirrors `aprilcam.calibration.calibration.Calibration`:
+// the homography crosses as 9 `double`s (row-major) rather than a
+// nested-message matrix type, since nothing else in this file needs a
+// generic NxM matrix shape.
+//
 // Wire conventions this file follows (docs/design/design.md §6):
 //   - World-cm coordinates cross this boundary only inside `TagRecord`
 //     (`world`, `world_velocity`, `world_corners`), and every camera
@@ -84,6 +113,49 @@ service AprilCamV2 {
   // an explicit entry with an empty `TagFrame.tags` -- gaps are never
   // interpolated or silently dropped (UC-26.S-4).
   rpc GetTagHistory (GetTagHistoryRequest) returns (GetTagHistoryResponse);
+
+  // Adopt a playfield definition, in memory, keyed by its own `name`
+  // (UC-02). Rejected whole if malformed -- client-side validation
+  // (`config/loader.py`'s `ConfigLoader`) means a malformed document
+  // never reaches this RPC in practice (UC-23.S-4).
+  rpc SetPlayfield (SetPlayfieldRequest) returns (SetPlayfieldResponse);
+
+  // Fetch one playfield by name, plus its derived `linked_cameras`
+  // (UC-02). Unknown name -> NOT_FOUND, naming the playfields held.
+  rpc GetPlayfield (GetPlayfieldRequest) returns (GetPlayfieldResponse);
+
+  // Every playfield this daemon currently holds (Decision 4: no
+  // single-slot limit).
+  rpc ListPlayfields (ListPlayfieldsRequest) returns (ListPlayfieldsResponse);
+
+  // Push a camera config, in memory, keyed by its own `name`. This
+  // sprint's minimal slice (Decision 1): only `playfield` has any
+  // observable effect (linking the camera); `settings` round-trips
+  // through `GetCameraConfig` but is never applied to hardware.
+  rpc SetCameraConfig (SetCameraConfigRequest) returns (SetCameraConfigResponse);
+
+  // Fetch one camera's config as last pushed. A camera nobody has
+  // configured yet is NOT_FOUND, not a fabricated blank document (the
+  // introspected-plus-blank template is out of scope this sprint).
+  rpc GetCameraConfig (GetCameraConfigRequest) returns (GetCameraConfigResponse);
+
+  // Establish a camera's pixel<->world mapping against its linked
+  // playfield (UC-04, UC-15). All vision happens in the daemon; the
+  // client sends a camera name, not pixels. All-or-nothing against the
+  // playfield definition's required ArUco set -- `CalibrationResult.
+  // missing_ids` names exactly which ids were absent, never a count.
+  // `NoPlayfieldLinked` (a camera with no playfield link) maps to
+  // FAILED_PRECONDITION, distinct from an explicit-but-failed
+  // `CalibrationResult` (UC-15.S-2).
+  rpc Calibrate (CalibrateRequest) returns (CalibrateResponse);
+
+  // Fetch a camera's currently-held calibration, if any (UC-01, UC-05).
+  // Absent `GetCalibrationResponse.calibration`
+  // (`HasField("calibration") == false`) means the camera has never
+  // been successfully calibrated -- never a fabricated/default
+  // `Calibration`, mirroring `GetTagResponse.record`'s presence
+  // discipline.
+  rpc GetCalibration (GetCalibrationRequest) returns (GetCalibrationResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -243,13 +315,29 @@ message GetFrameResponse {
   // saw nothing. `get_frame` never triggers a detection burst itself
   // -- this is a read of whatever the ring buffer already holds.
   //
-  // px_per_cm / world_extent / annotations from aprilcam.types.
-  // ImageFrame are still NOT carried this sprint -- they are only
-  // meaningful for deskewed/calibrated frames, none of which this
-  // sprint's daemon slice produces (get_frame(deskewed=True) always
-  // fails explicitly; no calibration subsystem exists yet). A later
-  // stage adds them here, additively, when calibration lands.
   optional TagFrame tags = 9;
+
+  // Ticket 022-005: derived px-per-cm and the field's world extent
+  // (width_cm, height_cm), for a deskewed frame -- present
+  // (HasField true) only when `deskewed` is true; absent for a raw
+  // frame, matching aprilcam.types.ImageFrame's own "present only for
+  // deskewed frames" contract. Both are *derived and reported*, never
+  // a chosen constant (specification.md Sec.4.1): `px_per_cm` is
+  // `frame_width / field_width_cm`, exactly as the daemon actually
+  // produced this frame's dimensions. `annotations` is still NOT
+  // carried this sprint -- the annotation store does not exist yet
+  // (sprint 022's Decision 5); a later stage adds it here, additively.
+  optional double px_per_cm = 10;
+  optional WorldExtent world_extent = 11;
+}
+
+// A field's world extent (width_cm, height_cm) -- distinct from
+// WorldPoint (a *position*): this is a *size*, carried only on a
+// deskewed GetFrameResponse (above), mirroring
+// aprilcam.types.ImageFrame.world_extent's `Tuple[float, float]`.
+message WorldExtent {
+  double width_cm = 1;
+  double height_cm = 2;
 }
 
 // ---------------------------------------------------------------------------
@@ -308,4 +396,147 @@ message GetTagHistoryRequest {
 
 message GetTagHistoryResponse {
   repeated TagFrame history = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Playfields (ticket 022-001)
+// ---------------------------------------------------------------------------
+
+// One entry from a playfield definition's april_tags / aruco_tags /
+// rectangles / dots array. Mirrors aprilcam.config.loader.
+// PlayfieldFeatureEntry, not aprilcam.config.interfaces.Feature -- see
+// this file's header comment for why. `id` is set for april_tags/
+// aruco_tags entries only (calibration ground truth); `colour` for
+// rectangles/dots entries only.
+message PlayfieldFeatureEntry {
+  string slug = 1;
+  double x = 2;
+  double y = 3;
+  optional int32 id = 4;
+  optional string colour = 5;
+}
+
+// A whole playfield definition document. Mirrors aprilcam.config.
+// loader.PlayfieldDefinition field-for-field.
+message PlayfieldDefinition {
+  string name = 1;
+  double width_cm = 2;
+  double height_cm = 3;
+  repeated PlayfieldFeatureEntry april_tags = 4;
+  repeated PlayfieldFeatureEntry aruco_tags = 5;
+  repeated PlayfieldFeatureEntry rectangles = 6;
+  repeated PlayfieldFeatureEntry dots = 7;
+}
+
+// A playfield the daemon knows about, as served. Mirrors aprilcam.
+// playfield.interfaces.Playfield: name + definition, plus
+// linked_cameras derived at serve time -- never stored in the
+// definition itself, so the two can never disagree.
+message PlayfieldEntry {
+  string name = 1;
+  PlayfieldDefinition definition = 2;
+  repeated string linked_cameras = 3;
+}
+
+message SetPlayfieldRequest {
+  PlayfieldDefinition definition = 1;
+}
+
+message SetPlayfieldResponse {}
+
+message GetPlayfieldRequest {
+  string name = 1;
+}
+
+message GetPlayfieldResponse {
+  PlayfieldEntry playfield = 1;
+}
+
+message ListPlayfieldsRequest {}
+
+message ListPlayfieldsResponse {
+  repeated PlayfieldEntry playfields = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Camera config -- minimal playfield-link slice (ticket 022-001,
+// Decision 1). Mirrors aprilcam.config.interfaces.CameraConfig, except
+// `settings` (Python `dict[str, Any]`) is carried as a JSON-encoded
+// string -- see this file's header comment.
+// ---------------------------------------------------------------------------
+
+message CameraConfig {
+  string name = 1;
+  optional string playfield = 2;
+  // JSON object text, e.g. "{}" for no settings. Stored and echoed
+  // back verbatim; never applied to hardware this sprint.
+  string settings_json = 3;
+}
+
+message SetCameraConfigRequest {
+  CameraConfig config = 1;
+}
+
+message SetCameraConfigResponse {}
+
+message GetCameraConfigRequest {
+  string camera = 1;
+}
+
+message GetCameraConfigResponse {
+  CameraConfig config = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Calibration (ticket 022-003). Mirrors aprilcam.calibration.interfaces.
+// CalibrationResult / aprilcam.calibration.calibration.Calibration
+// field for field -- see this file's header comment.
+// ---------------------------------------------------------------------------
+
+message CalibrationResult {
+  bool succeeded = 1;
+  // ArUco ids matched to surveyed positions. Sorted ascending.
+  repeated int32 matched_ids = 2;
+  // Ids the playfield definition requires that were not detected --
+  // the exact ids, never a count (UC-04.S-2). Non-empty means failure.
+  repeated int32 missing_ids = 3;
+  optional double reprojection_error_cm = 4;
+  // Why a *complete-but-degenerate* solve failed (collinear markers,
+  // singular homography) -- absent when `missing_ids` alone explains
+  // the failure, or on success.
+  optional string reason = 5;
+}
+
+// A camera's established pixel<->world mapping. Mirrors
+// aprilcam.calibration.calibration.Calibration field for field.
+// `homography` is the solved pixel->world 3x3 matrix, row-major
+// (h[0..2] = row 0, h[3..5] = row 1, h[6..8] = row 2) -- exactly 9
+// values, always, since a 2D homography is fixed-shape and a nested
+// matrix message type would be unused generality.
+message Calibration {
+  bool stale = 1;
+  double calibrated_at = 2;
+  string playfield = 3;
+  repeated double homography = 4;
+  repeated int32 matched_ids = 5;
+  optional double reprojection_error_cm = 6;
+}
+
+message CalibrateRequest {
+  string camera = 1;
+}
+
+message CalibrateResponse {
+  CalibrationResult result = 1;
+}
+
+message GetCalibrationRequest {
+  string camera = 1;
+}
+
+message GetCalibrationResponse {
+  // Absent (`HasField("calibration") == false`) means this camera has
+  // never been successfully calibrated -- never a fabricated/default
+  // Calibration (see the RPC's own comment above).
+  Calibration calibration = 1;
 }

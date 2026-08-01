@@ -32,6 +32,7 @@ __all__ = [
     "print_cameras",
     "print_probe_report",
     "fan_out",
+    "resolve_playfield_camera",
 ]
 
 #: Exit codes every subcommand function returns. Argparse's own parse
@@ -214,3 +215,43 @@ def fan_out(
         render(label, result)
 
     return EXIT_ERROR if had_failure else EXIT_OK
+
+
+def resolve_playfield_camera(
+    daemon: Daemon, *, camera: Optional[str] = None
+) -> Tuple[Optional[str], Optional[str]]:
+    """The camera a ``playfield``-addressed command (``image``, ``view``,
+    ``tags``) should target, per ``cli.md``'s "playfield commands resolve
+    their camera" rule: the daemon API is camera-addressed, always (no
+    daemon-side "the playfield's camera" shortcut), so this resolution is
+    the CLI's own, client-side, reading ``CameraState.playfield`` links
+    from a fresh :meth:`~aprilcam.daemon.interfaces.Daemon.list_cameras`
+    call.
+
+    Returns ``(resolved_camera, error_message)`` -- exactly one is
+    ``None``. *camera*, when given (``--camera``), is returned verbatim
+    without any lookup: an explicit choice always wins and is never
+    second-guessed against what is currently linked. Otherwise: exactly
+    one linked, present camera resolves silently; zero or several is an
+    error naming what is linked and pointing at ``--camera`` to
+    disambiguate -- never an arbitrary pick, the same "ambiguity is
+    reported, not silently resolved" discipline
+    ``FeatureQuery.find``'s docstring states for feature lookups.
+    """
+    if camera is not None:
+        return camera, None
+
+    cameras = daemon.list_cameras()
+    linked = tuple(sorted(c.name for c in cameras if c.playfield is not None and c.present))
+
+    if len(linked) == 1:
+        return linked[0], None
+    if not linked:
+        return None, (
+            "no camera is linked to a playfield -- push one with "
+            "'aprilcam camera config <file>', or pass --camera"
+        )
+    return None, (
+        f"multiple cameras are linked to a playfield ({', '.join(linked)}) "
+        "-- pass --camera to disambiguate"
+    )
