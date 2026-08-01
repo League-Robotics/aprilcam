@@ -1,4 +1,4 @@
-"""``aprilcam camera list|probe|image`` (ticket 020-006).
+"""``aprilcam camera list|probe|image|tags`` (tickets 020-006, 021-006).
 
 Thin argv-to-client-call shells over ``client/discovery.py`` (ticket
 020-005) -- ``adapters.md``'s "adapters hold no authoritative state,
@@ -23,6 +23,22 @@ stdout stream is not a valid image in any format. ``--all`` combined
 with either of those two destinations is therefore refused up front,
 naming ``--base64`` as the way to fan out -- the documented exception
 this ticket's brief asks for, not an oversight.
+
+**``camera tags <camera>`` (ticket 021-006).** ``cli.md``'s command
+surface names ``playfield tags`` -- resolved client-side from
+``CameraState.playfield`` links -- but that link is always ``None``
+until the config-service sprint builds playfields, so that spelling
+would fail on every invocation this sprint. This sprint ships the
+camera-addressed form instead, mirroring ``camera image``; see
+``docs/design/use-cases/cli.md``'s command-surface block and UC-20 for
+the deferred spelling and the forward pointer, and sprint 021's
+Architecture Decision 3 for the reasoning. Every record this sprint is
+uncalibrated by construction (``daemon/detection.py`` never sets
+``calibrated=True`` -- calibration does not exist yet), so
+``_format_tag_row`` below prints an explicit ``UNCALIBRATED`` marker
+plus pixel coordinates and never falls through to printing
+``None``-derived zeros as if they were a world position
+(UC-20.S-3, the ``TagRecord`` "world-first contract" in ``types.py``).
 """
 
 from __future__ import annotations
@@ -47,8 +63,9 @@ from aprilcam.cli._common import (
 )
 from aprilcam.client.discovery import Discovery
 from aprilcam.errors import AprilCamError
+from aprilcam.types import TagFrame, TagRecord
 
-__all__ = ["add_subparser", "cmd_list", "cmd_probe", "cmd_image"]
+__all__ = ["add_subparser", "cmd_list", "cmd_probe", "cmd_image", "cmd_tags"]
 
 
 def cmd_list(
@@ -178,8 +195,72 @@ def cmd_image(
     return EXIT_OK
 
 
+def _format_tag_row(record: TagRecord) -> str:
+    """One ``TagRecord`` as a single line -- family, id, then either a
+    world position (calibrated) or an explicit ``UNCALIBRATED`` marker
+    plus pixel coordinates.
+
+    Every record this sprint is uncalibrated by construction (see the
+    module docstring), so this always takes the ``else`` branch in
+    practice -- but the calibrated branch is real code, not a stub, so
+    a later calibration sprint activates it rather than writing it.
+    Guarding on both ``record.calibrated`` and ``record.world is not
+    None`` means a record that is inconsistent about its own
+    calibration state still cannot print a fabricated world position
+    (UC-20.S-3's failure-mode requirement, taken literally: never
+    ``0.0, 0.0`` or any world-looking number for an uncalibrated
+    record).
+    """
+    header = f"{record.tag.family.value} {record.tag.number}"
+    if record.calibrated and record.world is not None:
+        heading = "-" if record.heading_rad is None else f"{record.heading_rad:.3f}"
+        speed = "-" if record.speed is None else f"{record.speed:.2f}"
+        return (
+            f"  {header:<14} world=({record.world.x:.1f}, {record.world.y:.1f}) "
+            f"heading={heading} speed={speed}"
+        )
+    if record.pixel is not None:
+        pixel = f"({record.pixel.x:.1f}, {record.pixel.y:.1f})"
+    else:
+        pixel = "(unavailable)"
+    return f"  {header:<14} UNCALIBRATED -- pixel={pixel}"
+
+
+def _print_tags(frame: TagFrame) -> None:
+    """A ``get_tags`` result, one row per detected tag. An empty frame
+    prints an explicit ``(no tags detected)`` rather than nothing at
+    all -- an empty field is a normal, successful state, not an error
+    (UC-20's failure mode: "nothing detected" must never read as a
+    stack trace or a blank screen someone has to guess about)."""
+    if not frame.tags:
+        print("  (no tags detected)")
+        return
+    for record in frame.tags:
+        print(_format_tag_row(record))
+
+
+def cmd_tags(
+    args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
+) -> int:
+    """``aprilcam camera tags <camera> [-d HOST] [--all]``."""
+    discovery = discovery_factory()
+    if args.all:
+        def render(label: str, frame: TagFrame) -> None:
+            print(f"{label}:")
+            _print_tags(frame)
+
+        return fan_out(discovery, lambda daemon: daemon.get_tags(args.camera), render)
+
+    try:
+        frame = discovery.connect(args.daemon).get_tags(args.camera)
+    except AprilCamError as exc:
+        return report_error(exc)
+    _print_tags(frame)
+    return EXIT_OK
+
+
 def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
-    """Wire ``camera list|probe|image`` into the top-level parser."""
+    """Wire ``camera list|probe|image|tags`` into the top-level parser."""
     parser = subparsers.add_parser(
         "camera", help="camera listing, probing, and single-frame capture"
     )
@@ -219,3 +300,9 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
         help="allow raw image bytes to an attached terminal (normally refused)",
     )
     p_image.set_defaults(func=cmd_image)
+
+    p_tags = sub.add_parser("tags", help="list currently detected tags")
+    p_tags.add_argument("camera", help="camera name (slug or persistent number)")
+    add_daemon_option(p_tags)
+    add_all_option(p_tags)
+    p_tags.set_defaults(func=cmd_tags)

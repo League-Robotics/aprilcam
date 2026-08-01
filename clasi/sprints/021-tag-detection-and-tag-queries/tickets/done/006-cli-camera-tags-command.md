@@ -1,7 +1,7 @@
 ---
 id: '006'
 title: 'CLI: camera tags command'
-status: in-progress
+status: done
 use-cases:
 - SUC-004
 depends-on:
@@ -27,7 +27,7 @@ silently.
 
 ## Acceptance Criteria
 
-- [ ] `aprilcam camera tags <camera>` (`-d HOST` for remote) calls
+- [x] `aprilcam camera tags <camera>` (`-d HOST` for remote) calls
       `get_tags` and prints every detected tag: family, id, and either
       a world position (calibrated — not reachable this sprint, but
       the code path exists for when it is) or, this sprint always, an
@@ -35,17 +35,17 @@ silently.
       never prints `0.0, 0.0` or any world-looking number for an
       uncalibrated record** — it prints the flag and pixel coordinates
       instead (mirrors UC-20.S-3's failure-mode requirement literally).
-- [ ] Nothing detected prints an empty result (e.g. "no tags
+- [x] Nothing detected prints an empty result (e.g. "no tags
       detected"), not an error or a stack trace.
-- [ ] `--all` fans out, one row per daemon, each labelled — matching
+- [x] `--all` fans out, one row per daemon, each labelled — matching
       `camera list`/`camera probe`'s existing fan-out shape in
       `cli/camera.py` (reuse the `fan_out` helper in `cli/_common.py`
       rather than reimplementing it).
-- [ ] An unknown or absent camera surfaces the typed error from
+- [x] An unknown or absent camera surfaces the typed error from
       tickets 002/005 (`UnknownCamera`/`CameraNotPresent`) via the
       existing `report_error` helper — no new error-handling pattern
       invented here.
-- [ ] `docs/design/use-cases/cli.md` is updated:
+- [x] `docs/design/use-cases/cli.md` is updated:
   - The command-surface block: `aprilcam playfield tags` gains an
     inline note that it is deferred; `aprilcam camera tags <camera>`
     is added as what this sprint ships.
@@ -55,7 +55,7 @@ silently.
   - The fan-out table's `playfield tags` row becomes `camera tags`,
     joining `camera image`/`camera list`/`camera probe`'s existing
     read-only fan-out-eligible group.
-- [ ] `uv run mypy` stays clean; `uv run pytest` stays green.
+- [x] `uv run mypy` stays clean; `uv run pytest` stays green.
 
 ## Testing
 
