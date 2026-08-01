@@ -1,7 +1,7 @@
 ---
 id: '006'
 title: 'Playfield live view: aprilcam playfield view'
-status: open
+status: done
 use-cases:
 - SUC-006
 depends-on:
@@ -45,28 +45,28 @@ new geometry or rendering logic.
 
 ## Acceptance Criteria
 
-- [ ] `aprilcam playfield view` on a calibrated camera shows the
+- [x] `aprilcam playfield view` on a calibrated camera shows the
       deskewed field, north up, east right, with AprilTag 1 drawn at
       the image centre (UC-18.S-1).
-- [ ] **A second tag's drawn position moves right when the physical
+- [x] **A second tag's drawn position moves right when the physical
       tag moves east, and up when it moves north** — the mirror-
       catching check, now verified end-to-end through the full
       poll→render→display path (the same physical motions SUC-004
       verifies numerically and SUC-005 verifies for a single static
       frame; this is the live, continuously-updating version).
-- [ ] An **uncalibrated** camera's `playfield view` fails explicitly,
+- [x] An **uncalibrated** camera's `playfield view` fails explicitly,
       naming calibration as the missing step, and **never** displays a
       raw frame as a fallback — verified by asserting the viewer makes
       zero raw-frame requests on this path (UC-18.S-2).
-- [ ] Opening `playfield view` causes the target camera's ring buffer
+- [x] Opening `playfield view` causes the target camera's ring buffer
       to begin filling at approximately the poll rate for as long as
       the window stays open (the documented consequence of
       Architecture Decision 3 — sprint 021's Open Question 3 becomes
       true only while a poll-based consumer like this is active);
       closing the window stops new bursts.
-- [ ] `aprilcam playfield view --all` is refused (single-target,
+- [x] `aprilcam playfield view --all` is refused (single-target,
       matching tickets 002/003's refusals).
-- [ ] If calibration goes stale mid-view (`TagFrame.
+- [x] If calibration goes stale mid-view (`TagFrame.
       calibration_stale=True` arrives on a poll), this is surfaced in
       the view rather than silently ignored (UC-18's stale-mid-view
       failure mode) — a visible indicator is sufficient; this does not

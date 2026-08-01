@@ -1,10 +1,14 @@
 """Tests for ``aprilcam.cli.playfield`` (ticket 022-001; ``cmd_image``
-added by ticket 022-005).
+added by ticket 022-005; ``cmd_view`` added by ticket 022-006).
 
 Headless, matching ``test_camera_cli.py``'s established style: a fake
 ``ConfigLoader`` and a fake ``Daemon``/``Discovery`` pair injected
-through ``cmd_config``/``cmd_image``'s keyword seams -- no real file
-I/O, no daemon.
+through ``cmd_config``/``cmd_image``/``cmd_view``'s keyword seams -- no
+real file I/O, no daemon. ``cmd_view``'s own tests inject ``run_view``
+exactly like ``camera.py``'s ``cmd_view`` tests inject it, so none of
+these ever touch ``view/viewer.py``'s real poll loop or GUI toolkit --
+that machinery has its own headless tests in
+``tests/aprilcam/view/test_viewer.py``.
 """
 
 from __future__ import annotations
@@ -20,8 +24,9 @@ import pytest
 
 from aprilcam.cli import playfield as playfield_cli
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
-from aprilcam.errors import MalformedDocument, NotCalibrated, UnknownPlayfield
+from aprilcam.errors import CameraNotPresent, MalformedDocument, NotCalibrated, UnknownPlayfield
 from aprilcam.types import CameraState, ImageFrame
+from aprilcam.view.viewer import NoDisplayAvailable
 
 
 def _definition(name: str = "main-playfield") -> PlayfieldDefinition:
@@ -119,6 +124,7 @@ def _args(**overrides) -> argparse.Namespace:
         base64=False,
         encoding="jpeg",
         force=False,
+        all=False,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -374,6 +380,170 @@ def test_image_present_but_absent_linked_camera_is_not_offered_by_resolution(cap
 
 
 # ---------------------------------------------------------------------------
+# playfield view -- AC: UC-18.S-1/S-2, ticket 022-006
+# ---------------------------------------------------------------------------
+
+
+def test_view_refuses_all_before_ever_connecting(capsys):
+    class _ExplodingDiscovery:
+        def connect(self, host=None):
+            raise AssertionError("must not connect when --all is refused up front")
+
+    code = playfield_cli.cmd_view(_args(all=True), discovery_factory=lambda: _ExplodingDiscovery())
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "--all" in err
+    assert "single" in err.lower()
+
+
+def test_view_resolves_the_one_linked_camera_and_hands_it_to_run_view():
+    daemon = _FakeDaemon(cameras=(_camera("arducam", playfield="main-playfield"),))
+    discovery = _FakeDiscovery(daemon=daemon)
+    calls = []
+
+    code = playfield_cli.cmd_view(
+        _args(),
+        discovery_factory=lambda: discovery,
+        run_view=lambda camera, connected: calls.append((camera, connected)),
+    )
+
+    assert code == 0
+    assert calls == [("arducam", daemon)]
+
+
+def test_view_explicit_camera_flag_skips_resolution_entirely():
+    class _ExplodingCameraList:
+        def list_cameras(self):
+            raise AssertionError("must not call list_cameras when --camera is given")
+
+    discovery = _FakeDiscovery(daemon=_ExplodingCameraList())
+    calls = []
+
+    code = playfield_cli.cmd_view(
+        _args(camera="chosen-camera"),
+        discovery_factory=lambda: discovery,
+        run_view=lambda camera, connected: calls.append((camera, connected)),
+    )
+
+    assert code == 0
+    assert calls == [("chosen-camera", discovery.daemon)]
+
+
+def test_view_with_no_linked_camera_errors_naming_camera_config(capsys):
+    daemon = _FakeDaemon(cameras=(_camera("arducam", playfield=None),))
+    discovery = _FakeDiscovery(daemon=daemon)
+    calls = []
+
+    code = playfield_cli.cmd_view(
+        _args(),
+        discovery_factory=lambda: discovery,
+        run_view=lambda camera, connected: calls.append((camera, connected)),
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "no camera is linked" in err
+    assert "camera config" in err
+    assert calls == []
+
+
+def test_view_with_several_linked_cameras_errors_naming_them_and_pointing_at_camera_flag(capsys):
+    daemon = _FakeDaemon(
+        cameras=(
+            _camera("arducam", playfield="main-playfield"),
+            _camera("hd-usb-camera", playfield="main-playfield"),
+        )
+    )
+    discovery = _FakeDiscovery(daemon=daemon)
+    calls = []
+
+    code = playfield_cli.cmd_view(
+        _args(),
+        discovery_factory=lambda: discovery,
+        run_view=lambda camera, connected: calls.append((camera, connected)),
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "arducam" in err and "hd-usb-camera" in err
+    assert "--camera" in err
+    assert calls == []
+
+
+def test_view_reports_a_connection_failure_without_ever_calling_run_view(capsys):
+    from aprilcam.errors import ConnectionFailed
+
+    discovery = _FakeDiscovery(connect_raises=ConnectionFailed("pi-field.local", reason="refused"))
+    calls = []
+
+    code = playfield_cli.cmd_view(
+        _args(daemon="pi-field.local"),
+        discovery_factory=lambda: discovery,
+        run_view=lambda camera, connected: calls.append((camera, connected)),
+    )
+
+    assert code == 1
+    assert calls == []
+    err = capsys.readouterr().err
+    assert "pi-field.local" in err and "refused" in err
+
+
+def test_view_no_display_points_at_playfield_image_instead_of_a_backtrace(capsys):
+    """Mirrors UC-16.S-3, for UC-18's own headless case."""
+    daemon = _FakeDaemon(cameras=(_camera("arducam", playfield="main-playfield"),))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    def raising_run_view(camera, connected):
+        raise NoDisplayAvailable("no $DISPLAY or $WAYLAND_DISPLAY set")
+
+    code = playfield_cli.cmd_view(
+        _args(), discovery_factory=lambda: discovery, run_view=raising_run_view
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "playfield image" in err
+
+
+def test_view_uncalibrated_camera_points_at_camera_calibrate(capsys):
+    """UC-18.S-2: names calibration as the missing step and points at
+    ``camera calibrate`` -- ``run_playfield_view`` itself never falls
+    back to a raw frame (its own tests in ``test_viewer.py`` prove
+    that); this only asserts the CLI boundary adds the pointer."""
+    daemon = _FakeDaemon(cameras=(_camera("arducam", playfield="main-playfield"),))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    def raising_run_view(camera, connected):
+        raise NotCalibrated("'arducam' is not calibrated")
+
+    code = playfield_cli.cmd_view(
+        _args(), discovery_factory=lambda: discovery, run_view=raising_run_view
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "not calibrated" in err
+    assert "camera calibrate" in err
+    assert "arducam" in err
+
+
+def test_view_surfaces_a_typed_error_raised_mid_view(capsys):
+    daemon = _FakeDaemon(cameras=(_camera("hd-usb-camera", playfield="main-playfield"),))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    def raising_run_view(camera, connected):
+        raise CameraNotPresent(camera)
+
+    code = playfield_cli.cmd_view(
+        _args(), discovery_factory=lambda: discovery, run_view=raising_run_view
+    )
+
+    assert code == 1
+    assert "not currently present" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
 # argparse wiring
 # ---------------------------------------------------------------------------
 
@@ -451,4 +621,36 @@ def test_image_h_prints_help_not_a_missing_hostname_error():
     parser = _build_parser()
     with pytest.raises(SystemExit) as excinfo:
         parser.parse_args(["playfield", "image", "-h"])
+    assert excinfo.value.code == 0
+
+
+def test_view_is_wired_to_cmd_view_with_no_camera_positional():
+    parser = _build_parser()
+    args = parser.parse_args(["playfield", "view"])
+    assert args.func is playfield_cli.cmd_view
+    assert args.camera is None
+    assert args.daemon is None
+    assert args.all is False
+
+
+def test_view_accepts_an_explicit_camera_flag():
+    parser = _build_parser()
+    args = parser.parse_args(["playfield", "view", "--camera", "3"])
+    assert args.camera == "3"
+
+
+def test_view_accepts_all_at_parse_time_but_cmd_view_refuses_it_at_runtime():
+    """``--all`` is wired onto this subparser (so ``-h`` documents it
+    and the refusal message can explain itself, matching ``camera
+    view``'s pattern) -- argparse accepts it; ``cmd_view`` is what
+    refuses it, exercised above."""
+    parser = _build_parser()
+    args = parser.parse_args(["playfield", "view", "--all"])
+    assert args.all is True
+
+
+def test_view_h_prints_help_not_a_missing_hostname_error():
+    parser = _build_parser()
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["playfield", "view", "-h"])
     assert excinfo.value.code == 0
