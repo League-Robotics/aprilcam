@@ -164,6 +164,17 @@ def _image_frame_to_proto(frame: ImageFrame) -> aprilcam_v2_pb2.GetFrameResponse
     # different, also-representable answer (ticket 021-005).
     if frame.tags is not None:
         msg.tags.CopyFrom(_tag_frame_to_proto(frame.tags))
+    # Ticket 022-005: present only for a deskewed frame, matching
+    # ImageFrame's own "present only for deskewed frames" contract --
+    # never set for a raw frame, never coerced to 0.0/absent-looking
+    # defaults.
+    if frame.px_per_cm is not None:
+        msg.px_per_cm = frame.px_per_cm
+    if frame.world_extent is not None:
+        width_cm, height_cm = frame.world_extent
+        msg.world_extent.CopyFrom(
+            aprilcam_v2_pb2.WorldExtent(width_cm=width_cm, height_cm=height_cm)
+        )
     return msg
 
 

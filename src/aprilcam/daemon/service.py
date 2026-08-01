@@ -73,6 +73,7 @@ import cv2 as cv
 import numpy as np
 
 from aprilcam.calibration.calibration import Calibration, Calibrator
+from aprilcam.calibration.deskew import Deskewer
 from aprilcam.calibration.interfaces import CalibrationResult
 from aprilcam.camera.backends import CaptureBackend
 from aprilcam.camera.backends.opencv_backend import OpenCVBackend
@@ -277,29 +278,29 @@ class DaemonService(Daemon):
     ) -> ImageFrame:
         """See ``daemon.interfaces.Daemon.get_frame``.
 
-        ``deskewed=True`` fails explicitly with :class:`NotCalibrated`
-        every time this sprint -- no calibration subsystem exists yet,
-        so every camera is uncalibrated by construction (matches the
-        base class docstring's "never silently substitutes a raw frame").
         An unrecognised ``encoding`` is a plain ``ValueError`` (not one
         of ``errors.py``'s named types -- it is a caller-side argument
         mistake, not a domain failure the RPC boundary needs client
-        code to dispatch on).
+        code to dispatch on), checked before either branch below touches
+        a camera or calibration lookup.
 
-        ``tags`` embeds *camera*'s latest ring-buffer ``TagFrame`` when
-        one exists (``daemon.detection.DetectionEngine.latest`` -- a
-        pure read) and stays ``None`` when it does not -- asking for
-        pixels never triggers a detection burst of its own (sprint.md
-        Decision 4, ticket 021-004).
+        ``deskewed=True`` delegates to :meth:`_get_deskewed_frame`
+        (ticket 022-005): :class:`NotCalibrated` for an uncalibrated
+        camera, a real warped frame for a calibrated one -- see that
+        method's docstring. The raw (``deskewed=False``) branch is
+        unchanged from sprint 021: ``tags`` embeds *camera*'s latest
+        ring-buffer ``TagFrame`` when one exists
+        (``daemon.detection.DetectionEngine.latest`` -- a pure read) and
+        stays ``None`` when it does not -- asking for pixels never
+        triggers a detection burst of its own (sprint.md Decision 4,
+        ticket 021-004).
         """
         if encoding not in VALID_ENCODINGS:
             raise ValueError(
                 f"unsupported encoding {encoding!r}; expected one of {VALID_ENCODINGS}"
             )
         if deskewed:
-            raise NotCalibrated(
-                f"{camera!r} is not calibrated (no calibration subsystem this sprint)"
-            )
+            return self._get_deskewed_frame(camera, encoding=encoding)
 
         cam = self._camera_for(camera)
         frame = cam.read()
@@ -318,6 +319,76 @@ class DaemonService(Daemon):
             encoding=encoding,
             timestamp=time.time(),
             deskewed=False,
+            tags=self._detection.latest(cam.slug),
+        )
+
+    def _get_deskewed_frame(self, camera: str, *, encoding: str) -> ImageFrame:
+        """``get_frame(deskewed=True)``'s real body (ticket 022-005;
+        was an unconditional :class:`NotCalibrated` since sprint 020).
+
+        **Calibration is checked, and this raises, before
+        :meth:`_camera_for` is ever called** -- exactly the same
+        "precondition fails before any hardware access" discipline
+        :meth:`calibrate` already gets from ``Calibrator`` (module
+        docstring). A deskewed request on an uncalibrated camera must
+        never substitute a raw frame (``daemon.interfaces.Daemon.get_frame``'s
+        base-class docstring) -- checking first, not merely returning
+        early, is what makes "no raw frame is substituted" true by
+        construction rather than by an easily-broken ordering.
+
+        *camera* is resolved to its canonical slug via
+        :meth:`_resolve_slug_if_known` up front (SUC-005 number-or-slug
+        addressing -- the same hotfix :meth:`calibrate`/
+        :meth:`get_calibration` already apply) *before* the calibration
+        lookup, so a numbered camera's calibration is found the same way
+        a slug-addressed one is.
+
+        The playfield dimensions the warp needs come from
+        ``calibration.playfield`` (the definition this *homography* was
+        actually solved against) via :meth:`_playfield_for_calibration`,
+        not from the camera's *current* live playfield link -- those can
+        diverge (a camera re-linked to a different playfield after
+        calibrating), and the homography's own world coordinates are
+        only meaningful against the definition it was solved from.
+        """
+        slug = self._resolve_slug_if_known(camera)
+        calibration = self.get_calibration(slug)
+        if calibration is None:
+            raise NotCalibrated(f"{camera!r} is not calibrated")
+
+        definition = self._playfield_for_calibration(calibration.playfield)
+        if definition is None:
+            raise NotCalibrated(
+                f"{camera!r} was calibrated against playfield "
+                f"{calibration.playfield!r}, which this daemon no longer holds"
+            )
+
+        cam = self._camera_for(camera)
+        frame = cam.read()
+        if frame is None:
+            raise RuntimeError(f"no frame available from camera {camera!r}")
+
+        deskewer = Deskewer(
+            calibration=calibration,
+            width_cm=definition.width_cm,
+            height_cm=definition.height_cm,
+        )
+        warped = deskewer.deskew(frame)
+
+        ok, buf = cv.imencode(_CV_EXTENSION[encoding], warped)
+        if not ok:
+            raise RuntimeError(f"failed to encode deskewed frame from {camera!r} as {encoding}")
+
+        height, width = warped.shape[:2]
+        return ImageFrame(
+            data=buf.tobytes(),
+            width=width,
+            height=height,
+            encoding=encoding,
+            timestamp=time.time(),
+            deskewed=True,
+            px_per_cm=deskewer.px_per_cm,
+            world_extent=deskewer.world_extent,
             tags=self._detection.latest(cam.slug),
         )
 

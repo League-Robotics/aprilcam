@@ -315,13 +315,29 @@ message GetFrameResponse {
   // saw nothing. `get_frame` never triggers a detection burst itself
   // -- this is a read of whatever the ring buffer already holds.
   //
-  // px_per_cm / world_extent / annotations from aprilcam.types.
-  // ImageFrame are still NOT carried this sprint -- they are only
-  // meaningful for deskewed/calibrated frames, none of which this
-  // sprint's daemon slice produces (get_frame(deskewed=True) always
-  // fails explicitly; no calibration subsystem exists yet). A later
-  // stage adds them here, additively, when calibration lands.
   optional TagFrame tags = 9;
+
+  // Ticket 022-005: derived px-per-cm and the field's world extent
+  // (width_cm, height_cm), for a deskewed frame -- present
+  // (HasField true) only when `deskewed` is true; absent for a raw
+  // frame, matching aprilcam.types.ImageFrame's own "present only for
+  // deskewed frames" contract. Both are *derived and reported*, never
+  // a chosen constant (specification.md Sec.4.1): `px_per_cm` is
+  // `frame_width / field_width_cm`, exactly as the daemon actually
+  // produced this frame's dimensions. `annotations` is still NOT
+  // carried this sprint -- the annotation store does not exist yet
+  // (sprint 022's Decision 5); a later stage adds it here, additively.
+  optional double px_per_cm = 10;
+  optional WorldExtent world_extent = 11;
+}
+
+// A field's world extent (width_cm, height_cm) -- distinct from
+// WorldPoint (a *position*): this is a *size*, carried only on a
+// deskewed GetFrameResponse (above), mirroring
+// aprilcam.types.ImageFrame.world_extent's `Tuple[float, float]`.
+message WorldExtent {
+  double width_cm = 1;
+  double height_cm = 2;
 }
 
 // ---------------------------------------------------------------------------

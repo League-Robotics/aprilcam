@@ -45,7 +45,14 @@ import numpy as np
 
 from aprilcam.types import PixelPoint, WorldPoint
 
-__all__ = ["apply_homography", "invert_homography", "pixel_to_world", "world_to_pixel"]
+__all__ = [
+    "apply_homography",
+    "invert_homography",
+    "pixel_to_world",
+    "world_to_pixel",
+    "deskewed_output_size",
+    "world_to_deskewed_pixel",
+]
 
 
 def apply_homography(matrix: np.ndarray, x: float, y: float) -> Tuple[float, float]:
@@ -98,4 +105,76 @@ def world_to_pixel(homography: np.ndarray, world: WorldPoint) -> PixelPoint:
     :func:`pixel_to_world`, via *homography*'s inverse."""
     inverse = invert_homography(homography)
     x, y = apply_homography(inverse, world.x, world.y)
+    return PixelPoint(x=x, y=y)
+
+
+# ---------------------------------------------------------------------------
+# Deskew geometry (ticket 022-005): the fixed-bounding-box sizing rule and
+# the "anchor invariant" world<->deskewed-pixel mapping. Distinct from
+# pixel_to_world/world_to_pixel above -- those convert between a raw
+# camera's pixel space and world space via a *solved homography*.
+# world_to_deskewed_pixel below converts between world space and a
+# *deskewed image*'s pixel space via nothing but that image's own
+# published px_per_cm/world_extent metadata (ImageFrame's docstring,
+# design.md Sec.6) -- no homography, no Calibration object, because a
+# client holding only a deskewed frame's metadata has neither.
+# ---------------------------------------------------------------------------
+
+#: The fixed bounding box's default side length, in pixels
+#: (specification.md Sec.4.1: "default 800x800, overridable per
+#: playfield"). The field rectangle is scaled aspect-preserved to fit
+#: this square -- ``main-playfield`` (134.3 x 89.3 cm) yields 800 x 532.
+DEFAULT_MAX_DIMENSION_PX = 800
+
+
+def deskewed_output_size(
+    width_cm: float, height_cm: float, max_dimension_px: int = DEFAULT_MAX_DIMENSION_PX
+) -> Tuple[int, int]:
+    """The deskewed output image's ``(width_px, height_px)`` for a field
+    *width_cm* x *height_cm*, aspect-preserved into a
+    *max_dimension_px* x *max_dimension_px* bounding box.
+
+    Uniform-scale by construction: one ``scale`` (pixels per cm) is
+    computed from whichever field dimension is larger, then applied to
+    both -- the output is never stretched non-uniformly. ``round()`` on
+    each dimension independently means the two output dimensions may not
+    individually satisfy ``dim_px / dim_cm == scale`` to the last bit
+    once rounded (a non-square field's shorter dimension can land up to
+    half a pixel off the exact scale) -- an accepted, inherent
+    consequence of publishing one scalar px-per-cm for a two-dimensional
+    box, not a bug (see :func:`world_to_deskewed_pixel`'s docstring).
+    """
+    if width_cm <= 0 or height_cm <= 0:
+        raise ValueError(
+            f"width_cm/height_cm must be positive, got {width_cm}x{height_cm}"
+        )
+    if max_dimension_px <= 0:
+        raise ValueError(f"max_dimension_px must be positive, got {max_dimension_px}")
+
+    scale = max_dimension_px / max(width_cm, height_cm)
+    out_w = max(1, round(width_cm * scale))
+    out_h = max(1, round(height_cm * scale))
+    return out_w, out_h
+
+
+def world_to_deskewed_pixel(
+    world: WorldPoint, *, world_extent: Tuple[float, float], px_per_cm: float
+) -> PixelPoint:
+    """The anchor invariant (``types.ImageFrame``'s docstring, design.md
+    Sec.6): a deskewed frame spans *exactly* the field rectangle -- image
+    ``(0, 0)`` is the field's north-west corner, world ``(-width/2,
+    +height/2)``. North is up, east is right; world -> pixel flips y
+    **exactly once**, right here, and nowhere else.
+
+    *px_per_cm* is always the frame's own **published, derived** value
+    (``frame_width / field_width_cm`` -- never a chosen constant); this
+    function performs no scaling decision of its own, only the anchor
+    shift plus that one multiply-and-flip. The single source of truth
+    both ``calibration/deskew.py`` (building the warp's destination
+    quad) and ``client/renderer.py`` (placing a tag's drawn boundary)
+    share, so the sign only has to be right in one place.
+    """
+    width_cm, height_cm = world_extent
+    x = (world.x + width_cm / 2.0) * px_per_cm
+    y = (height_cm / 2.0 - world.y) * px_per_cm
     return PixelPoint(x=x, y=y)
