@@ -1,9 +1,14 @@
 ---
 id: '004'
 title: 'Daemon detection integration: ring buffer, get_tags/get_tag/get_tag_history'
-status: open
-use-cases: [SUC-001, SUC-002, SUC-003]
-depends-on: ['002', '003']
+status: done
+use-cases:
+- SUC-001
+- SUC-002
+- SUC-003
+depends-on:
+- '002'
+- '003'
 github-issue: ''
 issue: tag-detection-and-tag-queries.md
 completes_issue: false
@@ -41,7 +46,7 @@ positive), which is meaningless without calibration.
 
 ## Acceptance Criteria
 
-- [ ] `daemon/detection.py` exists with a per-camera ring buffer
+- [x] `daemon/detection.py` exists with a per-camera ring buffer
       (bounded, ~300 entries, matching v1's `RingBuffer(maxlen=300)`
       sizing) and a burst function: given an open `Camera`, run
       `vision/pipeline.py` + `vision/detector.py`, reorder corners to
@@ -49,20 +54,20 @@ positive), which is meaningless without calibration.
       convention), build `TagRecord`s with `calibrated=False` and only
       `pixel`/`pixel_corners`/`tag`/`timestamp` set, wrap into a
       `TagFrame`, append to that camera's buffer, and return it.
-- [ ] `vision/motion.py` exists: a pure function computing velocity,
+- [x] `vision/motion.py` exists: a pure function computing velocity,
       speed, and heading from a sequence of `(timestamp, WorldPoint)`
       pairs (`heading_rad = atan2(world_vy, world_vx)`, 0 = east, CCW
       positive — `types.py`'s stated convention). Not invoked with a
       non-`None` world position anywhere this sprint (nothing is
       calibrated) — tested directly against synthetic
       `(timestamp, WorldPoint)` sequences, not through the daemon.
-- [ ] `DaemonService.get_tags(camera)` and `get_tag(camera, tag)` each
+- [x] `DaemonService.get_tags(camera)` and `get_tag(camera, tag)` each
       trigger **exactly one** detection burst per call (verified with
       a call-counting/mock detector in tests — this is the CPU-budget
       regression pin, dev-plan Stage 8). `get_tag` filters the burst's
       `TagFrame` for the requested `TagId`, returning `None` when
       absent — never a zero-valued record (UC-09.S-4).
-- [ ] `DaemonService.get_tag_history(camera, tag=None, frames=None)`
+- [x] `DaemonService.get_tag_history(camera, tag=None, frames=None)`
       triggers **zero** detection bursts of its own — it only reads
       the existing per-camera buffer. A buffer with fewer entries than
       `frames` requested returns everything available, not an error.
@@ -71,24 +76,24 @@ positive), which is meaningless without calibration.
       is empty for the requested tag — the explicit-gap requirement
       (UC-26.S-4); frames are never dropped to make the tag's presence
       look continuous.
-- [ ] An idle daemon (zero `get_tags`/`get_tag`/`get_tag_history`
+- [x] An idle daemon (zero `get_tags`/`get_tag`/`get_tag_history`
       calls) triggers zero detections over a simulated 10 s window —
       trivially true with no background loop, asserted as a named
       regression test anyway (dev-plan Stage 8 treats this as a
       requirement with CPU-budget tests, not an assumption).
-- [ ] `DaemonService.get_frame` gains: if the named camera's ring
+- [x] `DaemonService.get_frame` gains: if the named camera's ring
       buffer has an entry, the returned `ImageFrame.tags` carries that
       entry; if the buffer is empty for that camera, `tags` stays
       `None`. `get_frame` itself never triggers a new burst — asking
       for pixels is not asking for tags (sprint.md Decision 4).
       `get_frame`'s existing `deskewed=True` → `NotCalibrated`
       behavior is unchanged.
-- [ ] `_camera_for` (ticket 002) is reused unmodified by all three new
+- [x] `_camera_for` (ticket 002) is reused unmodified by all three new
       methods — number-or-slug addressing and `CameraNotPresent`
       apply to `get_tags`/`get_tag`/`get_tag_history` automatically,
       with a test proving it (e.g. `get_tags("3")` and
       `get_tags(<slug>)` on the same held camera agree).
-- [ ] `uv run mypy` stays clean — no new `typing.Protocol` anywhere;
+- [x] `uv run mypy` stays clean — no new `typing.Protocol` anywhere;
       if any new interface-shaped thing is needed beyond the
       already-declared `Daemon` methods, it is a plain base class
       (`NotImplementedError` bodies) or a frozen
