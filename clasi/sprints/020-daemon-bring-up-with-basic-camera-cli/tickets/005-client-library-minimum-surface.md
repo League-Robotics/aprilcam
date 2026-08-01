@@ -1,9 +1,15 @@
 ---
 id: '005'
 title: Client library minimum surface
-status: open
-use-cases: [UC-01, UC-13, UC-14, UC-17, UC-25]
-depends-on: ['004']
+status: done
+use-cases:
+- UC-01
+- UC-13
+- UC-14
+- UC-17
+- UC-25
+depends-on:
+- '004'
 github-issue: ''
 issue: daemon-bring-up-with-basic-camera-cli.md
 completes_issue: true
@@ -51,27 +57,27 @@ this sprint (Architecture Decision 2 — deferred).
 
 ## Acceptance Criteria
 
-- [ ] `Discovery.connect(None)` connects to the local daemon over the
+- [x] `Discovery.connect(None)` connects to the local daemon over the
       unix socket (ticket 004's listener).
-- [ ] `Discovery.connect("some-remote-host")` attempts a direct TCP
+- [x] `Discovery.connect("some-remote-host")` attempts a direct TCP
       connect and raises `ConnectionFailed(host, reason)` when nothing
       answers — distinct in type from a successful-but-empty discovery
       result.
-- [ ] `Discovery.find_all()` with a local daemon running returns exactly
+- [x] `Discovery.find_all()` with a local daemon running returns exactly
       one `DaemonInfo` with `is_local=True`, `reachable=True`; with no
       daemon running, returns an empty tuple (not an error) — matching
       UC-13.S-2's "empty list, not an error" while being honest that no
       network discovery happened (module docstring states this
       explicitly per Architecture Decision 2).
-- [ ] `client/daemon_client.py`'s `list_cameras()` / `probe_cameras()` /
+- [x] `client/daemon_client.py`'s `list_cameras()` / `probe_cameras()` /
       `get_frame()` / `status()` round-trip correctly against a running
       daemon (headless, using ticket 004's fake-camera daemon fixture).
-- [ ] `DaemonLifecycle.start()` / `.stop()` / `.status()` round-trip
+- [x] `DaemonLifecycle.start()` / `.stop()` / `.status()` round-trip
       against a real local daemon process (`@pytest.mark.camera` or a
       lighter marker if it can run without cameras attached — zero
       cameras is a valid start per UC-01.S-2, so this can likely run
       headless).
-- [ ] `DaemonLifecycle.start()` refuses when the lock is already held,
+- [x] `DaemonLifecycle.start()` refuses when the lock is already held,
       surfacing `AlreadyRunning` from ticket 004 through to the client
       caller unchanged (no re-wrapping that loses the holder identity).
 
