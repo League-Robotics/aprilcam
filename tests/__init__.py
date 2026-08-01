@@ -6,6 +6,8 @@ Present specifically so ``tests/aprilcam/`` — which deliberately mirrors
 pytest's package-name inference (walking up through ``__init__.py``
 files) would stop at ``tests/`` and register the test tree in
 ``sys.modules`` as top-level ``aprilcam``, shadowing the real installed
-package of the same name. ``tests/testdev/`` has no ``__init__.py`` of
-its own, so it is unaffected either way.
+package of the same name. The repo-root ``testdev/`` (ad hoc developer
+tooling, not a pytest suite -- see ``testdev/conftest.py``, relocated
+out of ``tests/`` by ticket 021-001) lives outside this tree entirely
+and is unaffected either way.
 """

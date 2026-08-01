@@ -1,5 +1,13 @@
 ---
-status: pending
+status: in-progress
+sprint: '021'
+tickets:
+- 021-001
+- 021-003
+- 021-004
+- 021-005
+- 021-006
+- 021-007
 ---
 
 # Tag detection and tag queries

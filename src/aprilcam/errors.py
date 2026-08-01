@@ -79,6 +79,25 @@ class UnknownGuide(UnknownTarget):
     kind = "guide"
 
 
+class CameraNotPresent(AprilCamError):
+    """A camera the registry knows -- addressed by slug or by its
+    persistent number -- is not currently enumerated among live
+    backends (UC-14, UC-25).
+
+    Distinct from :class:`UnknownCamera`: the registry has a record for
+    this camera, it simply is not present right now (unplugged, or a
+    transient enumeration miss). A registry record outliving its
+    hardware is the normal case (UC-25), not a rejection -- this type
+    lets a caller distinguish "never registered" from "registered, but
+    not here," which ``UnknownCamera`` alone could not (UC-14.S-4-ish
+    reasoning, extended to number addressing by ticket 021-002).
+    """
+
+    def __init__(self, slug: str) -> None:
+        self.slug = slug
+        super().__init__(f"camera {slug!r} is registered but not currently present")
+
+
 class NotCalibrated(AprilCamError):
     """A deskewed or world-coordinate product was asked of an
     uncalibrated camera (UC-19).

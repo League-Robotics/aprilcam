@@ -60,7 +60,15 @@ def test_usb_serial_used_when_no_avf_unique():
     assert r.hardware_key == "serial:SN12345"
 
 
-def test_vid_pid_location_path():
+def test_vid_pid_location_path(monkeypatch):
+    """On non-darwin platforms, ``location`` is not guaranteed to be a
+    hardware-stable id (a Linux ``path`` is a ``/dev/videoN`` node — see
+    ``identity.py``'s "Root-cause fix" section), so this tier is genuinely
+    reachable and meaningful there. Explicitly non-darwin so this test
+    does not collide with the darwin-only determinism shortcut exercised
+    in ``test_darwin_location_used_as_primary_identity_even_without_profiler_match``
+    below."""
+    monkeypatch.setattr(sys, "platform", "linux")
     enum = {
         0: _EnumEntry(index=0, name="Generic Cam", vid=3141, pid=25446, path="0xABC123")
     }
@@ -70,7 +78,9 @@ def test_vid_pid_location_path():
     assert r.hardware_key == "vidpid:0c45:6366@0xabc123"
 
 
-def test_usb_location_path_fallback_when_only_location():
+def test_usb_location_path_fallback_when_only_location(monkeypatch):
+    """Non-darwin, per the note on ``test_vid_pid_location_path`` above."""
+    monkeypatch.setattr(sys, "platform", "linux")
     enum = {0: _EnumEntry(index=0, name="No IDs Cam", vid=None, pid=None, path="0xDEAD")}
     r = resolve_identity(0, enum_entries=enum, profiler_entries={})
     assert r.source == "usb_location_path"
@@ -120,6 +130,77 @@ def test_two_identical_name_devices_get_distinct_hardware_keys():
     r1 = resolve_identity(1, enum_entries=enum, profiler_entries={})
     assert r0.hardware_key != r1.hardware_key
     assert r0.slug == r1.slug == "arducam-ov9782-usb-camera"
+
+
+# ---------------------------------------------------------------------------
+# Root-cause regression: darwin location determinism (ticket 021-007)
+#
+# A production registry on this machine was found to have every physical
+# camera registered twice -- once under `avf:<id>`, once under
+# `vidpid:<vid>:<pid>@<id>` for the *same* id -- because system_profiler's
+# device-name match is a flaky gate on which tier resolution used, even
+# though cv2-enumerate-cameras' own `path` already *is* that id on macOS
+# (cv2_enumerate_cameras/macos_backend.py: `path=d.uniqueID()`). These
+# tests pin the fix: the tier used must not depend on whether the
+# system_profiler match happened to land this run.
+# ---------------------------------------------------------------------------
+
+
+def test_darwin_location_used_as_primary_identity_even_without_profiler_match(
+    monkeypatch,
+):
+    """No system_profiler entry at all (simulates the observed failure
+    mode) still resolves to the avfoundation_unique_id tier on darwin,
+    using cv2's own `path` directly."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    enum = {
+        0: _EnumEntry(
+            index=0, name="Brio 501", vid=1133, pid=2374, path="0x1100000046d0946"
+        )
+    }
+    r = resolve_identity(0, enum_entries=enum, profiler_entries={})
+    assert r.hardware_key == "avf:0x1100000046d0946"
+    assert r.source == "avfoundation_unique_id"
+    assert r.is_fallback is False
+
+
+def test_darwin_identity_deterministic_regardless_of_profiler_match(monkeypatch):
+    """The same camera, resolved once with a successful system_profiler
+    match and once with none at all, must produce the *same*
+    hardware_key -- this is the property whose absence duplicated every
+    camera in the registry found on this machine."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    enum = {
+        0: _EnumEntry(
+            index=0, name="Brio 501", vid=1133, pid=2374, path="0x1100000046d0946"
+        )
+    }
+    prof = {
+        "Brio 501": _ProfilerEntry(
+            name="Brio 501", unique_id="0x1100000046d0946", vid=1133, pid=2374
+        )
+    }
+    with_profiler = resolve_identity(0, enum_entries=enum, profiler_entries=prof)
+    without_profiler = resolve_identity(0, enum_entries=enum, profiler_entries={})
+    assert with_profiler.hardware_key == without_profiler.hardware_key == "avf:0x1100000046d0946"
+    assert with_profiler.source == without_profiler.source == "avfoundation_unique_id"
+
+
+def test_darwin_location_shortcut_does_not_apply_on_other_platforms(monkeypatch):
+    """The same enum data on a non-darwin platform must NOT get the
+    location-as-uniqueID shortcut -- there, `path` is not documented (or
+    guaranteed) to be a hardware-stable id (see linux_backend.py's
+    `/dev/videoN` node path), so it stays a genuine, lower-trust
+    fallback tier."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    enum = {
+        0: _EnumEntry(
+            index=0, name="Brio 501", vid=1133, pid=2374, path="0x1100000046d0946"
+        )
+    }
+    r = resolve_identity(0, enum_entries=enum, profiler_entries={})
+    assert r.source == "vid_pid_location"
+    assert r.hardware_key != "avf:0x1100000046d0946"
 
 
 def test_resolve_all_resolves_every_index():
@@ -194,6 +275,43 @@ def test_device_name_slug_never_carries_resolution():
     assert device_name_slug("Brio 501") == "brio-501"
     assert device_name_slug(None) == "camera"
     assert device_name_slug("") == "camera"
+
+
+# ---------------------------------------------------------------------------
+# device_name_slug's no-all-digits invariant (ticket 021-002) -- daemon-side
+# number/slug addressing depends on a slug never being confusable with a
+# persistent registry number.
+# ---------------------------------------------------------------------------
+
+
+def test_device_name_slug_guards_a_bare_numeric_device_name():
+    assert device_name_slug("123") == "camera-123"
+    assert not device_name_slug("123").isdigit()
+
+
+def test_device_name_slug_guards_a_numeric_looking_device_name_with_symbols():
+    # "4-2" slugifies to "4-2" -- already non-digit (contains '-'), so
+    # the guard should not touch it (no double-prefixing).
+    assert device_name_slug("4-2") == "4-2"
+
+
+def test_name_resolution_slug_last_resort_tier_never_all_digits():
+    """The last-resort hardware-key tier is built from
+    ``device_name_slug`` and so inherits its guard whenever no
+    resolution is supplied."""
+    assert name_resolution_slug("123") == "camera-123"
+    assert not name_resolution_slug("123").isdigit()
+
+
+def test_resolve_identity_last_resort_tier_with_numeric_device_name():
+    """End-to-end through the actual fallback chain: a camera whose OS-
+    reported name is a bare number must not resolve to an all-digits
+    ``.slug`` -- that would collide with number-addressing in
+    ``daemon/service.py``'s ``_camera_for``."""
+    r = resolve_identity(0, name="123", enum_entries={}, profiler_entries={})
+    assert r.source == "name_resolution_slug"
+    assert r.slug == "camera-123"
+    assert not r.slug.isdigit()
 
 
 # ---------------------------------------------------------------------------

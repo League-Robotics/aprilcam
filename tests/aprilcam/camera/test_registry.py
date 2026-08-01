@@ -186,6 +186,53 @@ def test_next_number_persists_and_clamps_against_stored_max(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# get_by_number() -- the number-addressing half of ticket 021-002
+# ---------------------------------------------------------------------------
+
+
+def test_get_by_number_round_trips_against_a_freshly_resolved_record(tmp_path):
+    reg = CameraRegistry(tmp_path)
+    slug = reg.resolve(_identity("hw:a", "Cam A"))
+    record = reg.get(slug)
+
+    assert reg.get_by_number(record.number) == record
+
+
+def test_get_by_number_returns_none_for_an_unassigned_number(tmp_path):
+    reg = CameraRegistry(tmp_path)
+    reg.resolve(_identity("hw:a", "Cam A"))
+
+    assert reg.get_by_number(999) is None
+
+
+def test_get_by_number_finds_the_right_record_among_several(tmp_path):
+    reg = CameraRegistry(tmp_path)
+    a_slug = reg.resolve(_identity("hw:a", "Cam A"))
+    b_slug = reg.resolve(_identity("hw:b", "Cam B"))
+    a_record = reg.get(a_slug)
+    b_record = reg.get(b_slug)
+
+    assert reg.get_by_number(a_record.number) == a_record
+    assert reg.get_by_number(b_record.number) == b_record
+
+
+def test_get_by_number_survives_a_gap_left_by_forget(tmp_path):
+    """Numbers are never reissued or reshuffled -- a gap left by forget
+    stays a gap, and get_by_number reports it as absent, not as some
+    other camera shifted into its place."""
+    reg = CameraRegistry(tmp_path)
+    a_slug = reg.resolve(_identity("hw:a", "Cam A"))
+    a_number = reg.get(a_slug).number
+    b_slug = reg.resolve(_identity("hw:b", "Cam B"))
+    b_record = reg.get(b_slug)
+
+    reg.forget(a_slug)
+
+    assert reg.get_by_number(a_number) is None
+    assert reg.get_by_number(b_record.number) == b_record
+
+
+# ---------------------------------------------------------------------------
 # forget() vs. absent-but-remembered (AC4)
 # ---------------------------------------------------------------------------
 
@@ -343,3 +390,234 @@ def test_on_disk_format_is_versioned(tmp_path):
 def test_satisfies_camera_registry_protocol(tmp_path):
     reg = CameraRegistry(tmp_path)
     assert isinstance(reg, CameraRegistryProtocol)
+
+
+# ---------------------------------------------------------------------------
+# Self-healing location-duplicate reconciliation (ticket 021-007)
+#
+# A production registry on this machine was found with every physical
+# camera registered twice -- once under `avf:<id>`, once under
+# `vidpid:<vid>:<pid>@<id>` for the *same* id -- because
+# `camera/identity.py`'s pre-fix resolver could route the same camera
+# through either tier depending on whether a system_profiler name-match
+# happened to land. Fixing the resolver (see test_identity.py) does not
+# retroactively clean a registry.json that already has both records; these
+# tests cover the registry-side self-heal that does.
+# ---------------------------------------------------------------------------
+
+
+def _write_raw_registry(tmp_path, cameras: dict, next_number: int) -> None:
+    data = {
+        "version": REGISTRY_VERSION,
+        "next_number": next_number,
+        "cameras": cameras,
+    }
+    (tmp_path / REGISTRY_FILENAME).write_text(json.dumps(data))
+
+
+def test_load_merges_avf_and_vidpid_duplicates_sharing_a_location(tmp_path):
+    """The exact shape found in the wild: an `avf:` record (lower
+    number, earlier-assigned) and a `vidpid:...@<same location>` record
+    (higher number, minted later by the bug) collapse into one on
+    load -- the lower-numbered survivor keeps its slug and number."""
+    _write_raw_registry(
+        tmp_path,
+        {
+            "avf:0x1100000046d0946": {
+                "hardware_key": "avf:0x1100000046d0946",
+                "slug": "brio-501",
+                "number": 1,
+                "device_name": "Brio 501",
+                "last_seen": "2026-08-01T18:13:27+00:00",
+            },
+            "vidpid:046d:0946@0x1100000046d0946": {
+                "hardware_key": "vidpid:046d:0946@0x1100000046d0946",
+                "slug": "brio-501-2",
+                "number": 7,
+                "device_name": "Brio 501",
+                "last_seen": "2026-08-01T17:21:02+00:00",
+            },
+        },
+        next_number=9,
+    )
+
+    reg = CameraRegistry(tmp_path)
+
+    assert len(reg) == 1
+    survivor = reg.get("brio-501")
+    assert survivor is not None
+    assert survivor.number == 1
+    assert survivor.hardware_key == "avf:0x1100000046d0946"
+    assert reg.get("brio-501-2") is None
+    assert reg.get_by_number(7) is None  # a permanent gap, not reissued
+
+    # The cleanup is persisted, not just an in-memory view.
+    reg2 = CameraRegistry(tmp_path)
+    assert len(reg2) == 1
+    assert reg2.get("brio-501").number == 1
+
+
+def test_reconcile_keeps_the_freshest_device_name_and_last_seen(tmp_path):
+    """The survivor's device_name/last_seen reflect whichever duplicate
+    was actually seen most recently -- not always the lower-numbered
+    one's own stale data."""
+    _write_raw_registry(
+        tmp_path,
+        {
+            "avf:0xdeadbeef": {
+                "hardware_key": "avf:0xdeadbeef",
+                "slug": "cam-a",
+                "number": 1,
+                "device_name": "Cam A (old name)",
+                "last_seen": "2026-06-01T00:00:00+00:00",
+            },
+            "vidpid:0c45:6366@0xdeadbeef": {
+                "hardware_key": "vidpid:0c45:6366@0xdeadbeef",
+                "slug": "cam-a-2",
+                "number": 4,
+                "device_name": "Cam A (current name)",
+                "last_seen": "2026-08-01T12:00:00+00:00",
+            },
+        },
+        next_number=5,
+    )
+
+    reg = CameraRegistry(tmp_path)
+
+    survivor = reg.get("cam-a")
+    assert survivor.device_name == "Cam A (current name)"
+    assert survivor.last_seen == "2026-08-01T12:00:00+00:00"
+
+
+def test_reconcile_does_not_merge_distinct_locations(tmp_path):
+    """Two cameras of the same model on two different ports keep two
+    records -- their location fragments genuinely differ, so this is
+    not the duplicate-registration bug's shape."""
+    _write_raw_registry(
+        tmp_path,
+        {
+            "vidpid:0c45:6366@loc1": {
+                "hardware_key": "vidpid:0c45:6366@loc1",
+                "slug": "arducam-ov9782-usb-camera",
+                "number": 1,
+                "device_name": "Arducam OV9782 USB Camera",
+                "last_seen": "2026-08-01T00:00:00+00:00",
+            },
+            "vidpid:0c45:6366@loc2": {
+                "hardware_key": "vidpid:0c45:6366@loc2",
+                "slug": "arducam-ov9782-usb-camera-2",
+                "number": 2,
+                "device_name": "Arducam OV9782 USB Camera",
+                "last_seen": "2026-08-01T00:00:00+00:00",
+            },
+        },
+        next_number=3,
+    )
+
+    reg = CameraRegistry(tmp_path)
+
+    assert len(reg) == 2
+    assert reg.get("arducam-ov9782-usb-camera") is not None
+    assert reg.get("arducam-ov9782-usb-camera-2") is not None
+
+
+def test_reconcile_ignores_non_location_tiers(tmp_path):
+    """`serial:`/`name:` keys are never location-derived and must never
+    be merged with each other or with a location-based key, even if
+    (implausibly) their fragments matched textually."""
+    _write_raw_registry(
+        tmp_path,
+        {
+            "serial:SN1": {
+                "hardware_key": "serial:SN1",
+                "slug": "cam-a",
+                "number": 1,
+                "device_name": "Cam A",
+                "last_seen": "2026-08-01T00:00:00+00:00",
+            },
+            "name:cam-a": {
+                "hardware_key": "name:cam-a",
+                "slug": "cam-a-2",
+                "number": 2,
+                "device_name": "Cam A",
+                "last_seen": "2026-08-01T00:00:00+00:00",
+            },
+        },
+        next_number=3,
+    )
+
+    reg = CameraRegistry(tmp_path)
+
+    assert len(reg) == 2
+
+
+def test_reconcile_is_idempotent(tmp_path):
+    """A second load of an already-reconciled registry changes nothing
+    further -- no re-merging, no renumbering."""
+    _write_raw_registry(
+        tmp_path,
+        {
+            "avf:0xabc": {
+                "hardware_key": "avf:0xabc",
+                "slug": "cam-a",
+                "number": 1,
+                "device_name": "Cam A",
+                "last_seen": "2026-08-01T00:00:00+00:00",
+            },
+            "vidpid:0c45:6366@0xabc": {
+                "hardware_key": "vidpid:0c45:6366@0xabc",
+                "slug": "cam-a-2",
+                "number": 2,
+                "device_name": "Cam A",
+                "last_seen": "2026-08-01T00:00:00+00:00",
+            },
+        },
+        next_number=3,
+    )
+
+    reg = CameraRegistry(tmp_path)
+    assert len(reg) == 1
+    first_pass_data = json.loads((tmp_path / REGISTRY_FILENAME).read_text())
+
+    reg2 = CameraRegistry(tmp_path)
+    assert len(reg2) == 1
+    second_pass_data = json.loads((tmp_path / REGISTRY_FILENAME).read_text())
+
+    assert first_pass_data == second_pass_data
+
+
+def test_reconcile_three_way_duplicate_keeps_lowest_number(tmp_path):
+    """avf:/vidpid:/loc: all sharing one location -- the full three-tier
+    duplication shape -- collapses to a single survivor."""
+    _write_raw_registry(
+        tmp_path,
+        {
+            "loc:0xabc": {
+                "hardware_key": "loc:0xabc",
+                "slug": "cam-a-3",
+                "number": 3,
+                "device_name": "Cam A",
+                "last_seen": "2026-08-01T00:00:00+00:00",
+            },
+            "avf:0xabc": {
+                "hardware_key": "avf:0xabc",
+                "slug": "cam-a",
+                "number": 1,
+                "device_name": "Cam A",
+                "last_seen": "2026-08-01T00:00:00+00:00",
+            },
+            "vidpid:0c45:6366@0xabc": {
+                "hardware_key": "vidpid:0c45:6366@0xabc",
+                "slug": "cam-a-2",
+                "number": 2,
+                "device_name": "Cam A",
+                "last_seen": "2026-08-01T00:00:00+00:00",
+            },
+        },
+        next_number=4,
+    )
+
+    reg = CameraRegistry(tmp_path)
+
+    assert len(reg) == 1
+    assert reg.get("cam-a").number == 1

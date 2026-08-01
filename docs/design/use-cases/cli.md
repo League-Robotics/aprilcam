@@ -29,7 +29,8 @@ aprilcam camera config <file>             # push a camera config (self-naming)
 aprilcam camera config <cam> --dump       # read back live camera config
 aprilcam playfield view                   # deskewed, calibrated, tags drawn
 aprilcam playfield image                  # one deskewed frame
-aprilcam playfield tags                   # list detected tags
+aprilcam playfield tags                   # list detected tags (DEFERRED -- see UC-20)
+aprilcam camera tags <camera>             # list detected tags, camera-addressed (sprint 021)
 aprilcam playfield config <file>          # push a playfield definition
 aprilcam playfield config <name> --dump   # read back live definition
 aprilcam playfield annotations            # list the annotation store (UC-28)
@@ -61,10 +62,17 @@ one. Fan-out is restricted to **read-only commands**:
 |---|---|
 | `daemon list`, `daemon status` | `daemon start`, `stop`, `restart` |
 | `camera list`, `camera probe` | `camera calibrate` |
-| `playfield tags` | `camera view`, `playfield view` |
+| `camera tags`[^tags-spelling] | `camera view`, `playfield view` |
 | `camera image`, `playfield image` | `camera config`, `playfield config` (push) |
 | `playfield annotations` (list) | `playfield annotations --clear` (any annotation write) |
 | `config --dump` | — |
+
+[^tags-spelling]: `camera tags <camera>` joins `camera image`/`camera
+list`/`camera probe` in the read-only, fan-out-eligible group as of
+sprint 021. `playfield tags` was the originally drafted spelling for
+this row (client-side camera resolution via `CameraState.playfield`)
+and remains the eventual form once playfields exist — deferred, not
+dropped; see UC-20's command-spelling note.
 
 The rule: **nothing that changes state or streams interactively fans
 out.** Calibrating every camera on the network should not be one typo
@@ -87,6 +95,27 @@ playfield links from `CameraState`; exactly one linked, present camera
 `--camera` to disambiguate. The implicitness lives in the shell, where
 a human can see and correct it — never in the daemon, where it would
 become a wrong answer that looks right.
+
+### Camera addressing — number or slug
+
+Every camera-addressed command (`camera image`, `camera calibrate`, and
+every future one, including this sprint's `camera tags`) accepts either
+form a camera can be named: **a decimal number resolves the camera
+currently holding that persistent registry number** — the same number
+`camera list`/`camera probe` print in their leading `[N]` column —
+**anything else resolves by slug**, exactly as before. There is no
+ambiguity between the two: a slug always contains at least one
+non-digit character (`camera/identity.py`'s `device_name_slug`
+invariant), so an all-digits token can only ever mean a number.
+
+Resolution happens once, daemon-side, in `_camera_for` — every adapter
+(this CLI, the MCP server once it lands, a future ROS node, direct
+robot programs) inherits the same rule automatically rather than each
+reimplementing the lookup (`adapters.md` §2's duplication test). A
+camera the registry remembers but that is not currently plugged in is
+addressable by either form and fails with a distinct "camera present:
+no" error, never "unknown camera" — a registry entry outliving its
+hardware is the normal case (UC-25), not a rejection.
 
 ---
 
@@ -521,11 +550,31 @@ right now" check, without opening a GUI.
 
 **Preconditions.** UC-05 satisfied for world coordinates.
 
-**Main success path.**
-1. `aprilcam playfield tags` (`-d` for remote).
+**Command spelling — sprint 021 ships `camera tags`, `playfield tags` is
+deferred.** This use case was drafted around `aprilcam playfield tags`,
+resolving its camera client-side from `CameraState.playfield` links
+(the "Playfield commands resolve their camera" convention above). That
+resolution has nothing to resolve until the config-service sprint
+builds playfields — `CameraState.playfield` is always `None` until
+then, so `playfield tags` would fail on every invocation, not degrade
+gracefully. Sprint 021 (tag detection) ships **`aprilcam camera tags
+<camera>`** instead — camera-addressed, mirroring the already-shipped
+`camera image <camera>` — as its main success path below. `playfield
+tags` remains the eventual form once playfields exist and is not
+removed from the command surface, only deferred (sprint 021's
+Architecture Decision 3 has the full reasoning).
+
+**Main success path (sprint 021, as shipped).**
+1. `aprilcam camera tags <camera>` (`-d` for remote).
 2. **All** detected tags are listed, per UC-10 — there is no count or
-   limit — each with family, id, world position in cm, heading, and
-   velocity, with UC-12 mount corrections applied.
+   limit — each with family and id. This sprint every camera is
+   uncalibrated by construction (no calibration subsystem exists yet),
+   so every row carries an explicit uncalibrated flag plus pixel
+   position rather than a world position (UC-20.S-3). Once calibration
+   and playfields exist, `camera tags` gains world position, heading,
+   and velocity with UC-12 mount corrections applied, and `playfield
+   tags` becomes reachable as the camera-implicit form of the same
+   data.
 
 **Postconditions.** None — a read.
 
@@ -543,15 +592,22 @@ but shell pipelines are a real use.
 **UC-20.S-1 — See three robots** · _happy path_
 AprilTags 7, 12, 30 plus surveyed centre tag 1 are on the field.
 `aprilcam playfield tags` lists exactly 4 tags with world coordinates
-inside the 134.3 × 89.3 field.
+inside the 134.3 × 89.3 field. Requires calibration and a playfield
+link, neither of which exists yet (sprint 021) — this is the eventual
+`playfield tags` behaviour, not what ships this sprint.
 
 **UC-20.S-2 — Fan out across the network** · _happy path_
 `aprilcam playfield tags --all` lists tags from every discovered daemon's
-playfield, each row labelled with its daemon.
+playfield, each row labelled with its daemon. Same deferral as S-1;
+sprint 021's fan-out equivalent is `aprilcam camera tags <camera>
+--all`, labelled per daemon exactly as `camera list`/`camera probe`
+already are.
 
 **UC-20.S-3 — Uncalibrated camera** · _failure path_
 Tags are listed with pixel positions and an explicit uncalibrated flag,
-with no world coordinates presented.
+with no world coordinates presented. This is exactly what sprint 021
+ships: every camera is uncalibrated by construction, so `aprilcam
+camera tags <camera>` always takes this path this sprint, never S-1's.
 
 ---
 

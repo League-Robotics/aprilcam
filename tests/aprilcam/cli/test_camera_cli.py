@@ -24,8 +24,19 @@ from typing import Callable, Optional, Tuple
 import pytest
 
 from aprilcam.cli import camera as camera_cli
-from aprilcam.errors import ConnectionFailed, DiscoveryFailed, UnknownCamera
-from aprilcam.types import CameraState, ImageFrame, ProbeReport, ProbeSkip
+from aprilcam.errors import CameraNotPresent, ConnectionFailed, DiscoveryFailed, UnknownCamera
+from aprilcam.types import (
+    CameraState,
+    ImageFrame,
+    PixelPoint,
+    ProbeReport,
+    ProbeSkip,
+    TagFamily,
+    TagFrame,
+    TagId,
+    TagRecord,
+    WorldPoint,
+)
 
 
 def _camera(name: str = "arducam-ov9782-usb-camera", number: int = 1, **overrides) -> CameraState:
@@ -52,6 +63,46 @@ def _args(**overrides) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
+def _uncalibrated_record(
+    family: TagFamily = TagFamily.APRILTAG, number: int = 7, x: float = 123.4, y: float = 56.7
+) -> TagRecord:
+    """A record shaped exactly as ``daemon/detection.py`` produces this
+    sprint (sprint.md: 'every tag record from this sprint reports
+    calibrated=False, world=None' -- see the module docstring)."""
+    return TagRecord(
+        tag=TagId(family, number),
+        world=None,
+        heading_rad=None,
+        world_velocity=None,
+        speed=None,
+        timestamp=0.0,
+        pixel=PixelPoint(x, y),
+        calibrated=False,
+    )
+
+
+def _calibrated_record(
+    family: TagFamily = TagFamily.APRILTAG, number: int = 1, wx: float = 10.0, wy: float = -5.0
+) -> TagRecord:
+    """A record shaped as a future calibration sprint would produce --
+    exercises ``_format_tag_row``'s calibrated branch, unreachable via
+    a real daemon this sprint but real code, not a stub."""
+    return TagRecord(
+        tag=TagId(family, number),
+        world=WorldPoint(wx, wy),
+        heading_rad=0.5,
+        world_velocity=None,
+        speed=12.5,
+        timestamp=0.0,
+        pixel=PixelPoint(1.0, 2.0),
+        calibrated=True,
+    )
+
+
+def _tag_frame(tags: Tuple[TagRecord, ...] = ()) -> TagFrame:
+    return TagFrame(tags=tags, timestamp=0.0, frame_index=0)
+
+
 @dataclass
 class _FakeDaemon:
     cameras: Tuple[CameraState, ...] = ()
@@ -60,6 +111,9 @@ class _FakeDaemon:
     get_frame_raises: Optional[Exception] = None
     requested_camera: Optional[str] = None
     requested_encoding: Optional[str] = None
+    tag_frame: Optional[TagFrame] = None
+    get_tags_raises: Optional[Exception] = None
+    requested_tags_camera: Optional[str] = None
 
     def list_cameras(self) -> Tuple[CameraState, ...]:
         return self.cameras
@@ -73,6 +127,12 @@ class _FakeDaemon:
         if self.get_frame_raises is not None:
             raise self.get_frame_raises
         return self.frame if self.frame is not None else _frame(encoding=encoding)
+
+    def get_tags(self, camera: str) -> TagFrame:
+        self.requested_tags_camera = camera
+        if self.get_tags_raises is not None:
+            raise self.get_tags_raises
+        return self.tag_frame if self.tag_frame is not None else _tag_frame()
 
 
 @dataclass
@@ -396,6 +456,156 @@ def test_image_all_base64_fans_out_labelled_lines(capsys):
 
 
 # ---------------------------------------------------------------------------
+# camera tags -- AC: UC-20.S-1/S-2/S-3, ticket 021-006
+# ---------------------------------------------------------------------------
+
+
+def test_tags_prints_uncalibrated_flag_and_pixel_never_a_world_looking_number(capsys):
+    """UC-20.S-3, taken literally: never ``0.0, 0.0`` or any
+    world-looking number for an uncalibrated record -- the flag and
+    the pixel position instead."""
+    record = _uncalibrated_record(x=123.4, y=56.7)
+    daemon = _FakeDaemon(tag_frame=_tag_frame((record,)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = camera_cli.cmd_tags(_args(), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "apriltag" in out and "7" in out
+    assert "UNCALIBRATED" in out
+    assert "123.4" in out and "56.7" in out
+    assert "world=" not in out
+    assert "0.0, 0.0" not in out
+    assert daemon.requested_tags_camera == "arducam-ov9782-usb-camera"
+
+
+def test_tags_distinguishes_apriltag_and_aruco_of_the_same_number(capsys):
+    """UC-09.S-3's disambiguation, exercised through the CLI: family
+    plus id, never id alone."""
+    apriltag_7 = _uncalibrated_record(family=TagFamily.APRILTAG, number=7)
+    aruco_7 = _uncalibrated_record(family=TagFamily.ARUCO, number=7)
+    daemon = _FakeDaemon(tag_frame=_tag_frame((apriltag_7, aruco_7)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    camera_cli.cmd_tags(_args(), discovery_factory=lambda: discovery)
+
+    out = capsys.readouterr().out
+    assert "apriltag 7" in out
+    assert "aruco 7" in out
+
+
+def test_tags_calibrated_record_prints_world_position_not_the_uncalibrated_flag(capsys):
+    """The calibrated branch is real code -- unreachable via a real
+    daemon this sprint, but tested so a later calibration sprint
+    activates it rather than writing it (see the module docstring)."""
+    record = _calibrated_record(wx=10.0, wy=-5.0)
+    daemon = _FakeDaemon(tag_frame=_tag_frame((record,)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    camera_cli.cmd_tags(_args(), discovery_factory=lambda: discovery)
+
+    out = capsys.readouterr().out
+    assert "UNCALIBRATED" not in out
+    assert "world=(10.0, -5.0)" in out
+
+
+def test_tags_with_nothing_detected_prints_an_empty_result_not_an_error(capsys):
+    """UC-20's failure mode: nothing detected is an empty result, never
+    an error or a stack trace."""
+    daemon = _FakeDaemon(tag_frame=_tag_frame(()))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = camera_cli.cmd_tags(_args(), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    out, err = capsys.readouterr()
+    assert "(no tags detected)" in out
+    assert err == ""
+
+
+def test_tags_passes_the_daemon_flag_through_to_connect():
+    discovery = _FakeDiscovery(daemon=_FakeDaemon())
+
+    camera_cli.cmd_tags(_args(daemon="pi-field.local"), discovery_factory=lambda: discovery)
+
+    assert discovery.connected_with == "pi-field.local"
+
+
+def test_tags_unknown_camera_surfaces_the_typed_error_with_available_list(capsys):
+    daemon = _FakeDaemon(
+        get_tags_raises=UnknownCamera("no-such-cam", ("1 arducam-ov9782-usb-camera", "2 hd-usb-camera"))
+    )
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = camera_cli.cmd_tags(
+        _args(camera="no-such-cam"), discovery_factory=lambda: discovery
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "no-such-cam" in err
+    assert "1 arducam-ov9782-usb-camera" in err and "2 hd-usb-camera" in err
+
+
+def test_tags_camera_not_present_surfaces_a_distinct_typed_error(capsys):
+    """``CameraNotPresent`` is distinct from ``UnknownCamera`` -- a
+    registered-but-unplugged camera reads as 'not present', never
+    'unknown camera' (ticket 021-002/005 handoff)."""
+    daemon = _FakeDaemon(get_tags_raises=CameraNotPresent("arducam-ov9782-usb-camera"))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = camera_cli.cmd_tags(_args(), discovery_factory=lambda: discovery)
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "not currently present" in err
+
+
+# ---------------------------------------------------------------------------
+# camera tags --all -- AC: fans out like camera list/probe, per-daemon labels
+# ---------------------------------------------------------------------------
+
+
+def test_tags_all_fans_out_and_reports_one_unreachable_daemon_without_failing(capsys):
+    good = _FakeDaemon(tag_frame=_tag_frame((_uncalibrated_record(),)))
+    discovery = _FakeDiscovery(
+        infos=(_Info(host="localhost", is_local=True), _Info(host="unreachable-host", is_local=False)),
+        daemons_by_host={
+            None: good,
+            "unreachable-host": ConnectionFailed("unreachable-host", reason="no answer"),
+        },
+    )
+
+    code = camera_cli.cmd_tags(_args(all=True), discovery_factory=lambda: discovery)
+
+    assert code == 1  # partial failure is visible in the exit code
+    out, err = capsys.readouterr()
+    assert "localhost (local):" in out
+    assert "apriltag 7" in out
+    assert "unreachable-host: unreachable" in err
+    assert "no answer" in err
+
+
+def test_tags_all_with_zero_daemons_found_is_success_not_error(capsys):
+    discovery = _FakeDiscovery(infos=())
+
+    code = camera_cli.cmd_tags(_args(all=True), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    assert "(no daemons found)" in capsys.readouterr().out
+
+
+def test_tags_all_reports_discovery_failed_distinctly(capsys):
+    discovery = _FakeDiscovery(find_all_raises=DiscoveryFailed("multicast blocked"))
+
+    code = camera_cli.cmd_tags(_args(all=True), discovery_factory=lambda: discovery)
+
+    assert code == 1
+    assert "multicast blocked" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
 # argparse wiring
 # ---------------------------------------------------------------------------
 
@@ -434,4 +644,35 @@ def test_camera_list_h_prints_help_not_a_missing_hostname_error():
     parser = _build_parser()
     with pytest.raises(SystemExit) as excinfo:
         parser.parse_args(["camera", "list", "-h"])
+    assert excinfo.value.code == 0
+
+
+def test_tags_requires_a_camera_positional_argument():
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["camera", "tags"])
+
+
+def test_tags_is_wired_to_cmd_tags():
+    parser = _build_parser()
+    args = parser.parse_args(["camera", "tags", "arducam-ov9782-usb-camera"])
+    assert args.func is camera_cli.cmd_tags
+    assert args.camera == "arducam-ov9782-usb-camera"
+    assert args.all is False
+    assert args.daemon is None
+
+
+def test_tags_accepts_a_persistent_number_as_the_camera_token():
+    """cli.md's number-or-slug convention: an all-digits token is a
+    valid camera argument at the argparse level -- resolution happens
+    daemon-side (ticket 021-002)."""
+    parser = _build_parser()
+    args = parser.parse_args(["camera", "tags", "3"])
+    assert args.camera == "3"
+
+
+def test_tags_h_prints_help_not_a_missing_hostname_error():
+    parser = _build_parser()
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["camera", "tags", "some-camera", "-h"])
     assert excinfo.value.code == 0

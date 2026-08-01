@@ -24,33 +24,57 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x11\x61prilcam_v2.proto\x12\x0b\x61prilcam.v2\"\xc5\x01\n\x0b\x43\x61meraState\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0f\n\x07present\x18\x02 \x01(\x08\x12\x0e\n\x06usable\x18\x03 \x01(\x08\x12\x16\n\tplayfield\x18\x04 \x01(\tH\x00\x88\x01\x01\x12\x12\n\ncalibrated\x18\x05 \x01(\x08\x12\x19\n\x11\x63\x61libration_stale\x18\x06 \x01(\x08\x12\x12\n\nframe_dark\x18\x07 \x01(\x08\x12\x13\n\x06number\x18\x08 \x01(\x05H\x01\x88\x01\x01\x42\x0c\n\n_playfieldB\t\n\x07_number\",\n\tProbeSkip\x12\x0f\n\x07\x62\x61\x63kend\x18\x01 \x01(\t\x12\x0e\n\x06reason\x18\x02 \x01(\t\"\x14\n\x12ListCamerasRequest\"@\n\x13ListCamerasResponse\x12)\n\x07\x63\x61meras\x18\x01 \x03(\x0b\x32\x18.aprilcam.v2.CameraState\"\x15\n\x13ProbeCamerasRequest\"j\n\x14ProbeCamerasResponse\x12)\n\x07\x63\x61meras\x18\x01 \x03(\x0b\x32\x18.aprilcam.v2.CameraState\x12\'\n\x07skipped\x18\x02 \x03(\x0b\x32\x16.aprilcam.v2.ProbeSkip\"E\n\x0fGetFrameRequest\x12\x0e\n\x06\x63\x61mera\x18\x01 \x01(\t\x12\x10\n\x08\x64\x65skewed\x18\x02 \x01(\x08\x12\x10\n\x08\x65ncoding\x18\x03 \x01(\t\"\xa5\x01\n\x10GetFrameResponse\x12\x0c\n\x04\x64\x61ta\x18\x01 \x01(\x0c\x12\r\n\x05width\x18\x02 \x01(\x05\x12\x0e\n\x06height\x18\x03 \x01(\x05\x12\x10\n\x08\x65ncoding\x18\x04 \x01(\t\x12\x11\n\ttimestamp\x18\x05 \x01(\x01\x12\x10\n\x08\x64\x65skewed\x18\x06 \x01(\x08\x12\x19\n\x11\x63\x61libration_stale\x18\x07 \x01(\x08\x12\x12\n\nframe_dark\x18\x08 \x01(\x08\"\x12\n\x10GetStatusRequest\"v\n\x11GetStatusResponse\x12\x0f\n\x07running\x18\x01 \x01(\x08\x12)\n\x07\x63\x61meras\x18\x02 \x03(\x0b\x32\x18.aprilcam.v2.CameraState\x12\x12\n\nconfig_dir\x18\x03 \x01(\t\x12\x11\n\tstate_dir\x18\x04 \x01(\t2\xc8\x02\n\nAprilCamV2\x12P\n\x0bListCameras\x12\x1f.aprilcam.v2.ListCamerasRequest\x1a .aprilcam.v2.ListCamerasResponse\x12S\n\x0cProbeCameras\x12 .aprilcam.v2.ProbeCamerasRequest\x1a!.aprilcam.v2.ProbeCamerasResponse\x12G\n\x08GetFrame\x12\x1c.aprilcam.v2.GetFrameRequest\x1a\x1d.aprilcam.v2.GetFrameResponse\x12J\n\tGetStatus\x12\x1d.aprilcam.v2.GetStatusRequest\x1a\x1e.aprilcam.v2.GetStatusResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x11\x61prilcam_v2.proto\x12\x0b\x61prilcam.v2\"\xc5\x01\n\x0b\x43\x61meraState\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0f\n\x07present\x18\x02 \x01(\x08\x12\x0e\n\x06usable\x18\x03 \x01(\x08\x12\x16\n\tplayfield\x18\x04 \x01(\tH\x00\x88\x01\x01\x12\x12\n\ncalibrated\x18\x05 \x01(\x08\x12\x19\n\x11\x63\x61libration_stale\x18\x06 \x01(\x08\x12\x12\n\nframe_dark\x18\x07 \x01(\x08\x12\x13\n\x06number\x18\x08 \x01(\x05H\x01\x88\x01\x01\x42\x0c\n\n_playfieldB\t\n\x07_number\",\n\tProbeSkip\x12\x0f\n\x07\x62\x61\x63kend\x18\x01 \x01(\t\x12\x0e\n\x06reason\x18\x02 \x01(\t\"\"\n\nWorldPoint\x12\t\n\x01x\x18\x01 \x01(\x01\x12\t\n\x01y\x18\x02 \x01(\x01\"\"\n\nPixelPoint\x12\t\n\x01x\x18\x01 \x01(\x01\x12\t\n\x01y\x18\x02 \x01(\x01\"?\n\x05TagId\x12&\n\x06\x66\x61mily\x18\x01 \x01(\x0e\x32\x16.aprilcam.v2.TagFamily\x12\x0e\n\x06number\x18\x02 \x01(\x05\"\xd4\x03\n\tTagRecord\x12\x1f\n\x03tag\x18\x01 \x01(\x0b\x32\x12.aprilcam.v2.TagId\x12+\n\x05world\x18\x02 \x01(\x0b\x32\x17.aprilcam.v2.WorldPointH\x00\x88\x01\x01\x12\x18\n\x0bheading_rad\x18\x03 \x01(\x01H\x01\x88\x01\x01\x12\x34\n\x0eworld_velocity\x18\x04 \x01(\x0b\x32\x17.aprilcam.v2.WorldPointH\x02\x88\x01\x01\x12\x12\n\x05speed\x18\x05 \x01(\x01H\x03\x88\x01\x01\x12\x11\n\ttimestamp\x18\x06 \x01(\x01\x12+\n\x05pixel\x18\x07 \x01(\x0b\x32\x17.aprilcam.v2.PixelPointH\x04\x88\x01\x01\x12\x12\n\ncalibrated\x18\x08 \x01(\x08\x12\x14\n\x07yaw_rad\x18\t \x01(\x01H\x05\x88\x01\x01\x12.\n\rworld_corners\x18\n \x03(\x0b\x32\x17.aprilcam.v2.WorldPoint\x12.\n\rpixel_corners\x18\x0b \x03(\x0b\x32\x17.aprilcam.v2.PixelPointB\x08\n\x06_worldB\x0e\n\x0c_heading_radB\x11\n\x0f_world_velocityB\x08\n\x06_speedB\x08\n\x06_pixelB\n\n\x08_yaw_rad\"s\n\x08TagFrame\x12$\n\x04tags\x18\x01 \x03(\x0b\x32\x16.aprilcam.v2.TagRecord\x12\x11\n\ttimestamp\x18\x02 \x01(\x01\x12\x13\n\x0b\x66rame_index\x18\x03 \x01(\x05\x12\x19\n\x11\x63\x61libration_stale\x18\x04 \x01(\x08\"\x14\n\x12ListCamerasRequest\"@\n\x13ListCamerasResponse\x12)\n\x07\x63\x61meras\x18\x01 \x03(\x0b\x32\x18.aprilcam.v2.CameraState\"\x15\n\x13ProbeCamerasRequest\"j\n\x14ProbeCamerasResponse\x12)\n\x07\x63\x61meras\x18\x01 \x03(\x0b\x32\x18.aprilcam.v2.CameraState\x12\'\n\x07skipped\x18\x02 \x03(\x0b\x32\x16.aprilcam.v2.ProbeSkip\"E\n\x0fGetFrameRequest\x12\x0e\n\x06\x63\x61mera\x18\x01 \x01(\t\x12\x10\n\x08\x64\x65skewed\x18\x02 \x01(\x08\x12\x10\n\x08\x65ncoding\x18\x03 \x01(\t\"\xd8\x01\n\x10GetFrameResponse\x12\x0c\n\x04\x64\x61ta\x18\x01 \x01(\x0c\x12\r\n\x05width\x18\x02 \x01(\x05\x12\x0e\n\x06height\x18\x03 \x01(\x05\x12\x10\n\x08\x65ncoding\x18\x04 \x01(\t\x12\x11\n\ttimestamp\x18\x05 \x01(\x01\x12\x10\n\x08\x64\x65skewed\x18\x06 \x01(\x08\x12\x19\n\x11\x63\x61libration_stale\x18\x07 \x01(\x08\x12\x12\n\nframe_dark\x18\x08 \x01(\x08\x12(\n\x04tags\x18\t \x01(\x0b\x32\x15.aprilcam.v2.TagFrameH\x00\x88\x01\x01\x42\x07\n\x05_tags\"\x12\n\x10GetStatusRequest\"v\n\x11GetStatusResponse\x12\x0f\n\x07running\x18\x01 \x01(\x08\x12)\n\x07\x63\x61meras\x18\x02 \x03(\x0b\x32\x18.aprilcam.v2.CameraState\x12\x12\n\nconfig_dir\x18\x03 \x01(\t\x12\x11\n\tstate_dir\x18\x04 \x01(\t\" \n\x0eGetTagsRequest\x12\x0e\n\x06\x63\x61mera\x18\x01 \x01(\t\"6\n\x0fGetTagsResponse\x12#\n\x04tags\x18\x01 \x01(\x0b\x32\x15.aprilcam.v2.TagFrame\"@\n\rGetTagRequest\x12\x0e\n\x06\x63\x61mera\x18\x01 \x01(\t\x12\x1f\n\x03tag\x18\x02 \x01(\x0b\x32\x12.aprilcam.v2.TagId\"8\n\x0eGetTagResponse\x12&\n\x06record\x18\x01 \x01(\x0b\x32\x16.aprilcam.v2.TagRecord\"t\n\x14GetTagHistoryRequest\x12\x0e\n\x06\x63\x61mera\x18\x01 \x01(\t\x12$\n\x03tag\x18\x02 \x01(\x0b\x32\x12.aprilcam.v2.TagIdH\x00\x88\x01\x01\x12\x13\n\x06\x66rames\x18\x03 \x01(\x05H\x01\x88\x01\x01\x42\x06\n\x04_tagB\t\n\x07_frames\"?\n\x15GetTagHistoryResponse\x12&\n\x07history\x18\x01 \x03(\x0b\x32\x15.aprilcam.v2.TagFrame*@\n\tTagFamily\x12\x1a\n\x16TAG_FAMILY_UNSPECIFIED\x10\x00\x12\x0c\n\x08\x41PRILTAG\x10\x01\x12\t\n\x05\x41RUCO\x10\x02\x32\xa9\x04\n\nAprilCamV2\x12P\n\x0bListCameras\x12\x1f.aprilcam.v2.ListCamerasRequest\x1a .aprilcam.v2.ListCamerasResponse\x12S\n\x0cProbeCameras\x12 .aprilcam.v2.ProbeCamerasRequest\x1a!.aprilcam.v2.ProbeCamerasResponse\x12G\n\x08GetFrame\x12\x1c.aprilcam.v2.GetFrameRequest\x1a\x1d.aprilcam.v2.GetFrameResponse\x12J\n\tGetStatus\x12\x1d.aprilcam.v2.GetStatusRequest\x1a\x1e.aprilcam.v2.GetStatusResponse\x12\x44\n\x07GetTags\x12\x1b.aprilcam.v2.GetTagsRequest\x1a\x1c.aprilcam.v2.GetTagsResponse\x12\x41\n\x06GetTag\x12\x1a.aprilcam.v2.GetTagRequest\x1a\x1b.aprilcam.v2.GetTagResponse\x12V\n\rGetTagHistory\x12!.aprilcam.v2.GetTagHistoryRequest\x1a\".aprilcam.v2.GetTagHistoryResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'aprilcam_v2_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
+  _globals['_TAGFAMILY']._serialized_start=2051
+  _globals['_TAGFAMILY']._serialized_end=2115
   _globals['_CAMERASTATE']._serialized_start=35
   _globals['_CAMERASTATE']._serialized_end=232
   _globals['_PROBESKIP']._serialized_start=234
   _globals['_PROBESKIP']._serialized_end=278
-  _globals['_LISTCAMERASREQUEST']._serialized_start=280
-  _globals['_LISTCAMERASREQUEST']._serialized_end=300
-  _globals['_LISTCAMERASRESPONSE']._serialized_start=302
-  _globals['_LISTCAMERASRESPONSE']._serialized_end=366
-  _globals['_PROBECAMERASREQUEST']._serialized_start=368
-  _globals['_PROBECAMERASREQUEST']._serialized_end=389
-  _globals['_PROBECAMERASRESPONSE']._serialized_start=391
-  _globals['_PROBECAMERASRESPONSE']._serialized_end=497
-  _globals['_GETFRAMEREQUEST']._serialized_start=499
-  _globals['_GETFRAMEREQUEST']._serialized_end=568
-  _globals['_GETFRAMERESPONSE']._serialized_start=571
-  _globals['_GETFRAMERESPONSE']._serialized_end=736
-  _globals['_GETSTATUSREQUEST']._serialized_start=738
-  _globals['_GETSTATUSREQUEST']._serialized_end=756
-  _globals['_GETSTATUSRESPONSE']._serialized_start=758
-  _globals['_GETSTATUSRESPONSE']._serialized_end=876
-  _globals['_APRILCAMV2']._serialized_start=879
-  _globals['_APRILCAMV2']._serialized_end=1207
+  _globals['_WORLDPOINT']._serialized_start=280
+  _globals['_WORLDPOINT']._serialized_end=314
+  _globals['_PIXELPOINT']._serialized_start=316
+  _globals['_PIXELPOINT']._serialized_end=350
+  _globals['_TAGID']._serialized_start=352
+  _globals['_TAGID']._serialized_end=415
+  _globals['_TAGRECORD']._serialized_start=418
+  _globals['_TAGRECORD']._serialized_end=886
+  _globals['_TAGFRAME']._serialized_start=888
+  _globals['_TAGFRAME']._serialized_end=1003
+  _globals['_LISTCAMERASREQUEST']._serialized_start=1005
+  _globals['_LISTCAMERASREQUEST']._serialized_end=1025
+  _globals['_LISTCAMERASRESPONSE']._serialized_start=1027
+  _globals['_LISTCAMERASRESPONSE']._serialized_end=1091
+  _globals['_PROBECAMERASREQUEST']._serialized_start=1093
+  _globals['_PROBECAMERASREQUEST']._serialized_end=1114
+  _globals['_PROBECAMERASRESPONSE']._serialized_start=1116
+  _globals['_PROBECAMERASRESPONSE']._serialized_end=1222
+  _globals['_GETFRAMEREQUEST']._serialized_start=1224
+  _globals['_GETFRAMEREQUEST']._serialized_end=1293
+  _globals['_GETFRAMERESPONSE']._serialized_start=1296
+  _globals['_GETFRAMERESPONSE']._serialized_end=1512
+  _globals['_GETSTATUSREQUEST']._serialized_start=1514
+  _globals['_GETSTATUSREQUEST']._serialized_end=1532
+  _globals['_GETSTATUSRESPONSE']._serialized_start=1534
+  _globals['_GETSTATUSRESPONSE']._serialized_end=1652
+  _globals['_GETTAGSREQUEST']._serialized_start=1654
+  _globals['_GETTAGSREQUEST']._serialized_end=1686
+  _globals['_GETTAGSRESPONSE']._serialized_start=1688
+  _globals['_GETTAGSRESPONSE']._serialized_end=1742
+  _globals['_GETTAGREQUEST']._serialized_start=1744
+  _globals['_GETTAGREQUEST']._serialized_end=1808
+  _globals['_GETTAGRESPONSE']._serialized_start=1810
+  _globals['_GETTAGRESPONSE']._serialized_end=1866
+  _globals['_GETTAGHISTORYREQUEST']._serialized_start=1868
+  _globals['_GETTAGHISTORYREQUEST']._serialized_end=1984
+  _globals['_GETTAGHISTORYRESPONSE']._serialized_start=1986
+  _globals['_GETTAGHISTORYRESPONSE']._serialized_end=2049
+  _globals['_APRILCAMV2']._serialized_start=2118
+  _globals['_APRILCAMV2']._serialized_end=2671
 # @@protoc_insertion_point(module_scope)

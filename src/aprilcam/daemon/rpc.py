@@ -1,14 +1,17 @@
-"""Thin gRPC wrapper over ``daemon/service.py`` (ticket 020-004).
+"""Thin gRPC wrapper over ``daemon/service.py`` (ticket 020-004; the
+tag-detection RPCs below are ticket 021-005).
 
-Translates between the sprint-020-scoped ``proto/aprilcam_v2.proto``
-service (four RPCs: ``ListCameras``, ``ProbeCameras``, ``GetFrame``,
-``GetStatus``) and ``daemon.service.DaemonService`` method calls.
-Everything here is (de)serialization and error-code mapping; no
-business logic, no camera access, no registry/discovery calls -- see
-the sprint architecture's module table and this ticket's explicit
-anti-pattern warning: v1's ``grpc_server.py`` (1193 lines) mixed both
-in one file, which is exactly what splitting ``rpc.py`` from
-``service.py`` exists to avoid.
+Translates between ``proto/aprilcam_v2.proto``'s service (sprint 020's
+four RPCs -- ``ListCameras``, ``ProbeCameras``, ``GetFrame``,
+``GetStatus`` -- plus sprint 021's ``GetTags``/``GetTag``/
+``GetTagHistory`` and the ``GetFrame`` tag embed) and
+``daemon.service.DaemonService`` method calls. Everything here is
+(de)serialization and error-code mapping; no business logic, no camera
+access, no registry/discovery/vision calls -- see the sprint
+architecture's module table and this ticket's explicit anti-pattern
+warning: v1's ``grpc_server.py`` (1193 lines) mixed both in one file,
+which is exactly what splitting ``rpc.py`` from ``service.py`` exists
+to avoid.
 
 **Proto boundary** (``docs/design/design.md`` §6: "generated proto
 types cross into Python only via ``from_proto`` constructors in
@@ -16,7 +19,13 @@ types cross into Python only via ``from_proto`` constructors in
 boundary -- Python dataclasses to proto messages -- so nothing outside
 it imports ``aprilcam.proto.aprilcam_v2_pb2`` directly. The reverse
 direction (wire -> Python, client-side) is ticket 020-005's
-``client/models.py``.
+``client/models.py``. The one exception is reading this module's *own*
+incoming requests (``GetFrameRequest.camera``/``.deskewed``/
+``.encoding`` already did this for scalars; ``GetTag``/
+``GetTagHistory``'s ``tag`` field extends it to a message via
+:func:`_tag_id_from_proto`) -- a server parsing what it was just sent
+is not the "proto types crossing into other Python code" the rule
+guards against.
 
 **Error mapping.** ``daemon.service`` raises ``aprilcam.errors`` typed
 exceptions (never bare strings, per this ticket's Definition of Done);
@@ -29,7 +38,9 @@ pattern-matching status text -- ``errors.py``'s stated purpose ("the
 client library raises something it can dispatch on") only survives the
 wire if this boundary preserves it. Metadata keys are documented next
 to :func:`_abort` below; ticket 005 should read them from there rather
-than duplicate the list.
+than duplicate the list. ``UnknownCamera``/``CameraNotPresent`` need no
+new mapping here for the tag-detection RPCs -- they flow through the
+same ``_camera_for`` path ``GetFrame`` already uses.
 """
 
 from __future__ import annotations
@@ -43,9 +54,25 @@ import grpc
 
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
 from aprilcam.daemon.lifecycle import ControlPlaneListener
-from aprilcam.errors import AlreadyRunning, AprilCamError, NotCalibrated, UnknownCamera
+from aprilcam.errors import (
+    AlreadyRunning,
+    AprilCamError,
+    CameraNotPresent,
+    NotCalibrated,
+    UnknownCamera,
+)
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
-from aprilcam.types import CameraState, ImageFrame, ProbeReport
+from aprilcam.types import (
+    CameraState,
+    ImageFrame,
+    PixelPoint,
+    ProbeReport,
+    TagFamily,
+    TagFrame,
+    TagId,
+    TagRecord,
+    WorldPoint,
+)
 
 __all__ = ["build_server"]
 
@@ -60,6 +87,10 @@ _STATUS_CODES = {
     AlreadyRunning: grpc.StatusCode.ALREADY_EXISTS,
     UnknownCamera: grpc.StatusCode.NOT_FOUND,
     NotCalibrated: grpc.StatusCode.FAILED_PRECONDITION,
+    # Same "the operation cannot succeed given current state" semantics
+    # as NotCalibrated -- the camera is known, just not present right
+    # now (ticket 021-002).
+    CameraNotPresent: grpc.StatusCode.FAILED_PRECONDITION,
 }
 
 
@@ -96,7 +127,7 @@ def _probe_report_to_proto(report: ProbeReport) -> aprilcam_v2_pb2.ProbeCamerasR
 
 
 def _image_frame_to_proto(frame: ImageFrame) -> aprilcam_v2_pb2.GetFrameResponse:
-    return aprilcam_v2_pb2.GetFrameResponse(
+    msg = aprilcam_v2_pb2.GetFrameResponse(
         data=frame.data,
         width=frame.width,
         height=frame.height,
@@ -106,6 +137,15 @@ def _image_frame_to_proto(frame: ImageFrame) -> aprilcam_v2_pb2.GetFrameResponse
         calibration_stale=frame.calibration_stale,
         frame_dark=frame.frame_dark,
     )
+    # Presence, not an empty-vs-absent default: only set `tags` when
+    # detection has actually run (frame.tags is not None). Leaving it
+    # unset keeps HasField("tags") false, matching ImageFrame.tags's
+    # three-way "absent means no detection has run" contract -- a
+    # present-but-empty TagFrame (detection ran, saw nothing) is a
+    # different, also-representable answer (ticket 021-005).
+    if frame.tags is not None:
+        msg.tags.CopyFrom(_tag_frame_to_proto(frame.tags))
+    return msg
 
 
 def _status_to_proto(status: DaemonStatus) -> aprilcam_v2_pb2.GetStatusResponse:
@@ -114,6 +154,80 @@ def _status_to_proto(status: DaemonStatus) -> aprilcam_v2_pb2.GetStatusResponse:
         cameras=_camera_states_to_proto(status.cameras),
         config_dir=status.config_dir,
         state_dir=status.state_dir,
+    )
+
+
+#: TagFamily <-> the generated enum's int values, both directions.
+#: Duplicated (not shared) with ``client/models.py``'s identical-shaped
+#: map -- see this module's docstring: each side of the proto boundary
+#: owns its own small conversion rather than importing across it.
+_TAG_FAMILY_TO_PROTO = {
+    TagFamily.APRILTAG: aprilcam_v2_pb2.APRILTAG,
+    TagFamily.ARUCO: aprilcam_v2_pb2.ARUCO,
+}
+_TAG_FAMILY_FROM_PROTO = {v: k for k, v in _TAG_FAMILY_TO_PROTO.items()}
+
+
+def _world_point_to_proto(point: WorldPoint) -> aprilcam_v2_pb2.WorldPoint:
+    return aprilcam_v2_pb2.WorldPoint(x=point.x, y=point.y)
+
+
+def _pixel_point_to_proto(point: PixelPoint) -> aprilcam_v2_pb2.PixelPoint:
+    return aprilcam_v2_pb2.PixelPoint(x=point.x, y=point.y)
+
+
+def _tag_id_to_proto(tag: TagId) -> aprilcam_v2_pb2.TagId:
+    return aprilcam_v2_pb2.TagId(family=_TAG_FAMILY_TO_PROTO[tag.family], number=tag.number)
+
+
+def _tag_id_from_proto(msg: aprilcam_v2_pb2.TagId) -> TagId:
+    """The one wire -> Python conversion this module needs: an
+    incoming ``GetTagRequest``/``GetTagHistoryRequest``'s ``tag`` field
+    has to become a ``types.TagId`` before it can be passed to
+    ``DaemonService``. This stays local to the *request* side of
+    ``rpc.py`` -- the module docstring's boundary is about responses
+    (Python -> proto, this module; proto -> Python, client-side
+    ``client/models.py``); a server reading its own incoming request's
+    fields is the same category of thing this module already does for
+    ``GetFrameRequest.camera``/``.deskewed``/``.encoding``, just for a
+    message-typed field instead of scalars."""
+    return TagId(family=_TAG_FAMILY_FROM_PROTO[msg.family], number=msg.number)
+
+
+def _tag_record_to_proto(record: TagRecord) -> aprilcam_v2_pb2.TagRecord:
+    msg = aprilcam_v2_pb2.TagRecord(
+        tag=_tag_id_to_proto(record.tag),
+        timestamp=record.timestamp,
+        calibrated=record.calibrated,
+    )
+    # optional fields: only set when not None, so HasField() on the wire
+    # matches Optional[...] being None on this side (design.md §6) --
+    # never coerced to 0.0/empty, which would look like a real answer.
+    if record.world is not None:
+        msg.world.CopyFrom(_world_point_to_proto(record.world))
+    if record.heading_rad is not None:
+        msg.heading_rad = record.heading_rad
+    if record.world_velocity is not None:
+        msg.world_velocity.CopyFrom(_world_point_to_proto(record.world_velocity))
+    if record.speed is not None:
+        msg.speed = record.speed
+    if record.pixel is not None:
+        msg.pixel.CopyFrom(_pixel_point_to_proto(record.pixel))
+    if record.yaw_rad is not None:
+        msg.yaw_rad = record.yaw_rad
+    if record.world_corners is not None:
+        msg.world_corners.extend(_world_point_to_proto(p) for p in record.world_corners)
+    if record.pixel_corners is not None:
+        msg.pixel_corners.extend(_pixel_point_to_proto(p) for p in record.pixel_corners)
+    return msg
+
+
+def _tag_frame_to_proto(frame: TagFrame) -> aprilcam_v2_pb2.TagFrame:
+    return aprilcam_v2_pb2.TagFrame(
+        tags=[_tag_record_to_proto(r) for r in frame.tags],
+        timestamp=frame.timestamp,
+        frame_index=frame.frame_index,
+        calibration_stale=frame.calibration_stale,
     )
 
 
@@ -132,6 +246,7 @@ def _abort(context: grpc.ServicerContext, exc: Exception) -> None:
     * :class:`AlreadyRunning`: + ``aprilcam-holder``.
     * :class:`UnknownCamera`: + ``aprilcam-requested``,
       ``aprilcam-available`` (comma-joined).
+    * :class:`CameraNotPresent`: + ``aprilcam-slug``.
     """
     if isinstance(exc, AprilCamError):
         code = grpc.StatusCode.INTERNAL
@@ -145,6 +260,8 @@ def _abort(context: grpc.ServicerContext, exc: Exception) -> None:
         elif isinstance(exc, UnknownCamera):
             metadata.append(("aprilcam-requested", exc.requested))
             metadata.append(("aprilcam-available", ",".join(exc.available)))
+        elif isinstance(exc, CameraNotPresent):
+            metadata.append(("aprilcam-slug", exc.slug))
         context.set_trailing_metadata(tuple(metadata))
         context.abort(code, str(exc))
     else:
@@ -195,6 +312,41 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
             _abort(context, exc)
             return aprilcam_v2_pb2.GetStatusResponse()
         return _status_to_proto(status)
+
+    def GetTags(self, request, context):  # noqa: N802
+        try:
+            tag_frame = self._service.get_tags(request.camera)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.GetTagsResponse()
+        return aprilcam_v2_pb2.GetTagsResponse(tags=_tag_frame_to_proto(tag_frame))
+
+    def GetTag(self, request, context):  # noqa: N802
+        tag = _tag_id_from_proto(request.tag)
+        try:
+            record = self._service.get_tag(request.camera, tag)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.GetTagResponse()
+        response = aprilcam_v2_pb2.GetTagResponse()
+        # Absent (never a zero-valued TagRecord) means not detected
+        # this burst -- UC-09.S-4, and the same presence discipline as
+        # every other optional field in this module.
+        if record is not None:
+            response.record.CopyFrom(_tag_record_to_proto(record))
+        return response
+
+    def GetTagHistory(self, request, context):  # noqa: N802
+        tag = _tag_id_from_proto(request.tag) if request.HasField("tag") else None
+        frames = request.frames if request.HasField("frames") else None
+        try:
+            history = self._service.get_tag_history(request.camera, tag=tag, frames=frames)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.GetTagHistoryResponse()
+        return aprilcam_v2_pb2.GetTagHistoryResponse(
+            history=[_tag_frame_to_proto(f) for f in history]
+        )
 
 
 class _GrpcListener(ControlPlaneListener):

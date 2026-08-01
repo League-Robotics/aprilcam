@@ -52,6 +52,35 @@ Directory creation is deferred to write time — ticket 001's
 ``registry.json``'s parent directory on demand in ``save``, wrapping any
 ``OSError`` (e.g. an unwritable ``state_dir``) with the path that failed
 rather than surfacing a bare traceback.
+
+Self-healing location-duplicate reconciliation (ticket 021-007)
+-----------------------------------------------------------------
+``camera/identity.py``'s "Root-cause fix" section documents a
+duplicate-registration bug found on a real machine: an occasional
+``system_profiler`` name-match miss let the *same* physical camera
+resolve through two different fallback tiers across different runs
+(``avf:<id>`` vs. ``vidpid:<vid>:<pid>@<id>``) that embed the identical
+underlying id under different key formats — creating two registry
+records, two enumeration numbers, and two slugs for one camera. Fixing
+the resolver alone (making tier selection deterministic going forward)
+does not retroactively merge a registry.json that already has both
+records from before the fix.
+
+:meth:`CameraRegistry._load` therefore runs
+:meth:`_reconcile_location_duplicates` once after loading, every time a
+:class:`CameraRegistry` is constructed: it groups existing records by
+the location fragment embedded in their ``hardware_key`` (see
+``_location_fragment`` below) and merges any group with more than one
+member, keeping the **lowest-numbered** record (the earliest-assigned,
+and so whatever an external reference such as a playfield config would
+already have been written against) and dropping the rest — refreshing
+the survivor's ``device_name``/``last_seen`` from whichever duplicate
+was seen most recently. This is self-healing: it needs no separate
+migration script to remember to run, and it cleans up an already-dirty
+registry the next time anything opens it, on this machine or any other
+affected by the same root cause. The dropped records' numbers become
+permanent gaps (:meth:`get_by_number`'s existing "gaps are structural,
+not an error" contract — the same shape ``forget`` already leaves).
 """
 
 from __future__ import annotations
@@ -62,7 +91,7 @@ import os
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 from aprilcam.camera.interfaces import CameraIdentity
 from aprilcam.camera.interfaces import CameraRegistry as _CameraRegistryBase
@@ -85,6 +114,28 @@ PathLike = Union[str, Path]
 def _now_iso() -> str:
     """Current UTC time as an ISO-8601 string (timezone-aware)."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _location_fragment(hardware_key: str) -> Optional[str]:
+    """Best-effort extraction of the location component embedded in a
+    ``hardware_key``, for the cross-tier duplicate reconciliation the
+    module docstring describes (ticket 021-007).
+
+    Recognizes the three ``camera/identity.py`` tiers that are
+    location-derived: ``avf:<loc>``, ``vidpid:<vid>:<pid>@<loc>``, and
+    ``loc:<loc>``. Any other tier (``serial:``, ``libcamera:``,
+    ``name:``) returns ``None`` — those values are independently unique
+    (a serial number, a libcamera path, a last-resort name+resolution
+    slug), never location-derived, and must never be treated as
+    interchangeable with each other or with a location-based key.
+    """
+    for prefix in ("avf:", "loc:"):
+        if hardware_key.startswith(prefix):
+            return hardware_key[len(prefix):] or None
+    if hardware_key.startswith("vidpid:"):
+        _, _, loc = hardware_key.partition("@")
+        return loc or None
+    return None
 
 
 @dataclass(frozen=True)
@@ -173,6 +224,72 @@ class CameraRegistry(_CameraRegistryBase):
             (r.number for r in self._records.values()), default=FIRST_NUMBER - 1
         )
         self._next_number = max(next_number, max_number + 1, FIRST_NUMBER)
+
+        # Self-healing duplicate cleanup (module docstring's "Self-healing
+        # location-duplicate reconciliation" section, ticket 021-007).
+        # Only persists if something actually changed, so an already-clean
+        # registry is not rewritten on every load.
+        if self._reconcile_location_duplicates():
+            self._save()
+
+    def _reconcile_location_duplicates(self) -> bool:
+        """Merge records that share a location fragment (see
+        ``_location_fragment``) across two different ``hardware_key``
+        tiers -- the shape ``identity.py``'s pre-fix non-determinism
+        produced. Returns ``True`` if any record was removed (the caller
+        decides whether/when to persist).
+
+        For each group of 2+ records sharing a location fragment: keeps
+        the record with the **lowest** ``number`` (earliest-assigned —
+        see the module docstring for why that is the safer canonical
+        choice), refreshes its ``device_name``/``last_seen`` from
+        whichever group member has the lexicographically greatest
+        (i.e. most recent, since ``last_seen`` is ISO-8601) timestamp,
+        and drops every other record in the group outright. Grouping is
+        case-insensitive: ``avf:`` keys preserve whatever case
+        ``system_profiler`` reported, while ``vidpid:``/``loc:`` keys
+        are built through ``identity.py``'s ``_slug`` (lower-cased) —
+        the same underlying id can therefore appear in two different
+        cases across a duplicated pair.
+        """
+        groups: Dict[str, List[str]] = {}
+        for key in self._records:
+            loc = _location_fragment(key)
+            if loc is None:
+                continue
+            groups.setdefault(loc.lower(), []).append(key)
+
+        changed = False
+        for loc, keys in groups.items():
+            if len(keys) < 2:
+                continue
+            group_records = [self._records[k] for k in keys]
+            winner_key = min(keys, key=lambda k: self._records[k].number)
+            winner = self._records[winner_key]
+            freshest = max(group_records, key=lambda r: r.last_seen)
+            self._records[winner_key] = replace(
+                winner,
+                device_name=freshest.device_name,
+                last_seen=freshest.last_seen,
+            )
+            for key in keys:
+                if key == winner_key:
+                    continue
+                dropped = self._records.pop(key)
+                changed = True
+                logger.warning(
+                    "camera registry: merged duplicate hardware_key %s "
+                    "(slug=%s, #%d, shared location %s) into %s (slug=%s, "
+                    "#%d) -- ticket 021-007 root-cause cleanup",
+                    key,
+                    dropped.slug,
+                    dropped.number,
+                    loc,
+                    winner_key,
+                    winner.slug,
+                    winner.number,
+                )
+        return changed
 
     def _save(self) -> None:
         """Atomically write the registry to ``registry.json``.
@@ -288,6 +405,22 @@ class CameraRegistry(_CameraRegistryBase):
     def get(self, slug: str) -> Optional[CameraRecord]:
         """The record for ``slug``, or ``None`` if it is not registered."""
         return next((r for r in self._records.values() if r.slug == slug), None)
+
+    def get_by_number(self, number: int) -> Optional[CameraRecord]:
+        """The record currently holding enumeration ``number``, or
+        ``None`` if no record does (never issued, or the holder was
+        later :meth:`forget`-ten -- gaps are structural, not an error,
+        per the module docstring's "numbers are never reissued or
+        reshuffled" contract).
+
+        Mirrors :meth:`get`'s shape -- a linear scan over
+        ``self._records.values()``, the same "small registry, no new
+        index structure needed" reasoning as ``get``'s own docstring
+        note in the sprint plan. This is the daemon's number-addressing
+        half of ``_camera_for`` (``daemon/service.py``, ticket 021-002)
+        — ``get`` remains the slug half.
+        """
+        return next((r for r in self._records.values() if r.number == number), None)
 
     def records(self) -> Tuple[CameraRecord, ...]:
         """Every record, ordered by enumeration number (a stable listing
