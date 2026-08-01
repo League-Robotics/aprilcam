@@ -13,7 +13,7 @@ in [specification.md](specification.md).
 ## 1. System overview
 
 AprilCam turns an overhead camera view of a fiducial-marked playfield into
-three products, all served by a single daemon that is the sole owner of
+four products, all served by a single daemon that is the sole owner of
 the cameras and the sole vision authority:
 
 1. **Deskewed, calibrated top-down images** of the playfield.
@@ -22,6 +22,9 @@ the cameras and the sole vision authority:
 3. **Configuration service** — playfield definitions and camera configs,
    pushed to the daemon as whole documents and served back whole to any
    client, local or remote.
+4. **Shared annotation state** *(v2)* — world-coordinate paths, markers,
+   and symbols pushed by any client, held in daemon memory, embedded in
+   published deskewed frames for every other client to render.
 
 Everything else is a thin client of the daemon: the MCP server (for AI
 agents), the basic viewer, the CLI tools, robot code using the client
@@ -46,7 +49,10 @@ them.
 4. **Whole-document configuration.** Playfield definitions and camera
    configs move as complete documents (`Set*`/`Get*`); there are no
    field-level edit RPCs. Source of record is the developer's repo;
-   the daemon persists its pushed copy.
+   the daemon persists its pushed copy. This rule governs
+   *configuration documents*; **runtime registrations** — mobile-tag
+   parameters, annotations — are record-level by nature and are not
+   configuration.
 5. **Calibration is robot-agnostic.** Robot-specific facts (tag height,
    mount offset, mount yaw) are per-tag runtime registrations (mobile
    tag registry), applied by the daemon as post-processing.
@@ -63,10 +69,13 @@ them.
    origin shift is pure subtraction, never a y-flip; heading 0 = east,
    CCW positive. These took enormous effort to get right — no change
    touching geometry lands without demonstrating they still hold.
-6. **Drawing is a library, not a service.** Overlays/paths/markers are
-   in-process client-side constructs. Nothing about drawings transits
-   or persists in the daemon. Programs wanting agent-driven drawing
-   embed their own MCP server atop the client library.
+6. **Annotations are daemon state; rendering is a client library.**
+   *(Reversed 2026-07-31 — spec §9 #8; previously "drawing is a
+   library, not a service".)* The daemon stores world-coordinate,
+   layer-keyed annotations as in-memory runtime state — like the
+   mobile-tag registry, gone on restart — and embeds the current set in
+   published deskewed frames. It never rasterizes. Clients (viewer,
+   robot programs, MCP agents) author via RPC and render locally.
 7. **Clients see handles and services, never file paths.**
 8. **Config/state split.** `config_dir` = admin-owned documents;
    `data_dir` = regenerable state. Files never migrate implicitly.
@@ -75,14 +84,14 @@ them.
 
 | Subsystem | Doc | Role | cv2? |
 |---|---|---|---|
-| `daemon/` | [DESIGN.md](../../src/aprilcam/daemon/DESIGN.md) | The aprilcamd process: camera ownership, per-camera pipeline, gRPC control plane, stream publishing, config service, mobile-tag registry | yes |
+| `daemon/` | [DESIGN.md](../../src/aprilcam/daemon/DESIGN.md) | The aprilcamd process: camera ownership, per-camera pipeline, gRPC control plane, stream publishing, config service, mobile-tag registry, annotation store | yes |
 | `camera/` | [DESIGN.md](../../src/aprilcam/camera/DESIGN.md) | Camera identity, persistent registry, capture backends, UVC settings | yes |
 | `vision/` | [DESIGN.md](../../src/aprilcam/vision/DESIGN.md) | Stateless frame vision: tag detection, tracking, object/color detection, OpenCV compat | yes |
 | `calibration/` | [DESIGN.md](../../src/aprilcam/calibration/DESIGN.md) | Pixel→world calibration from playfield definitions; deskew geometry | yes |
 | `playfield/` *(v2)* | — | Playfield definition schema + daemon-side document handling | no |
-| `client/` | [DESIGN.md](../../src/aprilcam/client/DESIGN.md) | Discovery, gRPC wrapper, stream consumers, models, host codes, drawing library *(v2)* | no |
+| `client/` | [DESIGN.md](../../src/aprilcam/client/DESIGN.md) | Discovery, gRPC wrapper, stream consumers, models, renderer *(v2)* | no |
 | `mcp/` *(today `server/`)* | [DESIGN.md](../../src/aprilcam/server/DESIGN.md) | MCP stdio server: perception + configuration tools, pure daemon client | no *(v2)* |
-| `view/` *(today in `cli/`+`ui/`)* | [DESIGN.md](../../src/aprilcam/ui/DESIGN.md) | Basic live viewer: deskewed + tag streams, local annotations | no *(v2)* |
+| `view/` *(today in `cli/`+`ui/`)* | [DESIGN.md](../../src/aprilcam/ui/DESIGN.md) | Basic live viewer: deskewed stream with embedded tags + annotation layers | no *(v2)* |
 | `cli/` | [DESIGN.md](../../src/aprilcam/cli/DESIGN.md) | `aprilcam` dispatcher + thin subcommand modules | no |
 | `tags/` | [DESIGN.md](../../src/aprilcam/tags/DESIGN.md) | AprilTag/ArUco image + PDF generation | yes (offline) |
 | `proto/` | [DESIGN.md](../../src/aprilcam/proto/DESIGN.md) | Generated protobuf wire contract (never hand-edited) | no |
@@ -100,7 +109,7 @@ cascade, `CONFIG_VARS` self-documentation), `errors.py`, `guides.py`
 | `aprilcam mcp` | stdio process per agent session | pure daemon client |
 | `aprilcam view` | GUI process | basic viewing only |
 | CLI commands | short-lived | thin daemon clients |
-| ROS bridge | future | client-library consumer republishing to ROS topics |
+| ROS node | future | client-library consumer republishing **streams only** to ROS topics ([adapters.md](adapters.md) §4.3) |
 
 Cardinality: a camera observes exactly one playfield; a playfield has
 zero or more cameras. A camera config names its playfield; a served
@@ -112,14 +121,26 @@ playfield document reports its linked cameras (derived at serve time).
   via `scripts/compile_proto.py`). Camera lifecycle, one-shot queries,
   stream endpoint allocation, calibration trigger, config service
   (`SetPlayfield`/`GetPlayfield`, `SetCameraConfig`/`GetCameraConfig`/
-  `ResetCameraConfig`), mobile-tag registry.
+  `ResetCameraConfig`), mobile-tag registry, annotation store
+  (`PutAnnotation`/`RemoveAnnotation`/`ReplaceLayer`/
+  `ClearAnnotations`/`GetAnnotations`, playfield-addressed).
 - **Bulk streams:** separate sockets (unix or TCP, allocated on demand),
   framing `[uint32 BE length][protobuf]`:
   - raw image stream (JPEG frames),
   - deskewed playfield stream *(v2)* — field warped aspect-preserved
     into a bounding box (default 800×800, per-playfield override);
     px-per-cm is derived and reported in stream metadata, never chosen,
-  - tag stream (`TagFrame`, change-driven, rate-capped, heartbeat).
+  - tag stream (`TagFrame`, change-driven, rate-capped, heartbeat);
+    records include the tag's facing yaw and boundary corners so
+    clients can draw outlines and front "hats" without vision work.
+
+  When detection is running, image frames (raw and deskewed alike)
+  embed the latest `TagFrame`; deskewed frames additionally embed the
+  playfield's current annotation set, with a monotonic revision so
+  renderers skip re-rasterizing an unchanged overlay. One deskewed
+  frame carries everything needed to render a fully annotated view.
+  Raw frames carry no annotations — annotations are world-only and a
+  raw frame gives the client no world→pixel mapping.
 - **Backpressure:** bounded per-subscriber queues, silent drop. Slow
   consumers lose frames, never stall the pipeline.
 
@@ -132,6 +153,13 @@ playfield document reports its linked cameras (derived at serve time).
   rows grow downward, so world→pixel conversion flips y exactly once,
   inside the published mapping — never again in client code.
 - **Heading:** `atan2(world_vy, world_vx)`; 0 = east, CCW positive.
+- **Tag yaw:** the direction the tag's front faces; 0 = east, CCW
+  positive (same convention as heading). Yaw is orientation, heading
+  is motion — a robot reversing has them 180° apart.
+- **Corner order:** tag boundary quads are `(front-left, front-right,
+  back-right, back-left)` in the tag's own frame; the corner 0→1 edge
+  is the front edge. Same physical order in world and pixel space.
+  Corners are the observed tag outline and are never mount-corrected.
 - **World-only storage:** positions in stored state or on the wire are
   world cm. Pixel positions are legitimate solely as calibration
   anchors (`corner_pixels`, `static_markers`) and diagnostics.
@@ -158,8 +186,9 @@ data_dir/                          # regenerable / runtime state
   cameras/registry.json            # identity -> enum + camera dir
   cameras/<cam>/calibration.json   # homography, static markers, provenance
   cameras/<cam>/info.json          # advisory: calibration_stale, frame_dark
-  tags.json                        # mobile-tag registry
-  hosts.json                       # probe results / host codes
+                                   # (no tags.json — mobile-tag registry is
+                                   #  in-memory; register at session start)
+                                   # (no hosts.json — host codes removed in v2)
 socket_dir/                        # control.sock + per-camera stream sockets
 log_dir/
 ```
@@ -197,8 +226,10 @@ tracked as CLASI issues. Summary of the gap:
 2. Calibration executes in CLI/MCP with local cv2, not in the daemon.
 3. No `SetPlayfield`/`GetPlayfield`/`ResetCameraConfig`; playfield defs
    are hand-placed files on the daemon host.
-4. Paths are a service (PathRegistry, `paths.json`, daemon file proxy,
-   MCP path tools, `PublishOverlay`) instead of a client library.
+4. Paths are a file-backed service (PathRegistry, `paths.json`, daemon
+   file proxy, MCP path tools, `PublishOverlay` compositing) instead of
+   the v2 shape: an in-memory daemon annotation store plus a
+   client-side renderer (spec §9 #8).
 5. The web server exists; v2 removes it.
 6. The MCP server carries a frame-processing registry and other
    local-cv2 tools; v2 removes them.

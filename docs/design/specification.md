@@ -85,10 +85,14 @@ These are the rules that shape every boundary below.
 |---|---|---|---|
 | `aprilcamd` (daemon) | long-running process | yes | sole camera owner; gRPC control + binary streams; mDNS-advertised |
 | `aprilcam mcp` | process per agent session (stdio) | for agents | pure daemon client: perception + configuration tools |
-| `aprilcam view` | interactive GUI process | optional | thin subscriber: deskewed stream + tags; draws via the client drawing library |
+| `aprilcam view` | interactive GUI process | optional | thin subscriber: deskewed stream; renders embedded tags + annotation layers via the client renderer |
 | CLI commands | short-lived processes | optional | thin daemon clients (calibrate, cameras, tags, mobile, probe…) |
-| ROS bridge | future process | no | subscribes to daemon streams, republishes as ROS topics |
+| ROS node | future process | no | **streams only** — republishes image + tag streams as ROS topics; not a query interface ([adapters.md](adapters.md) §4.3) |
 | Web server | — | **removed in v2** | HTTP/WS interface dropped; ROS + MCP + view cover the consumers |
+
+The daemon is a small stable core; the CLI, MCP server, and ROS node are
+**adapters** that translate it into a consumer's native idiom and hold no
+authoritative state of their own. See [adapters.md](adapters.md).
 
 There is **one daemon** serving both perception and configuration. The
 playfield is not a separate service and not a shared directory: playfield
@@ -101,10 +105,14 @@ There is **one MCP server**, not two. It fronts perception and
 configuration through the same daemon connection. Internally the tool
 domains are separate modules with no shared state.
 
-Drawing on the playfield — paths, markers, overlays — is **not a service
-at all** in v2: it is a client-side Python library (§4.6). There is no
-multi-client collaboration on paths, no path storage in the daemon, and
-no path tools in the MCP server.
+Drawing on the playfield — paths, markers, symbols — splits in two
+(decision 8, 2026-07-31): **authoring is a daemon service, rendering is
+a client-side library** (§4.6). Clients push world-coordinate
+annotations into the daemon's in-memory, layer-keyed store; the daemon
+embeds the current set in every published deskewed frame but never
+rasterizes anything. Multi-client collaboration on drawings is the
+point — one service draws, every consumer sees — and the MCP server
+exposes drawing tools as thin RPC wrappers.
 
 **Cardinality:** a camera observes exactly one playfield; a playfield has
 zero or more cameras. A camera's config names its playfield; a playfield
@@ -133,8 +141,10 @@ metadata (principle 5).
 - **gRPC control plane** (unix socket + TCP 5280, mDNS-advertised):
   camera lifecycle, one-shot queries (`CaptureFrame`, `GetTags`,
   `GetObjects`, `WhereIs`), stream endpoint allocation, calibration
-  trigger *(new in v2 — see 4.4)*, mobile-tag registry, and the
-  configuration service *(new in v2)*:
+  trigger *(new in v2 — see 4.4)*, mobile-tag registry, the annotation
+  store *(new in v2 — decision 8: `PutAnnotation`, `RemoveAnnotation`,
+  `ReplaceLayer`, `ClearAnnotations`, `GetAnnotations`, all
+  playfield-addressed)*, and the configuration service *(new in v2)*:
   - `SetPlayfield` / `GetPlayfield` — push/fetch a complete playfield
     definition document. The daemon persists it, uses it internally
     (calibration ground truth, `where` lookups, field dimensions), and
@@ -165,6 +175,33 @@ metadata (principle 5).
   for an uncalibrated camera (flagged as such). Clients plotting tags
   on an image convert world → pixels themselves via the stream
   metadata (principle 5).
+  **Boundary and hat:** each record also carries the tag's facing yaw
+  (orientation — distinct from motion heading) and its boundary quad,
+  ordered `(front-left, front-right, back-right, back-left)` so the
+  corner 0→1 edge is the front edge the "hat" marker sits on. World
+  corners are the contract on a calibrated camera; pixel corners, in
+  raw-stream pixel space, exist for drawing on raw frames (where the
+  client has no world→pixel mapping) and are the only representation
+  on an uncalibrated camera. Corners outline the tag **as observed**
+  — mount corrections apply to position and yaw, never to corners.
+- **Frames carry tags.** When detection is running, every published
+  frame — raw and deskewed, streamed or fetched via `CaptureFrame` —
+  embeds the `TagFrame` from the detection pass nearest its capture.
+  One frame is sufficient to render a fully annotated view: no second
+  query, no join. Absent tags means detection is off; an empty
+  `TagFrame` means detection ran and saw nothing; the embedded frame's
+  own timestamp exposes any capture↔detection skew.
+- **Frames carry annotations** *(decision 8)*. Deskewed frames also
+  embed the linked playfield's current annotation set, with a monotonic
+  revision so renderers can skip re-rasterizing an unchanged overlay.
+  The addressing rule is the join: observations are camera-addressed;
+  field state — surveyed features, annotations — is playfield-addressed;
+  the embed connects them via the camera's playfield link. **Raw frames
+  carry no annotations**: annotations are world-only and a raw frame
+  gives the client no world→pixel mapping (UC-16, "raw means raw").
+  The rejected alternative — embedding them unrenderably for agents
+  that want the data anyway — loses to `GetAnnotations`, which serves
+  that need directly.
 
 Singleton discipline (flock), idle gating (no subscribers → low-rate
 capture, lazy JPEG encode), self-heal on camera read failures, and the
@@ -244,8 +281,10 @@ serves it back to any client (`GetPlayfield`). Clients — local or remote
 A playfield's document, when served, also reports which cameras are
 currently linked to it (derived, not stored in the source file).
 
-There is no workspace directory, no `paths.json`, and no shared
-annotation state — drawing is a client-side library concern (§4.6).
+There is no workspace directory and no `paths.json` — nothing about
+drawings touches disk. Shared annotation state *does* exist in v2
+(decision 8): the daemon holds each playfield's annotations in memory,
+layer-keyed, and embeds them in published deskewed frames (§4.6).
 
 ### 4.6 `client/` — the thin client library
 
@@ -256,20 +295,29 @@ models (`TagRecord`, `TagFrame`, `ImageFrame`, …) with `from_proto` as the
 single proto boundary, and base-26 host/camera codes (`A`, `FB`) backed by
 the probe host store. cv2-free.
 
-**Drawing library** *(new home in v2)*: a pure-Python drawing/annotation
-layer in the client package — get a frame (raw or deskewed) from the
-daemon, overlay paths, waypoints, markers, and shapes on it in world
-coordinates, using the stream metadata for the cm↔px mapping. This is
-the *only* way to draw on the playfield: it is in-process, per-client
-state. Nothing about drawings goes through the daemon or gets persisted
-by AprilCam; a program that wants to keep its paths keeps them itself.
-(Replaces the path registry, `paths.json`, the daemon path proxy, and
-the overlay push machinery.)
+**Annotations and rendering** *(reshaped 2026-07-31, decision 8)*: two
+halves with a hard line between them.
 
-A program that wants agent-driven drawing — e.g. a richer visualization
-GUI where an MCP agent places markers — embeds its *own* MCP server and
-exposes its own drawing tools, built on this library. AprilCam supplies
-the streams and the drawing primitives, not the collaboration service.
+- **Authoring is a daemon RPC surface.** Clients draw by pushing
+  world-coordinate annotations (markers, paths, polygons, circles,
+  text) into the daemon's in-memory store — keyed (playfield, layer,
+  id), upserted one at a time or swapped atomically per layer, cleared
+  by layer or by id. A client needs no filesystem and holds no state:
+  connect and draw. Because every service draws into the same store and
+  every deskewed frame embeds it, annotations are how services
+  communicate spatially — with each other and with humans watching the
+  viewer.
+- **Rendering is a client library.** A cv2-free `Renderer` takes an
+  `ImageFrame` — with its embedded tags and annotations — and
+  rasterizes overlays (tag boundaries and hats, annotation shapes) to
+  PNG using the frame's published world→pixel metadata. The daemon
+  never rasterizes. Purely local, ad-hoc drawing (debug overlays)
+  passes extra `Annotation` values straight to the renderer — the same
+  types, no second vocabulary, nothing sent to the daemon.
+
+(The v1 mechanism this replaces — file-backed path registry,
+`paths.json`, the daemon path proxy, and the overlay push/compositing
+machinery — stays removed; §6.)
 
 ### 4.7 `mcp/` — the MCP server (today `server/`)
 
@@ -286,21 +334,28 @@ the streams and the drawing primitives, not the collaboration service.
 **Slimmed in v2:** the frame-processing registry (`create_frame`,
 `process_frame`, `get_frame_image`, …) and every local-cv2 code path are
 removed — consumers needing pixel work call `get_frame` and process the
-JPEG themselves (the vision-boundary contract). All path tools
-(`create_path`, `delete_path`, `list_paths`, `clear_paths`) and the
-live-view overlay tools are removed — drawing is the client-side library
-(§4.6), not an agent service.
+JPEG themselves (the vision-boundary contract).
+
+**Drawing tools** *(returned 2026-07-31, decision 8)*: `draw_marker`,
+`draw_path`, `draw_polygon`, `draw_circle`, `draw_text`,
+`remove_annotation`, `clear_layer`, `list_annotations` — thin wrappers
+over the daemon's annotation RPCs, world-coordinate only, no cv2; the
+vision boundary is untouched. (v1's path tools died with the
+paths-as-a-service mechanism; these are their daemon-backed
+successors.)
 
 ### 4.8 `view/` — the interactive viewer (today `cli/view_cli.py` + `ui/`)
 
 **What it does:** the tkinter live viewer, deliberately **basic viewing
-only**: subscribes to the deskewed stream and tag stream and renders tags
-and its own local annotations via the client drawing library; collapsible
-panels toggle rendering layers (the existing panel on/off behavior).
+only**: subscribes to the deskewed stream and renders the embedded tags
+and annotation layers via the client renderer; collapsible panels
+toggle layers by name — built-in layers (tags, features) plus each
+named annotation layer (decision 8, the existing panel on/off
+behavior).
 Anything more sophisticated is a separate program built on the client
 library (§4.6), not a viewer feature. Becomes a proper subsystem instead
 of an 1,185-line CLI module; the drawing helpers from `ui/display.py`
-fold into the client drawing library. With the daemon publishing deskewed
+fold into the client renderer. With the daemon publishing deskewed
 frames, the viewer's cv2 dependency goes away entirely.
 
 The unused `ui/tui.py` Rich dashboard is removed.
@@ -348,8 +403,10 @@ data_dir/                          # regenerable / runtime state
   cameras/registry.json            # identity -> enum + dir
   cameras/<cam>/calibration.json   # homography, static markers, provenance
   cameras/<cam>/info.json          # advisory: calibration_stale, frame_dark
-  tags.json                        # mobile-tag registry (per-tag mount params)
-  hosts.json                       # probe results / host codes
+                                   # (no tags.json — the mobile-tag registry
+                                   #  is in-memory in v2; clients register
+                                   #  mounts at session start. 2026-07-31)
+                                   # (no hosts.json — host codes removed in v2)
 
 socket_dir/                        # control.sock, per-camera stream sockets
 log_dir/                           # daemon logs
@@ -361,10 +418,11 @@ log_dir/                           # daemon logs
 |---|---|
 | Web server (`server/web_server.py`, `aprilcam web`) | consumers are MCP, viewer, robots (direct client), future ROS; HTTP/WS adds a surface nobody needs |
 | MCP frame-processing registry + all MCP-local cv2 | vision boundary; `get_frame` + caller-side processing covers it |
-| Paths as a service: `PathRegistry`, per-camera `paths.json`, daemon `GetPaths`/`SetPaths` proxy, MCP path tools, `PublishOverlay`/`OverlayFrame` push | drawing is a client-side library (§4.6); no multi-client path collaboration needed |
+| Paths as a service: `PathRegistry`, per-camera `paths.json`, daemon `GetPaths`/`SetPaths` proxy, MCP path tools, `PublishOverlay`/`OverlayFrame` push | the v1 *mechanism* stays removed; the capability returned 2026-07-31 in a different shape — in-memory, playfield-addressed, layer-keyed annotation store, daemon still never renders (§9 #8) |
 | `core/pipeline.py`, `core/motion.py` (second pipeline) | duplicate of the daemon path |
 | `daemon/protocol.py`, `daemon/client.py` | dead legacy transport |
 | Root `stream.py`, `ui/tui.py`, `iohelpers.py`, `AppConfig` | dead / legacy, unreferenced or nearly so |
+| Host codes (`client/host_codes.py`, base-26 `A`/`FB` addressing, `hosts.json`) | **removed in v2** — cameras are addressed by their derived slug and daemons by hostname (`-d`); a second addressing scheme with its own persistent store is complexity the CLI does not need |
 | `homocal` legacy CLI + upper-left-origin corner table in `homography.py` | superseded by playfield-def calibration; the old origin table is a foot-gun |
 
 ## 7. Retained invariants (hard-won, do not regress)
@@ -400,9 +458,11 @@ log_dir/                           # daemon logs
   (deskewed stream + tag stream) and republishing as ROS topics. Requires
   nothing from v2 except stable stream contracts.
 - Streamable-HTTP MCP transport.
-- Shared/persistent annotation state (collaborative paths), should the
-  no-collaboration decision ever be revisited — it would layer on the
-  daemon config service, not on shared files.
+- **Persistent** annotation state — annotations surviving a daemon
+  restart. (The *shared* half of this item happened 2026-07-31,
+  decision 8 — and layered on the runtime-state model like the
+  mobile-tag registry, not on the config service as this item
+  predicted, because annotations are not configuration.)
 
 ## 9. Resolved decisions (stakeholder, 2026-07-29)
 
@@ -412,8 +472,51 @@ log_dir/                           # daemon logs
    view does so through a purpose-built program that embeds its own MCP
    server on top of the client + drawing libraries. `aprilcam view` is
    for basic viewing only.
+   *(Superseded 2026-07-31: see decision 8 — the daemon now holds
+   annotation state. Rendering remains client-side.)*
 3. **Viewer stays in the package**, deliberately basic: subscribe to the
    deskewed + tag streams and watch. Sophistication belongs in separate
    programs.
-4. **`taggen` keeps its OpenCV dependency** — offline utility, already
-   behind the `[daemon]` extra.
+4. **`taggen` keeps its OpenCV dependency** — offline utility.
+   *(Superseded 2026-07-29: OpenCV moved into the **base** install rather
+   than the `[daemon]` extra, so tag generation works on any install —
+   including one made only to talk to a remote daemon. See
+   [use-cases/cli.md](use-cases/cli.md) UC-21. The vision **boundary** is
+   unchanged: the daemon remains the sole vision authority and no client
+   component does pixel work. OpenCV being importable is not permission
+   to use it outside the daemon — that is now a discipline the tests
+   enforce, not something packaging enforces for us.)*
+
+5. **Tag history is kept** (2026-07-30) — the daemon's bounded ring
+   buffer of per-frame tag records survives into v2 as a query. See
+   [use-cases/daemon.md](use-cases/daemon.md) UC-26.
+
+6. **The system carries its own instructions** (2026-07-30) — packaged
+   guides served to agents, as v1's `AGENT_GUIDE.md` /
+   `ROBOT_API_GUIDE.md` were. See
+   [use-cases/daemon.md](use-cases/daemon.md) UC-27.
+
+7. **Host codes are dropped** (2026-07-30) — no base-26 `A`/`FB`
+   addressing, no `hosts.json`. Cameras are addressed by derived slug,
+   daemons by hostname.
+
+8. **Daemon-held annotation state** (2026-07-31, supersedes decision 2) —
+   the daemon **stores** annotations (paths, markers, symbols); it never
+   renders them. Clients author via RPC in world coordinates on a
+   **playfield**; every published frame embeds the current annotation
+   set exactly as frames embed the `TagFrame`, so one frame suffices to
+   render a fully annotated view, and rendering stays a client-side
+   library. Motivation: multi-service communication — one service draws,
+   every service and viewer sees — and stateless clients that need no
+   filesystem, just a daemon connection. Two sub-decisions are settled:
+   - **In-memory only.** Annotations are runtime state like the
+     mobile-tag registry, not configuration; they vanish on daemon
+     restart and clients re-draw on reconnect. Nothing about them
+     touches disk.
+   - **Named layers.** Every annotation belongs to a client-chosen layer
+     (e.g. `planner`, `robot-3`); clear/replace by layer or by id;
+     **no ownership enforcement** — last write wins on a (layer, id)
+     key. The viewer's collapsible panels toggle layers by name.
+   The v1 paths-as-a-service *mechanism* (file-backed `PathRegistry`,
+   daemon-side compositing via `PublishOverlay`) stays removed (§6).
+   See [use-cases/daemon.md](use-cases/daemon.md) UC-28.

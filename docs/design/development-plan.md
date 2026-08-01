@@ -1,9 +1,20 @@
 # AprilCam v2 Development Plan
 
-**Owner:** Eric Busboom · **Last reviewed:** 2026-07-29 · **Status:** active — the build-order reference for v2 development
+**Owner:** Eric Busboom · **Last reviewed:** 2026-07-30 · **Status:** active — the build-order reference for v2 development
+
+> **This document answers *in what order*. It does not decide *what*.**
+> The requirements live in [use-cases/](use-cases/) — 27 use cases and
+> 100 scenarios, which are the acceptance criteria every stage below is
+> ultimately tested against. Where this plan and a use case disagree, the
+> **use case wins** and this plan is the thing to fix.
+>
+> Reconciled against the use-case set on 2026-07-30; the stage structure
+> is unchanged, the per-stage detail was updated where five sessions of
+> decisions had overtaken it.
 
 This is the order in which we build and test the v2 system described in
-[specification.md](specification.md) and [design.md](design.md). The
+[specification.md](specification.md), [design.md](design.md), and
+[use-cases/](use-cases/). The
 method is strictly **subsystem by subsystem, bottom-up**: each stage
 produces a component with its own independent test suite. This is a
 brownfield rebuild done **in place, in a worktree** — every stage says
@@ -73,12 +84,19 @@ to us as we work. This happens **first**, not last — the deferred
 end-of-project cleanup that v1 plans used is exactly the pattern we're
 abandoning.
 
+**Largely done (2026-07-29):** all of v1 — `src/`, `tests/`, `testdev/`,
+`proto/`, `scripts/`, `deploy/`, `contrib/` — was moved to `archive/`
+rather than deleted, so it remains readable for the convert-don't-rewrite
+work below without sitting in the build. The image-matrix fixtures are at
+`archive/tests/images/` and the capture tool at
+`archive/testdev/capture_matrix.py`; both move back as their stages need
+them.
+
 **Delete:**
-- **The v1 test suite** — nearly all of `tests/`. We are not carrying v1
-  tests forward and we are not maintaining parity against them. The only
-  survivors are the **image-matrix fixtures** (`tests/images/`) and the
-  capture tooling that regenerates them (`testdev/capture_matrix.py`),
-  which are the substrate every later stage tests against.
+- **The v1 test suite** — not carried forward, not maintained for parity.
+  The only survivors are the **image-matrix fixtures** and the capture
+  tooling that regenerates them, the substrate every later stage tests
+  against.
 - **Subsystems v2 does not use** — the modules the design set already
   marks as removed: legacy `protocol.py`/`client.py`, the `homocal` +
   upper-left-origin table, the web server (`remove-web-server.md`), the
@@ -307,8 +325,10 @@ the stakeholder, then locked by the automated checks.
 
 **What it is:** the daemon proper, composing stages 2–7: singleton
 lifecycle, gRPC control plane, per-camera loop around the `Camera`
-class, stream producers, and the **demand-driven scheduler** — the
-efficiency heart:
+class, stream producers, the **annotation store** (UC-28 — in-memory,
+playfield-addressed, layer-keyed, embedded into published deskewed
+frames; built here alongside the mobile-tag registry it mirrors), and
+the **demand-driven scheduler** — the efficiency heart:
 
 - No image subscribers → no JPEG encode; no deskew subscribers → no
   warp; nobody asking for tags (no tag stream subscriber, no recent
@@ -337,7 +357,20 @@ plumbing (bounded queues, silent drop), mDNS. **Removed:** dead
     budget; unsubscribe → detection stops within grace period.
   - one-shot `get_tags` with no stream: exactly one detection burst.
   These are regression-pinned numbers on this Mac, not absolutes.
-- Restart/reload: calibration hot-reload; boot_id changes.
+- Restart/reload: calibration hot-reload; boot_id changes; **calibration
+  survives a restart** (it is file-backed under the state dir — UC-01),
+  while pushed config does not.
+- **Tag history (UC-26):** the ring buffer answers a history query;
+  partial history before the buffer fills is returned, not an error;
+  a tag absent for part of the window shows an explicit gap rather than
+  interpolated positions.
+- **Camera hotplug (UC-25.S-5):** a camera attached to a running daemon
+  appears without any command; detached is flagged absent, not deleted.
+- **Annotation store (UC-28):** put/get round-trip; restart wipes the
+  store (S-4); the set embedded in a deskewed frame matches the store
+  at that revision; (layer, id) upsert is last-write-wins (S-6);
+  `replace_layer` is atomic — no frame embeds a half-updated layer
+  (S-2); raw frames embed no annotations.
 
 **Exit criteria:** a machine running the daemon with two cameras open
 and no clients sits at near-idle CPU (stakeholder-verified once,
@@ -353,34 +386,54 @@ budget-pinned thereafter).
 `daemon-playfield-config-service.md`,
 `daemon-camera-config-service-reset.md`.
 
+**Config model (UC-01, UC-23, UC-24 — changed since this plan was
+first written):** pushed documents are **in-memory only and discarded on
+restart**. Disk is the source of record; the daemon never writes config.
+Directory layout and cascade: [configuration.md](configuration.md).
+
 **Tests:** round-trip push/serve verbatim; derived links correct
 (camera↔playfield cardinality); reset re-applies to hardware
-(`@camera`); invalid documents rejected with actionable errors; daemon
-restart persists pushed documents.
+(`@camera`); invalid documents rejected whole with actionable errors
+(never partially applied — UC-02.S-2, UC-03.S-3); **daemon restart
+discards pushed documents and reloads from disk** (UC-01.S-4 — the
+defining round trip); documents are self-naming and a nameless document
+is rejected (UC-23.S-4); dump output re-loads verbatim (UC-24.S-1).
 
 **Exit criteria:** a playfield def pushed from a client machine is
 served back identically plus links; calibration consumes the pushed
-def (not a hand-placed file).
+def (not a hand-placed file); the UC-01.S-4 cycle — disk **A** → push
+**B** → restart → **A** — passes.
 
 ---
 
-## Stage 10 — Client library + drawing
+## Stage 10 — Client library + renderer
 
 **What it is:** discovery, `DaemonControl`, stream consumers (now
 including deskewed), world-first models (pixel fields demoted to
-diagnostics — issue `world-coordinates-first-tag-contract.md`), and the
-Pillow drawing library (world-coordinate overlays on fetched frames —
-issue `replace-paths-service-with-client-drawing-library.md`).
+diagnostics — issue `world-coordinates-first-tag-contract.md`), the
+annotation-authoring RPC wrappers, and the Pillow **renderer** — it
+rasterizes a frame's *embedded* tags (boundary + hat) and annotations
+to PNG via the frame's world→pixel metadata, plus caller-supplied
+local-only extras. *(Reshaped 2026-07-31, spec §9 #8: issue
+`replace-paths-service-with-client-drawing-library.md` is superseded —
+authoring moved into the daemon; a successor issue should be cut
+rather than repurposing it.)*
 
 **Tests:** models from recorded proto messages (no daemon); consumer
-framing against a fake socket server; drawing: draw a marker at a
-surveyed tag's world position on a deskewed fixture → pixel
-neighborhood check; **cv2-free import test** (fresh venv without
-OpenCV imports every client module).
+framing against a fake socket server; rendering: render a fixture
+`ImageFrame` whose embedded set holds a marker at a surveyed tag's
+world position → pixel neighborhood check; unchanged revision →
+renderer skips re-rasterizing; **no-cv2-import test** — every client
+module is imported and `cv2` must be absent from `sys.modules`
+afterwards. *(Changed: OpenCV is now a base dependency (UC-21), so
+"fresh venv without OpenCV" is no longer possible. The boundary is
+unchanged — we now test the discipline directly rather than relying on
+packaging to enforce it.)*
 
-**Exit criteria:** a 20-line example script — connect, subscribe
-deskewed, draw two tags' positions and a path, save PNG — works
-against the live daemon.
+**Exit criteria:** a 20-line example script — connect, put a marker
+and a path into a layer via the daemon, fetch one deskewed frame,
+render its embedded tags + annotations, save PNG — works against the
+live daemon.
 
 ---
 
@@ -392,13 +445,26 @@ tools, no cv2 anywhere — and CLI updates (`calibrate` as RPC
 orchestrator, `web` removed — issues `move-calibration-execution-into-daemon.md`,
 `remove-web-server.md`, `fix-calibrate-joint-nameerror.md` mooted).
 
-**Tests:** every MCP tool against a fake daemon (existing pattern);
-no-cv2 import sweep; end-to-end (`@camera`): agent-style session —
-list, open, calibrate via RPC, get_tags in world coords, get deskewed
-frame, set/get playfield.
+**Tests:** every MCP tool against a fake daemon (existing pattern) —
+including the drawing tools (`draw_marker`, `draw_path`, `draw_polygon`,
+`draw_circle`, `draw_text`, `remove_annotation`, `clear_layer`,
+`list_annotations`, spec §4.7); no-cv2 import sweep (as stage 10 —
+`cv2` absent from `sys.modules` after importing the MCP server);
+packaged-guide tool returns instructions with **no daemon running**
+(UC-27.S-1); end-to-end (`@camera`): agent-style session — list, open,
+calibrate via RPC, get_tags in world coords, get tag history (UC-26),
+draw a marker and read it back (UC-28.S-3), get deskewed frame,
+set/get playfield.
 
-**Exit criteria:** full MCP session on a base install (no OpenCV
-present) against a daemon on this Mac.
+**CLI scope (UC-13 … UC-25, UC-28):** `-d`/`--daemon` targeting with
+`-h` reserved for help; `--all` fan-out on read-only commands only
+(annotation writes are restricted); `camera probe`; `camera`/
+`playfield config` push and `--dump`; `playfield annotations` list and
+`--clear`.
+
+**Exit criteria:** full MCP session against a daemon on this Mac, with
+no client module having imported cv2; the CLI covers every use case in
+[use-cases/cli.md](use-cases/cli.md).
 
 ---
 
@@ -412,9 +478,10 @@ final (issue `package-restructure-v2-layout.md`): `server/`→`mcp/`,
 removed, DESIGN.md files move with their code.
 
 **Tests:** viewer smoke (headless render of one frame from fake
-daemon); full suite green after restructure; `clasi design validate`
-green against the new layout; import-graph check (nothing imports
-deleted modules).
+daemon, including one named annotation layer toggled on and off —
+UC-28, UC-18); full suite green after restructure; `clasi design
+validate` green against the new layout; import-graph check (nothing
+imports deleted modules).
 
 **Exit criteria:** the whole test pyramid green; design doc set valid;
 stakeholder runs the viewer on the live field.
@@ -445,10 +512,34 @@ Stage 12 tidies what v2 leaves behind.
 | 7 | daemon-publish-deskewed-playfield-stream (product side) |
 | 8 | daemon-publish-deskewed-playfield-stream (streams), world-coordinates-first-tag-contract (contract) |
 | 9 | daemon-playfield-config-service, daemon-camera-config-service-reset (RPC side) |
-| 10 | replace-paths-service-with-client-drawing-library |
+| 10 | replace-paths-service-with-client-drawing-library *(superseded 2026-07-31 by spec §9 #8 — daemon annotation store + client renderer; cut a successor issue rather than repurposing it)* |
 | 11 | slim-mcp-server-to-pure-daemon-client, move-calibration-execution-into-daemon (client side), remove-web-server, fix-calibrate-joint-nameerror |
 | 12 | viewer-subscribes-to-deskewed-stream, package-restructure-v2-layout |
 
 CLASI mapping: stages become sprints (one or two stages per sprint);
 each stage's tests are that sprint's acceptance evidence; the design
 overlay seeds from the affected `DESIGN.md`s per the design gate.
+
+## Stage → use-case coverage
+
+Which use cases each stage is ultimately accountable for. A stage is not
+done until its use cases' scenarios pass.
+
+| Stage | Use cases |
+|---|---|
+| 2 Camera discovery | UC-25 (probe, hotplug, naming) |
+| 3 Camera class | UC-03 (config document, hard-error on unsupported) |
+| 4–5 Pipeline + detection | UC-09, UC-10 (detection surface) |
+| 6 Calibration | UC-04 (all-fiducials rule), UC-05 |
+| 7 Deskew | UC-06, UC-19 |
+| 8 Daemon assembly | UC-01, UC-07, UC-11, UC-26, UC-12, UC-28 (store + embed) |
+| 9 Config service | UC-02, UC-23, UC-24 |
+| 10 Client library | *(chapter not yet written — see below)* |
+| 11 MCP + CLI | UC-08, UC-13 … UC-22, UC-27 |
+| 12 Viewer + restructure | UC-18 |
+
+**Known gap:** [use-cases/](use-cases/) has no chapter for the **client
+library**, which Stage 10 builds and which every adapter sits on. The
+process doc requires every capability to be reachable from the Python
+module, so this chapter should be written before Stage 10 — and probably
+before Stage 8, since the daemon's contract is what it wraps.
