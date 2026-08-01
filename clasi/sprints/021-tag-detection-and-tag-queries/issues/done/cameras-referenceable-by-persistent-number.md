@@ -1,5 +1,8 @@
 ---
-status: pending
+status: done
+sprint: '021'
+tickets:
+- 021-002
 ---
 
 # Cameras must be referenceable by their persistent number
