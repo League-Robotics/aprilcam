@@ -1,9 +1,12 @@
 ---
 id: '004'
 title: Daemon lifecycle and narrow gRPC control plane
-status: open
-use-cases: [UC-01, UC-13]
-depends-on: ['003']
+status: done
+use-cases:
+- UC-01
+- UC-13
+depends-on:
+- '003'
 github-issue: ''
 issue: daemon-bring-up-with-basic-camera-cli.md
 completes_issue: true
@@ -64,30 +67,30 @@ this one).
 
 ## Acceptance Criteria
 
-- [ ] `DaemonLifecycle.start()` with zero cameras and zero configuration
+- [x] `DaemonLifecycle.start()` with zero cameras and zero configuration
       succeeds and reports ready (UC-01.S-2).
-- [ ] `DaemonLifecycle.start()` with both Mac cameras attached succeeds,
+- [x] `DaemonLifecycle.start()` with both Mac cameras attached succeeds,
       populates the registry, and `list_cameras()` (over the gRPC
       surface) returns both with stable enumeration numbers
       (UC-01.S-1).
-- [ ] A second `DaemonLifecycle.start()` while one instance holds the
+- [x] A second `DaemonLifecycle.start()` while one instance holds the
       lock raises/reports `AlreadyRunning(holder)` naming the existing
       instance's identity (pid or socket path), and does not disturb
       the running daemon (UC-01.S-3).
-- [ ] Restarting the daemon (`stop()` then `start()`) yields the *same*
+- [x] Restarting the daemon (`stop()` then `start()`) yields the *same*
       enumeration numbers as before the restart, read via
       `registry.json` (UC-01.S-1's restart-stability check, this time
       through the full lifecycle rather than ticket 002's unit-level
       check).
-- [ ] `daemon/rpc.py`'s four RPCs round-trip correctly against
+- [x] `daemon/rpc.py`'s four RPCs round-trip correctly against
       `daemon/service.py` with a fake in-process camera fixture
       (headless, no real hardware): `ListCameras`, `ProbeCameras`,
       `GetFrame` (JPEG and PNG encoding), `GetStatus`.
-- [ ] `Daemon.status()` reports `running`, `cameras`, `config_dir`,
+- [x] `Daemon.status()` reports `running`, `cameras`, `config_dir`,
       `state_dir` correctly for a running daemon (UC-05's
       remotely-readable service view, as scoped by this sprint's
       `GetStatus` RPC).
-- [ ] The new `.proto` file is documented (header comment) as a
+- [x] The new `.proto` file is documented (header comment) as a
       sprint-020-scoped subset that Stage 8 extends in place, not
       replaces — so a future contributor does not treat it as
       disposable.
