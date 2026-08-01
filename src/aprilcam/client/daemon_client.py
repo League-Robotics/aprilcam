@@ -1,9 +1,10 @@
 """``GrpcDaemon`` -- the ``Daemon`` base class, client side (ticket
-020-005): a typed wrapper over ticket 004's generated gRPC stub for
-this sprint's four RPCs (``list_cameras``, ``probe_cameras``,
-``get_frame``, ``status``).
+020-005; ``get_tags``/``get_tag``/``get_tag_history`` added by ticket
+021-005): a typed wrapper over the generated gRPC stub for
+``list_cameras``, ``probe_cameras``, ``get_frame``, ``status``,
+``get_tags``, ``get_tag``, ``get_tag_history``.
 
-**Only this sprint's four methods are implemented**, mirroring
+**Only these seven methods are implemented**, mirroring
 ``daemon.service.DaemonService``'s own stance: ``daemon.interfaces.
 Daemon`` is a much larger base class (playfields, calibration, tags,
 streams, annotations, tag parameters, guides), and those are inherited
@@ -36,7 +37,7 @@ look the same from outside.
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import grpc
 
@@ -45,6 +46,8 @@ from aprilcam.client.models import (
     daemon_status_from_proto,
     image_frame_from_proto,
     probe_report_from_proto,
+    tag_frame_from_proto,
+    tag_record_from_get_tag_response,
 )
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
 from aprilcam.errors import (
@@ -55,9 +58,25 @@ from aprilcam.errors import (
     UnknownCamera,
 )
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
-from aprilcam.types import CameraState, ImageFrame, ProbeReport
+from aprilcam.types import CameraState, ImageFrame, ProbeReport, TagFamily, TagFrame, TagId, TagRecord
 
 __all__ = ["GrpcDaemon"]
+
+#: TagFamily -> the generated enum's int values, request-building
+#: direction only. Duplicated (not shared) with ``daemon/rpc.py``'s and
+#: ``client/models.py``'s identical-shaped maps -- see this module's
+#: docstring: request marshalling lives here, response marshalling
+#: does not, so this module owns its own small conversion for the one
+#: request field (``GetTagRequest.tag``/``GetTagHistoryRequest.tag``)
+#: that is not a bare scalar.
+_TAG_FAMILY_TO_PROTO = {
+    TagFamily.APRILTAG: aprilcam_v2_pb2.APRILTAG,
+    TagFamily.ARUCO: aprilcam_v2_pb2.ARUCO,
+}
+
+
+def _tag_id_to_proto(tag: TagId) -> aprilcam_v2_pb2.TagId:
+    return aprilcam_v2_pb2.TagId(family=_TAG_FAMILY_TO_PROTO[tag.family], number=tag.number)
 
 
 def _split_available(raw: str) -> Tuple[str, ...]:
@@ -139,6 +158,27 @@ class GrpcDaemon(Daemon):
     def status(self) -> DaemonStatus:
         response = self._call(self._stub.GetStatus, aprilcam_v2_pb2.GetStatusRequest())
         return daemon_status_from_proto(response)
+
+    def get_tags(self, camera: str) -> TagFrame:
+        request = aprilcam_v2_pb2.GetTagsRequest(camera=camera)
+        response = self._call(self._stub.GetTags, request)
+        return tag_frame_from_proto(response.tags)
+
+    def get_tag(self, camera: str, tag: TagId) -> Optional[TagRecord]:
+        request = aprilcam_v2_pb2.GetTagRequest(camera=camera, tag=_tag_id_to_proto(tag))
+        response = self._call(self._stub.GetTag, request)
+        return tag_record_from_get_tag_response(response)
+
+    def get_tag_history(
+        self, camera: str, tag: Optional[TagId] = None, frames: Optional[int] = None
+    ) -> Tuple[TagFrame, ...]:
+        request = aprilcam_v2_pb2.GetTagHistoryRequest(camera=camera)
+        if tag is not None:
+            request.tag.CopyFrom(_tag_id_to_proto(tag))
+        if frames is not None:
+            request.frames = frames
+        response = self._call(self._stub.GetTagHistory, request)
+        return tuple(tag_frame_from_proto(f) for f in response.history)
 
     # -- internals -----------------------------------------------------
 

@@ -1,34 +1,38 @@
-// aprilcam_v2.proto -- the v2 daemon control plane, sprint-020-scoped.
+// aprilcam_v2.proto -- the v2 daemon control plane, growing in place.
 //
 // **This file is a subset, not a placeholder.** Sprint 020 (daemon
-// bring-up) needs exactly four RPCs -- ListCameras, ProbeCameras,
+// bring-up) needed exactly four RPCs -- ListCameras, ProbeCameras,
 // GetFrame, GetStatus -- to satisfy UC-01, UC-13 (local-lifecycle
 // parts), UC-14, UC-17, and UC-25's in-scope scenarios. The full v1
 // surface (`archive/proto/aprilcam.proto`, 369 lines: calibration,
-// annotations, config push/pull, mobile tags, stream endpoints) is
-// deliberately not converted this sprint -- see sprint 020's
-// architecture Decision 1. A later sprint (development-plan.md's
-// Stage 8) EXTENDS this same file in place -- new RPCs and messages
-// added alongside these, existing ones only ever widened
-// (new optional fields), never removed or renumbered -- rather than
-// replacing it with a fresh proto. Treat every message/field number
+// annotations, config push/pull, mobile tags, stream endpoints) was
+// deliberately not converted then -- see sprint 020's architecture
+// Decision 1. Sprint 021 is the first EXTENSION of this same file in
+// place -- GetTags/GetTag/GetTagHistory and their messages added
+// alongside sprint 020's four, existing ones only ever widened (new
+// optional fields, e.g. GetFrameResponse.tags below), never removed
+// or renumbered -- exactly the growth path this file's evolution rule
+// anticipated, not a replacement. Treat every message/field number
 // below as permanent.
 //
 // Wire conventions this file follows (docs/design/design.md §6):
-//   - World-cm coordinates cross no boundary here -- this sprint's
-//     RPCs carry no tag/world data at all (out of scope; see below).
+//   - World-cm coordinates cross this boundary only inside `TagRecord`
+//     (`world`, `world_velocity`, `world_corners`), and every camera
+//     this sprint is uncalibrated, so those fields are always absent
+//     on the wire this sprint -- never a `0.0`/`(0,0)` placeholder.
 //   - `optional` scalar fields distinguish "not applicable" from a
 //     legitimate zero/empty value (`CameraState.playfield`,
-//     `CameraState.number`) -- the same Optional-vs-None-vs-empty
-//     discipline `types.py` enforces in Python.
+//     `CameraState.number`, `TagRecord.heading_rad`, ...) -- the same
+//     Optional-vs-None-vs-empty discipline `types.py` enforces in
+//     Python.
 //
 // Deliberately absent this sprint (Stage 8 territory, not forgotten):
 // OpenCamera/CloseCamera (no explicit open/close verb -- `GetFrame`
 // opens on demand and the daemon holds it, see `daemon/service.py`),
 // calibration trigger, config push/pull, annotation store, mobile-tag
 // registry, stream endpoint allocation (`GetImageStream`/
-// `GetTagStream`), `WhereIs`, `GetTags`. None of sprint 020's use cases
-// need them.
+// `GetTagStream`), `WhereIs`. None of this sprint's use cases need
+// them.
 
 syntax = "proto3";
 
@@ -58,6 +62,28 @@ service AprilCamV2 {
   // Readiness, queryable by any client (UC-05, as scoped by this
   // sprint's four-RPC surface).
   rpc GetStatus (GetStatusRequest) returns (GetStatusResponse);
+
+  // Every tag currently detected on a named camera (UC-10). Triggers
+  // exactly one demand-driven detection burst per call
+  // (`daemon/detection.py`) and appends it to that camera's ring
+  // buffer; an idle field returns an empty `TagFrame`, never an error.
+  rpc GetTags (GetTagsRequest) returns (GetTagsResponse);
+
+  // One tag, by family and id (UC-09). Runs the same single burst
+  // `GetTags` would (so the "exactly one burst per call" budget is
+  // shared, not doubled) and filters it for the requested tag.
+  // Absent `GetTagResponse.record` (`HasField("record") == false`,
+  // never a zero-valued `TagRecord`) means the tag was not detected
+  // this burst.
+  rpc GetTag (GetTagRequest) returns (GetTagResponse);
+
+  // Recent per-frame history from a camera's ring buffer (UC-26). A
+  // pure buffer read -- triggers no new detection burst. A buffer with
+  // fewer entries than requested returns everything available, not an
+  // error. A frame where the (optionally) requested tag was absent is
+  // an explicit entry with an empty `TagFrame.tags` -- gaps are never
+  // interpolated or silently dropped (UC-26.S-4).
+  rpc GetTagHistory (GetTagHistoryRequest) returns (GetTagHistoryResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -87,6 +113,76 @@ message CameraState {
 message ProbeSkip {
   string backend = 1;
   string reason = 2;
+}
+
+// A position in world cm, A1-centred, +x east +y north. Mirrors
+// aprilcam.types.WorldPoint.
+message WorldPoint {
+  double x = 1;
+  double y = 2;
+}
+
+// A position in an image, in pixels, origin top-left. Mirrors
+// aprilcam.types.PixelPoint -- diagnostic/render-time only, per that
+// class's docstring.
+message PixelPoint {
+  double x = 1;
+  double y = 2;
+}
+
+// Which fiducial family a tag id belongs to. Mirrors
+// aprilcam.types.TagFamily. The v1 `-(N+1)` internal ArUco encoding
+// never appears on the wire -- `TagId.number` is always the family's
+// own non-negative id (design.md §6's ID-space note describes the
+// *storage* encoding, not this wire contract).
+enum TagFamily {
+  TAG_FAMILY_UNSPECIFIED = 0;
+  APRILTAG = 1;
+  ARUCO = 2;
+}
+
+// A tag's full identity: family plus number. Mirrors
+// aprilcam.types.TagId field-for-field.
+message TagId {
+  TagFamily family = 1;
+  int32 number = 2;
+}
+
+// One tag, as observed in one frame. Mirrors aprilcam.types.TagRecord
+// field-for-field (UC-09, UC-10, UC-26) -- see that dataclass's
+// docstring for the world-first contract and the boundary/hat corner
+// convention. Every record this sprint is honestly uncalibrated:
+// `world`, `heading_rad`, `world_velocity`, `speed`, `yaw_rad`, and
+// `world_corners` are all absent (no calibration subsystem exists
+// yet) -- absence must round-trip as absence, never as a `0.0`/empty
+// placeholder that looks like a real answer. `pixel`/`pixel_corners`
+// are the only populated geometry this sprint.
+message TagRecord {
+  TagId tag = 1;
+  optional WorldPoint world = 2;
+  optional double heading_rad = 3;
+  optional WorldPoint world_velocity = 4;
+  optional double speed = 5;
+  double timestamp = 6;
+  optional PixelPoint pixel = 7;
+  bool calibrated = 8;
+  optional double yaw_rad = 9;
+  // Exactly 4 points (front-left, front-right, back-right, back-left)
+  // when present -- a valid corner quad is never empty, so an empty
+  // `repeated` here is the unambiguous "absent" encoding (unlike
+  // `GetFrameResponse.tags` below, which needs true field presence
+  // because an empty `TagFrame` is itself a valid answer).
+  repeated WorldPoint world_corners = 10;
+  repeated PixelPoint pixel_corners = 11;
+}
+
+// Every tag detected in a single frame, with when it was captured.
+// Mirrors aprilcam.types.TagFrame field-for-field.
+message TagFrame {
+  repeated TagRecord tags = 1;
+  double timestamp = 2;
+  int32 frame_index = 3;
+  bool calibration_stale = 4;
 }
 
 // ---------------------------------------------------------------------------
@@ -136,12 +232,24 @@ message GetFrameResponse {
   bool deskewed = 6;
   bool calibration_stale = 7;
   bool frame_dark = 8;
-  // px_per_cm / world_extent / tags / annotations from
-  // aprilcam.types.ImageFrame are NOT carried this sprint -- they are
-  // only meaningful for deskewed/calibrated/detected frames, none of
-  // which this sprint's daemon slice produces (get_frame(deskewed=True)
-  // always fails explicitly; no detection loop exists yet). Stage 8
-  // adds them here, additively, when calibration and detection land.
+  // The detection-burst result nearest this frame's capture
+  // (`daemon/detection.py`), embedded so one fetched frame is
+  // sufficient to render an annotated view -- boundaries and hats from
+  // the records' corners, positions from world coordinates once
+  // calibrated. Presence, not an empty-vs-absent default, carries
+  // aprilcam.types.ImageFrame.tags's three-way distinction: absent
+  // (`HasField("tags") == false`) means no detection has run for this
+  // camera yet; a present-but-empty `TagFrame` means detection ran and
+  // saw nothing. `get_frame` never triggers a detection burst itself
+  // -- this is a read of whatever the ring buffer already holds.
+  //
+  // px_per_cm / world_extent / annotations from aprilcam.types.
+  // ImageFrame are still NOT carried this sprint -- they are only
+  // meaningful for deskewed/calibrated frames, none of which this
+  // sprint's daemon slice produces (get_frame(deskewed=True) always
+  // fails explicitly; no calibration subsystem exists yet). A later
+  // stage adds them here, additively, when calibration lands.
+  optional TagFrame tags = 9;
 }
 
 // ---------------------------------------------------------------------------
@@ -155,4 +263,49 @@ message GetStatusResponse {
   repeated CameraState cameras = 2;
   string config_dir = 3;
   string state_dir = 4;
+}
+
+// ---------------------------------------------------------------------------
+// GetTags
+// ---------------------------------------------------------------------------
+
+message GetTagsRequest {
+  string camera = 1;
+}
+
+message GetTagsResponse {
+  TagFrame tags = 1;
+}
+
+// ---------------------------------------------------------------------------
+// GetTag
+// ---------------------------------------------------------------------------
+
+message GetTagRequest {
+  string camera = 1;
+  TagId tag = 2;
+}
+
+message GetTagResponse {
+  // Absent (`HasField("record") == false`) means the tag was not
+  // detected this burst -- never a zero-valued TagRecord (UC-09.S-4).
+  TagRecord record = 1;
+}
+
+// ---------------------------------------------------------------------------
+// GetTagHistory
+// ---------------------------------------------------------------------------
+
+message GetTagHistoryRequest {
+  string camera = 1;
+  // Absent means "every tag" -- mirrors
+  // Daemon.get_tag_history(tag: Optional[TagId] = None).
+  optional TagId tag = 2;
+  // Absent means "every buffered frame" -- mirrors
+  // Daemon.get_tag_history(frames: Optional[int] = None).
+  optional int32 frames = 3;
+}
+
+message GetTagHistoryResponse {
+  repeated TagFrame history = 1;
 }

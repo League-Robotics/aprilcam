@@ -26,6 +26,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -40,12 +41,13 @@ from aprilcam.camera.identity import CameraIdentity
 from aprilcam.camera.registry import CameraRegistry
 from aprilcam.config.directories import Directories
 from aprilcam.daemon.detection import DetectionEngine
+from aprilcam.daemon.interfaces import Daemon
 from aprilcam.daemon.lifecycle import DaemonLifecycle
 from aprilcam.daemon.rpc import build_server
 from aprilcam.daemon.service import VALID_ENCODINGS, DaemonService
 from aprilcam.errors import CameraNotPresent, NotCalibrated, UnknownCamera
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
-from aprilcam.types import PixelPoint, TagFamily, TagId
+from aprilcam.types import PixelPoint, TagFamily, TagFrame, TagId, TagRecord, WorldPoint
 from aprilcam.vision.detector import Detection
 from tests.aprilcam.camera.test_camera import FakeBackend
 
@@ -277,11 +279,16 @@ def test_valid_encodings_matches_daemon_get_frame_contract():
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def stub(service):
-    # A short, top-level /tmp dir -- not pytest's tmp_path, whose deeply
-    # nested per-test path (test name and all) routinely exceeds unix
-    # domain sockets' ~103-character path limit on macOS/Linux.
+@contextmanager
+def _bind_stub(service):
+    """Bind a real ``grpc.Server`` to a short top-level ``/tmp`` unix
+    socket (not pytest's deeply nested ``tmp_path``, which routinely
+    exceeds unix domain sockets' ~103-character path limit on
+    macOS/Linux) and yield a connected, real generated stub. Factored
+    out of the ``stub`` fixture below (ticket 021-005) so the
+    tag-detection round-trip tests can bind a *different* service per
+    test (each needs its own scripted detector) without duplicating
+    the bind/connect/teardown dance."""
     socket_dir = Path(tempfile.mkdtemp(prefix="ac-", dir="/tmp"))
     socket_path = socket_dir / "control.sock"
     try:
@@ -296,6 +303,32 @@ def stub(service):
             listener.stop(1.0)
     finally:
         shutil.rmtree(socket_dir, ignore_errors=True)
+
+
+@pytest.fixture
+def stub(service):
+    with _bind_stub(service) as s:
+        yield s
+
+
+@pytest.fixture
+def tag_stub_factory(directories, registry):
+    """Factory fixture: bind a real ``grpc.Server`` to a fresh
+    ``DaemonService`` wired to a caller-supplied scripted/counting
+    detector (see ``_build_tag_service`` above), yielding
+    ``(stub, slug)``. Each RPC round-trip test below needs its own
+    detection script, so this is a factory rather than a single
+    fixture instance."""
+
+    @contextmanager
+    def _make(detector, *, frame_count: int = 10):
+        service, slug = _build_tag_service(
+            directories, registry, detector=detector, frame_count=frame_count
+        )
+        with _bind_stub(service) as stub:
+            yield stub, slug
+
+    return _make
 
 
 def test_rpc_list_cameras_round_trip(stub, held_camera):
@@ -780,3 +813,269 @@ def test_get_frame_deskewed_behavior_is_unchanged_by_the_tag_embed(tag_service):
     service, slug = tag_service
     with pytest.raises(NotCalibrated):
         service.get_frame(slug, deskewed=True)
+
+
+# ---------------------------------------------------------------------------
+# GetTags / GetTag / GetTagHistory -- RPC round trips over a real
+# gRPC unix-socket server (ticket 021-005)
+# ---------------------------------------------------------------------------
+
+
+class _StaticTagsDaemon(Daemon):
+    """A minimal ``Daemon`` double (plain base class, derived from --
+    see ``daemon.interfaces``'s module docstring) that answers
+    ``get_tags`` with a pre-built ``TagFrame`` regardless of the
+    camera named. Lets a test hand the wire a ``TagRecord`` carrying a
+    *genuine* ``0.0``/``(0, 0)`` for fields that ``DaemonService`` never
+    actually produces this sprint (every real record is honestly
+    uncalibrated -- see ``test_get_tags_every_record_is_honestly_
+    uncalibrated`` above) -- proving the marshalling code's *other*
+    failure mode: a real zero must survive as a real zero, not collapse
+    into "unset" the same way ``None`` must never coerce to ``0.0``
+    (ticket 021-005's marshalling contract cuts both ways)."""
+
+    def __init__(self, tag_frame: TagFrame) -> None:
+        self._tag_frame = tag_frame
+
+    def get_tags(self, camera: str) -> TagFrame:
+        return self._tag_frame
+
+
+def test_rpc_get_tags_round_trip_found_tag_is_honestly_uncalibrated(tag_stub_factory):
+    detector = _ScriptedDetector([[_detection(7)]])
+    with tag_stub_factory(detector, frame_count=1) as (stub, slug):
+        response = stub.GetTags(aprilcam_v2_pb2.GetTagsRequest(camera=slug))
+
+    assert len(response.tags.tags) == 1
+    record = response.tags.tags[0]
+    assert record.tag.family == aprilcam_v2_pb2.APRILTAG
+    assert record.tag.number == 7
+    assert record.calibrated is False
+    # Absence, not a 0.0/empty placeholder -- the wire contract this
+    # sprint's uncalibrated records must never violate.
+    assert record.HasField("world") is False
+    assert record.HasField("heading_rad") is False
+    assert record.HasField("world_velocity") is False
+    assert record.HasField("speed") is False
+    assert record.HasField("yaw_rad") is False
+    assert record.world_corners == []
+    assert record.HasField("pixel") is True
+    assert len(record.pixel_corners) == 4
+
+
+def test_rpc_get_tags_round_trip_aruco_family_and_number_survive_intact(tag_stub_factory):
+    """The v1 ``-(N+1)`` internal ArUco encoding must never appear on
+    the wire -- family and a non-negative number cross intact."""
+    detector = _ScriptedDetector([[_detection(3, family=TagFamily.ARUCO)]])
+    with tag_stub_factory(detector, frame_count=1) as (stub, slug):
+        response = stub.GetTags(aprilcam_v2_pb2.GetTagsRequest(camera=slug))
+
+    record = response.tags.tags[0]
+    assert record.tag.family == aprilcam_v2_pb2.ARUCO
+    assert record.tag.number == 3
+
+
+def test_rpc_get_tags_round_trip_empty_field_returns_empty_tag_frame(tag_stub_factory):
+    detector = _ScriptedDetector([[]])
+    with tag_stub_factory(detector, frame_count=1) as (stub, slug):
+        response = stub.GetTags(aprilcam_v2_pb2.GetTagsRequest(camera=slug))
+
+    assert list(response.tags.tags) == []
+    assert response.tags.calibration_stale is False
+
+
+def test_rpc_get_tags_unknown_camera_maps_to_not_found(tag_stub_factory):
+    detector = _CountingDetector()
+    with tag_stub_factory(detector, frame_count=1) as (stub, _slug):
+        with pytest.raises(grpc.RpcError) as excinfo:
+            stub.GetTags(aprilcam_v2_pb2.GetTagsRequest(camera="no-such-camera"))
+
+    assert excinfo.value.code() == grpc.StatusCode.NOT_FOUND
+    metadata = dict(excinfo.value.trailing_metadata())
+    assert metadata["aprilcam-error-type"] == "UnknownCamera"
+    assert metadata["aprilcam-requested"] == "no-such-camera"
+
+
+def test_rpc_get_tag_round_trip_found(tag_stub_factory):
+    detector = _ScriptedDetector([[_detection(7)]])
+    with tag_stub_factory(detector, frame_count=1) as (stub, slug):
+        request = aprilcam_v2_pb2.GetTagRequest(
+            camera=slug, tag=aprilcam_v2_pb2.TagId(family=aprilcam_v2_pb2.APRILTAG, number=7)
+        )
+        response = stub.GetTag(request)
+
+    assert response.HasField("record") is True
+    assert response.record.tag.number == 7
+
+
+def test_rpc_get_tag_round_trip_not_found_is_an_absent_record_not_an_error(tag_stub_factory):
+    detector = _ScriptedDetector([[]])
+    with tag_stub_factory(detector, frame_count=1) as (stub, slug):
+        request = aprilcam_v2_pb2.GetTagRequest(
+            camera=slug, tag=aprilcam_v2_pb2.TagId(family=aprilcam_v2_pb2.APRILTAG, number=99)
+        )
+        response = stub.GetTag(request)
+
+    assert response.HasField("record") is False
+
+
+def test_rpc_get_tag_unknown_camera_maps_to_not_found(tag_stub_factory):
+    detector = _CountingDetector()
+    with tag_stub_factory(detector, frame_count=1) as (stub, _slug):
+        request = aprilcam_v2_pb2.GetTagRequest(
+            camera="no-such-camera",
+            tag=aprilcam_v2_pb2.TagId(family=aprilcam_v2_pb2.APRILTAG, number=1),
+        )
+        with pytest.raises(grpc.RpcError) as excinfo:
+            stub.GetTag(request)
+
+    assert excinfo.value.code() == grpc.StatusCode.NOT_FOUND
+
+
+def test_rpc_get_tag_history_round_trip_preserves_explicit_gap(tag_stub_factory):
+    target = aprilcam_v2_pb2.TagId(family=aprilcam_v2_pb2.APRILTAG, number=7)
+    script = [[_detection(7)], [_detection(9)], [_detection(7)]]
+    detector = _ScriptedDetector(script)
+    with tag_stub_factory(detector, frame_count=3) as (stub, slug):
+        stub.GetTags(aprilcam_v2_pb2.GetTagsRequest(camera=slug))
+        stub.GetTags(aprilcam_v2_pb2.GetTagsRequest(camera=slug))
+        stub.GetTags(aprilcam_v2_pb2.GetTagsRequest(camera=slug))
+
+        response = stub.GetTagHistory(
+            aprilcam_v2_pb2.GetTagHistoryRequest(camera=slug, tag=target)
+        )
+
+    history = response.history
+    assert len(history) == 3
+    assert [f.frame_index for f in history] == [0, 1, 2]
+    assert len(history[0].tags) == 1 and history[0].tags[0].tag.number == 7
+    assert list(history[1].tags) == []  # explicit gap -- retained, empty
+    assert len(history[2].tags) == 1 and history[2].tags[0].tag.number == 7
+
+
+def test_rpc_get_tag_history_round_trip_frames_limit(tag_stub_factory):
+    detector = _ScriptedDetector([[_detection(7)] for _ in range(5)])
+    with tag_stub_factory(detector, frame_count=5) as (stub, slug):
+        for _ in range(5):
+            stub.GetTags(aprilcam_v2_pb2.GetTagsRequest(camera=slug))
+
+        response = stub.GetTagHistory(
+            aprilcam_v2_pb2.GetTagHistoryRequest(camera=slug, frames=2)
+        )
+
+    assert len(response.history) == 2
+    assert [f.frame_index for f in response.history] == [3, 4]
+
+
+def test_rpc_get_tag_history_unknown_camera_maps_to_not_found(tag_stub_factory):
+    detector = _CountingDetector()
+    with tag_stub_factory(detector, frame_count=1) as (stub, _slug):
+        with pytest.raises(grpc.RpcError) as excinfo:
+            stub.GetTagHistory(aprilcam_v2_pb2.GetTagHistoryRequest(camera="no-such-camera"))
+
+    assert excinfo.value.code() == grpc.StatusCode.NOT_FOUND
+
+
+def test_rpc_get_tags_camera_not_present_maps_to_failed_precondition(stub, absent_camera):
+    """Reuses the plain ``service``/``stub`` fixtures (no detection
+    script needed -- the camera is never reached) to prove
+    ``CameraNotPresent`` (ticket 021-002) round-trips through the new
+    ``GetTags`` RPC exactly as it already does for ``GetFrame``."""
+    slug, _number = absent_camera
+
+    with pytest.raises(grpc.RpcError) as excinfo:
+        stub.GetTags(aprilcam_v2_pb2.GetTagsRequest(camera=slug))
+
+    err = excinfo.value
+    assert err.code() == grpc.StatusCode.FAILED_PRECONDITION
+    metadata = dict(err.trailing_metadata())
+    assert metadata["aprilcam-error-type"] == "CameraNotPresent"
+    assert metadata["aprilcam-slug"] == slug
+
+
+def test_rpc_get_tags_round_trip_distinguishes_a_real_zero_from_absent():
+    """The wire's other marshalling failure mode: a genuinely
+    calibrated-looking ``0.0``/``(0, 0)`` must survive as a real value,
+    never collapsing into "unset" -- the mirror image of ``None`` never
+    coercing to ``0.0``. Drives ``build_server`` with a
+    ``_StaticTagsDaemon`` double instead of ``DaemonService`` because no
+    real detection burst this sprint ever produces a non-``None`` value
+    for these fields to exercise this the other way."""
+    zeroed = TagRecord(
+        tag=TagId(family=TagFamily.APRILTAG, number=1),
+        world=WorldPoint(x=0.0, y=0.0),
+        heading_rad=0.0,
+        world_velocity=WorldPoint(x=0.0, y=0.0),
+        speed=0.0,
+        timestamp=1.0,
+        calibrated=True,
+        yaw_rad=0.0,
+    )
+    unset = TagRecord(
+        tag=TagId(family=TagFamily.APRILTAG, number=2),
+        world=None,
+        heading_rad=None,
+        world_velocity=None,
+        speed=None,
+        timestamp=1.0,
+        calibrated=False,
+    )
+    tag_frame = TagFrame(tags=(zeroed, unset), timestamp=1.0, frame_index=0)
+    service = _StaticTagsDaemon(tag_frame)
+
+    with _bind_stub(service) as stub:
+        response = stub.GetTags(aprilcam_v2_pb2.GetTagsRequest(camera="any"))
+
+    zero_record, unset_record = response.tags.tags
+
+    assert zero_record.HasField("heading_rad") is True
+    assert zero_record.heading_rad == 0.0
+    assert zero_record.HasField("world") is True
+    assert zero_record.world.x == 0.0 and zero_record.world.y == 0.0
+    assert zero_record.HasField("speed") is True
+    assert zero_record.speed == 0.0
+    assert zero_record.HasField("yaw_rad") is True
+
+    assert unset_record.HasField("heading_rad") is False
+    assert unset_record.HasField("world") is False
+    assert unset_record.HasField("world_velocity") is False
+    assert unset_record.HasField("speed") is False
+    assert unset_record.HasField("yaw_rad") is False
+
+
+# ---------------------------------------------------------------------------
+# GetFrame's tag embed over the wire: absent vs. present-but-empty
+# (ticket 021-005) -- the three-way distinction ImageFrame.tags
+# documents must survive real (de)serialization, not just the
+# same-process DaemonService assertions above.
+# ---------------------------------------------------------------------------
+
+
+def test_rpc_get_frame_tags_is_absent_when_no_detection_has_run(tag_stub_factory):
+    detector = _CountingDetector()
+    with tag_stub_factory(detector, frame_count=1) as (stub, slug):
+        response = stub.GetFrame(aprilcam_v2_pb2.GetFrameRequest(camera=slug))
+
+    assert response.HasField("tags") is False
+
+
+def test_rpc_get_frame_tags_is_present_but_empty_after_detection_saw_nothing(tag_stub_factory):
+    detector = _ScriptedDetector([[]])
+    with tag_stub_factory(detector, frame_count=2) as (stub, slug):
+        stub.GetTags(aprilcam_v2_pb2.GetTagsRequest(camera=slug))
+        response = stub.GetFrame(aprilcam_v2_pb2.GetFrameRequest(camera=slug))
+
+    assert response.HasField("tags") is True
+    assert list(response.tags.tags) == []
+
+
+def test_rpc_get_frame_embeds_tags_round_trip(tag_stub_factory):
+    detector = _ScriptedDetector([[_detection(7)]])
+    with tag_stub_factory(detector, frame_count=2) as (stub, slug):
+        tags_response = stub.GetTags(aprilcam_v2_pb2.GetTagsRequest(camera=slug))
+        frame_response = stub.GetFrame(aprilcam_v2_pb2.GetFrameRequest(camera=slug))
+
+    assert frame_response.HasField("tags") is True
+    assert frame_response.tags.frame_index == tags_response.tags.frame_index
+    assert len(frame_response.tags.tags) == 1
+    assert frame_response.tags.tags[0].tag.number == 7

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterator
 
@@ -38,8 +39,14 @@ from aprilcam.daemon.rpc import build_server
 from aprilcam.daemon.service import DaemonService
 from aprilcam.errors import CameraNotPresent, ConnectionFailed, NotCalibrated, UnknownCamera
 from aprilcam.proto import aprilcam_v2_pb2_grpc
-from aprilcam.types import CameraState, ImageFrame, ProbeReport
+from aprilcam.types import CameraState, ImageFrame, ProbeReport, TagFamily, TagFrame, TagId, TagRecord
 from tests.aprilcam.camera.test_camera import FakeBackend
+from tests.aprilcam.daemon.test_service import (
+    _build_tag_service,
+    _CountingDetector,
+    _detection,
+    _ScriptedDetector,
+)
 
 
 def _frame() -> np.ndarray:
@@ -108,12 +115,15 @@ def absent_camera(registry: CameraRegistry):
     return slug, number
 
 
-@pytest.fixture
-def client(service) -> Iterator[GrpcDaemon]:
+@contextmanager
+def _bind_client(service) -> Iterator[GrpcDaemon]:
     # A short, top-level /tmp dir -- not pytest's tmp_path, whose deeply
     # nested per-test path routinely exceeds unix domain sockets'
     # ~103-character path limit on macOS/Linux (same workaround as
-    # test_service.py's ``stub`` fixture).
+    # test_service.py's ``stub`` fixture). Factored out of the
+    # ``client`` fixture below (ticket 021-005) so the tag-detection
+    # round-trip tests can bind a *different* service per test (each
+    # needs its own scripted detector).
     socket_dir = Path(tempfile.mkdtemp(prefix="ac-dc-", dir="/tmp"))
     socket_path = socket_dir / "control.sock"
     try:
@@ -129,6 +139,32 @@ def client(service) -> Iterator[GrpcDaemon]:
             listener.stop(1.0)
     finally:
         shutil.rmtree(socket_dir, ignore_errors=True)
+
+
+@pytest.fixture
+def client(service) -> Iterator[GrpcDaemon]:
+    with _bind_client(service) as c:
+        yield c
+
+
+@pytest.fixture
+def tag_client_factory(directories, registry):
+    """Factory fixture: build a ``GrpcDaemon`` connected to a fresh
+    ``DaemonService`` wired to a caller-supplied scripted/counting
+    detector (reusing ``test_service.py``'s ``_build_tag_service`` --
+    the same cross-module-fixture convention ``test_service.py``
+    itself follows for ``FakeBackend``), yielding ``(client, slug)``.
+    """
+
+    @contextmanager
+    def _make(detector, *, frame_count: int = 10):
+        service, slug = _build_tag_service(
+            directories, registry, detector=detector, frame_count=frame_count
+        )
+        with _bind_client(service) as client:
+            yield client, slug
+
+    return _make
 
 
 # ---------------------------------------------------------------------------
@@ -263,3 +299,130 @@ def test_rpc_failure_after_server_shutdown_raises_connection_failed(service):
         channel.close()
     finally:
         shutil.rmtree(socket_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# get_tags / get_tag / get_tag_history -- client-side round trips
+# (ticket 021-005). Exercises the full proto boundary: real
+# aprilcam.types dataclasses out, with the None-not-0.0 discipline
+# intact after crossing client/models.py's from_proto conversions, not
+# just HasField() at the raw protobuf level (test_service.py covers
+# that layer).
+# ---------------------------------------------------------------------------
+
+
+def test_get_tags_round_trip_returns_a_tag_frame_of_honestly_uncalibrated_records(
+    tag_client_factory,
+):
+    detector = _ScriptedDetector([[_detection(7)]])
+    with tag_client_factory(detector, frame_count=1) as (client, slug):
+        tag_frame = client.get_tags(slug)
+
+    assert isinstance(tag_frame, TagFrame)
+    assert len(tag_frame.tags) == 1
+    record = tag_frame.tags[0]
+    assert isinstance(record, TagRecord)
+    assert record.tag == TagId(family=TagFamily.APRILTAG, number=7)
+    assert record.calibrated is False
+    # None, never 0.0/empty -- the client-side dataclass must not lose
+    # this distinction after crossing client/models.py.
+    assert record.world is None
+    assert record.heading_rad is None
+    assert record.world_velocity is None
+    assert record.speed is None
+    assert record.yaw_rad is None
+    assert record.world_corners is None
+    assert record.pixel is not None
+    assert record.pixel_corners is not None
+    assert len(record.pixel_corners) == 4
+
+
+def test_get_tags_round_trip_empty_field_returns_empty_tag_frame(tag_client_factory):
+    detector = _ScriptedDetector([[]])
+    with tag_client_factory(detector, frame_count=1) as (client, slug):
+        tag_frame = client.get_tags(slug)
+
+    assert tag_frame.tags == ()
+    assert tag_frame.calibration_stale is False
+
+
+def test_get_tags_unknown_camera_raises_unknown_camera(client):
+    with pytest.raises(UnknownCamera) as excinfo:
+        client.get_tags("no-such-camera")
+    assert excinfo.value.requested == "no-such-camera"
+
+
+def test_get_tag_round_trip_found_returns_a_tag_record(tag_client_factory):
+    detector = _ScriptedDetector([[_detection(7)]])
+    with tag_client_factory(detector, frame_count=1) as (client, slug):
+        record = client.get_tag(slug, TagId(family=TagFamily.APRILTAG, number=7))
+
+    assert record is not None
+    assert isinstance(record, TagRecord)
+    assert record.tag == TagId(family=TagFamily.APRILTAG, number=7)
+
+
+def test_get_tag_round_trip_not_found_returns_none_never_a_zero_valued_record(
+    tag_client_factory,
+):
+    detector = _ScriptedDetector([[]])
+    with tag_client_factory(detector, frame_count=1) as (client, slug):
+        record = client.get_tag(slug, TagId(family=TagFamily.APRILTAG, number=99))
+
+    assert record is None
+
+
+def test_get_tag_unknown_camera_raises_unknown_camera(client):
+    with pytest.raises(UnknownCamera):
+        client.get_tag("no-such-camera", TagId(family=TagFamily.APRILTAG, number=1))
+
+
+def test_get_tag_history_round_trip_preserves_explicit_gap(tag_client_factory):
+    target = TagId(family=TagFamily.APRILTAG, number=7)
+    script = [[_detection(7)], [_detection(9)], [_detection(7)]]
+    detector = _ScriptedDetector(script)
+    with tag_client_factory(detector, frame_count=3) as (client, slug):
+        client.get_tags(slug)
+        client.get_tags(slug)
+        client.get_tags(slug)
+
+        history = client.get_tag_history(slug, tag=target)
+
+    assert isinstance(history, tuple)
+    assert len(history) == 3
+    assert all(isinstance(f, TagFrame) for f in history)
+    assert len(history[0].tags) == 1 and history[0].tags[0].tag == target
+    assert history[1].tags == ()  # explicit gap -- retained, empty
+    assert len(history[2].tags) == 1 and history[2].tags[0].tag == target
+
+
+def test_get_tag_history_round_trip_with_no_prior_queries_returns_empty_tuple(
+    tag_client_factory,
+):
+    detector = _CountingDetector()
+    with tag_client_factory(detector, frame_count=1) as (client, slug):
+        history = client.get_tag_history(slug)
+
+    assert history == ()
+
+
+def test_get_tag_history_unknown_camera_raises_unknown_camera(client):
+    with pytest.raises(UnknownCamera):
+        client.get_tag_history("no-such-camera")
+
+
+def test_get_frame_embeds_tags_after_a_prior_get_tags_call(tag_client_factory):
+    detector = _ScriptedDetector([[_detection(7)]])
+    with tag_client_factory(detector, frame_count=2) as (client, slug):
+        tag_frame = client.get_tags(slug)
+        frame = client.get_frame(slug)
+
+    assert frame.tags == tag_frame
+
+
+def test_get_frame_tags_is_none_when_no_detection_has_run(tag_client_factory):
+    detector = _CountingDetector()
+    with tag_client_factory(detector, frame_count=1) as (client, slug):
+        frame = client.get_frame(slug)
+
+    assert frame.tags is None
