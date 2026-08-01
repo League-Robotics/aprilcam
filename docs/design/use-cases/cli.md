@@ -88,6 +88,27 @@ playfield links from `CameraState`; exactly one linked, present camera
 a human can see and correct it — never in the daemon, where it would
 become a wrong answer that looks right.
 
+### Camera addressing — number or slug
+
+Every camera-addressed command (`camera image`, `camera calibrate`, and
+every future one, including this sprint's `camera tags`) accepts either
+form a camera can be named: **a decimal number resolves the camera
+currently holding that persistent registry number** — the same number
+`camera list`/`camera probe` print in their leading `[N]` column —
+**anything else resolves by slug**, exactly as before. There is no
+ambiguity between the two: a slug always contains at least one
+non-digit character (`camera/identity.py`'s `device_name_slug`
+invariant), so an all-digits token can only ever mean a number.
+
+Resolution happens once, daemon-side, in `_camera_for` — every adapter
+(this CLI, the MCP server once it lands, a future ROS node, direct
+robot programs) inherits the same rule automatically rather than each
+reimplementing the lookup (`adapters.md` §2's duplication test). A
+camera the registry remembers but that is not currently plugged in is
+addressable by either form and fails with a distinct "camera present:
+no" error, never "unknown camera" — a registry entry outliving its
+hardware is the normal case (UC-25), not a rejection.
+
 ---
 
 ### UC-13 — Discover and manage daemons

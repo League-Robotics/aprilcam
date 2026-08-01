@@ -43,7 +43,13 @@ import grpc
 
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
 from aprilcam.daemon.lifecycle import ControlPlaneListener
-from aprilcam.errors import AlreadyRunning, AprilCamError, NotCalibrated, UnknownCamera
+from aprilcam.errors import (
+    AlreadyRunning,
+    AprilCamError,
+    CameraNotPresent,
+    NotCalibrated,
+    UnknownCamera,
+)
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
 from aprilcam.types import CameraState, ImageFrame, ProbeReport
 
@@ -60,6 +66,10 @@ _STATUS_CODES = {
     AlreadyRunning: grpc.StatusCode.ALREADY_EXISTS,
     UnknownCamera: grpc.StatusCode.NOT_FOUND,
     NotCalibrated: grpc.StatusCode.FAILED_PRECONDITION,
+    # Same "the operation cannot succeed given current state" semantics
+    # as NotCalibrated -- the camera is known, just not present right
+    # now (ticket 021-002).
+    CameraNotPresent: grpc.StatusCode.FAILED_PRECONDITION,
 }
 
 
@@ -132,6 +142,7 @@ def _abort(context: grpc.ServicerContext, exc: Exception) -> None:
     * :class:`AlreadyRunning`: + ``aprilcam-holder``.
     * :class:`UnknownCamera`: + ``aprilcam-requested``,
       ``aprilcam-available`` (comma-joined).
+    * :class:`CameraNotPresent`: + ``aprilcam-slug``.
     """
     if isinstance(exc, AprilCamError):
         code = grpc.StatusCode.INTERNAL
@@ -145,6 +156,8 @@ def _abort(context: grpc.ServicerContext, exc: Exception) -> None:
         elif isinstance(exc, UnknownCamera):
             metadata.append(("aprilcam-requested", exc.requested))
             metadata.append(("aprilcam-available", ",".join(exc.available)))
+        elif isinstance(exc, CameraNotPresent):
+            metadata.append(("aprilcam-slug", exc.slug))
         context.set_trailing_metadata(tuple(metadata))
         context.abort(code, str(exc))
     else:

@@ -55,7 +55,7 @@ from aprilcam.camera.identity import CameraIdentity, resolve_all
 from aprilcam.camera.registry import CameraRecord, CameraRegistry
 from aprilcam.config.interfaces import Directories
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
-from aprilcam.errors import NotCalibrated, UnknownCamera
+from aprilcam.errors import CameraNotPresent, NotCalibrated, UnknownCamera
 from aprilcam.types import CameraState, ImageFrame, ProbeReport
 
 __all__ = ["DaemonService"]
@@ -258,31 +258,47 @@ class DaemonService(Daemon):
 
     # -- internals -----------------------------------------------------
 
-    def _camera_for(self, slug: str) -> Camera:
-        """The held-open ``Camera`` for *slug*, opening it on first use.
+    def _camera_for(self, token: str) -> Camera:
+        """The held-open ``Camera`` addressed by *token*, opening it on
+        first use.
 
-        Raises :class:`UnknownCamera` (naming every slug the registry
-        knows) both for a slug the registry has never seen and for one
-        it has but cannot currently locate among enumerated backends
-        (unplugged, or a transient enumeration miss) -- ``errors.py``
-        has no third category for "known but not present right now",
-        and inventing one is outside this ticket's scope (see the
-        ticket's Open Question 1 resolution for the same reasoning
-        applied to ``get_camera_config``).
+        *token* is either form ``camera list``/``camera probe`` print
+        (ticket 021-002, SUC-005): an **all-digits token resolves by
+        persistent registry number** (``CameraRegistry.get_by_number``);
+        anything else resolves by slug, exactly as before
+        (``CameraRegistry.get``). No ambiguity is possible between the
+        two forms -- ``camera/identity.py``'s ``device_name_slug``
+        guarantees every slug contains at least one non-digit character,
+        so an all-digits token can never *be* a real slug.
+
+        Raises :class:`UnknownCamera` (naming every known camera as
+        ``"{number} {slug}"`` pairs, teaching the addressing scheme
+        rather than just rejecting) for a token -- number or slug -- the
+        registry has never seen. Raises :class:`CameraNotPresent`
+        (naming the resolved slug) for a token that *does* resolve to a
+        registry record but cannot currently be located among enumerated
+        backends (unplugged, or a transient enumeration miss) -- a
+        registry record outliving its hardware is normal (UC-25), so
+        this is distinct from "never registered," not folded into
+        :class:`UnknownCamera` the way it was before this ticket.
         """
         with self._lock:
-            existing = self._cameras.get(slug)
+            existing = self._cameras.get(token)
         if existing is not None:
             return existing
 
-        record = self._registry.get(slug)
-        available = tuple(r.slug for r in self._registry.records())
+        record = self._record_for(token)
         if record is None:
-            raise UnknownCamera(slug, available)
+            raise UnknownCamera(token, self._available())
+
+        with self._lock:
+            existing = self._cameras.get(record.slug)
+        if existing is not None:
+            return existing
 
         index = self._index_for(record)
         if index is None:
-            raise UnknownCamera(slug, available)
+            raise CameraNotPresent(record.slug)
 
         cam = Camera(
             record.slug,
@@ -292,8 +308,27 @@ class DaemonService(Daemon):
         )
         cam.open()
         with self._lock:
-            self._cameras[slug] = cam
+            self._cameras[record.slug] = cam
         return cam
+
+    def _record_for(self, token: str) -> Optional[CameraRecord]:
+        """Resolve *token* against the registry: an all-digits token by
+        number, anything else by slug. See :meth:`_camera_for`."""
+        if token.isdigit():
+            return self._registry.get_by_number(int(token))
+        return self._registry.get(token)
+
+    def _available(self) -> Tuple[str, ...]:
+        """Every known camera, formatted ``"{number} {slug}"`` for
+        :class:`UnknownCamera`'s ``available`` list -- falls back to the
+        bare slug for a record somehow missing a number (not reachable
+        through normal construction, since ``CameraRecord.number`` is a
+        required field, but defensive rather than assuming a stored
+        record can never be malformed)."""
+        return tuple(
+            f"{r.number} {r.slug}" if r.number is not None else r.slug
+            for r in self._registry.records()
+        )
 
     def _index_for(self, record: CameraRecord) -> Optional[int]:
         """The current OS-probe index for *record*, or ``None`` if it is

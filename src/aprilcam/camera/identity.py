@@ -107,8 +107,26 @@ def device_name_slug(name: Optional[str]) -> str:
     Built from the device name alone, **never** the resolution — see the
     module docstring's "two different questions" note. Falls back to
     ``"camera"`` for an empty/missing name so ``.slug`` is never empty.
+
+    **Invariant: the returned slug always contains at least one
+    non-digit character.** ``daemon/service.py``'s ``_camera_for``
+    (ticket 021-002) parses an all-digits token unambiguously as a
+    persistent registry number and anything else as a slug; that
+    parsing has no ambiguity only because a slug can never itself be
+    all digits. ``_slug``'s regex strips everything but alphanumerics,
+    so a device literally named e.g. ``"123"`` would otherwise slip
+    through as the bare numeric slug ``"123"`` — indistinguishable from
+    the number 123. Guarded here, not merely asserted: an all-digit
+    result is prefixed with ``camera-``. This is the readable ``.slug``
+    every fallback tier proposes (including the last-resort
+    ``name_resolution_slug`` tier below, whose own ``hardware_key`` is
+    separately prefixed with ``"name:"`` and is not addressed by this
+    invariant — only the readable slug is).
     """
-    return _slug(name) or "camera"
+    slug = _slug(name) or "camera"
+    if slug.isdigit():
+        slug = f"camera-{slug}"
+    return slug
 
 
 def name_resolution_slug(
@@ -120,7 +138,12 @@ def name_resolution_slug(
     Distinct from :func:`device_name_slug` — this is for
     ``hardware_key`` disambiguation at the bottom of the fallback chain,
     not for the readable ``slug`` shown to a human (which never carries
-    a resolution suffix).
+    a resolution suffix). Not subject to :func:`device_name_slug`'s
+    no-all-digits invariant itself (this value only ever becomes part
+    of a ``hardware_key``, behind a ``"name:"`` prefix — never a
+    ``CameraRecord.slug``), but it is built from
+    :func:`device_name_slug` and so inherits the guard whenever no
+    resolution is supplied.
     """
     base = device_name_slug(name)
     if width and height:
