@@ -62,10 +62,12 @@ from aprilcam.cli._common import (
     report_error,
 )
 from aprilcam.client.discovery import Discovery
+from aprilcam.config.interfaces import ConfigLoader
+from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
 from aprilcam.errors import AprilCamError
 from aprilcam.types import TagFrame, TagRecord
 
-__all__ = ["add_subparser", "cmd_list", "cmd_probe", "cmd_image", "cmd_tags"]
+__all__ = ["add_subparser", "cmd_list", "cmd_probe", "cmd_image", "cmd_tags", "cmd_config"]
 
 
 def cmd_list(
@@ -259,6 +261,37 @@ def cmd_tags(
     return EXIT_OK
 
 
+def cmd_config(
+    args: argparse.Namespace,
+    *,
+    discovery_factory: Callable[[], Discovery] = Discovery,
+    loader_factory: Callable[[], ConfigLoader] = JsonConfigLoader,
+) -> int:
+    """``aprilcam camera config <file> [-d HOST]`` (ticket 022-001).
+
+    **Playfield-link only, this sprint** (sprint.md Architecture
+    Decision 1): pushes a whole ``CameraConfig`` document -- ``name``
+    and ``playfield`` take effect (the camera is linked); any
+    ``settings`` round-trip through ``camera config <file>`` -> a later
+    ``get_camera_config`` unchanged but are never applied to the
+    camera's hardware. Full settings push is sprint 023.
+    """
+    loader = loader_factory()
+    try:
+        config = loader.load_camera_config(Path(args.file))
+    except AprilCamError as exc:
+        return report_error(exc)
+
+    try:
+        discovery_factory().connect(args.daemon).set_camera_config(config)
+    except AprilCamError as exc:
+        return report_error(exc)
+
+    playfield = config.playfield if config.playfield is not None else "(none)"
+    print(f"pushed camera config {config.name!r} -- playfield={playfield}")
+    return EXIT_OK
+
+
 def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     """Wire ``camera list|probe|image|tags`` into the top-level parser."""
     parser = subparsers.add_parser(
@@ -306,3 +339,10 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     add_daemon_option(p_tags)
     add_all_option(p_tags)
     p_tags.set_defaults(func=cmd_tags)
+
+    p_config = sub.add_parser(
+        "config", help="push a camera config document (playfield link only, this sprint)"
+    )
+    p_config.add_argument("file", help="path to a camera config JSON file")
+    add_daemon_option(p_config)
+    p_config.set_defaults(func=cmd_config)

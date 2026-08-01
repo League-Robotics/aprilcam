@@ -73,6 +73,31 @@ class AprilCamV2Stub(object):
                 request_serializer=aprilcam__v2__pb2.GetTagHistoryRequest.SerializeToString,
                 response_deserializer=aprilcam__v2__pb2.GetTagHistoryResponse.FromString,
                 _registered_method=True)
+        self.SetPlayfield = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/SetPlayfield',
+                request_serializer=aprilcam__v2__pb2.SetPlayfieldRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.SetPlayfieldResponse.FromString,
+                _registered_method=True)
+        self.GetPlayfield = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/GetPlayfield',
+                request_serializer=aprilcam__v2__pb2.GetPlayfieldRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.GetPlayfieldResponse.FromString,
+                _registered_method=True)
+        self.ListPlayfields = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/ListPlayfields',
+                request_serializer=aprilcam__v2__pb2.ListPlayfieldsRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.ListPlayfieldsResponse.FromString,
+                _registered_method=True)
+        self.SetCameraConfig = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/SetCameraConfig',
+                request_serializer=aprilcam__v2__pb2.SetCameraConfigRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.SetCameraConfigResponse.FromString,
+                _registered_method=True)
+        self.GetCameraConfig = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/GetCameraConfig',
+                request_serializer=aprilcam__v2__pb2.GetCameraConfigRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.GetCameraConfigResponse.FromString,
+                _registered_method=True)
 
 
 class AprilCamV2Servicer(object):
@@ -152,6 +177,51 @@ class AprilCamV2Servicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SetPlayfield(self, request, context):
+        """Adopt a playfield definition, in memory, keyed by its own `name`
+        (UC-02). Rejected whole if malformed -- client-side validation
+        (`config/loader.py`'s `ConfigLoader`) means a malformed document
+        never reaches this RPC in practice (UC-23.S-4).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetPlayfield(self, request, context):
+        """Fetch one playfield by name, plus its derived `linked_cameras`
+        (UC-02). Unknown name -> NOT_FOUND, naming the playfields held.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListPlayfields(self, request, context):
+        """Every playfield this daemon currently holds (Decision 4: no
+        single-slot limit).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SetCameraConfig(self, request, context):
+        """Push a camera config, in memory, keyed by its own `name`. This
+        sprint's minimal slice (Decision 1): only `playfield` has any
+        observable effect (linking the camera); `settings` round-trips
+        through `GetCameraConfig` but is never applied to hardware.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetCameraConfig(self, request, context):
+        """Fetch one camera's config as last pushed. A camera nobody has
+        configured yet is NOT_FOUND, not a fabricated blank document (the
+        introspected-plus-blank template is out of scope this sprint).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_AprilCamV2Servicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -189,6 +259,31 @@ def add_AprilCamV2Servicer_to_server(servicer, server):
                     servicer.GetTagHistory,
                     request_deserializer=aprilcam__v2__pb2.GetTagHistoryRequest.FromString,
                     response_serializer=aprilcam__v2__pb2.GetTagHistoryResponse.SerializeToString,
+            ),
+            'SetPlayfield': grpc.unary_unary_rpc_method_handler(
+                    servicer.SetPlayfield,
+                    request_deserializer=aprilcam__v2__pb2.SetPlayfieldRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.SetPlayfieldResponse.SerializeToString,
+            ),
+            'GetPlayfield': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetPlayfield,
+                    request_deserializer=aprilcam__v2__pb2.GetPlayfieldRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.GetPlayfieldResponse.SerializeToString,
+            ),
+            'ListPlayfields': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListPlayfields,
+                    request_deserializer=aprilcam__v2__pb2.ListPlayfieldsRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.ListPlayfieldsResponse.SerializeToString,
+            ),
+            'SetCameraConfig': grpc.unary_unary_rpc_method_handler(
+                    servicer.SetCameraConfig,
+                    request_deserializer=aprilcam__v2__pb2.SetCameraConfigRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.SetCameraConfigResponse.SerializeToString,
+            ),
+            'GetCameraConfig': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetCameraConfig,
+                    request_deserializer=aprilcam__v2__pb2.GetCameraConfigRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.GetCameraConfigResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -384,6 +479,141 @@ class AprilCamV2(object):
             '/aprilcam.v2.AprilCamV2/GetTagHistory',
             aprilcam__v2__pb2.GetTagHistoryRequest.SerializeToString,
             aprilcam__v2__pb2.GetTagHistoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SetPlayfield(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/SetPlayfield',
+            aprilcam__v2__pb2.SetPlayfieldRequest.SerializeToString,
+            aprilcam__v2__pb2.SetPlayfieldResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetPlayfield(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/GetPlayfield',
+            aprilcam__v2__pb2.GetPlayfieldRequest.SerializeToString,
+            aprilcam__v2__pb2.GetPlayfieldResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListPlayfields(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/ListPlayfields',
+            aprilcam__v2__pb2.ListPlayfieldsRequest.SerializeToString,
+            aprilcam__v2__pb2.ListPlayfieldsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SetCameraConfig(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/SetCameraConfig',
+            aprilcam__v2__pb2.SetCameraConfigRequest.SerializeToString,
+            aprilcam__v2__pb2.SetCameraConfigResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetCameraConfig(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/GetCameraConfig',
+            aprilcam__v2__pb2.GetCameraConfigRequest.SerializeToString,
+            aprilcam__v2__pb2.GetCameraConfigResponse.FromString,
             options,
             channel_credentials,
             insecure,
