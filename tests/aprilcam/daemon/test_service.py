@@ -1765,6 +1765,79 @@ def test_get_tags_on_a_calibrated_camera_reports_real_world_coordinates(director
 
 
 # ---------------------------------------------------------------------------
+# Regression, ticket 022-007: list_cameras()/CameraState.calibrated must
+# reflect the real calibration store, not a hardcoded False. Reported
+# independently by tickets 005 and 006's team-lead verification --
+# get_frame(deskewed=True)/get_tags/playfield view all read the real
+# calibration correctly, but `camera list`/`daemon status` said
+# "uncalibrated" for a camera that genuinely was calibrated.
+# ---------------------------------------------------------------------------
+
+
+def test_list_cameras_reports_calibrated_true_for_a_held_open_camera_after_calibrate(
+    directories, registry
+):
+    """The 'held open' branch of ``list_cameras`` (the camera is in
+    ``self._cameras`` -- exactly the state a just-calibrated camera is
+    in, since :meth:`DaemonService.calibrate` opens it via
+    ``_capture_calibration_frames``/``_camera_for``). Before the fix,
+    this branch read ``Camera.state`` verbatim, which hardcoded
+    ``calibrated=False`` unconditionally -- so a camera calibrated in
+    the same process, still held open, reported uncalibrated forever."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+
+    before = next(s for s in service.list_cameras() if s.name == slug)
+    assert before.calibrated is False
+    assert before.calibration_stale is False
+
+    result = service.calibrate(slug)
+    assert result.succeeded is True
+
+    after = next(s for s in service.list_cameras() if s.name == slug)
+    assert after.calibrated is True
+    assert after.calibration_stale is False
+
+
+def test_list_cameras_reports_calibrated_true_for_a_not_held_camera_after_restart(
+    directories, registry
+):
+    """The 'not held open' branch of ``list_cameras`` (no ``Camera`` in
+    ``self._cameras`` -- exactly a freshly-restarted daemon's state for
+    every camera until something opens it again). Before the fix, this
+    branch built its ``CameraState`` with an explicit, separate
+    ``calibrated=False`` literal -- so a calibration reloaded from
+    ``calibration.json`` at startup (UC-01) was invisible to
+    ``list_cameras`` even though :meth:`get_calibration` reported it
+    correctly. Mirrors
+    ``test_fresh_daemon_service_reloads_calibration_json_after_a_simulated_restart``'s
+    restart simulation, but asserts on ``list_cameras`` instead of
+    ``get_calibration`` directly -- the exact surface tickets 005/006's
+    team-lead verification found wrong."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True
+
+    fresh_discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(),
+        identity_source=lambda: {},
+        backend_factory=lambda index: FakeBackend(),
+    )
+    restarted = DaemonService(registry=registry, discovery=fresh_discovery, directories=directories)
+
+    state = next(s for s in restarted.list_cameras() if s.name == slug)
+    assert state.calibrated is True
+    assert state.calibration_stale is False
+
+
+# ---------------------------------------------------------------------------
 # Deskewed frames (ticket 022-005) -- Daemon.get_frame(deskewed=True), the
 # real implementation replacing sprint 020's unconditional NotCalibrated.
 # ---------------------------------------------------------------------------

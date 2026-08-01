@@ -222,24 +222,36 @@ def _format_tag_row(record: TagRecord) -> str:
     world position (calibrated) or an explicit ``UNCALIBRATED`` marker
     plus pixel coordinates.
 
-    Every record this sprint is uncalibrated by construction (see the
-    module docstring), so this always takes the ``else`` branch in
-    practice -- but the calibrated branch is real code, not a stub, so
-    a later calibration sprint activates it rather than writing it.
+    Calibration went live this sprint (ticket 022-003), so the
+    calibrated branch below is exercised for real now, not just held as
+    dead-but-correct code for a future sprint to activate.
+
     Guarding on both ``record.calibrated`` and ``record.world is not
     None`` means a record that is inconsistent about its own
     calibration state still cannot print a fabricated world position
     (UC-20.S-3's failure-mode requirement, taken literally: never
     ``0.0, 0.0`` or any world-looking number for an uncalibrated
     record).
+
+    ``yaw`` (the tag's own facing direction, ``record.yaw_rad``) is
+    printed ahead of ``heading`` (motion direction, ``record.
+    heading_rad``) -- deliberately, since for a stationary tag ``yaw``
+    is the only one of the two that means anything: ``heading_rad`` is
+    ``None`` (undefined, not stale) for a tag that has not moved enough
+    to clear ``vision.motion.MIN_RELIABLE_DISPLACEMENT_CM`` between
+    samples (ticket 022-007's real-hardware finding -- see that
+    module's docstring), while ``yaw_rad`` is a per-frame orientation
+    reading with no such motion precondition and stays populated
+    whether or not the tag is moving.
     """
     header = f"{record.tag.family.value} {record.tag.number}"
     if record.calibrated and record.world is not None:
+        yaw = "-" if record.yaw_rad is None else f"{record.yaw_rad:.3f}"
         heading = "-" if record.heading_rad is None else f"{record.heading_rad:.3f}"
         speed = "-" if record.speed is None else f"{record.speed:.2f}"
         return (
             f"  {header:<14} world=({record.world.x:.1f}, {record.world.y:.1f}) "
-            f"heading={heading} speed={speed}"
+            f"yaw={yaw} heading={heading} speed={speed}"
         )
     if record.pixel is not None:
         pixel = f"({record.pixel.x:.1f}, {record.pixel.y:.1f})"

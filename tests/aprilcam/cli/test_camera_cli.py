@@ -83,20 +83,32 @@ def _uncalibrated_record(
 
 
 def _calibrated_record(
-    family: TagFamily = TagFamily.APRILTAG, number: int = 1, wx: float = 10.0, wy: float = -5.0
+    family: TagFamily = TagFamily.APRILTAG,
+    number: int = 1,
+    wx: float = 10.0,
+    wy: float = -5.0,
+    heading_rad: Optional[float] = 0.5,
+    speed: Optional[float] = 12.5,
+    yaw_rad: Optional[float] = 0.2,
 ) -> TagRecord:
-    """A record shaped as a future calibration sprint would produce --
-    exercises ``_format_tag_row``'s calibrated branch, unreachable via
-    a real daemon this sprint but real code, not a stub."""
+    """A record shaped as a real calibrated camera produces this sprint
+    (ticket 022-003 onward) -- exercises ``_format_tag_row``'s
+    calibrated branch. ``heading_rad``/``speed``/``yaw_rad`` are
+    overridable so tests can shape the "stationary tag" case (ticket
+    022-007): ``heading_rad=None`` with a real ``speed``/``yaw_rad``,
+    exactly what ``vision.motion.compute_motion`` now reports for a tag
+    whose two most recent samples are within
+    ``MIN_RELIABLE_DISPLACEMENT_CM`` of each other."""
     return TagRecord(
         tag=TagId(family, number),
         world=WorldPoint(wx, wy),
-        heading_rad=0.5,
+        heading_rad=heading_rad,
         world_velocity=None,
-        speed=12.5,
+        speed=speed,
         timestamp=0.0,
         pixel=PixelPoint(1.0, 2.0),
         calibrated=True,
+        yaw_rad=yaw_rad,
     )
 
 
@@ -504,9 +516,8 @@ def test_tags_distinguishes_apriltag_and_aruco_of_the_same_number(capsys):
 
 
 def test_tags_calibrated_record_prints_world_position_not_the_uncalibrated_flag(capsys):
-    """The calibrated branch is real code -- unreachable via a real
-    daemon this sprint, but tested so a later calibration sprint
-    activates it rather than writing it (see the module docstring)."""
+    """The calibrated branch, exercised against a real daemon since
+    ticket 022-003 activated calibration."""
     record = _calibrated_record(wx=10.0, wy=-5.0)
     daemon = _FakeDaemon(tag_frame=_tag_frame((record,)))
     discovery = _FakeDiscovery(daemon=daemon)
@@ -516,6 +527,49 @@ def test_tags_calibrated_record_prints_world_position_not_the_uncalibrated_flag(
     out = capsys.readouterr().out
     assert "UNCALIBRATED" not in out
     assert "world=(10.0, -5.0)" in out
+
+
+def test_tags_calibrated_record_prints_yaw_ahead_of_heading_and_speed(capsys):
+    """Ticket 022-007 acceptance criterion: the CLI shows ``yaw_rad``
+    (the tag's own facing direction) alongside ``heading_rad`` (motion
+    direction) -- previously ``yaw`` was silently absent from
+    ``camera tags`` output entirely, even though ``TagRecord`` already
+    carried it (ticket 022-004)."""
+    record = _calibrated_record(wx=10.0, wy=-5.0, yaw_rad=0.2, heading_rad=0.5, speed=12.5)
+    daemon = _FakeDaemon(tag_frame=_tag_frame((record,)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    camera_cli.cmd_tags(_args(), discovery_factory=lambda: discovery)
+
+    out = capsys.readouterr().out
+    assert "yaw=0.200" in out
+    assert "heading=0.500" in out
+    assert "speed=12.50" in out
+    assert out.index("yaw=") < out.index("heading="), "yaw must print ahead of heading"
+
+
+def test_tags_stationary_tag_shows_undefined_heading_but_a_real_yaw_and_speed(capsys):
+    """Ticket 022-007 defect B, end to end through the CLI: a tag whose
+    two most recent samples are within
+    ``vision.motion.MIN_RELIABLE_DISPLACEMENT_CM`` of each other now
+    carries ``heading_rad=None`` (undefined -- not a confident-looking
+    noise-driven angle) from ``vision.motion.compute_motion``, while
+    ``yaw_rad`` (orientation, not motion -- unaffected by this fix) and
+    ``speed`` (honestly near-zero, not suppressed) stay populated. The
+    CLI must render that distinction, not collapse it: a dash for the
+    undefined heading, real numbers for yaw and speed."""
+    record = _calibrated_record(
+        wx=-67.1, wy=0.0, heading_rad=None, speed=0.0004, yaw_rad=-1.633
+    )
+    daemon = _FakeDaemon(tag_frame=_tag_frame((record,)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    camera_cli.cmd_tags(_args(), discovery_factory=lambda: discovery)
+
+    out = capsys.readouterr().out
+    assert "yaw=-1.633" in out
+    assert "heading=-" in out
+    assert "speed=0.00" in out
 
 
 def test_tags_with_nothing_detected_prints_an_empty_result_not_an_error(capsys):

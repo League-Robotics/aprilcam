@@ -128,12 +128,28 @@ class Camera(_CameraBase):
 
     @property
     def state(self) -> CameraState:
+        """``playfield``/``calibrated``/``calibration_stale`` are always
+        this instance's own defaults (``None``/``False``/``False``) --
+        ``Camera`` has no notion of a config-service link or a
+        calibration store (both are daemon-level state, per the module
+        boundary; see ``daemon.service.DaemonService``'s module
+        docstring). ``DaemonService.list_cameras`` overlays the real
+        values for all three onto whatever this property returns
+        (``dataclasses.replace``) for a held-open camera -- the same
+        overlay it already applies for every not-held-open camera it
+        reports. Do not treat these three fields as authoritative when
+        reading ``Camera.state`` directly outside ``list_cameras``
+        (ticket 022-007: a prior version hardcoded ``calibrated=False``
+        here as if it were, which combined with an identical hardcode in
+        ``list_cameras`` itself to make a genuinely calibrated camera
+        permanently report ``uncalibrated``).
+        """
         return CameraState(
             name=self._slug,
             present=self._present,
             usable=self._backend.is_open and not self._exhausted,
             playfield=self._playfield,
-            calibrated=False,  # no calibration subsystem wired this sprint
+            calibrated=False,
             calibration_stale=False,
             frame_dark=False,  # no dark-frame heuristic wired this sprint
             number=self._number,

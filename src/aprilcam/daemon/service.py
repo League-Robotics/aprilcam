@@ -245,14 +245,38 @@ class DaemonService(Daemon):
         camera list`` shows the camera linked" -- rather than stored on
         ``Camera`` itself, keeping the config-service link a pure
         ``DaemonService``-level concern (ticket 022-001).
+
+        ``calibrated``/``calibration_stale`` are overlaid the same way,
+        from :meth:`get_calibration` -- **not** read off ``Camera.state``
+        (``Camera`` has no notion of calibration; that state lives here,
+        in ``self._calibrations``, per the module boundary that keeps
+        calibration a daemon-level concern rather than something
+        ``camera/camera.py`` knows about). Bug fix, ticket 022-007: this
+        method previously hardcoded ``calibrated=False`` unconditionally
+        in both branches below (and, in the ``held`` branch, inherited a
+        second independent hardcoded ``False`` from ``Camera.state``
+        itself) -- a genuinely calibrated camera reported
+        ``uncalibrated`` forever in ``camera list``/``daemon status``,
+        even though ``get_frame(deskewed=True)``/``get_tags``/
+        ``playfield view`` all read the real calibration correctly. Pure
+        display/state-reporting bug: the calibration itself was never
+        wrong, only what this method told a caller about it.
         """
         present = self._discovery.known_present()
         states = []
         for record in self._registry.records():
             playfield = self._playfield_link(record.slug)
+            calibrated, calibration_stale = self._calibration_flags(record.slug)
             held = self._cameras.get(record.slug)
             if held is not None:
-                states.append(replace(held.state, playfield=playfield))
+                states.append(
+                    replace(
+                        held.state,
+                        playfield=playfield,
+                        calibrated=calibrated,
+                        calibration_stale=calibration_stale,
+                    )
+                )
                 continue
             is_present = record.slug in present
             states.append(
@@ -261,11 +285,24 @@ class DaemonService(Daemon):
                     present=is_present,
                     usable=is_present,
                     playfield=playfield,
-                    calibrated=False,
+                    calibrated=calibrated,
+                    calibration_stale=calibration_stale,
                     number=record.number,
                 )
             )
         return tuple(states)
+
+    def _calibration_flags(self, slug: str) -> Tuple[bool, bool]:
+        """``(calibrated, calibration_stale)`` for *slug*, from whatever
+        :meth:`get_calibration` currently holds -- ``(False, False)``
+        for a camera that has never been calibrated. The single overlay
+        point :meth:`list_cameras` uses for both its branches, so a
+        camera's reported calibration status can never drift between
+        the "held open" and "not held open" code paths."""
+        calibration = self.get_calibration(slug)
+        if calibration is None:
+            return False, False
+        return True, calibration.stale
 
     def probe_cameras(self) -> ProbeReport:
         """See ``daemon.interfaces.Daemon.probe_cameras``. Pure
