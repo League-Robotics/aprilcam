@@ -3,18 +3,21 @@
 021-005; ``set_playfield``/``get_playfield``/``list_playfields``/
 ``set_camera_config``/``get_camera_config`` added by ticket 022-001;
 ``calibrate``/``get_calibration`` added by ticket 022-003;
-``reset_camera_config`` added by ticket 023-004): a typed
+``reset_camera_config`` added by ticket 023-004; ``put_annotation``/
+``remove_annotation``/``replace_layer``/``clear_annotations``/
+``get_annotations`` added by ticket 024-002): a typed
 wrapper over the generated gRPC stub for
 ``list_cameras``, ``probe_cameras``, ``get_frame``, ``status``,
 ``get_tags``, ``get_tag``, ``get_tag_history``, ``set_playfield``,
 ``get_playfield``, ``list_playfields``, ``set_camera_config``,
 ``get_camera_config``, ``calibrate``, ``get_calibration``,
-``reset_camera_config``.
+``reset_camera_config``, ``put_annotation``, ``remove_annotation``,
+``replace_layer``, ``clear_annotations``, ``get_annotations``.
 
-**Only these fifteen methods are implemented**, mirroring
+**Only these twenty methods are implemented**, mirroring
 ``daemon.service.DaemonService``'s own stance: ``daemon.interfaces.
-Daemon`` is a much larger base class (streams, annotations, tag
-parameters, guides, ``find_feature``), and
+Daemon`` is a much larger base class (streams, tag parameters, guides,
+``find_feature``), and
 those are inherited as-is here rather than overridden -- calling one
 raises ``NotImplementedError`` naming itself instead of failing with a
 bare ``AttributeError``. ``isinstance(client,
@@ -53,6 +56,7 @@ import grpc
 from aprilcam.calibration.calibration import Calibration
 from aprilcam.calibration.interfaces import CalibrationResult
 from aprilcam.client.models import (
+    annotation_set_from_proto,
     calibration_from_proto,
     calibration_result_from_proto,
     camera_config_from_proto,
@@ -80,7 +84,24 @@ from aprilcam.errors import (
 )
 from aprilcam.playfield.interfaces import Playfield
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
-from aprilcam.types import CameraState, ImageFrame, ProbeReport, TagFamily, TagFrame, TagId, TagRecord
+from aprilcam.types import (
+    Annotation,
+    AnnotationSet,
+    CameraState,
+    Circle,
+    ImageFrame,
+    Marker,
+    PathShape,
+    Polygon,
+    ProbeReport,
+    Style,
+    TagFamily,
+    TagFrame,
+    TagId,
+    TagRecord,
+    Text,
+    WorldPoint,
+)
 
 __all__ = ["GrpcDaemon"]
 
@@ -135,6 +156,83 @@ def _camera_config_to_proto(config: CameraConfig) -> aprilcam_v2_pb2.CameraConfi
     msg = aprilcam_v2_pb2.CameraConfig(name=config.name, settings_json=json.dumps(config.settings))
     if config.playfield is not None:
         msg.playfield = config.playfield
+    return msg
+
+
+#: Annotations (ticket 024-002, UC-28, specification.md section 9
+#: decision 8). Request-building direction only (Python -> proto, for
+#: an outgoing ``PutAnnotationRequest``/``ReplaceLayerRequest``) --
+#: duplicated, not shared, with ``daemon/rpc.py``'s identically-shaped
+#: ``_annotation_to_proto`` and friends, matching this module's own
+#: established pattern above: each side of the proto boundary owns its
+#: own small conversion.
+
+
+def _world_point_to_proto(point: WorldPoint) -> aprilcam_v2_pb2.WorldPoint:
+    return aprilcam_v2_pb2.WorldPoint(x=point.x, y=point.y)
+
+
+def _marker_to_proto(marker: Marker) -> aprilcam_v2_pb2.Marker:
+    msg = aprilcam_v2_pb2.Marker(at=_world_point_to_proto(marker.at))
+    if marker.label is not None:
+        msg.label = marker.label
+    return msg
+
+
+def _path_shape_to_proto(path: PathShape) -> aprilcam_v2_pb2.PathShape:
+    return aprilcam_v2_pb2.PathShape(points=[_world_point_to_proto(p) for p in path.points])
+
+
+def _polygon_to_proto(polygon: Polygon) -> aprilcam_v2_pb2.Polygon:
+    return aprilcam_v2_pb2.Polygon(points=[_world_point_to_proto(p) for p in polygon.points])
+
+
+def _circle_to_proto(circle: Circle) -> aprilcam_v2_pb2.Circle:
+    return aprilcam_v2_pb2.Circle(center=_world_point_to_proto(circle.center), radius_cm=circle.radius_cm)
+
+
+def _text_to_proto(text: Text) -> aprilcam_v2_pb2.Text:
+    return aprilcam_v2_pb2.Text(at=_world_point_to_proto(text.at), text=text.text)
+
+
+def _style_to_proto(style: Style) -> aprilcam_v2_pb2.Style:
+    msg = aprilcam_v2_pb2.Style()
+    if style.color is not None:
+        msg.color = style.color
+    if style.line_width is not None:
+        msg.line_width = style.line_width
+    return msg
+
+
+def _annotation_to_proto(annotation: Annotation) -> aprilcam_v2_pb2.Annotation:
+    """Python -> proto, for an outgoing ``PutAnnotationRequest``/
+    ``ReplaceLayerRequest``. See ``daemon/rpc.py``'s
+    ``_annotation_to_proto`` -- exactly one ``oneof shape`` field is
+    set, matching ``types.AnnotationShape``'s
+    ``Union[Marker, PathShape, Polygon, Circle, Text]``; the ``else``
+    branch is unreachable through normal use for the same reason as
+    that function's."""
+    msg = aprilcam_v2_pb2.Annotation(
+        id=annotation.id, layer=annotation.layer, style=_style_to_proto(annotation.style)
+    )
+    shape = annotation.shape
+    if isinstance(shape, Marker):
+        msg.marker.CopyFrom(_marker_to_proto(shape))
+    elif isinstance(shape, PathShape):
+        msg.path.CopyFrom(_path_shape_to_proto(shape))
+    elif isinstance(shape, Polygon):
+        msg.polygon.CopyFrom(_polygon_to_proto(shape))
+    elif isinstance(shape, Circle):
+        msg.circle.CopyFrom(_circle_to_proto(shape))
+    elif isinstance(shape, Text):
+        msg.text.CopyFrom(_text_to_proto(shape))
+    else:
+        raise TypeError(
+            f"cannot serialize annotation {annotation.id!r}: unknown shape type "
+            f"{type(shape).__name__}"
+        )
+    if annotation.ttl_seconds is not None:
+        msg.ttl_seconds = annotation.ttl_seconds
     return msg
 
 
@@ -306,6 +404,55 @@ class GrpcDaemon(Daemon):
         if not response.HasField("calibration"):
             return None
         return calibration_from_proto(response.calibration)
+
+    def put_annotation(self, playfield: str, annotation: Annotation) -> None:
+        """Upsert one annotation on *playfield* (UC-28) -- the RPC face
+        of ``Daemon.put_annotation``. Thin request-build-and-call, like
+        every method above: no business logic here, that stays in the
+        daemon (``adapters.md``)."""
+        request = aprilcam_v2_pb2.PutAnnotationRequest(
+            playfield=playfield, annotation=_annotation_to_proto(annotation)
+        )
+        self._call(self._stub.PutAnnotation, request)
+
+    def remove_annotation(self, playfield: str, layer: str, id: str) -> None:
+        """Delete one annotation by its ``(layer, id)`` key. Removing an
+        absent key is a no-op, enforced daemon-side."""
+        request = aprilcam_v2_pb2.RemoveAnnotationRequest(playfield=playfield, layer=layer, id=id)
+        self._call(self._stub.RemoveAnnotation, request)
+
+    def replace_layer(
+        self, playfield: str, layer: str, annotations: Tuple[Annotation, ...]
+    ) -> None:
+        """Atomically swap *layer*'s entire contents (UC-28.S-2)."""
+        request = aprilcam_v2_pb2.ReplaceLayerRequest(
+            playfield=playfield,
+            layer=layer,
+            annotations=[_annotation_to_proto(a) for a in annotations],
+        )
+        self._call(self._stub.ReplaceLayer, request)
+
+    def clear_annotations(self, playfield: str, layer: Optional[str] = None) -> None:
+        """Clear one layer, or every layer on *playfield* when *layer*
+        is ``None``. Clearing an already-empty (or nonexistent) layer is
+        a no-op, enforced daemon-side."""
+        request = aprilcam_v2_pb2.ClearAnnotationsRequest(playfield=playfield)
+        if layer is not None:
+            request.layer = layer
+        self._call(self._stub.ClearAnnotations, request)
+
+    def get_annotations(self, playfield: str, layer: Optional[str] = None) -> AnnotationSet:
+        """The current annotation set for *playfield*, optionally
+        filtered to one *layer* (UC-28.S-3). ``GetAnnotationsResponse.
+        annotations`` is always present on the wire (``daemon/rpc.py``'s
+        ``GetAnnotations`` handler), so no ``HasField()`` check is
+        needed here -- unlike ``get_calibration``'s genuinely optional
+        response."""
+        request = aprilcam_v2_pb2.GetAnnotationsRequest(playfield=playfield)
+        if layer is not None:
+            request.layer = layer
+        response = self._call(self._stub.GetAnnotations, request)
+        return annotation_set_from_proto(response.annotations)
 
     # -- internals -----------------------------------------------------
 

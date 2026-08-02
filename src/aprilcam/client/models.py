@@ -1,5 +1,7 @@
 """The client-side half of the proto boundary (ticket 020-005; the
-tag-detection converters below are ticket 021-005).
+tag-detection converters below are ticket 021-005; the annotation-store
+converters below, and ``image_frame_from_proto``'s ``annotations``
+field, are ticket 024-002).
 
 ``docs/design/design.md`` §6 is explicit: "generated proto types cross
 into Python only via ``from_proto`` constructors in ``client/models.py``."
@@ -43,19 +45,30 @@ from aprilcam.daemon.interfaces import DaemonStatus
 from aprilcam.playfield.playfield import Playfield
 from aprilcam.proto import aprilcam_v2_pb2
 from aprilcam.types import (
+    Annotation,
+    AnnotationSet,
+    AnnotationShape,
     CameraState,
+    Circle,
     ImageFrame,
+    Marker,
+    PathShape,
     PixelPoint,
+    Polygon,
     ProbeReport,
     ProbeSkip,
+    Style,
     TagFamily,
     TagFrame,
     TagId,
     TagRecord,
+    Text,
     WorldPoint,
 )
 
 __all__ = [
+    "annotation_from_proto",
+    "annotation_set_from_proto",
     "calibration_from_proto",
     "calibration_result_from_proto",
     "camera_config_from_proto",
@@ -67,6 +80,7 @@ __all__ = [
     "playfield_from_proto",
     "playfields_from_proto",
     "probe_report_from_proto",
+    "style_from_proto",
     "tag_frame_from_proto",
     "tag_id_from_proto",
     "tag_record_from_get_tag_response",
@@ -106,14 +120,16 @@ def probe_report_from_proto(msg: aprilcam_v2_pb2.ProbeCamerasResponse) -> ProbeR
 
 
 def image_frame_from_proto(msg: aprilcam_v2_pb2.GetFrameResponse) -> ImageFrame:
-    """See ``daemon.interfaces.Daemon.get_frame``. ``annotations`` is
-    still not carried on the wire this sprint (the annotation store does
-    not exist yet -- sprint 022 Decision 5); it stays at its ``types.py``
-    default (``None``) here rather than being invented client-side.
-    ``tags`` (ticket 021-005) and ``px_per_cm``/``world_extent`` (ticket
-    022-005) all round-trip via ``HasField()`` -- ``None`` on this side
-    iff absent on the wire, never coerced to ``0.0``/empty, matching
-    ``types.py``'s Optional-vs-None discipline exactly."""
+    """See ``daemon.interfaces.Daemon.get_frame``. ``tags`` (ticket
+    021-005), ``px_per_cm``/``world_extent`` (ticket 022-005), and
+    ``annotations`` (ticket 024-002) all round-trip via ``HasField()``
+    -- ``None`` on this side iff absent on the wire, never coerced to
+    ``0.0``/empty, matching ``types.py``'s Optional-vs-None discipline
+    exactly. ``annotations`` is present only for a deskewed frame --
+    ``daemon/rpc.py``'s ``_image_frame_to_proto`` never sets it for a
+    raw one -- and, unlike ``tags``, is *always* set on that branch,
+    even for an empty ``AnnotationSet`` (revision 0): that presence
+    survives here unchanged, never coerced to ``None``."""
     return ImageFrame(
         data=msg.data,
         width=msg.width,
@@ -129,6 +145,9 @@ def image_frame_from_proto(msg: aprilcam_v2_pb2.GetFrameResponse) -> ImageFrame:
             (msg.world_extent.width_cm, msg.world_extent.height_cm)
             if msg.HasField("world_extent")
             else None
+        ),
+        annotations=(
+            annotation_set_from_proto(msg.annotations) if msg.HasField("annotations") else None
         ),
     )
 
@@ -357,4 +376,84 @@ def calibration_from_proto(msg: aprilcam_v2_pb2.Calibration) -> Calibration:
         reprojection_error_cm=(
             msg.reprojection_error_cm if msg.HasField("reprojection_error_cm") else None
         ),
+    )
+
+
+#: Annotations (ticket 024-002, UC-28, specification.md section 9
+#: decision 8). The client-side mirror of ``daemon/rpc.py``'s
+#: ``_annotation_*_from_proto`` converters -- field for field, in
+#: reverse, same ``HasField()`` discipline as everywhere else in this
+#: module. Per-shape helpers stay private (like ``_world_point_from_proto``
+#: above); ``annotation_from_proto``/``annotation_set_from_proto``/
+#: ``style_from_proto`` are the public door, matching the granularity of
+#: this module's other composite converters (``tag_record_from_proto``
+#: and friends).
+
+
+def _marker_from_proto(msg: aprilcam_v2_pb2.Marker) -> Marker:
+    return Marker(at=_world_point_from_proto(msg.at), label=msg.label if msg.HasField("label") else None)
+
+
+def _path_shape_from_proto(msg: aprilcam_v2_pb2.PathShape) -> PathShape:
+    return PathShape(points=tuple(_world_point_from_proto(p) for p in msg.points))
+
+
+def _polygon_from_proto(msg: aprilcam_v2_pb2.Polygon) -> Polygon:
+    return Polygon(points=tuple(_world_point_from_proto(p) for p in msg.points))
+
+
+def _circle_from_proto(msg: aprilcam_v2_pb2.Circle) -> Circle:
+    return Circle(center=_world_point_from_proto(msg.center), radius_cm=msg.radius_cm)
+
+
+def _text_from_proto(msg: aprilcam_v2_pb2.Text) -> Text:
+    return Text(at=_world_point_from_proto(msg.at), text=msg.text)
+
+
+def style_from_proto(msg: aprilcam_v2_pb2.Style) -> Style:
+    """The client-side mirror of ``daemon/rpc.py``'s ``_style_to_proto``
+    -- field for field, in reverse. An unset ``color``/``line_width``
+    stays ``None``, never coerced to ``""``/``0.0``."""
+    return Style(
+        color=msg.color if msg.HasField("color") else None,
+        line_width=msg.line_width if msg.HasField("line_width") else None,
+    )
+
+
+def annotation_from_proto(msg: aprilcam_v2_pb2.Annotation) -> Annotation:
+    """The client-side mirror of ``daemon/rpc.py``'s
+    ``_annotation_from_proto`` -- field for field, in reverse, including
+    the same ``WhichOneof("shape")`` dispatch (see that function's
+    docstring for why the ``else`` branch is unreachable through normal
+    use)."""
+    which = msg.WhichOneof("shape")
+    shape: AnnotationShape
+    if which == "marker":
+        shape = _marker_from_proto(msg.marker)
+    elif which == "path":
+        shape = _path_shape_from_proto(msg.path)
+    elif which == "polygon":
+        shape = _polygon_from_proto(msg.polygon)
+    elif which == "circle":
+        shape = _circle_from_proto(msg.circle)
+    elif which == "text":
+        shape = _text_from_proto(msg.text)
+    else:
+        raise ValueError(f"annotation {msg.id!r} has no shape set")
+    return Annotation(
+        id=msg.id,
+        layer=msg.layer,
+        shape=shape,
+        style=style_from_proto(msg.style),
+        ttl_seconds=msg.ttl_seconds if msg.HasField("ttl_seconds") else None,
+    )
+
+
+def annotation_set_from_proto(msg: aprilcam_v2_pb2.AnnotationSet) -> AnnotationSet:
+    """The client-side mirror of ``daemon/rpc.py``'s
+    ``_annotation_set_to_proto`` -- field for field, in reverse."""
+    return AnnotationSet(
+        annotations=tuple(annotation_from_proto(a) for a in msg.annotations),
+        revision=msg.revision,
+        timestamp=msg.timestamp,
     )
