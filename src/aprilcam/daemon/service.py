@@ -631,27 +631,53 @@ class DaemonService(Daemon):
         """See ``daemon.interfaces.Daemon.get_camera_config``.
 
         Answers from whatever :meth:`set_camera_config` last held for
-        *camera* -- this sprint builds no introspected-plus-blank
-        template (UC-03.S-1's full behaviour is out of scope, Decision
-        1), so a camera nobody has configured yet is honestly
-        :class:`~aprilcam.errors.UnknownCamera` rather than a
-        fabricated blank document, naming every camera this daemon
-        currently holds a config for.
+        *camera* when one exists -- UC-03.S-2's "re-fetching the config
+        returns the pushed values," exactly the document, never a live
+        hardware readback merged in. This is deliberate, not an
+        omission: the dump -> install -> restart -> dump round trip
+        (UC-24.S-1) must reproduce exactly what was pushed or installed
+        on disk, and the blank-template case just below must report
+        ``None`` for every unset key even when the hardware itself has
+        real factory-default values in force -- a live readback would
+        get both of those wrong. Capturing what a camera's hardware is
+        *actually* doing right now (as opposed to what document is on
+        record for it) is a different, unbuilt capability -- ticket
+        023-005 (this ticket) deliberately leaves it that way; see that
+        ticket's notes.
+
+        A camera with no stored document but **held open** in this
+        process (:attr:`_cameras` -- populated by ``get_frame``/
+        ``tags``/a config-push attempt/... via :meth:`_camera_for`)
+        falls back to that camera's own introspected-plus-blank
+        template (:meth:`~aprilcam.camera.camera.Camera.effective_config`,
+        made real per-camera by ticket 023-002) -- UC-03.S-1's "freshly
+        enumerated... never configured" scenario and UC-24.S-3's
+        dump-as-template scenario, ticket 023-005's whole reason for
+        depending on 023-002. A camera merely *registered* (known from
+        a previous session or a probe, but never opened by this
+        process) still reports :class:`~aprilcam.errors.UnknownCamera`
+        here, matching UC-24.S-4 and every restart test's existing
+        expectation -- config, pushed or blank-template, is exactly as
+        ephemeral as everything else UC-01/UC-02 already establish;
+        only calibration survives a restart.
 
         *camera* accepts a persistent number or a slug (SUC-005),
-        resolved via :meth:`_resolve_slug_if_known` before the lookup
-        -- ``_camera_configs`` is keyed by slug only, so an unresolved
-        number would otherwise never match a real link. The error still
-        names whatever *camera* the caller actually typed, not the
-        resolved slug.
+        resolved via :meth:`_resolve_slug_if_known` before either
+        lookup -- both ``_camera_configs`` and ``_cameras`` are keyed by
+        slug only, so an unresolved number would otherwise never match
+        a real entry in either. The error still names whatever *camera*
+        the caller actually typed, not the resolved slug.
         """
         slug = self._resolve_slug_if_known(camera)
         with self._lock:
             config = self._camera_configs.get(slug)
+            held = self._cameras.get(slug)
             available = tuple(sorted(self._camera_configs.keys()))
-        if config is None:
-            raise UnknownCamera(camera, available)
-        return config
+        if config is not None:
+            return config
+        if held is not None:
+            return held.effective_config()
+        raise UnknownCamera(camera, available)
 
     def set_camera_config(self, config: CameraConfig) -> None:
         """See ``daemon.interfaces.Daemon.set_camera_config``.

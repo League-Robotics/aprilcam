@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -85,6 +86,9 @@ class _FakeDaemon:
     get_frame_raises: Optional[Exception] = None
     requested_camera: Optional[str] = None
     requested_encoding: Optional[str] = None
+    get_playfield_returns: object = None
+    get_playfield_raises: Optional[Exception] = None
+    get_playfield_requested: Optional[str] = None
 
     def set_playfield(self, definition) -> None:
         if self.set_playfield_raises is not None:
@@ -100,6 +104,13 @@ class _FakeDaemon:
         if self.get_frame_raises is not None:
             raise self.get_frame_raises
         return self.frame if self.frame is not None else _frame()
+
+    def get_playfield(self, name: str):
+        self.get_playfield_requested = name
+        if self.get_playfield_raises is not None:
+            raise self.get_playfield_raises
+        assert self.get_playfield_returns is not None, "test forgot to set get_playfield_returns"
+        return self.get_playfield_returns
 
 
 @dataclass
@@ -125,6 +136,7 @@ def _args(**overrides) -> argparse.Namespace:
         encoding="jpeg",
         force=False,
         all=False,
+        dump=False,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -207,6 +219,105 @@ def test_config_passes_the_daemon_flag_through_to_connect():
     )
 
     assert discovery.connected_with == "pi-field.local"
+
+
+# ---------------------------------------------------------------------------
+# playfield config --dump -- AC: UC-24, ticket 023-005 (playfield's first
+# CLI *read* path)
+# ---------------------------------------------------------------------------
+
+
+def test_config_dump_flag_is_wired():
+    parser = _build_parser()
+    args = parser.parse_args(["playfield", "config", "main-playfield", "--dump"])
+    assert args.func is playfield_cli.cmd_config
+    assert args.file == "main-playfield"
+    assert args.dump is True
+
+
+def test_config_dump_prints_the_live_document_in_exact_on_disk_json(capsys):
+    from aprilcam.playfield.playfield import Playfield
+
+    definition = _definition()
+    playfield = Playfield(name=definition.name, definition=definition)
+    daemon = _FakeDaemon(get_playfield_returns=playfield)
+    discovery = _FakeDiscovery(daemon=daemon)
+    loader = _FakePlayfieldLoader()  # never touched -- --dump skips the loader entirely
+
+    code = playfield_cli.cmd_config(
+        _args(file="main-playfield", dump=True),
+        discovery_factory=lambda: discovery,
+        loader_factory=lambda: loader,
+    )
+
+    assert code == 0
+    assert daemon.get_playfield_requested == "main-playfield"
+    assert loader.requested_path is None  # no file was ever loaded client-side
+    printed = json.loads(capsys.readouterr().out)
+    assert printed == definition.to_dict()
+    assert printed["name"] == "main-playfield"  # ConfigDocument.to_dict's contract
+
+
+def test_config_dump_round_trips_through_config_loader(capsys, tmp_path):
+    """The binding contract ``config/interfaces.py`` states for
+    ``ConfigLoader``: ``load(x.to_dict()) == x``. Dumped output, written
+    to a file and re-loaded through the real ``ConfigLoader`` (not the
+    fake used elsewhere in this file), reproduces an identical
+    document -- UC-24.S-1's round trip, exercised headlessly against a
+    fake ``Daemon``."""
+    from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
+    from aprilcam.playfield.playfield import Playfield
+
+    definition = _definition()
+    playfield = Playfield(name=definition.name, definition=definition)
+    daemon = _FakeDaemon(get_playfield_returns=playfield)
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = playfield_cli.cmd_config(
+        _args(file="main-playfield", dump=True), discovery_factory=lambda: discovery
+    )
+    assert code == 0
+
+    dumped_path = tmp_path / "dumped.json"
+    dumped_path.write_text(capsys.readouterr().out)
+    reloaded = JsonConfigLoader().load_playfield(dumped_path)
+
+    assert reloaded == definition
+
+
+def test_config_dump_reports_a_daemon_side_rejection(capsys):
+    daemon = _FakeDaemon(get_playfield_raises=UnknownPlayfield("ghost-field", ("main-playfield",)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = playfield_cli.cmd_config(
+        _args(file="ghost-field", dump=True), discovery_factory=lambda: discovery
+    )
+
+    assert code == 1
+    assert "ghost-field" in capsys.readouterr().err
+
+
+def test_config_dump_passes_the_daemon_flag_through_to_connect():
+    from aprilcam.playfield.playfield import Playfield
+
+    definition = _definition()
+    playfield = Playfield(name=definition.name, definition=definition)
+    daemon = _FakeDaemon(get_playfield_returns=playfield)
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    playfield_cli.cmd_config(
+        _args(file="main-playfield", dump=True, daemon="pi-field.local"),
+        discovery_factory=lambda: discovery,
+    )
+
+    assert discovery.connected_with == "pi-field.local"
+
+
+def test_config_dump_h_prints_help_not_a_missing_hostname_error():
+    parser = _build_parser()
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["playfield", "config", "main-playfield", "--dump", "-h"])
+    assert excinfo.value.code == 0
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +673,7 @@ def test_config_is_wired_to_cmd_config():
     assert args.func is playfield_cli.cmd_config
     assert args.file == "main-playfield.json"
     assert args.daemon is None
+    assert args.dump is False
 
 
 def test_config_requires_a_file_positional_argument():
