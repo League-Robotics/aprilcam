@@ -113,6 +113,31 @@ class AprilCamV2Stub(object):
                 request_serializer=aprilcam__v2__pb2.ResetCameraConfigRequest.SerializeToString,
                 response_deserializer=aprilcam__v2__pb2.ResetCameraConfigResponse.FromString,
                 _registered_method=True)
+        self.PutAnnotation = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/PutAnnotation',
+                request_serializer=aprilcam__v2__pb2.PutAnnotationRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.PutAnnotationResponse.FromString,
+                _registered_method=True)
+        self.RemoveAnnotation = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/RemoveAnnotation',
+                request_serializer=aprilcam__v2__pb2.RemoveAnnotationRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.RemoveAnnotationResponse.FromString,
+                _registered_method=True)
+        self.ReplaceLayer = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/ReplaceLayer',
+                request_serializer=aprilcam__v2__pb2.ReplaceLayerRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.ReplaceLayerResponse.FromString,
+                _registered_method=True)
+        self.ClearAnnotations = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/ClearAnnotations',
+                request_serializer=aprilcam__v2__pb2.ClearAnnotationsRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.ClearAnnotationsResponse.FromString,
+                _registered_method=True)
+        self.GetAnnotations = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/GetAnnotations',
+                request_serializer=aprilcam__v2__pb2.GetAnnotationsRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.GetAnnotationsResponse.FromString,
+                _registered_method=True)
 
 
 class AprilCamV2Servicer(object):
@@ -277,6 +302,54 @@ class AprilCamV2Servicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def PutAnnotation(self, request, context):
+        """Upsert one annotation by its (layer, id) key (UC-28, ticket
+        024-001). Last write wins on a colliding key -- documented
+        semantics, not a race bug (UC-28.S-6). Unknown playfield ->
+        `NOT_FOUND`, naming the playfields held.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RemoveAnnotation(self, request, context):
+        """Delete one annotation. Removing an absent (layer, id) key -- or a
+        layer that does not exist -- on a *known* playfield is a no-op,
+        never an error; an unknown *playfield* still -> `NOT_FOUND`.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ReplaceLayer(self, request, context):
+        """Atomically swap a layer's entire contents in one call (UC-28.S-2)
+        -- no consumer ever observes a half-updated layer; every frame
+        embeds the old set or the new one, never a mix.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ClearAnnotations(self, request, context):
+        """Clear one layer, or every layer on the playfield when `layer` is
+        absent. Clearing an already-empty or nonexistent layer on a
+        *known* playfield is a no-op -- a known-empty state is the
+        caller's actual goal.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetAnnotations(self, request, context):
+        """The current annotation set for a playfield, optionally filtered to
+        one layer (UC-28.S-3) -- how a robot reads another robot's plan
+        without fetching pixels. After a restart this is an empty set at
+        revision 0 (UC-28.S-4): the wipe is the contract, not a fault.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_AprilCamV2Servicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -354,6 +427,31 @@ def add_AprilCamV2Servicer_to_server(servicer, server):
                     servicer.ResetCameraConfig,
                     request_deserializer=aprilcam__v2__pb2.ResetCameraConfigRequest.FromString,
                     response_serializer=aprilcam__v2__pb2.ResetCameraConfigResponse.SerializeToString,
+            ),
+            'PutAnnotation': grpc.unary_unary_rpc_method_handler(
+                    servicer.PutAnnotation,
+                    request_deserializer=aprilcam__v2__pb2.PutAnnotationRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.PutAnnotationResponse.SerializeToString,
+            ),
+            'RemoveAnnotation': grpc.unary_unary_rpc_method_handler(
+                    servicer.RemoveAnnotation,
+                    request_deserializer=aprilcam__v2__pb2.RemoveAnnotationRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.RemoveAnnotationResponse.SerializeToString,
+            ),
+            'ReplaceLayer': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReplaceLayer,
+                    request_deserializer=aprilcam__v2__pb2.ReplaceLayerRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.ReplaceLayerResponse.SerializeToString,
+            ),
+            'ClearAnnotations': grpc.unary_unary_rpc_method_handler(
+                    servicer.ClearAnnotations,
+                    request_deserializer=aprilcam__v2__pb2.ClearAnnotationsRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.ClearAnnotationsResponse.SerializeToString,
+            ),
+            'GetAnnotations': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetAnnotations,
+                    request_deserializer=aprilcam__v2__pb2.GetAnnotationsRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.GetAnnotationsResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -765,6 +863,141 @@ class AprilCamV2(object):
             '/aprilcam.v2.AprilCamV2/ResetCameraConfig',
             aprilcam__v2__pb2.ResetCameraConfigRequest.SerializeToString,
             aprilcam__v2__pb2.ResetCameraConfigResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def PutAnnotation(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/PutAnnotation',
+            aprilcam__v2__pb2.PutAnnotationRequest.SerializeToString,
+            aprilcam__v2__pb2.PutAnnotationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RemoveAnnotation(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/RemoveAnnotation',
+            aprilcam__v2__pb2.RemoveAnnotationRequest.SerializeToString,
+            aprilcam__v2__pb2.RemoveAnnotationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReplaceLayer(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/ReplaceLayer',
+            aprilcam__v2__pb2.ReplaceLayerRequest.SerializeToString,
+            aprilcam__v2__pb2.ReplaceLayerResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ClearAnnotations(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/ClearAnnotations',
+            aprilcam__v2__pb2.ClearAnnotationsRequest.SerializeToString,
+            aprilcam__v2__pb2.ClearAnnotationsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetAnnotations(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/GetAnnotations',
+            aprilcam__v2__pb2.GetAnnotationsRequest.SerializeToString,
+            aprilcam__v2__pb2.GetAnnotationsResponse.FromString,
             options,
             channel_credentials,
             insecure,

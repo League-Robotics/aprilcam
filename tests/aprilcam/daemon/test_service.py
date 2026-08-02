@@ -64,7 +64,21 @@ from aprilcam.errors import (
     UnsupportedSetting,
 )
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
-from aprilcam.types import PixelPoint, TagFamily, TagFrame, TagId, TagRecord, WorldPoint
+from aprilcam.types import (
+    Annotation,
+    Circle,
+    Marker,
+    PathShape,
+    PixelPoint,
+    Polygon,
+    Style,
+    TagFamily,
+    TagFrame,
+    TagId,
+    TagRecord,
+    Text,
+    WorldPoint,
+)
 from aprilcam.vision.detector import Detection
 from tests.aprilcam.calibration.test_calibration import (
     MAIN_PLAYFIELD_ARUCO_POSITIONS,
@@ -2678,6 +2692,708 @@ def test_rpc_calibrate_no_playfield_linked_maps_to_failed_precondition(stub, hel
     metadata = dict(excinfo.value.trailing_metadata())
     assert metadata["aprilcam-error-type"] == "NoPlayfieldLinked"
     assert metadata["aprilcam-camera"] == slug
+
+
+# ---------------------------------------------------------------------------
+# Annotation store (ticket 024-001, specification.md section 9 decision
+# 8, UC-28) -- DaemonService direct-method tests first (no gRPC needed,
+# mirroring every other section's construction pattern), then RPC round
+# trips over a real gRPC channel.
+# ---------------------------------------------------------------------------
+
+
+def _marker(id: str, layer: str, x: float = 1.0, y: float = 2.0) -> Annotation:
+    return Annotation(id=id, layer=layer, shape=Marker(at=WorldPoint(x=x, y=y)))
+
+
+def test_put_annotation_unknown_playfield_raises_unknown_playfield_naming_held_playfields(
+    service,
+):
+    service.set_playfield(_playfield_definition("main-playfield"))
+
+    with pytest.raises(UnknownPlayfield) as excinfo:
+        service.put_annotation("practice-field", _marker("goal", "planner"))
+
+    assert excinfo.value.requested == "practice-field"
+    assert excinfo.value.available == ("main-playfield",)
+
+
+def test_remove_annotation_unknown_playfield_raises_unknown_playfield(service):
+    with pytest.raises(UnknownPlayfield):
+        service.remove_annotation("no-such-field", "planner", "goal")
+
+
+def test_replace_layer_unknown_playfield_raises_unknown_playfield(service):
+    with pytest.raises(UnknownPlayfield):
+        service.replace_layer("no-such-field", "planner", ())
+
+
+def test_clear_annotations_unknown_playfield_raises_unknown_playfield(service):
+    with pytest.raises(UnknownPlayfield):
+        service.clear_annotations("no-such-field")
+
+
+def test_get_annotations_unknown_playfield_raises_unknown_playfield(service):
+    with pytest.raises(UnknownPlayfield):
+        service.get_annotations("no-such-field")
+
+
+def test_put_annotation_then_get_annotations_round_trips_and_bumps_revision(service):
+    service.set_playfield(_playfield_definition("main-playfield"))
+
+    before = service.get_annotations("main-playfield")
+    assert before.annotations == ()
+    assert before.revision == 0
+
+    service.put_annotation("main-playfield", _marker("goal", "planner", x=50.0, y=30.0))
+
+    after = service.get_annotations("main-playfield")
+    assert len(after.annotations) == 1
+    assert after.annotations[0].id == "goal"
+    assert after.annotations[0].layer == "planner"
+    assert after.annotations[0].shape == Marker(at=WorldPoint(x=50.0, y=30.0))
+    assert after.revision == 1
+
+
+def test_two_independent_reads_see_the_same_put_annotation(service):
+    """UC-28.S-1: a marker put by one client is visible to a second
+    caller's ``list_annotations`` with no action required on its part.
+    At the service level (single shared store, RPC concerns already
+    covered separately below) this is exactly two independent
+    ``get_annotations`` calls agreeing."""
+    service.set_playfield(_playfield_definition("main-playfield"))
+    service.put_annotation("main-playfield", _marker("goal", "planner", x=50.0, y=30.0))
+
+    client_a_view = service.get_annotations("main-playfield")
+    client_b_view = service.get_annotations("main-playfield")
+
+    assert client_a_view.annotations == client_b_view.annotations
+    assert client_a_view.revision == client_b_view.revision == 1
+
+
+def test_put_annotation_accepts_every_shape_in_the_annotation_shape_union(service):
+    service.set_playfield(_playfield_definition("main-playfield"))
+    shapes = {
+        "marker": Marker(at=WorldPoint(x=1.0, y=1.0), label="m"),
+        "path": PathShape(points=(WorldPoint(x=0.0, y=0.0), WorldPoint(x=1.0, y=1.0))),
+        "polygon": Polygon(
+            points=(
+                WorldPoint(x=0.0, y=0.0),
+                WorldPoint(x=1.0, y=0.0),
+                WorldPoint(x=0.0, y=1.0),
+            )
+        ),
+        "circle": Circle(center=WorldPoint(x=0.0, y=0.0), radius_cm=5.0),
+        "text": Text(at=WorldPoint(x=0.0, y=0.0), text="hi"),
+    }
+    for name, shape in shapes.items():
+        service.put_annotation(
+            "main-playfield",
+            Annotation(id=name, layer="planner", shape=shape, style=Style(color="blue")),
+        )
+
+    after = service.get_annotations("main-playfield")
+
+    by_id = {a.id: a for a in after.annotations}
+    assert set(by_id) == set(shapes)
+    for name, shape in shapes.items():
+        assert by_id[name].shape == shape
+        assert by_id[name].style == Style(color="blue")
+
+
+def test_remove_annotation_removes_and_bumps_revision(service):
+    service.set_playfield(_playfield_definition("main-playfield"))
+    service.put_annotation("main-playfield", _marker("goal", "planner"))
+
+    service.remove_annotation("main-playfield", "planner", "goal")
+
+    after = service.get_annotations("main-playfield")
+    assert after.annotations == ()
+    assert after.revision == 2  # put -> 1, remove -> 2
+
+
+def test_remove_annotation_absent_id_on_known_playfield_is_a_no_op(service):
+    service.set_playfield(_playfield_definition("main-playfield"))
+
+    service.remove_annotation("main-playfield", "planner", "no-such-id")  # must not raise
+
+    after = service.get_annotations("main-playfield")
+    assert after.annotations == ()
+    assert after.revision == 0  # no mutation happened -- no-op, not an error
+
+
+def test_remove_annotation_absent_layer_on_known_playfield_is_a_no_op(service):
+    service.set_playfield(_playfield_definition("main-playfield"))
+    service.put_annotation("main-playfield", _marker("goal", "planner"))
+
+    service.remove_annotation("main-playfield", "no-such-layer", "goal")
+
+    after = service.get_annotations("main-playfield")
+    assert len(after.annotations) == 1
+    assert after.revision == 1  # unchanged by the no-op remove
+
+
+def test_replace_layer_atomically_swaps_contents_and_bumps_revision(service):
+    service.set_playfield(_playfield_definition("main-playfield"))
+    service.put_annotation("main-playfield", _marker("old", "planner"))
+
+    service.replace_layer("main-playfield", "planner", (_marker("new", "planner", x=10.0, y=20.0),))
+
+    after = service.get_annotations("main-playfield", layer="planner")
+    assert [a.id for a in after.annotations] == ["new"]
+    assert after.revision == 2  # put -> 1, replace -> 2
+
+
+def test_replace_layer_with_an_empty_tuple_clears_the_layer_and_still_bumps_revision(service):
+    service.set_playfield(_playfield_definition("main-playfield"))
+    service.put_annotation("main-playfield", _marker("goal", "planner"))
+
+    service.replace_layer("main-playfield", "planner", ())
+
+    after = service.get_annotations("main-playfield")
+    assert after.annotations == ()
+    assert after.revision == 2
+
+
+def test_replace_layer_never_exposes_a_torn_state_to_a_concurrent_reader(service):
+    """UC-28.S-2: no consumer ever observes a half-updated layer --
+    every read sees either the old set or the new one, never a mix.
+    Hammers ``replace_layer`` from a writer thread while a reader
+    thread polls ``get_annotations`` continuously (mirrors
+    ``test_mark_stale_is_thread_safe_under_concurrent_calls``'s
+    pattern), recording any observed id set that is neither the
+    pre-replace nor the post-replace set."""
+    service.set_playfield(_playfield_definition("main-playfield"))
+    old_set = tuple(_marker(f"old-{i}", "planner", x=float(i)) for i in range(5))
+    new_set = tuple(_marker(f"new-{i}", "planner", x=float(i)) for i in range(5))
+    old_ids = frozenset(a.id for a in old_set)
+    new_ids = frozenset(a.id for a in new_set)
+    service.replace_layer("main-playfield", "planner", old_set)
+
+    errors: List[BaseException] = []
+    observed_bad: List[frozenset] = []
+
+    def reader() -> None:
+        try:
+            for _ in range(500):
+                ids = frozenset(a.id for a in service.get_annotations("main-playfield").annotations)
+                if ids not in (old_ids, new_ids):
+                    observed_bad.append(ids)
+        except BaseException as exc:  # pragma: no cover - would fail the test either way
+            errors.append(exc)
+
+    def writer() -> None:
+        try:
+            for i in range(100):
+                service.replace_layer(
+                    "main-playfield", "planner", new_set if i % 2 == 0 else old_set
+                )
+        except BaseException as exc:  # pragma: no cover - would fail the test either way
+            errors.append(exc)
+
+    reader_thread = threading.Thread(target=reader)
+    writer_thread = threading.Thread(target=writer)
+    reader_thread.start()
+    writer_thread.start()
+    reader_thread.join()
+    writer_thread.join()
+
+    assert errors == []
+    assert observed_bad == []
+
+
+def test_clear_annotations_named_layer_clears_only_that_layer_and_bumps_revision(service):
+    service.set_playfield(_playfield_definition("main-playfield"))
+    service.put_annotation("main-playfield", _marker("goal", "planner"))
+    service.put_annotation("main-playfield", _marker("robot", "robot-3"))
+
+    service.clear_annotations("main-playfield", layer="planner")
+
+    after = service.get_annotations("main-playfield")
+    assert [a.id for a in after.annotations] == ["robot"]
+    assert after.revision == 3  # two puts -> 2, clear -> 3
+
+
+def test_clear_annotations_with_no_layer_clears_everything_and_bumps_revision(service):
+    service.set_playfield(_playfield_definition("main-playfield"))
+    service.put_annotation("main-playfield", _marker("goal", "planner"))
+    service.put_annotation("main-playfield", _marker("robot", "robot-3"))
+
+    service.clear_annotations("main-playfield")
+
+    after = service.get_annotations("main-playfield")
+    assert after.annotations == ()
+    assert after.revision == 3
+
+
+def test_clear_annotations_nonexistent_layer_on_known_playfield_is_a_no_op(service):
+    """Architecture resolution 2 / acceptance criterion: clearing a
+    layer that does not exist on a *known* playfield is a no-op, not an
+    error, and does not bump the revision."""
+    service.set_playfield(_playfield_definition("main-playfield"))
+    service.put_annotation("main-playfield", _marker("goal", "planner"))
+    revision_before = service.get_annotations("main-playfield").revision
+
+    service.clear_annotations("main-playfield", layer="no-such-layer")  # must not raise
+
+    after = service.get_annotations("main-playfield")
+    assert len(after.annotations) == 1
+    assert after.revision == revision_before
+
+
+def test_clear_annotations_on_a_playfield_with_nothing_stored_is_a_no_op(service):
+    service.set_playfield(_playfield_definition("main-playfield"))
+
+    service.clear_annotations("main-playfield")  # must not raise
+
+    assert service.get_annotations("main-playfield").revision == 0
+
+
+def test_clear_annotations_with_no_layer_when_every_layer_is_already_empty_is_a_no_op(service):
+    service.set_playfield(_playfield_definition("main-playfield"))
+    service.put_annotation("main-playfield", _marker("goal", "planner"))
+    service.remove_annotation("main-playfield", "planner", "goal")
+    revision_after_remove = service.get_annotations("main-playfield").revision
+
+    service.clear_annotations("main-playfield")  # every layer already empty -- no-op
+
+    assert service.get_annotations("main-playfield").revision == revision_after_remove
+
+
+def test_two_writers_on_one_key_last_write_wins_no_merge_no_error(service):
+    """UC-28.S-6: two services both put layer 'shared', id 'target' --
+    the later position wins outright, no merge, no error."""
+    service.set_playfield(_playfield_definition("main-playfield"))
+
+    service.put_annotation("main-playfield", _marker("target", "shared", x=10.0, y=5.0))
+    service.put_annotation("main-playfield", _marker("target", "shared", x=12.0, y=6.0))
+
+    after = service.get_annotations("main-playfield", layer="shared")
+    assert len(after.annotations) == 1
+    assert after.annotations[0].shape == Marker(at=WorldPoint(x=12.0, y=6.0))
+
+
+def test_get_annotations_filtered_by_layer_still_reports_the_whole_playfield_revision(service):
+    service.set_playfield(_playfield_definition("main-playfield"))
+    service.put_annotation("main-playfield", _marker("goal", "planner"))
+    service.put_annotation("main-playfield", _marker("robot", "robot-3"))
+
+    filtered = service.get_annotations("main-playfield", layer="planner")
+
+    assert [a.id for a in filtered.annotations] == ["goal"]
+    assert filtered.revision == 2  # the whole-playfield revision, not a per-layer one
+
+
+def test_ttl_seconds_round_trips_through_put_and_get_unchanged(service):
+    """AC: ``ttl_seconds`` round-trips through put -> get unchanged; no
+    pruning logic exists anywhere (sprint.md's Resolved UC-28 open
+    questions, item 5 -- a deliberate deferral)."""
+    service.set_playfield(_playfield_definition("main-playfield"))
+    annotation = Annotation(
+        id="goal", layer="planner", shape=Marker(at=WorldPoint(x=1.0, y=2.0)), ttl_seconds=30.0
+    )
+
+    service.put_annotation("main-playfield", annotation)
+
+    fetched = service.get_annotations("main-playfield").annotations[0]
+    assert fetched.ttl_seconds == 30.0
+
+
+def test_set_playfield_of_an_already_held_name_leaves_its_annotations_untouched(service):
+    """Resolution 3: pushing a ``PlayfieldDefinition`` of an
+    already-held name does not clear that playfield's annotations."""
+    service.set_playfield(_playfield_definition("main-playfield"))
+    service.put_annotation("main-playfield", _marker("goal", "planner"))
+
+    service.set_playfield(_playfield_definition("main-playfield", aruco_ids=(9, 10)))  # replace
+
+    after = service.get_annotations("main-playfield")
+    assert [a.id for a in after.annotations] == ["goal"]
+
+
+def test_a_fresh_daemon_service_reports_an_empty_annotation_set_at_revision_zero(
+    directories, registry
+):
+    """UC-28.S-4: a daemon restart wipes all annotations; ``list_annotations``
+    on the playfield returns an empty set at revision 0. Modeled the same
+    way every other restart test in this file is -- a fresh
+    ``DaemonService`` sharing the same directories/registry -- since
+    annotations are in-memory only, exactly like the store they live in;
+    a fresh instance simply never saw the earlier puts. The playfield is
+    re-pushed on the fresh instance (the same reconnect ritual UC-28.S-4
+    itself describes for annotations) so ``get_annotations`` can be
+    called at all -- an unknown playfield would raise instead of
+    answering."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    original = _service_with_camera(directories, registry, identity, slug, cam)
+    original.set_playfield(main_playfield_definition())
+    original.put_annotation("main-playfield", _marker("goal", "planner"))
+    assert original.get_annotations("main-playfield").revision == 1
+
+    fresh_discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(),
+        identity_source=lambda: {},
+        backend_factory=lambda index: FakeBackend(),
+    )
+    restarted = DaemonService(registry=registry, discovery=fresh_discovery, directories=directories)
+    restarted.set_playfield(main_playfield_definition())
+
+    after = restarted.get_annotations("main-playfield")
+    assert after.annotations == ()
+    assert after.revision == 0
+
+
+def test_get_frame_deskewed_embeds_an_empty_annotation_set_when_nothing_has_been_put(
+    directories, registry
+):
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(
+        registry, [frame] * (CALIBRATION_FRAME_COUNT + 1)
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True
+
+    image = service.get_frame(slug, deskewed=True)
+
+    assert image.annotations is not None
+    assert image.annotations.annotations == ()
+    assert image.annotations.revision == 0
+
+
+def test_get_frame_deskewed_embeds_the_current_annotation_set(directories, registry):
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(
+        registry, [frame] * (CALIBRATION_FRAME_COUNT + 1)
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True
+    service.put_annotation("main-playfield", _marker("goal", "planner", x=50.0, y=30.0))
+
+    image = service.get_frame(slug, deskewed=True)
+
+    assert image.annotations is not None
+    assert len(image.annotations.annotations) == 1
+    assert image.annotations.annotations[0].id == "goal"
+    assert image.annotations.revision == 1
+
+
+def test_get_frame_raw_never_embeds_annotations_even_after_a_put(directories, registry):
+    """AC: a raw ``GetFrame`` never sets ``annotations`` (stays
+    ``None``), unconditionally -- verified with an annotation actually
+    put first, on the same camera's linked playfield, so the ``None``
+    is a real contract, not merely "nothing was ever put"."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    service.put_annotation("main-playfield", _marker("goal", "planner"))
+
+    raw = service.get_frame(slug)
+
+    assert raw.deskewed is False
+    assert raw.annotations is None
+
+
+# ---------------------------------------------------------------------------
+# Annotations -- RPC round trips (ticket 024-001)
+# ---------------------------------------------------------------------------
+
+
+def _annotation_msg(
+    id: str,
+    layer: str,
+    *,
+    x: float = 1.0,
+    y: float = 1.0,
+) -> aprilcam_v2_pb2.Annotation:
+    return aprilcam_v2_pb2.Annotation(
+        id=id,
+        layer=layer,
+        marker=aprilcam_v2_pb2.Marker(at=aprilcam_v2_pb2.WorldPoint(x=x, y=y)),
+    )
+
+
+def test_rpc_put_and_get_annotations_round_trip_every_shape(stub):
+    stub.SetPlayfield(aprilcam_v2_pb2.SetPlayfieldRequest(definition=_playfield_definition_msg()))
+
+    marker = aprilcam_v2_pb2.Annotation(
+        id="goal",
+        layer="planner",
+        marker=aprilcam_v2_pb2.Marker(at=aprilcam_v2_pb2.WorldPoint(x=50.0, y=30.0), label="Goal"),
+        style=aprilcam_v2_pb2.Style(color="red", line_width=2.0),
+        ttl_seconds=30.0,
+    )
+    path = aprilcam_v2_pb2.Annotation(
+        id="route",
+        layer="planner",
+        path=aprilcam_v2_pb2.PathShape(
+            points=[
+                aprilcam_v2_pb2.WorldPoint(x=0.0, y=0.0),
+                aprilcam_v2_pb2.WorldPoint(x=25.0, y=10.0),
+                aprilcam_v2_pb2.WorldPoint(x=50.0, y=30.0),
+            ]
+        ),
+    )
+    zone = aprilcam_v2_pb2.Annotation(
+        id="zone",
+        layer="planner",
+        polygon=aprilcam_v2_pb2.Polygon(
+            points=[
+                aprilcam_v2_pb2.WorldPoint(x=-10.0, y=-10.0),
+                aprilcam_v2_pb2.WorldPoint(x=10.0, y=-10.0),
+                aprilcam_v2_pb2.WorldPoint(x=0.0, y=10.0),
+            ]
+        ),
+    )
+    ring = aprilcam_v2_pb2.Annotation(
+        id="ring",
+        layer="planner",
+        circle=aprilcam_v2_pb2.Circle(
+            center=aprilcam_v2_pb2.WorldPoint(x=5.0, y=5.0), radius_cm=15.0
+        ),
+    )
+    label = aprilcam_v2_pb2.Annotation(
+        id="label",
+        layer="planner",
+        text=aprilcam_v2_pb2.Text(at=aprilcam_v2_pb2.WorldPoint(x=0.0, y=0.0), text="Base"),
+    )
+
+    for annotation in (marker, path, zone, ring, label):
+        stub.PutAnnotation(
+            aprilcam_v2_pb2.PutAnnotationRequest(playfield="main-playfield", annotation=annotation)
+        )
+
+    response = stub.GetAnnotations(
+        aprilcam_v2_pb2.GetAnnotationsRequest(playfield="main-playfield")
+    )
+
+    by_id = {a.id: a for a in response.annotations.annotations}
+    assert set(by_id) == {"goal", "route", "zone", "ring", "label"}
+    assert response.annotations.revision == 5
+
+    fetched_marker = by_id["goal"]
+    assert fetched_marker.WhichOneof("shape") == "marker"
+    assert fetched_marker.marker.at.x == 50.0 and fetched_marker.marker.at.y == 30.0
+    assert fetched_marker.marker.label == "Goal"
+    assert fetched_marker.style.color == "red"
+    assert fetched_marker.style.line_width == 2.0
+    assert fetched_marker.HasField("ttl_seconds")
+    assert fetched_marker.ttl_seconds == 30.0
+
+    fetched_path = by_id["route"]
+    assert fetched_path.WhichOneof("shape") == "path"
+    assert [(p.x, p.y) for p in fetched_path.path.points] == [
+        (0.0, 0.0),
+        (25.0, 10.0),
+        (50.0, 30.0),
+    ]
+
+    fetched_zone = by_id["zone"]
+    assert fetched_zone.WhichOneof("shape") == "polygon"
+    assert len(fetched_zone.polygon.points) == 3
+
+    fetched_ring = by_id["ring"]
+    assert fetched_ring.WhichOneof("shape") == "circle"
+    assert fetched_ring.circle.radius_cm == 15.0
+
+    fetched_label = by_id["label"]
+    assert fetched_label.WhichOneof("shape") == "text"
+    assert fetched_label.text.text == "Base"
+
+
+def test_rpc_remove_annotation_round_trip(stub):
+    stub.SetPlayfield(aprilcam_v2_pb2.SetPlayfieldRequest(definition=_playfield_definition_msg()))
+    stub.PutAnnotation(
+        aprilcam_v2_pb2.PutAnnotationRequest(
+            playfield="main-playfield", annotation=_annotation_msg("goal", "planner")
+        )
+    )
+
+    stub.RemoveAnnotation(
+        aprilcam_v2_pb2.RemoveAnnotationRequest(
+            playfield="main-playfield", layer="planner", id="goal"
+        )
+    )
+
+    response = stub.GetAnnotations(
+        aprilcam_v2_pb2.GetAnnotationsRequest(playfield="main-playfield")
+    )
+    assert list(response.annotations.annotations) == []
+
+
+def test_rpc_remove_annotation_absent_key_on_known_playfield_does_not_raise(stub):
+    stub.SetPlayfield(aprilcam_v2_pb2.SetPlayfieldRequest(definition=_playfield_definition_msg()))
+
+    stub.RemoveAnnotation(
+        aprilcam_v2_pb2.RemoveAnnotationRequest(
+            playfield="main-playfield", layer="planner", id="no-such-id"
+        )
+    )  # must not raise
+
+
+def test_rpc_replace_layer_round_trip_swaps_a_layers_contents(stub):
+    stub.SetPlayfield(aprilcam_v2_pb2.SetPlayfieldRequest(definition=_playfield_definition_msg()))
+    stub.PutAnnotation(
+        aprilcam_v2_pb2.PutAnnotationRequest(
+            playfield="main-playfield", annotation=_annotation_msg("old", "planner")
+        )
+    )
+
+    stub.ReplaceLayer(
+        aprilcam_v2_pb2.ReplaceLayerRequest(
+            playfield="main-playfield",
+            layer="planner",
+            annotations=[_annotation_msg("new", "planner", x=2.0, y=2.0)],
+        )
+    )
+
+    response = stub.GetAnnotations(
+        aprilcam_v2_pb2.GetAnnotationsRequest(playfield="main-playfield")
+    )
+    assert [a.id for a in response.annotations.annotations] == ["new"]
+
+
+def test_rpc_clear_annotations_round_trip_named_layer_and_everything(stub):
+    stub.SetPlayfield(aprilcam_v2_pb2.SetPlayfieldRequest(definition=_playfield_definition_msg()))
+    stub.PutAnnotation(
+        aprilcam_v2_pb2.PutAnnotationRequest(
+            playfield="main-playfield", annotation=_annotation_msg("goal", "planner")
+        )
+    )
+    stub.PutAnnotation(
+        aprilcam_v2_pb2.PutAnnotationRequest(
+            playfield="main-playfield", annotation=_annotation_msg("robot", "robot-3")
+        )
+    )
+
+    stub.ClearAnnotations(
+        aprilcam_v2_pb2.ClearAnnotationsRequest(playfield="main-playfield", layer="planner")
+    )
+    after_one = stub.GetAnnotations(
+        aprilcam_v2_pb2.GetAnnotationsRequest(playfield="main-playfield")
+    )
+    assert [a.id for a in after_one.annotations.annotations] == ["robot"]
+
+    stub.ClearAnnotations(aprilcam_v2_pb2.ClearAnnotationsRequest(playfield="main-playfield"))
+    after_all = stub.GetAnnotations(
+        aprilcam_v2_pb2.GetAnnotationsRequest(playfield="main-playfield")
+    )
+    assert list(after_all.annotations.annotations) == []
+
+
+def test_rpc_clear_annotations_nonexistent_layer_on_known_playfield_does_not_raise(stub):
+    stub.SetPlayfield(aprilcam_v2_pb2.SetPlayfieldRequest(definition=_playfield_definition_msg()))
+
+    stub.ClearAnnotations(
+        aprilcam_v2_pb2.ClearAnnotationsRequest(playfield="main-playfield", layer="no-such-layer")
+    )  # must not raise
+
+
+def test_rpc_put_annotation_unknown_playfield_maps_to_not_found_naming_held_playfields(stub):
+    stub.SetPlayfield(aprilcam_v2_pb2.SetPlayfieldRequest(definition=_playfield_definition_msg()))
+
+    with pytest.raises(grpc.RpcError) as excinfo:
+        stub.PutAnnotation(
+            aprilcam_v2_pb2.PutAnnotationRequest(
+                playfield="practice-field", annotation=_annotation_msg("goal", "planner")
+            )
+        )
+
+    assert excinfo.value.code() == grpc.StatusCode.NOT_FOUND
+    metadata = dict(excinfo.value.trailing_metadata())
+    assert metadata["aprilcam-error-type"] == "UnknownPlayfield"
+    assert metadata["aprilcam-requested"] == "practice-field"
+    assert metadata["aprilcam-available"] == "main-playfield"
+
+
+def test_rpc_remove_annotation_unknown_playfield_maps_to_not_found(stub):
+    with pytest.raises(grpc.RpcError) as excinfo:
+        stub.RemoveAnnotation(
+            aprilcam_v2_pb2.RemoveAnnotationRequest(
+                playfield="no-such-field", layer="planner", id="goal"
+            )
+        )
+    assert excinfo.value.code() == grpc.StatusCode.NOT_FOUND
+
+
+def test_rpc_replace_layer_unknown_playfield_maps_to_not_found(stub):
+    with pytest.raises(grpc.RpcError) as excinfo:
+        stub.ReplaceLayer(
+            aprilcam_v2_pb2.ReplaceLayerRequest(
+                playfield="no-such-field", layer="planner", annotations=[]
+            )
+        )
+    assert excinfo.value.code() == grpc.StatusCode.NOT_FOUND
+
+
+def test_rpc_clear_annotations_unknown_playfield_maps_to_not_found(stub):
+    with pytest.raises(grpc.RpcError) as excinfo:
+        stub.ClearAnnotations(aprilcam_v2_pb2.ClearAnnotationsRequest(playfield="no-such-field"))
+    assert excinfo.value.code() == grpc.StatusCode.NOT_FOUND
+
+
+def test_rpc_get_annotations_unknown_playfield_maps_to_not_found(stub):
+    with pytest.raises(grpc.RpcError) as excinfo:
+        stub.GetAnnotations(aprilcam_v2_pb2.GetAnnotationsRequest(playfield="no-such-field"))
+
+    assert excinfo.value.code() == grpc.StatusCode.NOT_FOUND
+    metadata = dict(excinfo.value.trailing_metadata())
+    assert metadata["aprilcam-error-type"] == "UnknownPlayfield"
+
+
+def test_rpc_get_frame_raw_never_carries_annotations_even_after_a_put(stub, held_camera):
+    stub.SetPlayfield(aprilcam_v2_pb2.SetPlayfieldRequest(definition=_playfield_definition_msg()))
+    stub.PutAnnotation(
+        aprilcam_v2_pb2.PutAnnotationRequest(
+            playfield="main-playfield", annotation=_annotation_msg("goal", "planner")
+        )
+    )
+    _, slug, _ = held_camera
+
+    response = stub.GetFrame(aprilcam_v2_pb2.GetFrameRequest(camera=slug))
+
+    assert response.HasField("annotations") is False
+
+
+def test_rpc_get_frame_deskewed_embeds_annotations_round_trip(directories, registry):
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(
+        registry, [frame] * (CALIBRATION_FRAME_COUNT + 2)
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True
+
+    with _bind_stub(service) as stub:
+        empty_response = stub.GetFrame(
+            aprilcam_v2_pb2.GetFrameRequest(camera=slug, deskewed=True)
+        )
+        assert empty_response.HasField("annotations") is True
+        assert list(empty_response.annotations.annotations) == []
+        assert empty_response.annotations.revision == 0
+
+        stub.PutAnnotation(
+            aprilcam_v2_pb2.PutAnnotationRequest(
+                playfield="main-playfield",
+                annotation=_annotation_msg("goal", "planner", x=50.0, y=30.0),
+            )
+        )
+        filled_response = stub.GetFrame(
+            aprilcam_v2_pb2.GetFrameRequest(camera=slug, deskewed=True)
+        )
+
+    assert filled_response.HasField("annotations") is True
+    assert len(filled_response.annotations.annotations) == 1
+    assert filled_response.annotations.annotations[0].id == "goal"
+    assert filled_response.annotations.revision == 1
 
 
 # ---------------------------------------------------------------------------
