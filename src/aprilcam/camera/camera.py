@@ -75,6 +75,7 @@ keys, so fetching the template cannot itself disturb hardware state.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Dict, Optional, Set, Tuple
 
 import numpy as np
@@ -82,6 +83,7 @@ import numpy as np
 from aprilcam.camera.backends import CaptureBackend, ControlBackend
 from aprilcam.camera.interfaces import Camera as _CameraBase
 from aprilcam.config.interfaces import CameraConfig
+from aprilcam.config.interfaces import ConfigLoader as ConfigLoaderIface
 from aprilcam.errors import UnsupportedSetting
 from aprilcam.types import CameraState
 
@@ -146,6 +148,19 @@ class Camera(_CameraBase):
         Static facts from the registry/config that ``state()`` reports
         verbatim; ``playfield`` is ``None`` this sprint (no config-push
         loop yet to link one).
+    config_loader, config_path:
+        Optional (ticket 023-004): what :meth:`reset`/:meth:`stored_config`
+        read *config_path* through, when both are given. ``daemon.
+        service.DaemonService._camera_for`` wires a real
+        ``config.loader.ConfigLoader`` plus this camera's resolved
+        ``config_dir/cameras/<slug>/config.json`` path (sprint.md
+        Decision 3: always this fixed location, never whatever was last
+        pushed) into every ``Camera`` it constructs. ``None`` (the
+        default -- every pre-existing test, and any ``Camera`` built by
+        hand rather than through ``_camera_for``) means there is nothing
+        to read: :meth:`reset` then falls back to the blank
+        introspected-plus-blank template, exactly like a camera whose
+        *config_path* does not exist on disk.
     """
 
     def __init__(
@@ -157,6 +172,8 @@ class Camera(_CameraBase):
         device_name: str = "",
         number: Optional[int] = None,
         playfield: Optional[str] = None,
+        config_loader: Optional[ConfigLoaderIface] = None,
+        config_path: Optional[Path] = None,
     ) -> None:
         self._slug = slug
         self._backend = backend
@@ -164,6 +181,8 @@ class Camera(_CameraBase):
         self._device_name = device_name or slug
         self._number = number
         self._playfield = playfield
+        self._config_loader = config_loader
+        self._config_path = config_path
         self._present = False
         self._consecutive_failures = 0
         self._reopens = 0
@@ -430,14 +449,74 @@ class Camera(_CameraBase):
         return names
 
     def reset(self) -> None:
-        """See ``camera.interfaces.Camera.reset``.
+        """See ``camera.interfaces.Camera.reset`` (ticket 023-004).
 
-        No ``ConfigLoader`` is wired this sprint (the config-push
-        ticket owns reading ``config.json`` back off disk) -- there is
-        nothing stored to discard live overrides back to yet. A
-        truthful no-op: leaving the camera exactly as it is, rather
-        than pretending to re-apply a document that does not exist.
+        The real on-disk document at *config_path* (:meth:`_on_disk_config`),
+        re-applied through :meth:`apply_config` -- the exact same
+        whole-push, ordered, hard-error, rollback-on-failure contract a
+        live push gets, since this is nothing more than ``apply_config``
+        fed a freshly-read document instead of an RPC-supplied one. No
+        separate, weaker code path exists here.
+
+        Nothing installed on disk (sprint.md Decision 3's "nothing to
+        revert to" case): applies an explicitly *empty* settings push --
+        a true no-op on hardware, never :meth:`effective_config`'s
+        template. That template's ``device_name`` is introspected-only,
+        never a settable key -- pushing it through ``apply_config``
+        would hard-error every time, which is exactly backwards for a
+        code path whose entire point is "nothing to revert to, not a
+        failure." :meth:`stored_config` is the accessor that reports
+        the *template* for display/config-service purposes; this method
+        only ever touches hardware with real, settable values.
         """
+        config = self._on_disk_config()
+        if config is None:
+            config = CameraConfig(name=self._slug, playfield=self._playfield, settings={})
+        self.apply_config(config)
+
+    def stored_config(self) -> CameraConfig:
+        """The document that describes what is now in force after
+        :meth:`reset` (ticket 023-004): the real on-disk document at
+        *config_path* when one exists, else the blank
+        introspected-plus-blank template (:meth:`effective_config`, the
+        same document an unconfigured camera reports) -- sprint.md
+        Decision 3: a live override with nothing installed in
+        ``config_dir`` falls back to this blank template rather than
+        erroring, "discard the override, nothing to revert to" being an
+        honest answer. Unlike :meth:`reset`'s own fallback (an
+        explicitly empty push, since ``effective_config``'s
+        ``device_name`` is not a settable key), this method's fallback
+        is the full template -- this is what a caller reports back to a
+        client asking "what does this camera's config look like now,"
+        not what gets pushed to hardware.
+
+        Not part of ``camera.interfaces.Camera``'s declared contract --
+        an addition specific to this concrete class, the same way
+        ``DaemonService.active_slugs`` adds a capability ``Daemon``
+        itself does not declare -- so a caller
+        (``DaemonService.reset_camera_config``) can learn what is now in
+        force to keep its own config-service state in sync, without
+        re-deriving the same on-disk resolution itself.
+        """
+        config = self._on_disk_config()
+        return config if config is not None else self.effective_config()
+
+    def _on_disk_config(self) -> Optional[CameraConfig]:
+        """The real document at *config_path*, re-read fresh through
+        *config_loader* every call -- never cached, so a file edited
+        between resets is always picked up. ``None`` when either was
+        not injected at construction, or the resolved path does not
+        currently exist on disk -- the shared "is there really
+        something installed" check :meth:`reset`/:meth:`stored_config`
+        both build on, so the two methods can never disagree about
+        *whether* an on-disk document exists, only about what to do
+        when one does not."""
+        if (
+            self._config_loader is not None
+            and self._config_path is not None
+            and self._config_path.exists()
+        ):
+            return self._config_loader.load_camera_config(self._config_path)
         return None
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostics only
