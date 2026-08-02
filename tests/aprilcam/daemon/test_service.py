@@ -1422,6 +1422,89 @@ def test_set_camera_config_gate_key_ordering_reaches_the_real_backend(directorie
     assert order == ["auto_exposure", "exposure"]
 
 
+# ---------------------------------------------------------------------------
+# Apply-on-open (ticket 023-003 AC5): a config stored before a camera is
+# ever opened -- whether it arrived via a live push while the camera was
+# absent, or (daemon/__main__.py's job) was boot-loaded from config_dir
+# -- takes effect the moment _camera_for opens that camera for the first
+# time.
+# ---------------------------------------------------------------------------
+
+
+def test_camera_for_applies_a_previously_stored_config_when_opening_for_the_first_time(
+    directories, registry
+):
+    """AC5 / UC-01.S-4's previously-broken half: a config already held
+    in ``_camera_configs`` for a camera that has never been opened (here,
+    simulated the same way ``set_camera_config`` already allows -- a push
+    while the camera is not held open, per
+    ``test_set_camera_config_for_a_not_held_open_camera_stores_without_applying``
+    above) reaches the real backend the instant that camera *is* first
+    opened, via ``_camera_for``. ``daemon.__main__.build()``'s boot-time
+    load feeds ``_camera_configs`` through this exact same
+    ``set_camera_config`` entry point (this ticket's other half), so this
+    also stands in for "a boot-loaded config takes effect on first
+    open" without needing a real ``config_dir`` fixture here."""
+    identity = _identity("hw:preconfigured", "Preconfigured Camera")
+    slug = registry.resolve(identity)
+    backend = FakeBackend(read_queue=[_frame()])
+    cameras: Dict[str, Camera] = {}
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(cameras.keys()),
+        identity_source=lambda: {0: identity},
+        backend_factory=lambda index: FakeBackend(),
+    )
+    service = DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        cameras=cameras,
+        identity_source=lambda: {0: identity},
+        backend_factory=lambda index: backend,
+        control_backend_factory=lambda device_name: None,
+    )
+    service.set_camera_config(CameraConfig(name=slug, playfield=None, settings={"gain": 7}))
+    assert backend.get_property("gain") is None  # not applied yet -- camera not open
+
+    service.get_frame(slug)  # first-ever open -- _camera_for must apply the stored config
+
+    assert backend.get_property("gain") == 7.0
+    assert service.active_slugs() == {slug}
+
+
+def test_camera_for_with_no_stored_config_opens_without_touching_the_backend_settings(
+    directories, registry
+):
+    """The common case (no config pushed or boot-loaded for this camera
+    at all): opening it for the first time must not call ``apply_config``
+    -- nothing to apply, and no spurious backend interaction."""
+    identity = _identity("hw:unconfigured", "Unconfigured Camera")
+    slug = registry.resolve(identity)
+    backend = FakeBackend(read_queue=[_frame()])
+    cameras: Dict[str, Camera] = {}
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(cameras.keys()),
+        identity_source=lambda: {0: identity},
+        backend_factory=lambda index: FakeBackend(),
+    )
+    service = DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        cameras=cameras,
+        identity_source=lambda: {0: identity},
+        backend_factory=lambda index: backend,
+        control_backend_factory=lambda device_name: None,
+    )
+
+    frame = service.get_frame(slug)
+
+    assert frame.width == 4 and frame.height == 4
+    assert service.active_slugs() == {slug}
+
+
 def test_get_camera_config_unknown_camera_raises_unknown_camera(service):
     with pytest.raises(UnknownCamera) as excinfo:
         service.get_camera_config("never-configured")
