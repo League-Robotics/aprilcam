@@ -1,5 +1,6 @@
 """Tests for ``aprilcam.cli.playfield`` (ticket 022-001; ``cmd_image``
-added by ticket 022-005; ``cmd_view`` added by ticket 022-006).
+added by ticket 022-005; ``cmd_view`` added by ticket 022-006;
+``cmd_annotations`` added by ticket 024-004).
 
 Headless, matching ``test_camera_cli.py``'s established style: a fake
 ``ConfigLoader`` and a fake ``Daemon``/``Discovery`` pair injected
@@ -25,8 +26,27 @@ import pytest
 
 from aprilcam.cli import playfield as playfield_cli
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
-from aprilcam.errors import CameraNotPresent, MalformedDocument, NotCalibrated, UnknownPlayfield
-from aprilcam.types import CameraState, ImageFrame
+from aprilcam.errors import (
+    CameraNotPresent,
+    ConnectionFailed,
+    DiscoveryFailed,
+    MalformedDocument,
+    NotCalibrated,
+    UnknownPlayfield,
+)
+from aprilcam.types import (
+    Annotation,
+    AnnotationSet,
+    CameraState,
+    Circle,
+    ImageFrame,
+    Marker,
+    PathShape,
+    Polygon,
+    Style,
+    Text,
+    WorldPoint,
+)
 from aprilcam.view.viewer import NoDisplayAvailable
 
 
@@ -89,6 +109,11 @@ class _FakeDaemon:
     get_playfield_returns: object = None
     get_playfield_raises: Optional[Exception] = None
     get_playfield_requested: Optional[str] = None
+    annotation_set_returns: object = None
+    get_annotations_raises: Optional[Exception] = None
+    get_annotations_requested: Optional[Tuple[str, Optional[str]]] = None
+    clear_annotations_raises: Optional[Exception] = None
+    clear_annotations_requested: Optional[Tuple[str, Optional[str]]] = None
 
     def set_playfield(self, definition) -> None:
         if self.set_playfield_raises is not None:
@@ -112,18 +137,49 @@ class _FakeDaemon:
         assert self.get_playfield_returns is not None, "test forgot to set get_playfield_returns"
         return self.get_playfield_returns
 
+    def get_annotations(self, playfield: str, layer: Optional[str] = None):
+        self.get_annotations_requested = (playfield, layer)
+        if self.get_annotations_raises is not None:
+            raise self.get_annotations_raises
+        assert self.annotation_set_returns is not None, "test forgot to set annotation_set_returns"
+        return self.annotation_set_returns
+
+    def clear_annotations(self, playfield: str, layer: Optional[str] = None) -> None:
+        self.clear_annotations_requested = (playfield, layer)
+        if self.clear_annotations_raises is not None:
+            raise self.clear_annotations_raises
+
 
 @dataclass
 class _FakeDiscovery:
     daemon: Optional[_FakeDaemon] = None
     connect_raises: Optional[Exception] = None
     connected_with: Optional[str] = None
+    daemons_by_host: dict = field(default_factory=dict)
+    infos: Tuple[object, ...] = ()
+    find_all_raises: Optional[Exception] = None
 
     def connect(self, host: Optional[str] = None):
         self.connected_with = host
+        if host in self.daemons_by_host:
+            target = self.daemons_by_host[host]
+            if isinstance(target, Exception):
+                raise target
+            return target
         if self.connect_raises is not None:
             raise self.connect_raises
         return self.daemon
+
+    def find_all(self):
+        if self.find_all_raises is not None:
+            raise self.find_all_raises
+        return self.infos
+
+
+@dataclass(frozen=True)
+class _Info:
+    host: str
+    is_local: bool
 
 
 def _args(**overrides) -> argparse.Namespace:
@@ -137,6 +193,9 @@ def _args(**overrides) -> argparse.Namespace:
         force=False,
         all=False,
         dump=False,
+        playfield="main-playfield",
+        clear=False,
+        layer=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -655,6 +714,218 @@ def test_view_surfaces_a_typed_error_raised_mid_view(capsys):
 
 
 # ---------------------------------------------------------------------------
+# playfield annotations -- AC: UC-28.S-1/S-3/S-4/S-5, ticket 024-004
+# ---------------------------------------------------------------------------
+
+
+def _annotation_set(*annotations: Annotation, revision: int = 1) -> AnnotationSet:
+    return AnnotationSet(annotations=tuple(annotations), revision=revision, timestamp=0.0)
+
+
+def test_annotations_lists_the_current_set_grouped_by_layer(capsys):
+    annotations = (
+        Annotation(id="goal", layer="planner", shape=Marker(at=WorldPoint(50.0, 30.0), label="goal")),
+        Annotation(
+            id="route",
+            layer="planner",
+            shape=PathShape(points=(WorldPoint(0.0, 0.0), WorldPoint(25.0, 10.0))),
+        ),
+        Annotation(id="zone", layer="robot-3", shape=Polygon(points=(WorldPoint(0.0, 0.0),))),
+    )
+    daemon = _FakeDaemon(annotation_set_returns=_annotation_set(*annotations, revision=7))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = playfield_cli.cmd_annotations(_args(), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    assert daemon.get_annotations_requested == ("main-playfield", None)
+    out = capsys.readouterr().out
+    assert "revision 7" in out
+    assert "planner" in out and "robot-3" in out
+    assert "goal" in out and "50.00" in out and "30.00" in out
+    assert "route" in out and "Marker" in out and "PathShape" in out
+    assert "zone" in out and "Polygon" in out
+
+
+def test_annotations_empty_set_reads_as_explicitly_empty_not_an_error(capsys):
+    daemon = _FakeDaemon(annotation_set_returns=_annotation_set(revision=0))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = playfield_cli.cmd_annotations(_args(), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "revision 0" in out
+    assert "no annotations" in out
+
+
+def test_annotations_prints_every_shape_kind_with_its_geometry(capsys):
+    annotations = (
+        Annotation(id="c", layer="x", shape=Circle(center=WorldPoint(1.0, 2.0), radius_cm=5.0)),
+        Annotation(id="t", layer="x", shape=Text(at=WorldPoint(3.0, 4.0), text="hello")),
+    )
+    daemon = _FakeDaemon(annotation_set_returns=_annotation_set(*annotations))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = playfield_cli.cmd_annotations(_args(), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "circle" in out and "radius=5.00cm" in out
+    assert "text" in out and "'hello'" in out
+
+
+def test_annotations_unknown_playfield_surfaces_the_daemon_error(capsys):
+    daemon = _FakeDaemon(get_annotations_raises=UnknownPlayfield("ghost-field", ("main-playfield",)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = playfield_cli.cmd_annotations(
+        _args(playfield="ghost-field"), discovery_factory=lambda: discovery
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "ghost-field" in err
+    assert "main-playfield" in err
+
+
+def test_annotations_passes_the_daemon_flag_through_to_connect():
+    daemon = _FakeDaemon(annotation_set_returns=_annotation_set())
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    playfield_cli.cmd_annotations(
+        _args(daemon="pi-field.local"), discovery_factory=lambda: discovery
+    )
+
+    assert discovery.connected_with == "pi-field.local"
+
+
+def test_annotations_all_fans_out_and_reports_one_unreachable_daemon(capsys):
+    good = _FakeDaemon(annotation_set_returns=_annotation_set(revision=3))
+    discovery = _FakeDiscovery(
+        infos=(_Info(host="localhost", is_local=True), _Info(host="unreachable-host", is_local=False)),
+        daemons_by_host={
+            None: good,
+            "unreachable-host": ConnectionFailed("unreachable-host", reason="no answer"),
+        },
+    )
+
+    code = playfield_cli.cmd_annotations(_args(all=True), discovery_factory=lambda: discovery)
+
+    assert code == 1  # partial failure is visible in the exit code
+    out, err = capsys.readouterr()
+    assert "localhost (local):" in out
+    assert "revision 3" in out
+    assert "unreachable-host: unreachable" in err
+    assert "no answer" in err
+
+
+def test_annotations_all_with_zero_daemons_found_is_success_not_error(capsys):
+    discovery = _FakeDiscovery(infos=())
+
+    code = playfield_cli.cmd_annotations(_args(all=True), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    assert "(no daemons found)" in capsys.readouterr().out
+
+
+def test_annotations_all_reports_discovery_failed_distinctly(capsys):
+    discovery = _FakeDiscovery(find_all_raises=DiscoveryFailed("multicast blocked"))
+
+    code = playfield_cli.cmd_annotations(_args(all=True), discovery_factory=lambda: discovery)
+
+    assert code == 1
+    assert "multicast blocked" in capsys.readouterr().err
+
+
+def test_annotations_clear_clears_every_layer_by_default(capsys):
+    daemon = _FakeDaemon()
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = playfield_cli.cmd_annotations(_args(clear=True), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    assert daemon.clear_annotations_requested == ("main-playfield", None)
+    assert "main-playfield" in capsys.readouterr().out
+
+
+def test_annotations_clear_with_layer_clears_only_that_layer(capsys):
+    daemon = _FakeDaemon()
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = playfield_cli.cmd_annotations(
+        _args(clear=True, layer="planner"), discovery_factory=lambda: discovery
+    )
+
+    assert code == 0
+    assert daemon.clear_annotations_requested == ("main-playfield", "planner")
+    out = capsys.readouterr().out
+    assert "planner" in out and "main-playfield" in out
+
+
+def test_annotations_clearing_an_absent_layer_is_a_quiet_no_op(capsys):
+    """``clear_annotations`` clearing an absent layer is a no-op
+    enforced daemon-side (``daemon/interfaces.py``'s own docstring) --
+    the fake simply never raises, and the CLI reports success exactly
+    as it would for a layer that did exist, since it cannot and should
+    not distinguish the two client-side."""
+    daemon = _FakeDaemon()
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = playfield_cli.cmd_annotations(
+        _args(clear=True, layer="never-existed"), discovery_factory=lambda: discovery
+    )
+
+    assert code == 0
+    assert daemon.clear_annotations_requested == ("main-playfield", "never-existed")
+
+
+def test_annotations_clear_reports_a_daemon_side_unknown_playfield(capsys):
+    daemon = _FakeDaemon(clear_annotations_raises=UnknownPlayfield("ghost-field", ("main-playfield",)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = playfield_cli.cmd_annotations(
+        _args(clear=True, playfield="ghost-field"), discovery_factory=lambda: discovery
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "ghost-field" in err
+    assert "main-playfield" in err
+
+
+def test_annotations_clear_all_is_refused_before_ever_connecting(capsys):
+    class _ExplodingDiscovery:
+        def connect(self, host=None):
+            raise AssertionError("must not connect when --clear --all is refused up front")
+
+    code = playfield_cli.cmd_annotations(
+        _args(clear=True, all=True), discovery_factory=lambda: _ExplodingDiscovery()
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "--all" in err
+    assert "single" in err.lower()
+
+
+def test_annotations_style_default_does_not_affect_shape_formatting():
+    """A cheap smoke check that ``Style`` (unused by ``_format_shape``
+    -- geometry only, per its docstring) still constructs and an
+    ``Annotation`` carrying the default is listed without error."""
+    daemon = _FakeDaemon(
+        annotation_set_returns=_annotation_set(
+            Annotation(id="a", layer="x", shape=Marker(at=WorldPoint(0.0, 0.0)), style=Style())
+        )
+    )
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = playfield_cli.cmd_annotations(_args(), discovery_factory=lambda: discovery)
+
+    assert code == 0
+
+
+# ---------------------------------------------------------------------------
 # argparse wiring
 # ---------------------------------------------------------------------------
 
@@ -765,4 +1036,46 @@ def test_view_h_prints_help_not_a_missing_hostname_error():
     parser = _build_parser()
     with pytest.raises(SystemExit) as excinfo:
         parser.parse_args(["playfield", "view", "-h"])
+    assert excinfo.value.code == 0
+
+
+def test_annotations_is_wired_to_cmd_annotations_with_a_required_playfield_positional():
+    parser = _build_parser()
+    args = parser.parse_args(["playfield", "annotations", "main-playfield"])
+    assert args.func is playfield_cli.cmd_annotations
+    assert args.playfield == "main-playfield"
+    assert args.daemon is None
+    assert args.all is False
+    assert args.clear is False
+    assert args.layer is None
+
+
+def test_annotations_requires_a_playfield_positional_argument():
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["playfield", "annotations"])
+
+
+def test_annotations_accepts_clear_and_layer_flags():
+    parser = _build_parser()
+    args = parser.parse_args(["playfield", "annotations", "main-playfield", "--clear", "--layer", "planner"])
+    assert args.clear is True
+    assert args.layer == "planner"
+
+
+def test_annotations_accepts_all_at_parse_time_but_cmd_annotations_refuses_it_with_clear():
+    """``--all`` is wired onto this subparser (list fans out, per
+    ``cli.md``'s fan-out table) -- argparse accepts it unconditionally;
+    ``cmd_annotations`` is what refuses the ``--clear --all``
+    combination at runtime, exercised above."""
+    parser = _build_parser()
+    args = parser.parse_args(["playfield", "annotations", "main-playfield", "--clear", "--all"])
+    assert args.clear is True
+    assert args.all is True
+
+
+def test_annotations_h_prints_help_not_a_missing_hostname_error():
+    parser = _build_parser()
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["playfield", "annotations", "main-playfield", "-h"])
     assert excinfo.value.code == 0
