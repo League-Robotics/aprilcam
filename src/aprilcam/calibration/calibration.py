@@ -98,6 +98,22 @@ def _row3(values: Sequence[Any]) -> _Row3:
 #: module/class docstrings).
 DEFAULT_CALIBRATION_FRAMES = 30
 
+#: Reprojection-error acceptance ceiling, in cm (ticket 023-006, UC-04's
+#: open question -- "completeness is necessary but may not be
+#: sufficient" -- now resolved). A solve where every required ArUco id
+#: was found (completeness holds) but whose RMS reprojection error
+#: exceeds this is still rejected: complete is not the same as good.
+#: **Confirmed 1.0 cm by the stakeholder** (sprint.md Decisions, Design
+#: Rationale Decision 4): ~5x headroom over the observed-good 0.179 cm
+#: live sprint-022 solve against the real ``main-playfield``, and 0.7%
+#: of that field's 134.3 cm width -- tight enough to catch a genuinely
+#: degenerate solve, loose enough not to fail an ordinary one. Named and
+#: overridable per :class:`Calibrator` instance
+#: (``max_reprojection_error_cm``) rather than hardcoded, since the
+#: exact number is a domain-tuning call, not a structural one -- trivial
+#: to retune once more field data exists.
+MAX_REPROJECTION_ERROR_CM = 1.0
+
 #: Below this ratio of the second-to-largest singular value of a
 #: (centred) correspondence point set, the points are treated as
 #: collinear -- see :func:`_is_collinear`.
@@ -142,8 +158,11 @@ class Calibration(_CalibrationBase):
     reprojection_error_cm: Optional[float] = None
     """RMS distance (cm) between each matched marker's surveyed world
     position and where the solved homography reprojects its detected
-    pixel position -- informational (sprint.md Open Question 1: no
-    acceptance threshold is enforced this sprint)."""
+    pixel position. A stored :class:`Calibration` always has this at or
+    below whatever :class:`Calibrator` instance produced it was
+    configured with (``MAX_REPROJECTION_ERROR_CM`` by default, ticket
+    023-006) -- a solve above the threshold never reaches this
+    dataclass at all; see :meth:`Calibrator.calibrate`."""
 
     def to_world(self, pixel: PixelPoint) -> WorldPoint:
         return geometry.pixel_to_world(self._matrix(), pixel)
@@ -318,6 +337,12 @@ class Calibrator(_CalibratorBase):
     pipeline_config:
         Passed straight through to ``vision.pipeline.run_pipeline`` for
         every captured frame. ``None`` uses that function's own default.
+    max_reprojection_error_cm:
+        The reprojection-error acceptance ceiling (ticket 023-006) --
+        defaults to the module-level :data:`MAX_REPROJECTION_ERROR_CM`
+        (1.0 cm) but is genuinely overridable per instance, since the
+        confirmed default is a domain-tuning call (sprint.md Decisions),
+        not a structural one.
     """
 
     def __init__(
@@ -328,12 +353,14 @@ class Calibrator(_CalibratorBase):
         capture_frames: FrameSource,
         detector_factory: DetectorFactory = _default_detector_factory,
         pipeline_config: Optional[PipelineConfig] = None,
+        max_reprojection_error_cm: float = MAX_REPROJECTION_ERROR_CM,
     ) -> None:
         self._get_camera_config = get_camera_config
         self._get_playfield = get_playfield
         self._capture_frames = capture_frames
         self._pipeline_config = pipeline_config
         self._detector = detector_factory()
+        self._max_reprojection_error_cm = max_reprojection_error_cm
         self._calibrations: Dict[str, Calibration] = {}
         self._lock = threading.Lock()
 
@@ -432,6 +459,26 @@ class Calibrator(_CalibratorBase):
             )
 
         rms = _reprojection_error_cm(homography, pixel_pts, world_pts)
+
+        if rms > self._max_reprojection_error_cm:
+            # Complete (every required id found -- missing_ids stays
+            # empty) but sloppy: UC-04's open question, resolved. Named
+            # via `reason`, not `missing_ids`, per the interface
+            # docstring's "why a failure failed when ids alone don't
+            # say" -- and nothing is stored, matching the "a failed
+            # attempt leaves the previous calibration as it was"
+            # contract every other rejection branch above already
+            # honors.
+            return CalibrationResult(
+                succeeded=False,
+                matched_ids=matched_ids,
+                missing_ids=(),
+                reprojection_error_cm=rms,
+                reason=(
+                    f"reprojection error {rms:.3f} cm exceeds the "
+                    f"{self._max_reprojection_error_cm:.3f} cm acceptance threshold"
+                ),
+            )
 
         calibration = Calibration(
             stale=False,

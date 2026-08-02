@@ -93,7 +93,7 @@ import grpc
 import numpy as np
 import pytest
 
-from aprilcam.calibration.calibration import Calibrator
+from aprilcam.calibration.calibration import MAX_REPROJECTION_ERROR_CM, Calibrator
 from aprilcam.camera.backends.opencv_backend import OpenCVBackend
 from aprilcam.camera.camera import Camera
 from aprilcam.camera.identity import resolve_all
@@ -215,6 +215,33 @@ def test_full_set_calibration_matches_all_ten_required_aruco_ids(daemon):
     )
     assert result.matched_ids == tuple(range(1, 11))
     assert result.missing_ids == ()
+
+
+# ---------------------------------------------------------------------------
+# AC (ticket 023-006, SUC-005): the stakeholder's real, currently-working
+# calibration still passes under the new reprojection-error threshold --
+# a self-inflicted regression is exactly what this ticket's "hardware
+# care" instructions warn against. Ground truth (module docstring):
+# this exact camera/field pairing reliably lands 0.18-0.21 cm, ~5x under
+# the confirmed 1.0 cm threshold.
+# ---------------------------------------------------------------------------
+
+
+def test_full_set_calibration_reprojection_error_stays_under_the_new_threshold(daemon):
+    result = _link_and_calibrate(daemon)
+
+    assert result.succeeded is True, (
+        f"calibration failed against the real field -- matched "
+        f"{result.matched_ids}, missing {result.missing_ids} "
+        f"(reason={result.reason!r})."
+    )
+    assert result.reprojection_error_cm is not None
+    assert result.reprojection_error_cm < MAX_REPROJECTION_ERROR_CM, (
+        f"real main-playfield solve measured {result.reprojection_error_cm:.3f} cm, "
+        f"which does not clear the {MAX_REPROJECTION_ERROR_CM:.3f} cm threshold -- "
+        "this ticket's own threshold would break the stakeholder's currently-working "
+        "calibration, which is the self-inflicted regression it explicitly warns against."
+    )
 
 
 # ---------------------------------------------------------------------------

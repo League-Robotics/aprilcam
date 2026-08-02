@@ -52,10 +52,14 @@ class CalibrationResult:
     reprojection_error_cm: Optional[float] = None
     """How far surveyed markers land from where they should.
 
-    Open (UC-04): completeness is necessary but may not be
-    sufficient. A complete-but-sloppy solve is still a bad solve, so
-    there is probably also a maximum acceptable error — that
-    threshold is undecided.
+    Resolved (UC-04, ticket 023-006): completeness is necessary but
+    not sufficient. A complete-but-sloppy solve is still a bad solve,
+    so ``calibration.calibration.Calibrator`` also enforces a maximum
+    acceptable error (``MAX_REPROJECTION_ERROR_CM``, a named,
+    overridable constant — confirmed default 1.0 cm). On a
+    threshold rejection this field still carries the measured error
+    that failed the check; ``reason`` names the threshold it was
+    measured against.
     """
     reason: Optional[str] = None
     """Why a failure failed, when ids alone don't say.

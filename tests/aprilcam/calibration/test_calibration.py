@@ -25,7 +25,7 @@ import cv2 as cv
 import numpy as np
 import pytest
 
-from aprilcam.calibration.calibration import Calibration, Calibrator
+from aprilcam.calibration.calibration import MAX_REPROJECTION_ERROR_CM, Calibration, Calibrator
 from aprilcam.config.interfaces import CameraConfig
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.errors import NoPlayfieldLinked
@@ -144,12 +144,17 @@ def _calibrator_for(
     *,
     camera_slug: str = "test-camera",
     playfield_name: str = "main-playfield",
+    max_reprojection_error_cm: float = MAX_REPROJECTION_ERROR_CM,
 ) -> Calibrator:
     """A ``Calibrator`` wired against in-memory config/playfield stores
     and a frame source that reads from *frames_holder* -- a plain
     ``dict`` so a test can swap ``frames_holder["frames"]`` between
     calls (e.g. the "failed retry" test below) without touching
-    ``Calibrator`` internals."""
+    ``Calibrator`` internals. ``max_reprojection_error_cm`` defaults to
+    the real module constant rather than being silently unset, so a
+    test that does not care about the threshold still exercises the
+    real default (ticket 023-006's "no regression" acceptance
+    criterion); tests below that *do* care override it explicitly."""
     camera_configs = {camera_slug: CameraConfig(name=camera_slug, playfield=playfield_name, settings={})}
     playfields = {playfield_name: definition}
 
@@ -160,6 +165,7 @@ def _calibrator_for(
         get_camera_config=camera_configs.get,
         get_playfield=playfields.get,
         capture_frames=capture_frames,
+        max_reprojection_error_cm=max_reprojection_error_cm,
     )
 
 
@@ -390,6 +396,154 @@ def test_calibrate_rejects_too_few_correspondence_points_naming_the_problem():
     assert result.missing_ids == ()
     assert result.reason is not None
     assert "at least 4" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# Reprojection-error acceptance threshold (ticket 023-006, UC-04's open
+# question resolved -- SUC-005): complete (every required id found) but
+# sloppy is still rejected, distinctly from missing-ids/degenerate-
+# geometry failures above.
+# ---------------------------------------------------------------------------
+
+
+def test_calibrate_rejects_a_complete_solve_whose_reprojection_error_exceeds_the_threshold():
+    """A synthetic complete-but-degenerate point set: every one of the
+    ten required ArUco ids is detected (completeness holds -- UC-04's
+    all-or-nothing rule is satisfied), but ArUco 5 is rendered 20 cm
+    away from its surveyed position, dragging the homography fit's RMS
+    reprojection error well past ``MAX_REPROJECTION_ERROR_CM``. The
+    rejection must name the measured error and the threshold via
+    ``reason`` -- not ``missing_ids``, since nothing is missing -- and
+    must store nothing."""
+    definition = main_playfield_definition()
+    positions = dict(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    true_x, true_y = positions[5]
+    positions[5] = (true_x + 20.0, true_y)
+    frame = render_playfield_frame(positions)
+    calibrator = _calibrator_for(definition, {"frames": [frame]})
+
+    result = calibrator.calibrate("test-camera")
+
+    assert result.succeeded is False
+    assert result.missing_ids == ()  # every id WAS found -- a threshold failure, not a coverage one
+    assert result.matched_ids == tuple(range(1, 11))
+    assert result.reprojection_error_cm is not None
+    assert result.reprojection_error_cm > MAX_REPROJECTION_ERROR_CM
+    assert result.reason is not None
+    assert f"{result.reprojection_error_cm:.3f}" in result.reason
+    assert f"{MAX_REPROJECTION_ERROR_CM:.3f}" in result.reason
+    assert calibrator.get_calibration("test-camera") is None
+
+
+def test_calibrate_accepts_a_solve_at_or_below_the_threshold_exactly_as_before():
+    """A good, complete solve (the same fixture
+    ``test_calibrate_with_all_ten_required_aruco_ids_succeeds`` uses,
+    whose noise-free reprojection error is comfortably under 1.0 cm)
+    succeeds exactly as it did before this ticket -- no regression on
+    the ordinary case."""
+    definition = main_playfield_definition()
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    calibrator = _calibrator_for(definition, {"frames": [frame, frame, frame]})
+
+    result = calibrator.calibrate("test-camera")
+
+    assert result.succeeded is True
+    assert result.reprojection_error_cm is not None
+    assert result.reprojection_error_cm <= MAX_REPROJECTION_ERROR_CM
+    assert calibrator.get_calibration("test-camera") is not None
+
+
+def test_calibrate_accepts_a_solve_whose_error_exactly_equals_the_threshold():
+    """"At or below the threshold" is inclusive at the boundary --
+    proven by pointing the threshold exactly at a real measured error
+    rather than trying to hand-construct an exact-equality rms."""
+    definition = main_playfield_definition()
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    probe = _calibrator_for(definition, {"frames": [frame]})
+    probe_result = probe.calibrate("test-camera")
+    assert probe_result.succeeded is True
+    measured = probe_result.reprojection_error_cm
+    assert measured is not None
+
+    calibrator = _calibrator_for(
+        definition, {"frames": [frame]}, max_reprojection_error_cm=measured
+    )
+
+    result = calibrator.calibrate("test-camera")
+
+    assert result.succeeded is True
+    assert result.reprojection_error_cm == pytest.approx(measured)
+
+
+def test_a_threshold_rejection_leaves_the_prior_successful_calibration_untouched():
+    """UC-04/SUC-005: a failed threshold check does not disturb an
+    existing good calibration -- mirrors
+    ``test_a_failed_retry_leaves_the_prior_successful_calibration_untouched``
+    above, but for the new rejection branch specifically rather than
+    the missing-ids one."""
+    definition = main_playfield_definition()
+    good_frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    frames_holder = {"frames": [good_frame]}
+    calibrator = _calibrator_for(definition, frames_holder)
+
+    good_result = calibrator.calibrate("test-camera")
+    assert good_result.succeeded is True
+    first_calibration = calibrator.get_calibration("test-camera")
+
+    positions = dict(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    true_x, true_y = positions[5]
+    positions[5] = (true_x + 20.0, true_y)
+    frames_holder["frames"] = [render_playfield_frame(positions)]
+
+    retry_result = calibrator.calibrate("test-camera")
+    assert retry_result.succeeded is False
+    assert retry_result.missing_ids == ()
+    assert retry_result.reason is not None
+
+    assert calibrator.get_calibration("test-camera") == first_calibration
+
+
+def test_max_reprojection_error_cm_is_genuinely_overridable_to_reject_a_normally_good_solve():
+    """Lowering ``max_reprojection_error_cm`` well below what an
+    otherwise-good solve measures must reject it -- proving the
+    threshold used is the instance's own override, not a hardcoded
+    module constant baked into the comparison."""
+    definition = main_playfield_definition()
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    calibrator = _calibrator_for(
+        definition, {"frames": [frame]}, max_reprojection_error_cm=1e-6
+    )
+
+    result = calibrator.calibrate("test-camera")
+
+    assert result.succeeded is False
+    assert result.missing_ids == ()
+    assert result.reason is not None
+    assert calibrator.get_calibration("test-camera") is None
+
+
+def test_max_reprojection_error_cm_is_genuinely_overridable_to_accept_a_normally_rejected_solve():
+    """The inverse direction: raising ``max_reprojection_error_cm``
+    above what the default (1.0 cm) would reject lets the same
+    otherwise-degenerate solve from
+    ``test_calibrate_rejects_a_complete_solve_whose_reprojection_error_exceeds_the_threshold``
+    succeed -- confirming the override is a real per-instance ceiling,
+    not a one-directional safety clamp."""
+    definition = main_playfield_definition()
+    positions = dict(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    true_x, true_y = positions[5]
+    positions[5] = (true_x + 20.0, true_y)
+    frame = render_playfield_frame(positions)
+    calibrator = _calibrator_for(
+        definition, {"frames": [frame]}, max_reprojection_error_cm=10.0
+    )
+
+    result = calibrator.calibrate("test-camera")
+
+    assert result.succeeded is True
+    assert result.reprojection_error_cm is not None
+    assert result.reprojection_error_cm > MAX_REPROJECTION_ERROR_CM
+    assert calibrator.get_calibration("test-camera") is not None
 
 
 # ---------------------------------------------------------------------------
