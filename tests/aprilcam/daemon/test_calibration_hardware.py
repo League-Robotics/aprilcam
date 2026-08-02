@@ -531,8 +531,15 @@ def test_deskewed_request_on_an_uncalibrated_camera_raises_not_calibrated(daemon
 
 # ---------------------------------------------------------------------------
 # AC: stopping and restarting the real daemon leaves the calibration
-# intact -- and the documented trap: the camera->playfield link does not
-# survive (in-memory only), even though the calibration does.
+# intact, and confirms UC-01's ephemeral-push rule still holds for a
+# playfield/camera-config link that was only ever pushed over RPC and
+# never installed under config_dir -- that link is in-memory only and
+# does not survive a restart. This is narrower than it once was: a link
+# genuinely installed under config_dir now DOES survive a restart with
+# zero pushes at all (ticket 023-003's boot-time load closed that as a
+# trap) -- see test_lifecycle_integration.py's
+# test_boot_loaded_playfield_and_camera_config_need_no_manual_push for
+# the live proof of that path, against this same camera.
 # ---------------------------------------------------------------------------
 
 
@@ -574,15 +581,31 @@ def cli_env(tmp_path, monkeypatch):
         shutil.rmtree(short_dir, ignore_errors=True)
 
 
-def test_calibration_survives_a_restart_but_the_playfield_link_does_not(cli_env, tmp_path):
+def test_calibration_survives_a_restart_but_an_rpc_only_playfield_link_does_not(cli_env, tmp_path):
     """UC-01/UC-02, against the real ``aprilcam daemon stop && aprilcam
-    daemon start`` cycle: calibration is file-backed and must survive;
-    the camera->playfield *link* is pushed config and is in-memory only,
-    so it must NOT survive -- documented as a real, observed trap in
-    this ticket's own description and completion notes (a developer who
-    only checks ``calibrated`` after a restart could be misled into
-    thinking a deskewed request will work; it will not, until the
-    playfield and link are re-pushed)."""
+    daemon start`` cycle -- the ephemeral-push half of UC-01, not the
+    boot-time-load trap ticket 023-003 fixed. Calibration is file-backed
+    and must survive; a playfield/camera-config link that was only ever
+    *pushed* over RPC, and never installed anywhere under ``config_dir``,
+    is in-memory only and must NOT survive a restart -- UC-01's standing
+    rule ("disk is the source of record, RPC push is ephemeral"), still
+    correct and unaffected by ticket 023-003.
+
+    **Deliberately the un-installed case.** ``cli_env`` points
+    ``config_dir`` at an empty ``tmp_path`` directory this test never
+    writes into -- ``camera_config_path``/``MAIN_PLAYFIELD_JSON`` are
+    both pushed from *outside* it, over RPC, exactly like any other
+    experimental push. Since ticket 023-003 (daemon boot-time config
+    load from disk), a playfield and camera config genuinely *installed*
+    under ``config_dir`` before the daemon starts DOES survive a restart
+    with zero manual pushes -- that is no longer a trap, it is the
+    supported, tested behaviour; see
+    ``test_lifecycle_integration.py``'s
+    ``test_boot_loaded_playfield_and_camera_config_need_no_manual_push``
+    for the live proof against this same camera. What this test still
+    pins is narrower, and still true: a link that was only ever pushed,
+    never installed, is discarded on restart exactly like every other
+    ephemeral RPC document."""
     _skip_if_arducam_not_attached()
     bin_path = _aprilcam_bin()
     env = cli_env
@@ -629,21 +652,27 @@ def test_calibration_survives_a_restart_but_the_playfield_link_does_not(cli_env,
             f"arducam row to still show calibrated:\n{after_out}"
         )
         assert "playfield=main-playfield" not in after_out, (
-            "the camera->playfield link unexpectedly survived the "
-            "restart -- if pushed config has become file-backed, this "
-            "test (and the ticket's documented trap) need updating "
+            "an RPC-only playfield link (never installed under "
+            "config_dir) unexpectedly survived the restart -- if "
+            "pushed-but-uninstalled config has become file-backed, "
+            f"UC-01's ephemeral-push rule (and this test) need updating "
             f"together:\n{after_out}"
         )
 
-        # The documented trap in its most concrete, practical form: a
-        # deskewed request fails right after restart, despite
-        # 'calibrated' being reported true, until the playfield/link are
-        # re-pushed.
+        # The ephemeral-push rule's practical consequence for a link
+        # that was only ever pushed, never installed: a deskewed request
+        # fails right after restart, despite 'calibrated' being reported
+        # true, until the playfield/link are re-pushed. Contrast with
+        # test_lifecycle_integration.py's
+        # test_boot_loaded_playfield_and_camera_config_need_no_manual_push,
+        # where the identical request succeeds immediately because the
+        # link was installed under config_dir, not merely pushed.
         image_before_relink = _run(bin_path, "playfield", "image", "--camera", ARDUCAM_SLUG, "--base64", env=env)
         assert image_before_relink.returncode != 0, (
             "expected a deskewed request to fail right after restart "
-            "(playfield definition lost, per the trap this test "
-            f"documents), but it succeeded:\n{image_before_relink.stdout}"
+            "(the playfield link here was only ever pushed, never "
+            "installed under config_dir, so it did not survive), but "
+            f"it succeeded:\n{image_before_relink.stdout}"
         )
 
         repush_pf = _run(bin_path, "playfield", "config", str(MAIN_PLAYFIELD_JSON), env=env)
