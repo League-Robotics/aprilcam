@@ -29,6 +29,21 @@ and broken" case (``types.CameraState``'s own docstring), not
 "unplugged", since a stopped self-heal loop is not evidence the
 hardware is gone.
 
+**Reopen as a staleness trigger, notification only (ticket 023-007).**
+A successful self-heal reopen is a real-world event that can move a
+camera — someone unplugged it to swap a port, bumped it while
+investigating a problem — which is exactly what
+``calibration.interfaces.Calibration.stale`` exists to flag once a
+calibration is established. ``Camera`` itself has no notion of
+calibration (that stays a daemon-level concern, per this module's own
+existing "beyond the interface" divisions below), so it only exposes an
+optional, constructor-injected ``on_reopen`` callback — see
+:meth:`Camera.__init__`'s docstring — invoked with no arguments at the
+end of a *successful* :meth:`Camera._attempt_self_heal`, mirroring
+``daemon.detection.DetectionEngine``'s existing ``calibration_lookup``
+injection pattern. ``daemon.service.DaemonService`` is the one thing
+that wires this to anything meaningful.
+
 **Real UVC control, validated live (ticket 023-001).** ``apply_config``
 was originally implemented only against the small set of controls
 ``camera.backends.opencv_backend.property_map()`` exposes generically
@@ -76,7 +91,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 import numpy as np
 
@@ -161,6 +176,25 @@ class Camera(_CameraBase):
         to read: :meth:`reset` then falls back to the blank
         introspected-plus-blank template, exactly like a camera whose
         *config_path* does not exist on disk.
+    on_reopen:
+        Optional, constructor-injected notification (ticket 023-007,
+        sprint.md Decision 6) invoked with no arguments at the end of a
+        *successful* :meth:`_attempt_self_heal` reopen -- mirrors
+        ``daemon.detection.DetectionEngine``'s existing
+        ``calibration_lookup`` injection pattern: ``Camera`` gains no
+        notion of calibration itself, it only tells whoever is
+        listening "I just reopened." ``daemon.service.DaemonService``
+        wires this to a closure marking the camera's calibration stale
+        (a reopen correlates with a real-world event that can move a
+        camera far better than elapsed time alone -- sprint.md Design
+        Rationale Decision 6). **Not** invoked from :meth:`open`
+        itself: the very first open of a freshly constructed ``Camera``
+        (``DaemonService._camera_for``'s normal path, including for a
+        calibration reloaded from disk at daemon startup) is not a
+        reopen and must never mark a just-loaded, still-accurate
+        calibration stale. ``None`` (the default) means nobody is
+        listening -- every pre-existing test and any ``Camera`` built
+        without this parameter behaves exactly as before.
     """
 
     def __init__(
@@ -174,6 +208,7 @@ class Camera(_CameraBase):
         playfield: Optional[str] = None,
         config_loader: Optional[ConfigLoaderIface] = None,
         config_path: Optional[Path] = None,
+        on_reopen: Optional[Callable[[], None]] = None,
     ) -> None:
         self._slug = slug
         self._backend = backend
@@ -183,6 +218,7 @@ class Camera(_CameraBase):
         self._playfield = playfield
         self._config_loader = config_loader
         self._config_path = config_path
+        self._on_reopen = on_reopen
         self._present = False
         self._consecutive_failures = 0
         self._reopens = 0
@@ -283,6 +319,13 @@ class Camera(_CameraBase):
         trivially succeeding while it never yields another frame) --
         ``usable`` must reflect "we gave up", not just "is a handle
         technically open".
+
+        **Staleness notification (ticket 023-007).** *on_reopen* fires
+        only when ``self._backend.open()`` above genuinely succeeds --
+        never on a failed reopen attempt (nothing physically changed
+        about the camera's mount if the reopen itself didn't happen)
+        and never when the budget is already exhausted (the ``return``
+        above short-circuits before this point).
         """
         if self._reopens >= MAX_REOPENS:
             self._exhausted = True
@@ -300,6 +343,9 @@ class Camera(_CameraBase):
             self._present = True
         except Exception as exc:
             logger.warning("%s: reopen failed: %s", self._slug, exc)
+            return
+        if self._on_reopen is not None:
+            self._on_reopen()
 
     # -- config --------------------------------------------------------
 

@@ -252,6 +252,95 @@ def test_reopen_failure_leaves_camera_unusable_but_present():
 
 
 # ---------------------------------------------------------------------------
+# on_reopen (ticket 023-007): staleness trigger notification hook, fired at
+# the end of a *successful* self-heal reopen only -- never on plain open(),
+# never on a failed reopen attempt, never once the reopen budget is spent.
+# ---------------------------------------------------------------------------
+
+
+def test_on_reopen_invoked_after_a_successful_self_heal_reopen():
+    backend = FakeBackend()
+    calls = []
+    cam = Camera("cam-a", backend, on_reopen=lambda: calls.append(1))
+    cam.open()
+
+    for _ in range(FAILURE_THRESHOLD):
+        cam.read()
+
+    assert backend.open_calls == 2  # the reopen genuinely happened
+    assert calls == [1]
+
+
+def test_on_reopen_not_invoked_by_the_initial_open():
+    backend = FakeBackend()
+    calls = []
+    cam = Camera("cam-a", backend, on_reopen=lambda: calls.append(1))
+
+    cam.open()
+
+    assert calls == []
+
+
+def test_on_reopen_not_invoked_on_a_failed_reopen_attempt():
+    backend = FakeBackend()
+    calls = []
+    cam = Camera("cam-a", backend, on_reopen=lambda: calls.append(1))
+    cam.open()
+
+    backend.fail_open = True  # the reopen attempt itself will now fail
+    for _ in range(FAILURE_THRESHOLD):
+        cam.read()
+
+    assert backend.open_calls == 2  # the failed reopen attempt happened
+    assert calls == []  # but it never counts as a successful reopen
+
+
+def test_on_reopen_invoked_once_per_successful_reopen():
+    backend = FakeBackend()
+    calls = []
+    cam = Camera("cam-a", backend, on_reopen=lambda: calls.append(1))
+    cam.open()
+
+    for _ in range(3):
+        for _ in range(FAILURE_THRESHOLD):
+            cam.read()
+
+    assert backend.open_calls == 4  # initial open + 3 successful reopens
+    assert calls == [1, 1, 1]
+
+
+def test_on_reopen_not_invoked_once_the_reopen_budget_is_exhausted():
+    backend = FakeBackend()  # open() always trivially succeeds; never yields frames
+    calls = []
+    cam = Camera("cam-a", backend, on_reopen=lambda: calls.append(1))
+    cam.open()
+
+    for _ in range(FAILURE_THRESHOLD * MAX_REOPENS):
+        cam.read()
+    assert len(calls) == MAX_REOPENS  # every reopen attempt in the budget succeeded
+    assert cam.state.usable is True
+
+    calls.clear()
+    for _ in range(FAILURE_THRESHOLD):
+        cam.read()  # budget spent -- self-heal gives up before reopening
+    assert cam.state.usable is False
+    assert calls == []  # no further notification once nothing further happened
+
+
+def test_default_on_reopen_is_none_and_self_heal_still_works():
+    """No ``on_reopen`` passed (every pre-ticket-007 caller) -- self-heal
+    must behave exactly as before, never raising for lack of a listener."""
+    backend = FakeBackend()
+    cam = Camera("cam-a", backend)
+    cam.open()
+
+    for _ in range(FAILURE_THRESHOLD):
+        cam.read()
+
+    assert backend.open_calls == 2  # reopened without error
+
+
+# ---------------------------------------------------------------------------
 # effective_config() — introspected facts (AC3)
 # ---------------------------------------------------------------------------
 

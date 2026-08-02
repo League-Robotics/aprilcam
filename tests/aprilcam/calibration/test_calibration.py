@@ -25,7 +25,15 @@ import cv2 as cv
 import numpy as np
 import pytest
 
-from aprilcam.calibration.calibration import MAX_REPROJECTION_ERROR_CM, Calibration, Calibrator
+from aprilcam.calibration.calibration import (
+    DRIFT_CHECK_INTERVAL_S,
+    DRIFT_TOLERANCE_CM,
+    MAX_REPROJECTION_ERROR_CM,
+    MIN_DRIFT_CHECK_MARKERS,
+    Calibration,
+    Calibrator,
+    compute_drift_cm,
+)
 from aprilcam.config.interfaces import CameraConfig
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.errors import NoPlayfieldLinked
@@ -629,3 +637,153 @@ def test_origin_shift_is_never_a_sign_inversion_on_either_axis():
 
     assert east.x > 0 > west.x
     assert north.y > 0 > south.y
+
+
+# ---------------------------------------------------------------------------
+# compute_drift_cm (ticket 023-007) -- the opportunistic staleness drift
+# check's pure geometry, exercised directly against a real ``Calibration``
+# from the fixtures above rather than through ``DetectionEngine``/
+# ``DaemonService`` (those modules' own tests cover the wiring; this module
+# covers the math and the "cannot verify" contract it must honour).
+# ---------------------------------------------------------------------------
+
+
+def _detected_at(positions: Dict[int, Tuple[float, float]]) -> Dict[int, PixelPoint]:
+    """*positions* (world cm, id -> (x, y)) as a drift-check ``detected``
+    dict -- pixel positions via the same synthetic camera mount
+    ``_calibrated()`` solved against, simulating "the marker was detected
+    here" for whatever world position is passed in (whether or not that
+    matches the marker's real surveyed position -- the caller decides,
+    to simulate either an unmoved camera or a bumped one)."""
+    return {tag_id: PixelPoint(*standard_pixel_for_world(x, y)) for tag_id, (x, y) in positions.items()}
+
+
+def test_drift_constants_match_the_stakeholder_confirmed_values():
+    """Pins the sprint.md Decisions values directly, the same way
+    ``test_ring_buffer_size_defaults_to_v1s_300`` pins its own constant --
+    a silent change to either number is exactly the kind of regression a
+    plain equality assertion catches immediately."""
+    assert DRIFT_TOLERANCE_CM == 2.0
+    assert DRIFT_CHECK_INTERVAL_S == 10.0
+    assert MIN_DRIFT_CHECK_MARKERS == 3
+
+
+def test_compute_drift_cm_is_near_zero_when_nothing_has_moved():
+    """An unmoved camera: every matched marker re-detected at exactly
+    its surveyed position (the same synthetic camera mount the
+    calibration was solved against) should reproject to within the
+    homography's own noise-free fit error, comfortably under the 2.0 cm
+    tolerance."""
+    calibration = _calibrated()
+    definition = main_playfield_definition()
+    detected = _detected_at(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+
+    drift = compute_drift_cm(calibration, definition, detected)
+
+    assert drift is not None
+    assert drift < 0.5
+
+
+def test_compute_drift_cm_flags_a_shift_beyond_tolerance():
+    """One matched marker detected 5 cm from its surveyed position --
+    well past the 2.0 cm tolerance -- simulating a bumped camera (or,
+    equivalently for this pure-geometry function, a marker that
+    genuinely moved). The max, not an average, decides the outcome, so
+    a single bad marker among nine good ones is not diluted away."""
+    calibration = _calibrated()
+    definition = main_playfield_definition()
+    positions = dict(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    true_x, true_y = positions[5]
+    positions[5] = (true_x + 5.0, true_y)
+    detected = _detected_at(positions)
+
+    drift = compute_drift_cm(calibration, definition, detected)
+
+    assert drift is not None
+    assert drift > DRIFT_TOLERANCE_CM
+
+
+def test_compute_drift_cm_within_tolerance_is_not_flagged():
+    """A small, sub-tolerance shift (0.5 cm -- comfortably inside the
+    2.0 cm tolerance, itself ~11x the observed real noise floor) must
+    not be reported as drift -- the false-positive guard on ordinary
+    detection jitter."""
+    calibration = _calibrated()
+    definition = main_playfield_definition()
+    positions = dict(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    true_x, true_y = positions[5]
+    positions[5] = (true_x + 0.5, true_y)
+    detected = _detected_at(positions)
+
+    drift = compute_drift_cm(calibration, definition, detected)
+
+    assert drift is not None
+    assert drift < DRIFT_TOLERANCE_CM
+
+
+def test_compute_drift_cm_returns_none_when_no_markers_are_visible():
+    """Darkness, a covered field, a lens cap -- zero matched markers
+    detected must read as "cannot verify," never as "confirmed no
+    drift" (never ``0.0``)."""
+    calibration = _calibrated()
+    definition = main_playfield_definition()
+
+    drift = compute_drift_cm(calibration, definition, {})
+
+    assert drift is None
+
+
+def test_compute_drift_cm_returns_none_below_the_minimum_marker_count():
+    """Fewer than ``MIN_DRIFT_CHECK_MARKERS`` matched markers visible --
+    even if every one of them individually shows a huge apparent shift --
+    is still "cannot verify," not evidence of drift. Proven with a
+    deliberately enormous single-marker shift that would trivially
+    exceed the tolerance if it were allowed to count on its own."""
+    calibration = _calibrated()
+    definition = main_playfield_definition()
+    assert MIN_DRIFT_CHECK_MARKERS > 1
+    huge_shift = {1: (MAIN_PLAYFIELD_ARUCO_POSITIONS[1][0] + 50.0, MAIN_PLAYFIELD_ARUCO_POSITIONS[1][1])}
+    detected = _detected_at(huge_shift)
+    assert len(detected) < MIN_DRIFT_CHECK_MARKERS
+
+    drift = compute_drift_cm(calibration, definition, detected)
+
+    assert drift is None
+
+
+def test_compute_drift_cm_exactly_at_the_minimum_marker_count_does_verify():
+    """The boundary case: exactly ``MIN_DRIFT_CHECK_MARKERS`` matched
+    markers visible is enough to draw a conclusion -- the guard is "fewer
+    than," not "fewer than or equal to.\""""
+    calibration = _calibrated()
+    definition = main_playfield_definition()
+    ids = list(calibration.matched_ids)[:MIN_DRIFT_CHECK_MARKERS]
+    positions = {tag_id: MAIN_PLAYFIELD_ARUCO_POSITIONS[tag_id] for tag_id in ids}
+    detected = _detected_at(positions)
+    assert len(detected) == MIN_DRIFT_CHECK_MARKERS
+
+    drift = compute_drift_cm(calibration, definition, detected)
+
+    assert drift is not None
+
+
+def test_compute_drift_cm_ignores_a_detected_id_the_calibration_never_matched():
+    """A detected id outside ``calibration.matched_ids`` (a stray ArUco
+    marker in frame, or an id that stopped being part of the playfield
+    definition) is simply not counted towards *visible* -- it must not
+    let an otherwise-insufficient reading sneak past the minimum-marker
+    guard."""
+    calibration = _calibrated()
+    definition = main_playfield_definition()
+    detected = _detected_at(
+        {
+            1: MAIN_PLAYFIELD_ARUCO_POSITIONS[1],
+            2: MAIN_PLAYFIELD_ARUCO_POSITIONS[2],
+        }
+    )
+    detected[999] = PixelPoint(*standard_pixel_for_world(0.0, 0.0))
+    assert 999 not in calibration.matched_ids
+
+    drift = compute_drift_cm(calibration, definition, detected)
+
+    assert drift is None  # still only 2 real matched markers -- below the minimum

@@ -258,16 +258,25 @@ class DaemonService(Daemon):
         self._config_loader: ConfigLoaderIface = (
             config_loader if config_loader is not None else JsonConfigLoader()
         )
-        # ``calibration_lookup=self.get_calibration``: a bound-method
-        # reference, resolved at call time, not at this line -- safe to
-        # pass before ``self._calibrations``/``self._lock`` exist below,
-        # since ``DetectionEngine`` never calls it during construction,
-        # only from a later ``run_burst`` (ticket 022-004, module
-        # docstring's "threaded through" section). Callers that pass
-        # their own ``detection=`` (tests pinning burst counts) own their
-        # engine's ``calibration_lookup`` themselves.
+        # ``calibration_lookup=self.get_calibration``/
+        # ``playfield_lookup=self._playfield_for_calibration``/
+        # ``mark_stale=self._mark_stale``: bound-method references,
+        # resolved at call time, not at this line -- safe to pass before
+        # ``self._calibrations``/``self._playfields``/``self._lock`` exist
+        # below, since ``DetectionEngine`` never calls any of them during
+        # construction, only from a later ``run_burst`` (ticket 022-004's
+        # ``calibration_lookup``; ticket 023-007's ``playfield_lookup``/
+        # ``mark_stale``, module docstring's "threaded through" section).
+        # Callers that pass their own ``detection=`` (tests pinning burst
+        # counts) own their engine's callables themselves.
         self._detection = (
-            detection if detection is not None else DetectionEngine(calibration_lookup=self.get_calibration)
+            detection
+            if detection is not None
+            else DetectionEngine(
+                calibration_lookup=self.get_calibration,
+                playfield_lookup=self._playfield_for_calibration,
+                mark_stale=self._mark_stale,
+            )
         )
         self._playfields: Dict[str, PlayfieldDefinitionIface] = {}
         self._camera_configs: Dict[str, CameraConfig] = {}
@@ -394,7 +403,10 @@ class DaemonService(Daemon):
         (``daemon.detection.DetectionEngine.latest`` -- a pure read) and
         stays ``None`` when it does not -- asking for pixels never
         triggers a detection burst of its own (sprint.md Decision 4,
-        ticket 021-004).
+        ticket 021-004). ``calibration_stale`` (ticket 023-007) is
+        overlaid from :meth:`get_calibration` on both branches -- ``ImageFrame``'s
+        in-band carrier, so a client fetching pixels sees real staleness
+        state without a second round trip.
         """
         if encoding not in VALID_ENCODINGS:
             raise ValueError(
@@ -413,6 +425,7 @@ class DaemonService(Daemon):
             raise RuntimeError(f"failed to encode frame from {camera!r} as {encoding}")
 
         height, width = frame.shape[:2]
+        calibration = self.get_calibration(cam.slug)
         return ImageFrame(
             data=buf.tobytes(),
             width=width,
@@ -421,6 +434,7 @@ class DaemonService(Daemon):
             timestamp=time.time(),
             deskewed=False,
             tags=self._detection.latest(cam.slug),
+            calibration_stale=calibration.stale if calibration is not None else False,
         )
 
     def _get_deskewed_frame(self, camera: str, *, encoding: str) -> ImageFrame:
@@ -491,6 +505,7 @@ class DaemonService(Daemon):
             px_per_cm=deskewer.px_per_cm,
             world_extent=deskewer.world_extent,
             tags=self._detection.latest(cam.slug),
+            calibration_stale=calibration.stale,
         )
 
     def get_tags(self, camera: str) -> TagFrame:
@@ -836,6 +851,45 @@ class DaemonService(Daemon):
         with self._lock:
             return self._calibrations.get(slug)
 
+    def _mark_stale(self, slug: str) -> None:
+        """Flip *slug*'s currently-held calibration's ``stale`` bit, if
+        it has one (ticket 023-007) -- the single mutation point both
+        staleness triggers share: wired as ``camera.camera.Camera``'s
+        ``on_reopen`` callback in :meth:`_camera_for` (sprint.md
+        Decision 6), and as ``daemon.detection.DetectionEngine``'s
+        ``mark_stale`` callable, called from its opportunistic drift
+        check (Decision 5). *slug* is always an already-resolved
+        registry slug in both callers -- never a raw number-or-slug
+        token -- so, unlike :meth:`calibrate`/:meth:`get_calibration`,
+        this method does not call :meth:`_resolve_slug_if_known` itself.
+
+        Takes :attr:`_lock` exactly like every other ``self._calibrations``
+        mutation already does (:meth:`calibrate`) -- pinned explicitly by
+        the ticket: two concurrent bursts (or a burst racing a reopen) on
+        the same camera must not corrupt the store. A no-op for a slug
+        with no held calibration (never calibrated -- nothing to flag as
+        wrong) or one already marked stale (idempotent, and avoids a
+        redundant disk write on repeated triggers for the same still-bad
+        camera).
+
+        Persists the change to ``calibration.json`` (:meth:`_persist_calibration`,
+        the same atomic write :meth:`calibrate` already uses) so a
+        staleness flip survives a daemon restart -- ``Calibration`` is
+        file-backed (UC-01), and a restart silently un-flagging a bumped
+        camera as "not stale" would reintroduce exactly the failure mode
+        this ticket exists to close. Persisted *after* releasing
+        :attr:`_lock`, mirroring :meth:`calibrate`'s own ordering, so a
+        slow disk write never holds up a concurrent caller's unrelated
+        camera.
+        """
+        with self._lock:
+            calibration = self._calibrations.get(slug)
+            if calibration is None or calibration.stale:
+                return
+            updated = replace(calibration, stale=True)
+            self._calibrations[slug] = updated
+        self._persist_calibration(slug, updated)
+
     def _camera_config_for_calibration(self, camera: str) -> Optional[CameraConfig]:
         """``Calibrator``'s ``get_camera_config`` callable -- a locked
         read of :attr:`_camera_configs`, the same store
@@ -1035,6 +1089,7 @@ class DaemonService(Daemon):
             number=record.number,
             config_loader=self._config_loader,
             config_path=self._config_path_for(record.slug),
+            on_reopen=lambda: self._mark_stale(record.slug),
         )
         cam.open()
         with self._lock:
