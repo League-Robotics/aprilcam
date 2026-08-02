@@ -51,12 +51,19 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from aprilcam.config.interfaces import CameraConfig, ConfigLoader as _ConfigLoaderBase
+from aprilcam.config.interfaces import Directories
 from aprilcam.config.interfaces import Feature
 from aprilcam.config.interfaces import PlayfieldDefinition as _PlayfieldDefinitionBase
 from aprilcam.errors import MalformedDocument
 from aprilcam.types import WorldPoint
 
-__all__ = ["ConfigLoader", "PlayfieldDefinition", "PlayfieldFeatureEntry"]
+__all__ = [
+    "ConfigDirError",
+    "ConfigLoader",
+    "PlayfieldDefinition",
+    "PlayfieldFeatureEntry",
+    "ScanResult",
+]
 
 #: A small absolute margin (cm) added to the field's declared
 #: half-extents before rejecting a feature as out-of-bounds -- large
@@ -193,9 +200,100 @@ class PlayfieldDefinition(_PlayfieldDefinitionBase):
         }
 
 
+@dataclass(frozen=True, kw_only=True)
+class ConfigDirError:
+    """One file :meth:`ConfigLoader.load_config_dir` could not load --
+    named, so a caller (``daemon/__main__.py build()``) can log exactly
+    which file was skipped and why, per Decision 1 (sprint 023 sprint.md):
+    boot-time malformed config is skip-and-warn, never refuse-to-start."""
+
+    path: Path
+    message: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class ScanResult:
+    """Everything :meth:`ConfigLoader.load_config_dir` found under one
+    ``config_dir``: every successfully-loaded document plus every file
+    that failed to load, named. Never raised for one bad file among
+    good ones -- see that method's docstring."""
+
+    playfields: Tuple["PlayfieldDefinition", ...] = ()
+    camera_configs: Tuple[CameraConfig, ...] = ()
+    errors: Tuple[ConfigDirError, ...] = ()
+
+
 class ConfigLoader(_ConfigLoaderBase):
     """Concrete ``config.interfaces.ConfigLoader``. See the module
     docstring for the validation this performs."""
+
+    def load_config_dir(self, directories: Directories) -> ScanResult:
+        """Scan *directories*.config_dir for every playfield definition
+        (``playfields/*.json``) then every camera config
+        (``cameras/<slug>/config.json``) -- ``configuration.md``'s
+        two-directory layout -- loading each through
+        :meth:`load_playfield`/:meth:`load_camera_config` in turn.
+
+        This is ticket 023-003's boot-time-load half: `daemon.
+        __main__.build()` calls this once, before the control plane
+        opens, and feeds every document returned here into
+        `DaemonService`'s already-existing `set_playfield`/
+        `set_camera_config` setters (sprint.md Architecture, "Modules"
+        point 1 -- `DaemonService` itself stays ignorant of disk).
+
+        **Never raises for one malformed file** (sprint.md Design
+        Rationale, Decision 1: skip-and-warn, not refuse-to-start,
+        matching the existing precedent in
+        `DaemonService._load_calibrations`). A `MalformedDocument` from
+        either loader method for one file is caught here and recorded
+        in the returned `ScanResult.errors`, naming the offending path
+        and the message; scanning continues with every other file. This
+        is what lets a daemon with five cameras start successfully when
+        only one of their config files has a typo, rather than refusing
+        to start over it.
+
+        A missing `playfields/` or `cameras/` subdirectory is not an
+        error -- an empty or partially-populated `config_dir` is the
+        ordinary first-run case (UC-01.S-2). A `cameras/<slug>/`
+        directory with no `config.json` inside it is likewise skipped
+        silently, not reported as an error -- there is nothing there to
+        have failed to load.
+
+        Playfields are scanned (and appear in the returned tuple)
+        before camera configs, in sorted-path order within each
+        section, matching UC-01's stated main-flow order and giving
+        deterministic output for a fixed directory tree.
+        """
+        playfields: list = []
+        camera_configs: list = []
+        errors: list = []
+
+        playfields_dir = directories.config_dir / "playfields"
+        if playfields_dir.is_dir():
+            for path in sorted(playfields_dir.glob("*.json")):
+                try:
+                    playfields.append(self.load_playfield(path))
+                except MalformedDocument as exc:
+                    errors.append(ConfigDirError(path=path, message=str(exc)))
+
+        cameras_dir = directories.config_dir / "cameras"
+        if cameras_dir.is_dir():
+            for camera_dir in sorted(cameras_dir.iterdir()):
+                if not camera_dir.is_dir():
+                    continue
+                path = camera_dir / "config.json"
+                if not path.exists():
+                    continue
+                try:
+                    camera_configs.append(self.load_camera_config(path))
+                except MalformedDocument as exc:
+                    errors.append(ConfigDirError(path=path, message=str(exc)))
+
+        return ScanResult(
+            playfields=tuple(playfields),
+            camera_configs=tuple(camera_configs),
+            errors=tuple(errors),
+        )
 
     def load_camera_config(self, path: Path) -> CameraConfig:
         data = _read_json_object(path, kind="camera config")

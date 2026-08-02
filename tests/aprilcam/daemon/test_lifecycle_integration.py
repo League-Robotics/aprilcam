@@ -16,6 +16,7 @@ matching every other ``@pytest.mark.camera`` module's convention
 
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 from pathlib import Path
@@ -30,6 +31,17 @@ from aprilcam.errors import AlreadyRunning
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
 
 pytestmark = pytest.mark.camera
+
+#: ticket 003/006's ground-truth camera: aimed at main-playfield on this
+#: Mac -- matches ``test_calibration_hardware.py``'s ``ARDUCAM_SLUG``.
+ARDUCAM_SLUG = "arducam-ov9782-usb-camera"
+
+#: The real, checked-in playfield definition (same file
+#: ``test_calibration_hardware.py``/``test_detection_hardware.py`` name
+#: as ground truth).
+MAIN_PLAYFIELD_JSON = (
+    Path(__file__).resolve().parents[3] / "config" / "aprilcam-old" / "playfields" / "main-playfield.json"
+)
 
 
 @pytest.fixture
@@ -116,5 +128,80 @@ def test_start_stop_and_restart_stability_against_real_cameras(tmp_path, short_t
     try:
         second_numbers = {c.name: c.number for c in restarted.status().cameras}
         assert second_numbers == first_numbers
+    finally:
+        restarted.stop()
+
+
+# ---------------------------------------------------------------------------
+# UC-01.S-4 end to end (ticket 023-003): a playfield + camera config
+# installed directly into config_dir -- never pushed over RPC -- comes
+# back linked and ready on every fresh start, closing the restart trap
+# sprint 022 hit live.
+# ---------------------------------------------------------------------------
+
+
+def _skip_if_arducam_not_attached() -> None:
+    slugs = {identity.slug for identity in resolve_all().values()}
+    if ARDUCAM_SLUG not in slugs:
+        pytest.skip(f"{ARDUCAM_SLUG!r} not attached to this machine")
+
+
+def test_boot_loaded_playfield_and_camera_config_need_no_manual_push(tmp_path, short_tmp_dir):
+    """UC-01.S-4, closed for real: ``main-playfield.json`` plus a camera
+    config linking ``arducam-ov9782-usb-camera`` to it are installed
+    directly into ``config_dir`` -- never pushed over RPC anywhere in
+    this test -- before the daemon ever starts. Calibrating with zero
+    ``SetPlayfield``/``SetCameraConfig`` calls proves the playfield link
+    came from disk alone (``Calibrator.calibrate`` raises
+    ``NoPlayfieldLinked`` before ever touching the camera backend if it
+    did not -- see ``calibration.calibration``'s module docstring), and a
+    restart preserves both the calibration (file-backed, unchanged from
+    before this ticket) and the playfield link (boot-loaded from
+    ``config_dir``, this ticket's fix) -- a deskewed frame request
+    succeeds immediately after the restart with no push at all."""
+    _skip_if_arducam_not_attached()
+
+    config_dir = tmp_path / "config"
+    (config_dir / "playfields").mkdir(parents=True)
+    (config_dir / "cameras" / ARDUCAM_SLUG).mkdir(parents=True)
+    shutil.copyfile(MAIN_PLAYFIELD_JSON, config_dir / "playfields" / "main-playfield.json")
+    (config_dir / "cameras" / ARDUCAM_SLUG / "config.json").write_text(
+        json.dumps({"name": ARDUCAM_SLUG, "playfield": "main-playfield", "settings": {}}),
+        encoding="utf-8",
+    )
+
+    state_dir = tmp_path / "state"
+    lock_path = short_tmp_dir / "daemon.lock"
+    socket_path = short_tmp_dir / "control.sock"
+    directories = Directories(config_dir=config_dir, state_dir=state_dir)
+
+    lifecycle = daemon_main.build(directories, lock_path=lock_path, socket_path=socket_path)
+    lifecycle.start()
+    try:
+        stub = _stub_for(socket_path)
+
+        # No SetPlayfield/SetCameraConfig RPC anywhere above or here --
+        # if the boot-time load did not run, this raises NoPlayfieldLinked.
+        calibrate_response = stub.Calibrate(aprilcam_v2_pb2.CalibrateRequest(camera=ARDUCAM_SLUG))
+        assert calibrate_response.result.succeeded is True, (
+            "calibrate failed with config loaded from disk only, no "
+            f"manual push -- matched {list(calibrate_response.result.matched_ids)}, "
+            f"missing {list(calibrate_response.result.missing_ids)}, "
+            f"reason={calibrate_response.result.reason!r}. Check the arducam is "
+            "physically aimed at main-playfield."
+        )
+    finally:
+        lifecycle.stop()
+
+    # -- restart: fresh process-equivalent stack, still nothing pushed --
+    restarted = daemon_main.build(directories, lock_path=lock_path, socket_path=socket_path)
+    restarted.start()
+    try:
+        stub = _stub_for(socket_path)
+        frame_response = stub.GetFrame(
+            aprilcam_v2_pb2.GetFrameRequest(camera=ARDUCAM_SLUG, deskewed=True)
+        )
+        assert frame_response.deskewed is True
+        assert len(frame_response.data) > 0
     finally:
         restarted.stop()

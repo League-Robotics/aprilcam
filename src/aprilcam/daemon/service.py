@@ -647,7 +647,14 @@ class DaemonService(Daemon):
         (a config outliving, or arriving before, its hardware is normal
         -- UC-25) and for a camera not currently held open -- there is
         nothing to reconfigure on a closed handle, only the link to
-        record (ticket 023-001 AC1).
+        record (ticket 023-001 AC1). A config stored here for a camera
+        not yet open still takes effect the moment that camera is first
+        opened, via :meth:`_camera_for`'s apply-on-open step (ticket
+        023-003) -- the same mechanism that also applies a
+        boot-time-loaded config (``daemon.__main__.build()``), so a
+        pushed-while-absent config and a config installed on disk before
+        the daemon ever started are handled identically once the camera
+        actually appears.
 
         **Applies to hardware when the camera is held open** (ticket
         023-001, closing sprint 022's Decision 1 deferral -- UC-03's
@@ -905,6 +912,23 @@ class DaemonService(Daemon):
         registry record outliving its hardware is normal (UC-25), so
         this is distinct from "never registered," not folded into
         :class:`UnknownCamera` the way it was before this ticket.
+
+        **Apply-on-open (ticket 023-003).** A freshly-opened camera
+        checks :attr:`_camera_configs` for a config already held under
+        its slug -- populated either by a live :meth:`set_camera_config`
+        push that arrived before this camera did, or by
+        ``daemon.__main__.build()``'s boot-time load from ``config_dir``
+        -- and applies it via :meth:`Camera.apply_config` *before* the
+        camera is cached into :attr:`_cameras` and handed back to the
+        caller. This is what makes a config installed on disk (or
+        pushed while the camera was absent) take effect the instant the
+        camera is actually opened, not only on a subsequent
+        :meth:`set_camera_config` call -- closing UC-01.S-4's
+        previously-broken playfield-link half. An ``UnsupportedSetting``
+        from a stored-but-now-invalid config propagates straight through,
+        exactly like a live push would; :attr:`_cameras` is only updated
+        after this succeeds, so a camera that fails to apply its stored
+        config is not left half-registered as held-open.
         """
         with self._lock:
             existing = self._cameras.get(token)
@@ -932,6 +956,10 @@ class DaemonService(Daemon):
             number=record.number,
         )
         cam.open()
+        with self._lock:
+            config = self._camera_configs.get(record.slug)
+        if config is not None:
+            cam.apply_config(config)
         with self._lock:
             self._cameras[record.slug] = cam
         return cam
