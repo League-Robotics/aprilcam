@@ -589,7 +589,15 @@ def _build_tag_service(directories, registry, *, detector, frame_count: int = 10
     fresh ``DetectionEngine`` -- the shared setup every burst-counting /
     scripted-detection test below needs, factored out so each test states
     only what is different about it (the detector's script and how many
-    times it queries). Returns ``(service, slug)``."""
+    times it queries). Returns ``(service, slug)``.
+
+    ``confirmation_streak=1`` (ticket 024-006): every test built on this
+    helper is about burst-counting, ring-buffer/history shape, or the
+    RPC wire contract -- not about temporal confirmation itself (that is
+    ``test_detection.py``'s dedicated suite) -- so this override restores
+    exactly pre-ticket, single-burst-reports-immediately behaviour,
+    matching the ticket's own sanctioned pattern for tests "genuinely
+    about something else entirely."""
     identity = _identity("hw:fake-tags", "Fake Tag Camera")
     slug = registry.resolve(identity)
     number = registry.get(slug).number
@@ -604,7 +612,7 @@ def _build_tag_service(directories, registry, *, detector, frame_count: int = 10
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: FakeBackend(),
     )
-    detection = DetectionEngine(detector_factory=lambda: detector)
+    detection = DetectionEngine(detector_factory=lambda: detector, confirmation_streak=1)
     service = DaemonService(
         registry=registry,
         discovery=discovery,
@@ -2365,14 +2373,25 @@ def test_get_tags_on_a_calibrated_camera_reports_real_world_coordinates(director
     isolation with an injected ``calibration_lookup``; this is the one
     place the actual ``DaemonService`` wiring itself is checked, using
     the real (default, no ``detection=`` override) engine a production
-    daemon process constructs."""
+    daemon process constructs.
+
+    Ticket 024-006: the production ``DetectionEngine`` uses the default
+    ``CONFIRMATION_STREAK`` (2), and ``calibrate()`` does not itself run
+    any bursts through ``DetectionEngine`` (it captures its own frames
+    directly), so the first ``get_tags`` call against this camera is
+    this tag's first-ever sighting through the engine -- unconfirmed.
+    ``get_tags`` is therefore called *twice*, against two identical
+    rendered frames, with the assertions made against the second
+    (confirmed) call -- the "more honest fix" pattern the ticket
+    prescribes for tests specifically about world-field behaviour."""
     frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
-    # CALIBRATION_FRAME_COUNT reads for calibrate(), plus one more for
-    # get_tags' own burst -- the same rendered image serves both, since
-    # real ArUco detection/homography is what's under test here, not
-    # distinct per-call imagery.
+    # CALIBRATION_FRAME_COUNT reads for calibrate(), plus two more for
+    # get_tags' own two bursts (first unconfirmed, second confirmed) --
+    # the same rendered image serves all of them, since real ArUco
+    # detection/homography is what's under test here, not distinct
+    # per-call imagery.
     identity, slug, cam, _backend = _open_camera_with_frames(
-        registry, [frame] * (CALIBRATION_FRAME_COUNT + 1)
+        registry, [frame] * (CALIBRATION_FRAME_COUNT + 2)
     )
     service = _service_with_camera(directories, registry, identity, slug, cam)
     service.set_playfield(main_playfield_definition())
@@ -2381,6 +2400,7 @@ def test_get_tags_on_a_calibrated_camera_reports_real_world_coordinates(director
     result = service.calibrate(slug)
     assert result.succeeded is True
 
+    service.get_tags(slug)
     tag_frame = service.get_tags(slug)
 
     aruco_1 = next(r for r in tag_frame.tags if r.tag == TagId(family=TagFamily.ARUCO, number=1))
