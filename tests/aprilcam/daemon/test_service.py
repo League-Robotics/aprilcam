@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -40,7 +41,7 @@ import pytest
 
 from aprilcam.calibration.calibration import Calibration
 from aprilcam.camera import identity as identity_module
-from aprilcam.camera.camera import Camera
+from aprilcam.camera.camera import FAILURE_THRESHOLD, Camera
 from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import CameraIdentity
 from aprilcam.camera.registry import CameraRegistry
@@ -2138,6 +2139,199 @@ def test_fresh_daemon_service_with_no_calibration_file_reports_none(directories,
     service = DaemonService(registry=registry, discovery=discovery, directories=directories)
 
     assert service.get_calibration("never-calibrated-camera") is None
+
+
+# ---------------------------------------------------------------------------
+# Calibration staleness reachable (ticket 023-007) -- the two triggers
+# (opportunistic drift, camera reopen), _mark_stale's locking, staleness
+# reaching ImageFrame, and re-calibration clearing it.
+# ---------------------------------------------------------------------------
+
+
+def test_camera_reopen_via_self_heal_marks_the_calibration_stale_through_real_wiring(
+    directories, registry
+):
+    """Sprint.md Decision 6, exercised through ``DaemonService._camera_for``'s
+    own ``Camera(...)`` construction -- not a directly-injected ``Camera``
+    the way ``held_camera``/``_open_camera_with_frames`` build one for
+    every other test in this file. Those fixtures bypass ``_camera_for``
+    entirely, so they would never exercise the
+    ``on_reopen=lambda: self._mark_stale(...)`` wiring this ticket adds
+    there -- ``test_camera.py``'s own ``on_reopen`` tests already cover
+    the hook's *mechanism* in isolation; this is the one place the real
+    production wiring between ``Camera`` and ``DaemonService`` is
+    checked."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity = _identity("hw:reopen", "Reopen Camera")
+    slug = registry.resolve(identity)
+    backend = FakeBackend(read_queue=[frame] * CALIBRATION_FRAME_COUNT)
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(),
+        identity_source=lambda: {0: identity},
+        backend_factory=lambda index: backend,
+    )
+    service = DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        identity_source=lambda: {0: identity},
+        backend_factory=lambda index: backend,
+    )
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True
+    assert service.get_calibration(slug).stale is False
+
+    cam = service._camera_for(slug)  # noqa: SLF001 - internal; the same Camera calibrate() opened
+    opens_before = backend.open_calls
+    for _ in range(FAILURE_THRESHOLD):
+        cam.read()  # the queue is now empty -- every read fails; the 5th triggers self-heal
+
+    assert backend.open_calls == opens_before + 1  # the reopen genuinely happened
+    calibration = service.get_calibration(slug)
+    assert calibration is not None
+    assert calibration.stale is True
+
+
+def test_mark_stale_is_thread_safe_under_concurrent_calls(directories, registry):
+    """AC: 'Concurrent mark-stale calls... do not corrupt
+    self._calibrations -- guarded by self._lock.' Hammers ``_mark_stale``
+    from several threads at once (the drift check and the reopen hook
+    can both fire from whatever RPC thread is servicing them, per
+    ``daemon/rpc.py``'s ``ThreadPoolExecutor``) and checks both that
+    nothing raises and that the store ends up with exactly one, fully-
+    formed, stale entry for the camera -- never a torn or duplicated
+    one."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True
+
+    errors: List[BaseException] = []
+
+    def hammer() -> None:
+        try:
+            for _ in range(200):
+                service._mark_stale(slug)  # noqa: SLF001 - internal; the concurrency target itself
+        except BaseException as exc:  # pragma: no cover - would fail the test either way
+            errors.append(exc)
+
+    threads = [threading.Thread(target=hammer) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    calibration = service.get_calibration(slug)
+    assert calibration is not None
+    assert calibration.stale is True
+    assert list(service._calibrations.keys()) == [slug]  # noqa: SLF001 - exactly one entry, no corruption
+
+
+def test_get_frame_raw_reports_calibration_stale_after_mark_stale(directories, registry):
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(
+        registry, [frame] * (CALIBRATION_FRAME_COUNT + 2)
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True
+
+    before = service.get_frame(slug)
+    assert before.calibration_stale is False
+
+    service._mark_stale(slug)  # noqa: SLF001
+
+    after = service.get_frame(slug)
+    assert after.calibration_stale is True
+
+
+def test_get_frame_deskewed_reports_calibration_stale_after_mark_stale(directories, registry):
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(
+        registry, [frame] * (CALIBRATION_FRAME_COUNT + 2)
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True
+
+    before = service.get_frame(slug, deskewed=True)
+    assert before.calibration_stale is False
+
+    service._mark_stale(slug)  # noqa: SLF001
+
+    after = service.get_frame(slug, deskewed=True)
+    assert after.calibration_stale is True
+
+
+def test_recalibrating_a_stale_camera_clears_stale(directories, registry):
+    """AC: re-calibrating a stale camera clears ``stale`` -- already true
+    by construction (``calibrate()`` always writes ``stale=False`` on a
+    fresh success), pinned explicitly now that staleness is actually
+    reachable rather than assumed permanently ``False``."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(
+        registry, [frame] * (CALIBRATION_FRAME_COUNT * 2)
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True
+
+    service._mark_stale(slug)  # noqa: SLF001
+    stale_calibration = service.get_calibration(slug)
+    assert stale_calibration is not None
+    assert stale_calibration.stale is True
+
+    result = service.calibrate(slug)
+
+    assert result.succeeded is True
+    fresh_calibration = service.get_calibration(slug)
+    assert fresh_calibration is not None
+    assert fresh_calibration.stale is False
+
+
+def test_end_to_end_drift_via_the_real_daemon_service_wiring_flips_stale(directories, registry):
+    """SUC-006's own scenario, headless: a bumped camera's calibration is
+    flagged stale rather than continuing to serve confident wrong
+    positions. This is the ticket's headless equivalent of physically
+    moving camera 3 (a corner-shifted fixture frame, per the ticket's own
+    documented alternative -- real hardware was not disturbed for this
+    ticket; see the ticket notes), run through ``DaemonService``'s real,
+    production-wired ``DetectionEngine`` (no ``detection=`` override --
+    every other drift-check test in ``test_detection.py`` substitutes its
+    own engine; this is the one place the default constructor wiring
+    itself, ``playfield_lookup``/``mark_stale``, is exercised end to
+    end)."""
+    good_frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    shifted_positions = {
+        tag_id: (x + 5.0, y) for tag_id, (x, y) in MAIN_PLAYFIELD_ARUCO_POSITIONS.items()
+    }
+    bumped_frame = render_playfield_frame(shifted_positions)
+    identity, slug, cam, backend = _open_camera_with_frames(
+        registry, [good_frame] * CALIBRATION_FRAME_COUNT
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True
+    assert service.get_calibration(slug).stale is False
+
+    backend._queue.append(bumped_frame)
+    tag_frame = service.get_tags(slug)
+
+    assert tag_frame.calibration_stale is True
+    calibration = service.get_calibration(slug)
+    assert calibration is not None
+    assert calibration.stale is True
+    state = next(s for s in service.list_cameras() if s.name == slug)
+    assert state.calibration_stale is True
 
 
 # ---------------------------------------------------------------------------
