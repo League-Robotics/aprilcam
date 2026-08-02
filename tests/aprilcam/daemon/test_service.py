@@ -47,6 +47,7 @@ from aprilcam.camera.registry import CameraRegistry
 from aprilcam.config.directories import Directories
 from aprilcam.config.interfaces import CameraConfig
 from aprilcam.config.loader import ConfigLoader, PlayfieldDefinition, PlayfieldFeatureEntry
+from aprilcam.daemon import __main__ as daemon_main
 from aprilcam.daemon.detection import DetectionEngine
 from aprilcam.daemon.interfaces import Daemon
 from aprilcam.daemon.lifecycle import DaemonLifecycle
@@ -1342,8 +1343,9 @@ def test_set_camera_config_unsupported_key_fails_whole_push_leaves_config_unset(
     """UC-03.S-3 at the service level: an unsupported key on a
     held-open camera's *first-ever* push raises ``UnsupportedSetting``
     (propagated straight through from ``Camera.apply_config``) and
-    leaves nothing stored -- ``get_camera_config`` still reports the
-    camera as never configured, exactly as if the push never
+    leaves nothing stored. ``get_camera_config`` reports the camera as
+    never configured via the held-open blank template (ticket 023-005),
+    not the rejected document -- exactly as if the push never
     happened."""
     _, slug, _ = held_camera
 
@@ -1353,8 +1355,15 @@ def test_set_camera_config_unsupported_key_fails_whole_push_leaves_config_unset(
         )
     assert exc_info.value.key == "not_a_real_key"
 
-    with pytest.raises(UnknownCamera):
-        service.get_camera_config(slug)
+    fetched = service.get_camera_config(slug)
+    assert fetched.playfield is None
+    assert fetched.settings["device_name"] == slug
+    assert fetched.settings["frame_width"] == 640
+    assert all(
+        value is None
+        for key, value in fetched.settings.items()
+        if key not in ("device_name", "frame_width", "frame_height")
+    )
 
 
 def test_set_camera_config_unsupported_key_leaves_prior_config_untouched(service, held_camera):
@@ -1510,6 +1519,55 @@ def test_get_camera_config_unknown_camera_raises_unknown_camera(service):
         service.get_camera_config("never-configured")
     assert excinfo.value.requested == "never-configured"
     assert excinfo.value.available == ()
+
+
+def test_get_camera_config_held_open_but_never_pushed_returns_blank_template(
+    service, held_camera
+):
+    """UC-03.S-1 / UC-24.S-3 at the service level (ticket 023-005): a
+    camera this process has opened (``held_camera`` -- as ``get_frame``
+    leaves one) but that has never had a config successfully pushed
+    reports the introspected-plus-blank template
+    (``Camera.effective_config``, ticket 023-002's real per-camera
+    settable-key set) rather than ``UnknownCamera`` -- the gap ticket
+    023-002 built ``effective_config`` for and this ticket closes."""
+    _, slug, _ = held_camera
+
+    fetched = service.get_camera_config(slug)
+
+    assert fetched.name == slug
+    assert fetched.playfield is None
+    assert fetched.settings["device_name"] == slug
+    assert fetched.settings["frame_width"] == 640
+    assert fetched.settings["frame_height"] == 480
+    non_dimension_keys = {
+        key for key in fetched.settings if key not in ("device_name", "frame_width", "frame_height")
+    }
+    assert non_dimension_keys  # the real per-camera settable-key set, not empty
+    assert all(fetched.settings[key] is None for key in non_dimension_keys)
+
+
+def test_get_camera_config_registered_but_never_opened_still_raises_unknown_camera(
+    directories, registry, held_camera
+):
+    """A camera merely *registered* (known to this process's registry,
+    e.g. from a prior ``probe``) but never actually opened this process
+    -- ``held_camera``'s own identity is resolved into *registry* by its
+    fixture, but this service's ``cameras``/``identity_source`` never
+    include it -- still reports ``UnknownCamera``, not the blank
+    template: the held-open fallback above is deliberately narrower than
+    "known to the registry" (see ``get_camera_config``'s docstring)."""
+    _, slug, _ = held_camera
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(),
+        identity_source=lambda: {},
+        backend_factory=lambda index: FakeBackend(),
+    )
+    service = DaemonService(registry=registry, discovery=discovery, directories=directories)
+
+    with pytest.raises(UnknownCamera):
+        service.get_camera_config(slug)
 
 
 # ---------------------------------------------------------------------------
@@ -1672,8 +1730,19 @@ def test_fresh_daemon_service_instance_has_no_playfields_or_camera_links(
 
     assert restarted.list_playfields() == ()
     assert restarted.list_cameras()[0].playfield is None
-    with pytest.raises(UnknownCamera):
-        restarted.get_camera_config(slug)
+    # The pushed config itself is gone (UC-02's ephemeral rule) -- this
+    # test shares `cameras` with `original` on purpose, to isolate "is
+    # the config-service map ephemeral" from camera-open state, so the
+    # still-held-open camera correctly reports the blank template
+    # (ticket 023-005's held-open fallback), not the discarded push and
+    # not an error.
+    fetched = restarted.get_camera_config(slug)
+    assert fetched.playfield is None
+    assert all(
+        value is None
+        for key, value in fetched.settings.items()
+        if key not in ("device_name", "frame_width", "frame_height")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2736,6 +2805,51 @@ def test_reset_camera_config_reapplies_the_real_on_disk_document_live(
         assert _uvc_util_current_value(binary, identity.device_name, "exposure-time-abs") == 6.0
         assert _uvc_util_current_value(binary, identity.device_name, "gain") == 2.0
         assert _uvc_util_current_value(binary, identity.device_name, "auto-exposure-mode") == 1.0
+    finally:
+        real_daemon_service.set_camera_config(
+            CameraConfig(name=slug, playfield=None, settings=_CAMERA_3_BASELINE_SETTINGS)
+        )
+
+
+@pytest.mark.camera
+def test_dump_camera_config_round_trips_through_install_and_restart_live(
+    real_daemon_service, directories
+):
+    """UC-24.S-1, live, on camera 3 (ticket 023-005's AC): dump the live
+    config, install it under ``config_dir``, simulate a daemon restart
+    (a fresh ``DaemonService`` boot-loaded from the same on-disk
+    ``config_dir``/registry exactly the way ``daemon.__main__.build()``
+    loads a real one -- ticket 023-003's ``_load_config_dir``), and dump
+    again. The two documents compare byte-for-byte identical as JSON --
+    the round trip ticket 023-005 depends on ticket 023-002 to make
+    accurate closes for real."""
+    identity = _real_identity("Arducam OV9782")
+    if identity is None:
+        pytest.skip("no attached camera matching 'Arducam OV9782'")
+    slug = identity.slug
+
+    try:
+        real_daemon_service.get_frame(slug)  # open + hold -- apply_config needs this
+        real_daemon_service.set_camera_config(
+            CameraConfig(name=slug, playfield=None, settings=dict(_CAMERA_3_BASELINE_SETTINGS))
+        )
+
+        dumped_once = real_daemon_service.get_camera_config(slug).to_dict()
+
+        config_path = directories.config_dir / "cameras" / slug / "config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(dumped_once, indent=2, sort_keys=True))
+
+        registry = CameraRegistry(directories.state_dir / "cameras")
+        restart_discovery = CameraDiscovery(registry, active_slugs=lambda: frozenset())
+        restarted = DaemonService(registry=registry, discovery=restart_discovery, directories=directories)
+        try:
+            daemon_main._load_config_dir(restarted, directories)
+            dumped_twice = restarted.get_camera_config(slug).to_dict()
+        finally:
+            restarted.close()
+
+        assert dumped_twice == dumped_once
     finally:
         real_daemon_service.set_camera_config(
             CameraConfig(name=slug, playfield=None, settings=_CAMERA_3_BASELINE_SETTINGS)
