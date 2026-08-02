@@ -91,7 +91,16 @@ from aprilcam.daemon.detection import DetectionEngine
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
 from aprilcam.errors import CameraNotPresent, NotCalibrated, UnknownCamera, UnknownPlayfield
 from aprilcam.playfield.playfield import Playfield
-from aprilcam.types import CameraState, ImageFrame, ProbeReport, TagFrame, TagId, TagRecord
+from aprilcam.types import (
+    Annotation,
+    AnnotationSet,
+    CameraState,
+    ImageFrame,
+    ProbeReport,
+    TagFrame,
+    TagId,
+    TagRecord,
+)
 
 __all__ = ["DaemonService"]
 
@@ -280,6 +289,16 @@ class DaemonService(Daemon):
         )
         self._playfields: Dict[str, PlayfieldDefinitionIface] = {}
         self._camera_configs: Dict[str, CameraConfig] = {}
+        # playfield -> layer -> id -> Annotation (ticket 024-001, UC-28).
+        # A fourth in-memory store alongside the three above -- runtime
+        # state, never written to disk, wiped on restart like everything
+        # else this class holds. ``_annotation_revisions`` is the
+        # sibling monotonic-counter store, one entry per playfield that
+        # has ever seen a mutation; both are guarded by ``self._lock``
+        # exactly like ``_playfields``/``_camera_configs``/
+        # ``_calibrations`` already are.
+        self._annotations: Dict[str, Dict[str, Dict[str, Annotation]]] = {}
+        self._annotation_revisions: Dict[str, int] = {}
         self._lock = threading.Lock()
         self._calibrator = calibrator if calibrator is not None else Calibrator(
             get_camera_config=self._camera_config_for_calibration,
@@ -465,6 +484,18 @@ class DaemonService(Daemon):
         diverge (a camera re-linked to a different playfield after
         calibrating), and the homography's own world coordinates are
         only meaningful against the definition it was solved from.
+
+        **Embeds annotations** (ticket 024-001, UC-28, Architecture
+        resolution 1): :meth:`get_annotations` for the resolved
+        ``calibration.playfield`` is always set here, never ``None`` --
+        even an empty set (revision 0) -- since a deskewed frame off a
+        known, calibrated playfield has only "nothing drawn" to
+        represent, not an on/off state the way ``tags`` has. Safe to
+        call unconditionally: by this point ``definition is not None``
+        already proved the playfield is currently held, so this can
+        never raise ``UnknownPlayfield``. The raw branch of
+        :meth:`get_frame` is untouched -- it never sets ``annotations``,
+        by contract (UC-16, "raw means raw").
         """
         slug = self._resolve_slug_if_known(camera)
         calibration = self.get_calibration(slug)
@@ -505,6 +536,7 @@ class DaemonService(Daemon):
             px_per_cm=deskewer.px_per_cm,
             world_extent=deskewer.world_extent,
             tags=self._detection.latest(cam.slug),
+            annotations=self.get_annotations(calibration.playfield),
             calibration_stale=calibration.stale,
         )
 
@@ -777,6 +809,167 @@ class DaemonService(Daemon):
         with self._lock:
             config = self._camera_configs.get(slug)
         return config.playfield if config is not None else None
+
+    # -- annotations (ticket 024-001) ---------------------------------------
+    #
+    # The shared drawing surface (spec section 9 decision 8, UC-28):
+    # ``self._annotations`` (playfield -> layer -> id -> Annotation) and
+    # ``self._annotation_revisions`` (playfield -> monotonic counter),
+    # both declared alongside ``_playfields``/``_camera_configs`` in
+    # ``__init__`` and guarded the same way, by ``self._lock``. Runtime
+    # state exactly like the mobile-tag registry: in-memory,
+    # record-level, gone on restart, never written to disk -- there is
+    # simply no write-to-disk path here, the same structural guarantee
+    # ``_playfields``/``_camera_configs`` already have.
+    #
+    # Unknown playfield is rejected on all five methods below
+    # (``UnknownPlayfield``, naming every playfield currently held) --
+    # matching ``get_playfield``'s own precedent exactly (sprint.md
+    # Architecture, resolved UC-28 open question 2). An unknown *layer*
+    # within a *known* playfield is never an error one level down: a
+    # no-op for ``remove_annotation``/``clear_annotations``, an empty
+    # result for ``get_annotations``.
+
+    def _known_playfields_locked(self) -> Tuple[str, ...]:
+        """Every playfield name currently held, sorted -- the
+        ``UnknownPlayfield`` ``available`` list every method below
+        raises with. Assumes :attr:`_lock` is already held by the
+        caller (mirrors :meth:`get_playfield`'s own inline check, just
+        factored out since five methods need it instead of one)."""
+        return tuple(sorted(self._playfields.keys()))
+
+    def _require_known_playfield_locked(self, playfield: str) -> None:
+        """Raise :class:`~aprilcam.errors.UnknownPlayfield` for a
+        *playfield* this daemon does not hold. Assumes :attr:`_lock` is
+        already held -- every one of the five annotation methods below
+        calls this as its very first act inside its own ``with
+        self._lock:`` block, so the known-playfield check and the
+        mutation/read it guards happen under one uninterrupted critical
+        section (no other thread's ``set_playfield``/annotation call can
+        interleave between the check and the effect)."""
+        if playfield not in self._playfields:
+            raise UnknownPlayfield(playfield, self._known_playfields_locked())
+
+    def _bump_annotation_revision_locked(self, playfield: str) -> None:
+        """Increment *playfield*'s annotation revision by one. Assumes
+        :attr:`_lock` is already held. The single mutation point every
+        actual annotation change goes through, so "revision increments
+        on every real mutation, never on a no-op" is true by
+        construction: a method that decides nothing actually changed
+        simply never calls this."""
+        self._annotation_revisions[playfield] = self._annotation_revisions.get(playfield, 0) + 1
+
+    def put_annotation(self, playfield: str, annotation: Annotation) -> None:
+        """See ``daemon.interfaces.Daemon.put_annotation``.
+
+        Upserts by *annotation*'s own ``(layer, id)`` -- last write
+        wins on a colliding key, no merge, no error (UC-28.S-6): the
+        dict assignment below simply replaces whatever was there.
+        Always bumps *playfield*'s revision -- a put is definitionally
+        a real mutation, never a no-op.
+        """
+        with self._lock:
+            self._require_known_playfield_locked(playfield)
+            layer = self._annotations.setdefault(playfield, {}).setdefault(annotation.layer, {})
+            layer[annotation.id] = annotation
+            self._bump_annotation_revision_locked(playfield)
+
+    def remove_annotation(self, playfield: str, layer: str, id: str) -> None:
+        """See ``daemon.interfaces.Daemon.remove_annotation``.
+
+        A no-op -- not an error, and no revision bump -- when *playfield*
+        has nothing stored at all, when *layer* does not exist on it, or
+        when *id* is not present in that layer. Only an actual removal
+        bumps the revision.
+        """
+        with self._lock:
+            self._require_known_playfield_locked(playfield)
+            layers = self._annotations.get(playfield)
+            if not layers:
+                return
+            annotations = layers.get(layer)
+            if not annotations or id not in annotations:
+                return
+            del annotations[id]
+            self._bump_annotation_revision_locked(playfield)
+
+    def replace_layer(
+        self, playfield: str, layer: str, annotations: Tuple[Annotation, ...]
+    ) -> None:
+        """See ``daemon.interfaces.Daemon.replace_layer``.
+
+        A single dict-assignment swap of *layer*'s entire contents,
+        atomic under :attr:`_lock` -- no consumer ever observes a
+        half-updated layer; every frame embed or ``get_annotations``
+        call sees either the layer's old contents or its new ones,
+        never a mix (UC-28.S-2). Unlike ``remove``/``clear``, this
+        always bumps the revision, including replacing an absent or
+        already-empty layer with an empty tuple -- a replace is a
+        deliberate whole-layer redraw, not a conditional mutation.
+        """
+        with self._lock:
+            self._require_known_playfield_locked(playfield)
+            self._annotations.setdefault(playfield, {})[layer] = {
+                a.id: a for a in annotations
+            }
+            self._bump_annotation_revision_locked(playfield)
+
+    def clear_annotations(self, playfield: str, layer: Optional[str] = None) -> None:
+        """See ``daemon.interfaces.Daemon.clear_annotations``.
+
+        ``layer=None`` clears every layer on *playfield*; a named
+        *layer* clears just that one. Either way, clearing something
+        that is already empty -- a nonexistent layer, an
+        already-cleared layer, or a playfield with nothing stored at
+        all -- is a no-op: not an error, and no revision bump. Only a
+        clear that actually removes at least one annotation bumps the
+        revision.
+        """
+        with self._lock:
+            self._require_known_playfield_locked(playfield)
+            layers = self._annotations.get(playfield)
+            if not layers:
+                return
+            if layer is None:
+                if not any(layers.values()):
+                    return
+                self._annotations[playfield] = {}
+                self._bump_annotation_revision_locked(playfield)
+                return
+            if not layers.get(layer):
+                return
+            del layers[layer]
+            self._bump_annotation_revision_locked(playfield)
+
+    def get_annotations(self, playfield: str, layer: Optional[str] = None) -> AnnotationSet:
+        """See ``daemon.interfaces.Daemon.get_annotations``.
+
+        ``layer=None`` flattens every layer's annotations into one
+        set (each :class:`~aprilcam.types.Annotation` still carries its
+        own ``layer`` field, so the flattening loses no information); a
+        named *layer* filters to just that one. ``revision`` is always
+        *playfield*'s whole-store revision regardless of the ``layer``
+        filter -- a caller reading one layer still learns whether
+        *anything* on the playfield changed since its last read, which
+        the (deliberately not offered) alternative of a per-layer
+        revision counter could not give it for free. A playfield that
+        has never seen a mutation reports revision 0 -- the same value
+        a freshly restarted daemon reports (UC-28.S-4), by construction:
+        ``self._annotation_revisions`` simply has no entry yet.
+        """
+        with self._lock:
+            self._require_known_playfield_locked(playfield)
+            layers = self._annotations.get(playfield, {})
+            revision = self._annotation_revisions.get(playfield, 0)
+            if layer is None:
+                annotations = tuple(
+                    annotation
+                    for layer_annotations in layers.values()
+                    for annotation in layer_annotations.values()
+                )
+            else:
+                annotations = tuple(layers.get(layer, {}).values())
+        return AnnotationSet(annotations=annotations, revision=revision, timestamp=time.time())
 
     # -- calibration (ticket 022-003) --------------------------------------
 
