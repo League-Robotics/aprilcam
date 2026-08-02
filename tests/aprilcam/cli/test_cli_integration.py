@@ -335,3 +335,63 @@ def test_camera_list_all_fans_out_across_two_real_daemons_and_one_dead_target(ca
             listener_b.stop(1.0)
         shutil.rmtree(dir_a, ignore_errors=True)
         shutil.rmtree(dir_b, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# ``playfield annotations`` subprocess round trip -- @pytest.mark.integration,
+# no camera hardware needed (ticket 024-005, UC-28, SUC-004): annotations
+# are playfield-addressed, never camera-addressed, so this needs nothing
+# this module's zero-camera fan-out test above does not already prove is
+# safe to run headless (a real daemon subprocess, real local socket).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_playfield_annotations_subprocess_round_trips_against_a_python_client_put(isolated_env):
+    """``aprilcam playfield annotations`` (the real, installed console
+    script, via subprocess) reads back exactly what a ``GrpcDaemon``
+    Python client put on the *same* running daemon -- ``cmd_annotations``
+    "invents no separate truth" (``cli/playfield.py``'s own docstring)
+    from what ``get_annotations``/``clear_annotations`` actually report.
+    ``--clear`` is confirmed by a follow-up ``get_annotations`` Python
+    call against the same daemon, not just by the CLI's own printed
+    claim.
+    """
+    from aprilcam.client.discovery import Discovery
+    from aprilcam.config.loader import PlayfieldDefinition
+    from aprilcam.types import Annotation, Marker, WorldPoint
+
+    bin_path = _aprilcam_bin()
+    env = isolated_env
+
+    result = _run(bin_path, "daemon", "start", env=env)
+    assert result.returncode == 0, result.stderr
+
+    try:
+        client = Discovery().connect()
+        client.set_playfield(
+            PlayfieldDefinition(name="main-playfield", width_cm=100.0, height_cm=80.0)
+        )
+        client.put_annotation(
+            "main-playfield",
+            Annotation(id="goal", layer="planner", shape=Marker(at=WorldPoint(x=1.0, y=2.0))),
+        )
+
+        result = _run(bin_path, "playfield", "annotations", "main-playfield", env=env)
+        assert result.returncode == 0, result.stderr
+        list_out = result.stdout.decode()
+        assert "revision 1" in list_out
+        assert "planner" in list_out
+        assert "goal" in list_out
+
+        result = _run(
+            bin_path, "playfield", "annotations", "main-playfield", "--clear", env=env
+        )
+        assert result.returncode == 0, result.stderr
+        assert b"cleared" in result.stdout
+
+        after = client.get_annotations("main-playfield")
+        assert after.annotations == ()
+    finally:
+        result = _run(bin_path, "daemon", "stop", env=env)
+        assert result.returncode == 0, result.stderr
