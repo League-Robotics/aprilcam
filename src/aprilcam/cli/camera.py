@@ -299,18 +299,38 @@ def cmd_config(
     discovery_factory: Callable[[], Discovery] = Discovery,
     loader_factory: Callable[[], ConfigLoader] = JsonConfigLoader,
 ) -> int:
-    """``aprilcam camera config <file> [-d HOST]`` (ticket 022-001; real
-    hardware settings apply ticket 023-001).
+    """``aprilcam camera config <file> [-d HOST]`` pushes a whole
+    ``CameraConfig`` document (ticket 022-001; real hardware settings
+    apply ticket 023-001). ``aprilcam camera config <camera> --reset
+    [-d HOST]`` (ticket 023-004) discards any live override and
+    re-applies whatever is installed at `config_dir/cameras/<slug>/
+    config.json` -- or the blank introspected-plus-blank template when
+    nothing is installed -- with no daemon restart (sprint.md Decision
+    3: reset always means this fixed on-disk location, never whatever
+    was last pushed).
 
-    Pushes a whole ``CameraConfig`` document -- ``name``/``playfield``
-    take effect (the camera is linked) and ``settings`` are applied to
-    the camera's hardware immediately when it is currently held open
-    (``DaemonService.set_camera_config`` -> ``Camera.apply_config``). An
-    unsupported key or a value the hardware will not take fails the
-    **whole** push (``UnsupportedSetting``, surfaced here through
-    ``report_error`` like any other typed error) and leaves both the
-    hardware and the previously-pushed document unchanged (UC-03.S-3).
+    The two modes share the positional argument but are mutually
+    exclusive in meaning: with ``--reset`` it names a *camera* (slug or
+    persistent number), not a file path -- there is no document to load
+    client-side, the daemon reads its own disk.
+
+    Pushing: ``name``/``playfield`` take effect (the camera is linked)
+    and ``settings`` are applied to the camera's hardware immediately
+    when it is currently held open (``DaemonService.set_camera_config``
+    -> ``Camera.apply_config``). An unsupported key or a value the
+    hardware will not take fails the **whole** push
+    (``UnsupportedSetting``, surfaced here through ``report_error`` like
+    any other typed error) and leaves both the hardware and the
+    previously-pushed document unchanged (UC-03.S-3).
     """
+    if args.reset:
+        try:
+            discovery_factory().connect(args.daemon).reset_camera_config(args.file)
+        except AprilCamError as exc:
+            return report_error(exc)
+        print(f"reset camera config for {args.file!r} -- on-disk document now in force")
+        return EXIT_OK
+
     loader = loader_factory()
     try:
         config = loader.load_camera_config(Path(args.file))
@@ -423,10 +443,21 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     p_tags.set_defaults(func=cmd_tags)
 
     p_config = sub.add_parser(
-        "config", help="push a camera config document (playfield link only, this sprint)"
+        "config", help="push a camera config document, or --reset it to the on-disk version"
     )
-    p_config.add_argument("file", help="path to a camera config JSON file")
+    p_config.add_argument(
+        "file",
+        help="path to a camera config JSON file to push; with --reset, the camera "
+        "name (slug or persistent number) instead",
+    )
     add_daemon_option(p_config)
+    p_config.add_argument(
+        "--reset",
+        action="store_true",
+        help="discard any live override and re-apply config_dir/cameras/<slug>/"
+        "config.json (or the blank template if none is installed) -- no daemon "
+        "restart (ticket 023-004)",
+    )
     p_config.set_defaults(func=cmd_config)
 
     p_view = sub.add_parser(

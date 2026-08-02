@@ -440,10 +440,132 @@ def test_apply_config_backend_without_settings_surface_rejects_any_push():
     cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={}))
 
 
-def test_reset_is_a_documented_noop():
-    cam = Camera("cam-a", FakeBackend())
+def test_reset_without_config_loader_or_path_falls_back_to_blank_template():
+    """No ``config_loader``/``config_path`` wired at all (every
+    pre-existing test, and any ``Camera`` built by hand rather than
+    through ``DaemonService._camera_for``) -- ticket 023-004's
+    Decision 3 fallback: there is nothing to revert to, so ``reset()``
+    applies the blank introspected-plus-blank template, an honest
+    no-op on hardware rather than an error."""
+    backend = FakeBackend()
+    cam = Camera("cam-a", backend)
     cam.open()
-    assert cam.reset() is None
+    backend.set_property("gain", 42.0)  # a pre-existing "live" value
+
+    cam.reset()  # no error
+
+    assert backend.get_property("gain") == 42.0  # nothing pushed -- unchanged
+
+
+def test_reset_with_no_installed_file_falls_back_to_blank_template(tmp_path):
+    """A ``config_loader``/``config_path`` *were* given, but no file
+    exists yet at that path (a camera whose ``config_dir`` entry was
+    never populated) -- the same blank-template fallback as no
+    injection at all."""
+    from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
+
+    backend = FakeBackend()
+    path = tmp_path / "cameras" / "cam-a" / "config.json"
+    cam = Camera("cam-a", backend, config_loader=JsonConfigLoader(), config_path=path)
+    cam.open()
+    backend.set_property("gain", 42.0)
+
+    cam.reset()
+
+    assert backend.get_property("gain") == 42.0  # nothing pushed -- unchanged
+    assert cam.stored_config().settings["gain"] is None
+
+
+def test_stored_config_reports_the_blank_template_when_nothing_is_installed():
+    cam = Camera("cam-a", FakeBackend(size=(640, 480)), device_name="Cam A")
+    cam.open()
+
+    config = cam.stored_config()
+
+    assert config.name == "cam-a"
+    assert config.settings["frame_width"] == 640
+    assert config.settings["gain"] is None
+
+
+def test_reset_reads_and_reapplies_the_real_on_disk_document(tmp_path):
+    """The round trip that matters (ticket 023-004's Definition of Done
+    #2): a document installed on disk is read fresh via a real
+    ``ConfigLoader`` and re-applied through ``apply_config``'s normal
+    ordering/hard-error path, discarding a live experimental override
+    pushed earlier -- verified by backend *readback*, not a setter's
+    return value."""
+    import json
+
+    from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
+
+    path = tmp_path / "cameras" / "cam-a" / "config.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "name": "cam-a",
+                "playfield": "main-playfield",
+                "settings": {"auto_exposure": 1, "exposure": 50, "gain": 3},
+            }
+        )
+    )
+
+    backend = FakeBackend()
+    cam = Camera("cam-a", backend, config_loader=JsonConfigLoader(), config_path=path)
+    cam.open()
+    # A live experimental override, different from what's on disk.
+    cam.apply_config(
+        CameraConfig(name="cam-a", playfield=None, settings={"exposure": 999, "gain": 99})
+    )
+    assert backend.get_property("gain") == 99.0
+
+    cam.reset()
+
+    assert backend.get_property("gain") == 3.0
+    assert backend.get_property("exposure") == 50.0
+    assert backend.get_property("auto_exposure") == 1.0
+
+
+def test_stored_config_matches_what_reset_just_applied(tmp_path):
+    import json
+
+    from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
+
+    path = tmp_path / "cameras" / "cam-a" / "config.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"name": "cam-a", "playfield": "main-playfield", "settings": {"gain": 3}})
+    )
+    cam = Camera("cam-a", FakeBackend(), config_loader=JsonConfigLoader(), config_path=path)
+    cam.open()
+
+    cam.reset()
+    stored = cam.stored_config()
+
+    assert stored.playfield == "main-playfield"
+    assert stored.settings["gain"] == 3
+
+
+def test_reset_reads_the_file_fresh_every_call_not_cached(tmp_path):
+    """A file edited between two resets is picked up on the second
+    one -- ``reset()``/``stored_config()`` never cache a prior read."""
+    import json
+
+    from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
+
+    path = tmp_path / "cameras" / "cam-a" / "config.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"name": "cam-a", "playfield": None, "settings": {"gain": 1}}))
+    backend = FakeBackend()
+    cam = Camera("cam-a", backend, config_loader=JsonConfigLoader(), config_path=path)
+    cam.open()
+
+    cam.reset()
+    assert backend.get_property("gain") == 1.0
+
+    path.write_text(json.dumps({"name": "cam-a", "playfield": None, "settings": {"gain": 2}}))
+    cam.reset()
+    assert backend.get_property("gain") == 2.0
 
 
 # ---------------------------------------------------------------------------

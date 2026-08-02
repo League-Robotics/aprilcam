@@ -84,7 +84,9 @@ from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import CameraIdentity, resolve_all
 from aprilcam.camera.registry import CameraRecord, CameraRegistry
 from aprilcam.config.interfaces import CameraConfig, Directories
+from aprilcam.config.interfaces import ConfigLoader as ConfigLoaderIface
 from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitionIface
+from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
 from aprilcam.daemon.detection import DetectionEngine
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
 from aprilcam.errors import CameraNotPresent, NotCalibrated, UnknownCamera, UnknownPlayfield
@@ -155,10 +157,9 @@ class DaemonService(Daemon):
     """Concrete ``daemon.interfaces.Daemon`` (this sprint's slice only).
 
     Derives from ``Daemon`` (see that class's module docstring for the
-    base-class-vs-``Protocol`` design rule): the 15 methods this sprint
-    does not implement (calibration, streams, annotations, tag
-    parameters, guides, ``reset_camera_config``, ``find_feature``) are
-    inherited as-is, so calling one raises
+    base-class-vs-``Protocol`` design rule): the 14 methods this sprint
+    does not implement (streams, annotations, tag parameters, guides,
+    ``find_feature``) are inherited as-is, so calling one raises
     ``NotImplementedError`` naming the missing method rather than an
     ``AttributeError`` -- ``isinstance(service, Daemon)`` is also simply
     true now, mechanically, rather than a Protocol structural guess.
@@ -217,6 +218,18 @@ class DaemonService(Daemon):
         -- tests that want a substitutable frame source or camera-config
         lookup construct their own ``Calibrator`` and pass it here
         instead, the same override pattern ``detection`` above uses.
+    config_loader:
+        The :class:`~aprilcam.config.interfaces.ConfigLoader` every
+        newly-constructed ``Camera`` is given (ticket 023-004), for
+        :meth:`Camera.reset`/:meth:`Camera.stored_config` to read a
+        camera's on-disk ``config_dir/cameras/<slug>/config.json`` back.
+        This service never calls it itself -- passing it through to
+        ``Camera`` at construction is the one piece of "where configs
+        come from" knowledge this service carries, targeted reads only,
+        never the boot-time directory scan (that stays in
+        ``daemon.__main__.build()``, sprint.md Architecture "Modules"
+        point 1). Defaults to a real ``config.loader.ConfigLoader``;
+        tests substitute their own when they need to.
     """
 
     def __init__(
@@ -233,6 +246,7 @@ class DaemonService(Daemon):
         ),
         detection: Optional[DetectionEngine] = None,
         calibrator: Optional[Calibrator] = None,
+        config_loader: Optional[ConfigLoaderIface] = None,
     ) -> None:
         self._registry = registry
         self._discovery = discovery
@@ -241,6 +255,9 @@ class DaemonService(Daemon):
         self._identity_source = identity_source
         self._backend_factory = backend_factory
         self._control_backend_factory = control_backend_factory
+        self._config_loader: ConfigLoaderIface = (
+            config_loader if config_loader is not None else JsonConfigLoader()
+        )
         # ``calibration_lookup=self.get_calibration``: a bound-method
         # reference, resolved at call time, not at this line -- safe to
         # pass before ``self._calibrations``/``self._lock`` exist below,
@@ -556,7 +573,7 @@ class DaemonService(Daemon):
             state_dir=str(self._directories.state_dir),
         )
 
-    # -- playfields / camera config (ticket 022-001) ----------------------
+    # -- playfields / camera config (ticket 022-001; reset, ticket 023-004) -
     #
     # The minimal config-service slice sprint.md's Architecture Decision 1
     # scopes for this sprint: playfields in full (held zero-or-more,
@@ -564,11 +581,10 @@ class DaemonService(Daemon):
     # only the playfield link. Both stores are plain in-memory dicts,
     # never written to disk (UC-01's ephemeral rule is structural here,
     # not a policy this class has to remember -- there is simply no
-    # write path). ``reset_camera_config`` is deliberately *not*
-    # overridden -- the inherited ``Daemon.reset_camera_config`` already
-    # raises ``NotImplementedError`` naming itself, exactly the
-    # "explicitly not built this sprint, never a silent no-op" contract
-    # the ticket asks for.
+    # write path). ``reset_camera_config`` (below, ticket 023-004) is the
+    # one deliberate exception to "never written to disk" -- it *reads*
+    # disk, never writes it, so the ephemeral rule for RPC-pushed state
+    # is undisturbed.
 
     def set_playfield(self, definition: PlayfieldDefinitionIface) -> None:
         """See ``daemon.interfaces.Daemon.set_playfield``.
@@ -675,6 +691,43 @@ class DaemonService(Daemon):
             cam.apply_config(config)
         with self._lock:
             self._camera_configs[config.name] = config
+
+    def reset_camera_config(self, camera: str) -> None:
+        """See ``daemon.interfaces.Daemon.reset_camera_config`` --
+        "the RPC face of ``Camera.reset()``" (that base-class docstring's
+        own words). Ticket 023-004.
+
+        Opens *camera* if it is not already held (:meth:`_camera_for`,
+        the same on-demand-open discipline every other camera-addressed
+        method here uses -- ``UnknownCamera``/``CameraNotPresent``
+        propagate exactly as they would from ``get_frame``/``calibrate``).
+        Every ``Camera`` :meth:`_camera_for` constructs already carries
+        the ``config_loader``/``config_path`` :meth:`Camera.reset` needs
+        (wired at construction, see :meth:`_config_path_for`), so this
+        method never touches ``config.loader`` or ``self._directories``
+        itself -- disk access for reset stays entirely inside ``Camera``,
+        this service only orchestrates (sprint.md Architecture "Modules"
+        point 1: this service stays ignorant of disk beyond handing the
+        already-resolved path/loader to ``Camera`` at construction).
+
+        :meth:`Camera.reset` re-reads and re-applies whatever is at
+        `config_dir/cameras/<slug>/config.json` (or the blank
+        introspected-plus-blank template when nothing is installed --
+        sprint.md Decision 3), discarding whatever live override this
+        service held. The resulting document
+        (:meth:`Camera.stored_config`) then replaces this service's
+        ``_camera_configs`` entry for the camera, so
+        :meth:`get_camera_config`/:meth:`list_cameras` reflect the reset
+        immediately -- exactly the way a live :meth:`set_camera_config`
+        push already would (SUC-003's postcondition: fetching the config
+        after a reset returns the on-disk document, or the blank
+        template, never the discarded override).
+        """
+        cam = self._camera_for(camera)
+        cam.reset()
+        config = cam.stored_config()
+        with self._lock:
+            self._camera_configs[cam.slug] = config
 
     def _playfield_link(self, slug: str) -> Optional[str]:
         """The playfield *slug* is currently linked to, per the last
@@ -954,6 +1007,8 @@ class DaemonService(Daemon):
             control_backend=self._control_backend_factory(record.device_name),
             device_name=record.device_name,
             number=record.number,
+            config_loader=self._config_loader,
+            config_path=self._config_path_for(record.slug),
         )
         cam.open()
         with self._lock:
@@ -963,6 +1018,19 @@ class DaemonService(Daemon):
         with self._lock:
             self._cameras[record.slug] = cam
         return cam
+
+    def _config_path_for(self, slug: str) -> Path:
+        """``config_dir/cameras/<slug>/config.json`` -- sprint.md
+        Decision 3's fixed reset target (``ResetCameraConfig`` always
+        means re-reading exactly this location, never whatever was last
+        pushed), matching ``configuration.md``'s documented per-camera
+        layout and ``config.loader.ConfigLoader.load_config_dir``'s own
+        boot-time scan path for the same file. Computed fresh per call
+        from :attr:`_directories`, set once at construction -- every
+        ``Camera`` :meth:`_camera_for` builds gets this wired in
+        (ticket 023-004), whether or not anything is actually installed
+        there yet."""
+        return self._directories.config_dir / "cameras" / slug / "config.json"
 
     def _record_for(self, token: str) -> Optional[CameraRecord]:
         """Resolve *token* against the registry: an all-digits token by
