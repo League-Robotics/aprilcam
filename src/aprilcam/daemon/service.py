@@ -63,6 +63,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import threading
 import time
 from dataclasses import replace
@@ -75,8 +76,9 @@ import numpy as np
 from aprilcam.calibration.calibration import Calibration, Calibrator
 from aprilcam.calibration.deskew import Deskewer
 from aprilcam.calibration.interfaces import CalibrationResult
-from aprilcam.camera.backends import CaptureBackend
+from aprilcam.camera.backends import CaptureBackend, ControlBackend
 from aprilcam.camera.backends.opencv_backend import OpenCVBackend
+from aprilcam.camera.backends.uvc_util import UvcUtilBackend
 from aprilcam.camera.camera import Camera
 from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import CameraIdentity, resolve_all
@@ -115,6 +117,38 @@ _CV_EXTENSION = {"jpeg": ".jpg", "png": ".png"}
 
 def _default_backend_factory(index: int) -> CaptureBackend:
     return OpenCVBackend(index)
+
+
+def _default_control_backend_factory(device_name: str) -> Optional[ControlBackend]:
+    """The real per-control mechanism for a newly-opened camera's
+    settings surface (ticket 023-001, sprint.md Decision 2).
+
+    macOS only, unconditionally: real-hardware validation against camera
+    3 (an OV9782) found ``cv2.VideoCapture.set()`` -- ``OpenCVBackend``'s
+    settings path -- returns ``False`` for every one of
+    ``auto_exposure``/``exposure``/``gain``/``auto_white_balance``/
+    ``white_balance_temperature`` on this platform's AVFoundation capture
+    session, so ``UvcUtilBackend`` (``camera/backends/uvc_util.py``) is
+    unconditionally what a macOS ``Camera`` uses for those controls, not
+    a fallback tried only if something else fails first. Deliberately
+    **not** wrapped in a try/except that would swallow a missing
+    ``uvc-util`` binary into ``None`` -- sprint.md's Migration Concerns
+    are explicit that its absence "must surface as a clear, typed
+    error... never a silent fallback to a path that... may not actually
+    work", so :class:`~aprilcam.camera.backends.uvc_util.UvcUtilBackend`'s
+    constructor is left to raise straight through when ``uvc-util`` is
+    not on ``PATH``, rather than this factory quietly degrading to the
+    already-proven-broken ``OpenCVBackend`` control surface.
+
+    Returns ``None`` on every other platform, unchanged from before this
+    ticket -- Linux/Raspberry Pi UVC control is out of this sprint's
+    scope (sprint.md Scope); ``Camera`` falls back to *backend* itself
+    for settings exactly as it always has (``camera/camera.py``'s
+    module docstring).
+    """
+    if sys.platform != "darwin":
+        return None
+    return UvcUtilBackend(device_name)
 
 
 class DaemonService(Daemon):
@@ -156,6 +190,15 @@ class DaemonService(Daemon):
         via :meth:`get_frame` -- see :meth:`_camera_for`). Overridable
         for headless tests exactly like ``CameraDiscovery``'s own
         constructor; default to real hardware enumeration.
+    control_backend_factory:
+        Builds the optional :class:`~aprilcam.camera.backends.ControlBackend`
+        a newly-constructed ``Camera`` uses for ``apply_config``'s
+        settings surface (ticket 023-001 -- real UVC control validated
+        live on camera 3; see :func:`_default_control_backend_factory`).
+        Defaults to that real, macOS-only factory; headless tests
+        override with ``lambda device_name: None`` so a ``FakeBackend``
+        stands in for settings too, exactly like *backend_factory*
+        above.
     detection:
         The per-camera ring buffer plus burst orchestration
         (``daemon/detection.py``, ticket 021-004) that
@@ -185,6 +228,9 @@ class DaemonService(Daemon):
         cameras: Optional[Dict[str, Camera]] = None,
         identity_source: Callable[[], Dict[int, CameraIdentity]] = resolve_all,
         backend_factory: Callable[[int], CaptureBackend] = _default_backend_factory,
+        control_backend_factory: Callable[[str], Optional[ControlBackend]] = (
+            _default_control_backend_factory
+        ),
         detection: Optional[DetectionEngine] = None,
         calibrator: Optional[Calibrator] = None,
     ) -> None:
@@ -194,6 +240,7 @@ class DaemonService(Daemon):
         self._cameras: Dict[str, Camera] = cameras if cameras is not None else {}
         self._identity_source = identity_source
         self._backend_factory = backend_factory
+        self._control_backend_factory = control_backend_factory
         # ``calibration_lookup=self.get_calibration``: a bound-method
         # reference, resolved at call time, not at this line -- safe to
         # pass before ``self._calibrations``/``self._lock`` exist below,
@@ -593,19 +640,32 @@ class DaemonService(Daemon):
     def set_camera_config(self, config: CameraConfig) -> None:
         """See ``daemon.interfaces.Daemon.set_camera_config``.
 
-        This sprint's minimal slice (Decision 1): stores *config*
-        whole, keyed by its own ``name``, so :meth:`get_camera_config`/
-        :meth:`list_cameras`/a linked playfield's ``linked_cameras()``
-        all see the update immediately. ``config.settings`` is stored
-        and echoed back verbatim but **never applied to hardware** --
-        no ``Camera.apply_config`` call happens here, which is the
-        whole point of Decision 1's scoping (full settings push is
-        sprint 023). Accepts a config for a camera this daemon has
-        never enumerated (a config outliving, or arriving before, its
-        hardware is normal -- UC-25) and for a camera not currently
-        held open -- there is nothing to reconfigure on a closed
-        handle, only the link to record.
+        Stores *config* whole, keyed by its own ``name``, so
+        :meth:`get_camera_config`/:meth:`list_cameras`/a linked
+        playfield's ``linked_cameras()`` all see the update immediately.
+        Accepts a config for a camera this daemon has never enumerated
+        (a config outliving, or arriving before, its hardware is normal
+        -- UC-25) and for a camera not currently held open -- there is
+        nothing to reconfigure on a closed handle, only the link to
+        record (ticket 023-001 AC1).
+
+        **Applies to hardware when the camera is held open** (ticket
+        023-001, closing sprint 022's Decision 1 deferral -- UC-03's
+        "applies... immediately, not at next open"). ``Camera.
+        apply_config`` is called **before** the store, deliberately:
+        its whole-push, hard-error contract
+        (``camera.interfaces.Camera.apply_config``'s docstring) means an
+        ``UnsupportedSetting`` propagates straight out of this method
+        too, leaving *both* the hardware **and** the stored document
+        exactly as they were (UC-03.S-3's "re-fetching the config
+        returns the previous state") -- storing first and applying
+        after would leave the stored document ahead of the hardware on
+        exactly the failure path this rule exists to prevent.
         """
+        with self._lock:
+            cam = self._cameras.get(config.name)
+        if cam is not None:
+            cam.apply_config(config)
         with self._lock:
             self._camera_configs[config.name] = config
 
@@ -867,6 +927,7 @@ class DaemonService(Daemon):
         cam = Camera(
             record.slug,
             self._backend_factory(index),
+            control_backend=self._control_backend_factory(record.device_name),
             device_name=record.device_name,
             number=record.number,
         )

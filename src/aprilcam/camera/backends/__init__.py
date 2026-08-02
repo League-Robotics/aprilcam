@@ -50,11 +50,11 @@ a client; ``camera.py`` is the only consumer.
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional, Set, Tuple
 
 import numpy as np
 
-__all__ = ["CaptureBackend"]
+__all__ = ["CaptureBackend", "ControlBackend"]
 
 
 class CaptureBackend:
@@ -112,3 +112,51 @@ class CaptureBackend:
         device.
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement CaptureBackend.frame_size")
+
+
+class ControlBackend:
+    """The settings-only surface a ``Camera`` can optionally use for
+    ``get_property``/``set_property``/``settable_names``, decoupled from
+    :class:`CaptureBackend`'s capture-only contract (``is_open``/
+    ``open``/``read``/``close``/``frame_size``).
+
+    A plain base class, not ``Protocol`` — see the module docstring for
+    the design rule. Exists because a control mechanism and a capture
+    mechanism are not always the same object (ticket 023-001's
+    real-hardware finding): :mod:`opencv_backend`'s ``OpenCVBackend``
+    happens to be both — its ``get_property``/``set_property``/
+    ``settable_names`` sit "beyond the ``CaptureBackend`` base class",
+    per that module's own docstring, duck-typed rather than declared —
+    but :mod:`uvc_util`'s ``UvcUtilBackend`` is control-only: it never
+    opens a capture stream or reads a frame, so it derives from this
+    instead of :class:`CaptureBackend`.
+
+    ``camera.camera.Camera`` accepts an optional ``control_backend`` of
+    this shape and, when given one, routes ``apply_config``'s settings
+    surface through it exclusively rather than through the primary
+    capture backend — see that module's docstring for why real hardware
+    (camera 3, an OV9782) needed this: ``cv2.VideoCapture.set()`` reports
+    failure for every exposure/gain/white-balance control on that
+    hardware's AVFoundation capture session (ticket 023-001).
+    """
+
+    def get_property(self, name: str) -> Optional[float]:
+        """Current value of *name*, or ``None`` if unsupported or
+        unreadable right now. Never raises for an ordinary failure —
+        mirrors ``CaptureBackend.read()``'s "only construction/``open``
+        raise" discipline."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement ControlBackend.get_property")
+
+    def set_property(self, name: str, value: float) -> bool:
+        """Attempt to set *name* to *value*. Returns whether the
+        hardware actually reports the new value afterward — **not**
+        merely whether the underlying call claimed success (UC-03: "must
+        never report success for a setting that did not take effect").
+        Unknown names return ``False`` rather than raising; ``Camera.
+        apply_config`` is what turns a ``False`` into the typed
+        ``UnsupportedSetting`` its callers see."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement ControlBackend.set_property")
+
+    def settable_names(self) -> Set[str]:
+        """Setting names this backend can attempt."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement ControlBackend.settable_names")

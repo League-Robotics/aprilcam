@@ -29,17 +29,29 @@ and broken" case (``types.CameraState``'s own docstring), not
 "unplugged", since a stopped self-heal loop is not evidence the
 hardware is gone.
 
-**This sprint's config surface is introspection-only.** ``apply_config``
-is implemented against the small set of controls
+**Real UVC control, validated live (ticket 023-001).** ``apply_config``
+was originally implemented only against the small set of controls
 ``camera.backends.opencv_backend.property_map()`` exposes generically
-through OpenCV — not a verified per-camera-model settable-key list
-(that needs real UVC introspection, e.g. v1's ``uvc-util``, and is
-deferred to the config-push ticket per the sprint architecture's Open
-Question 1). Nothing in this sprint's CLI or daemon RPC surface calls
-``apply_config`` with a client-supplied document; it exists here so the
-``Camera`` base class's contract is fully satisfied and so the
-ordering/atomicity rules in its docstring are honoured by *something*
-runnable, not left purely aspirational.
+through OpenCV (``cv2.VideoCapture.set()``) — not a verified
+per-camera-model settable-key list. Ticket 023-001 validated that
+generic path live against camera 3 (the OV9782 this project's real
+playfield uses): ``cv2.VideoCapture.set()`` returns ``False`` for
+**every one** of ``auto_exposure``/``exposure``/``gain``/
+``auto_white_balance``/``white_balance_temperature`` on this exact
+hardware's AVFoundation capture session — matching archived v1 evidence
+that a generic capture-library property setter is not to be trusted here
+(``archive/src/aprilcam/camera/DESIGN.md`` §4). ``Camera`` therefore
+accepts an optional second backend, *control_backend* — a
+:class:`~aprilcam.camera.backends.ControlBackend` (e.g.
+``camera.backends.uvc_util.UvcUtilBackend``, a ``uvc-util`` subprocess
+adapter) — that, when given, becomes the **exclusive** source for
+``apply_config``'s settings surface (``get_property``/``set_property``/
+``settable_names``) in place of the primary capture backend. Resolution
+(``frame_width``/``frame_height``, ticket 002) is not a UVC control and
+is meant to stay on the primary (``OpenCVBackend``) capture path
+regardless of whether a *control_backend* is wired — a future ticket
+adding it as a settable key should special-case it rather than routing
+it through *control_backend*.
 """
 
 from __future__ import annotations
@@ -49,7 +61,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from aprilcam.camera.backends import CaptureBackend
+from aprilcam.camera.backends import CaptureBackend, ControlBackend
 from aprilcam.camera.interfaces import Camera as _CameraBase
 from aprilcam.config.interfaces import CameraConfig
 from aprilcam.errors import UnsupportedSetting
@@ -93,6 +105,15 @@ class Camera(_CameraBase):
         chosen by whoever constructs it (``camera/discovery.py`` for
         USB/AVFoundation hardware; a Pi bring-up sprint would pass a
         ``V4l2LoopbackBackend`` instead).
+    control_backend:
+        Optional :class:`~aprilcam.camera.backends.ControlBackend` used
+        **exclusively** for ``apply_config``'s settings surface
+        (``get_property``/``set_property``/``settable_names``) in place
+        of *backend*, when given (ticket 023-001 -- see the module
+        docstring). ``None`` (the default) preserves the original
+        behaviour of reading/writing settings through *backend* itself,
+        which is what every non-macOS platform and every headless test
+        still does.
     device_name:
         OS-reported descriptor (``CameraIdentity.device_name``), carried
         through for ``effective_config``'s introspected facts. Purely
@@ -108,12 +129,14 @@ class Camera(_CameraBase):
         slug: str,
         backend: CaptureBackend,
         *,
+        control_backend: Optional[ControlBackend] = None,
         device_name: str = "",
         number: Optional[int] = None,
         playfield: Optional[str] = None,
     ) -> None:
         self._slug = slug
         self._backend = backend
+        self._control_backend = control_backend
         self._device_name = device_name or slug
         self._number = number
         self._playfield = playfield
@@ -260,10 +283,12 @@ class Camera(_CameraBase):
     def apply_config(self, config: CameraConfig) -> None:
         """See ``camera.interfaces.Camera.apply_config``.
 
-        Not called by any CLI command or daemon RPC this sprint (the
-        config-push loop, UC-03, is out of scope) -- implemented so the
-        ``Camera`` base class's ordering/atomicity contract is real, not
-        aspirational, for whenever it is wired in.
+        Called by ``DaemonService.set_camera_config`` on every push to a
+        held-open camera (ticket 023-001) -- no longer aspirational.
+        Settings are read/written through :meth:`_settings_backend`:
+        *control_backend* when one was given at construction, else
+        *backend* itself, exactly as before this ticket (see the module
+        docstring).
         """
         if not self._backend.is_open:
             raise RuntimeError(f"{self._slug}: cannot apply_config while not open")
@@ -273,8 +298,9 @@ class Camera(_CameraBase):
             if key not in settable:
                 raise UnsupportedSetting(key)
 
-        get_property = getattr(self._backend, "get_property", None)
-        set_property = getattr(self._backend, "set_property", None)
+        settings_backend = self._settings_backend()
+        get_property = getattr(settings_backend, "get_property", None)
+        set_property = getattr(settings_backend, "set_property", None)
         if get_property is None or set_property is None:
             # Backend exposes no adjustable settings surface at all
             # (e.g. v4l2 loopback -- the stream format is fixed by its
@@ -306,15 +332,25 @@ class Camera(_CameraBase):
                 raise UnsupportedSetting(key)
             applied.append(key)
 
-    def _settable_names(self) -> set:
-        """Setting names the backend itself claims to support.
+    def _settings_backend(self) -> Any:
+        """The backend :meth:`apply_config`/:meth:`_settable_names` read
+        and write settings through: *control_backend* when one was given
+        at construction (ticket 023-001 -- real UVC control on macOS,
+        see the module docstring), else *backend* itself (unchanged
+        original behaviour -- every non-macOS platform and every
+        headless test)."""
+        return self._control_backend if self._control_backend is not None else self._backend
 
-        Delegates to the backend's own ``settable_names()`` (beyond the
+    def _settable_names(self) -> set:
+        """Setting names :meth:`_settings_backend` itself claims to
+        support.
+
+        Delegates to that backend's own ``settable_names()`` (beyond the
         ``CaptureBackend`` base class, like ``get_property``/``set_property``
         -- a backend with none of these, e.g. v4l2 loopback, is simply
         polled as having no settable keys at all).
         """
-        settable_names = getattr(self._backend, "settable_names", None)
+        settable_names = getattr(self._settings_backend(), "settable_names", None)
         if settable_names is None:
             return set()
         return set(settable_names())
