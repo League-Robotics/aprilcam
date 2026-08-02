@@ -46,18 +46,36 @@ accepts an optional second backend, *control_backend* — a
 ``camera.backends.uvc_util.UvcUtilBackend``, a ``uvc-util`` subprocess
 adapter) — that, when given, becomes the **exclusive** source for
 ``apply_config``'s settings surface (``get_property``/``set_property``/
-``settable_names``) in place of the primary capture backend. Resolution
-(``frame_width``/``frame_height``, ticket 002) is not a UVC control and
-is meant to stay on the primary (``OpenCVBackend``) capture path
-regardless of whether a *control_backend* is wired — a future ticket
-adding it as a settable key should special-case it rather than routing
-it through *control_backend*.
+``settable_names``) in place of the primary capture backend, for every
+key except resolution (below).
+
+**Self-describing template + resolution key (ticket 023-002).**
+``effective_config`` reports the real, per-camera settable-key set —
+the union of whichever backend :meth:`Camera._settable_names` resolves
+to for most keys, plus ``frame_width``/``frame_height`` — rather than
+the two-key ``device_name``/dimensions placeholder it reported before
+this ticket. ``frame_width``/``frame_height`` are **always** routed
+through *backend* (:meth:`Camera._backend_for_key`), never through
+*control_backend*, because resolution is a capture property
+(``OpenCVBackend.property_map``'s ``CAP_PROP_FRAME_WIDTH``/
+``CAP_PROP_FRAME_HEIGHT`` entries), not a UVC control — the one
+special-case the ticket-001 module docstring flagged as a future
+ticket's job. Every settable key other than the two introspected
+dimensions is always reported blank (``None``): ``Camera`` itself holds
+no notion of "what was last pushed" (that is
+``daemon.service.DaemonService._camera_configs``'s job, one layer up —
+see :attr:`state`'s own docstring for the same division of
+responsibility) or of what a control's current hardware value happens
+to be, so ``effective_config`` is always the template a camera
+configuration starts from, never a live-values dump — this also means
+it never has to call a settings backend's ``get_property`` for those
+keys, so fetching the template cannot itself disturb hardware state.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set, Tuple
 
 import numpy as np
 
@@ -84,6 +102,12 @@ MAX_REOPENS = 10
 #: must be switched to manual before an exposure value will stick, and
 #: auto-white-balance off before WB temperature").
 _GATE_KEYS = ("auto_exposure", "auto_white_balance")
+
+#: Keys that are a capture property, not a UVC control (ticket 023-002).
+#: Always routed through *backend* (the primary capture backend) for
+#: get/set, never through *control_backend* -- see the module docstring's
+#: "Real UVC control, validated live" section and :meth:`Camera._backend_for_key`.
+_RESOLUTION_KEYS = frozenset({"frame_width", "frame_height"})
 
 
 class Camera(_CameraBase):
@@ -263,14 +287,19 @@ class Camera(_CameraBase):
     def effective_config(self) -> CameraConfig:
         """See ``camera.interfaces.Camera.effective_config``.
 
-        Reports only what is genuinely introspectable: the device name
-        (always) and current frame dimensions (only while the backend
-        is open -- ``None`` otherwise, never guessed). The fuller
-        "every settable key, blank" self-describing template
-        (UC-25.S-1/S-2) needs real per-model UVC-control enumeration
-        this sprint does not implement (see the module docstring) --
-        reporting a fabricated key list would be a worse answer than
-        reporting none.
+        The self-describing template (UC-03.S-1, ticket 023-002):
+        introspected facts (``device_name``, always; ``frame_width``/
+        ``frame_height``, only while the backend is open -- ``None``
+        otherwise, never guessed) plus every other key
+        :meth:`_settable_names` reports for *this* camera's active
+        backend(s), each blank. Unlike the two introspected dimensions,
+        those other keys are never read back from hardware here --
+        ``Camera`` has no notion of "what was last pushed" (that is
+        ``DaemonService``'s job, one layer up; see :attr:`state`'s own
+        docstring for the same division) -- so this is always the blank
+        template a camera configuration starts from, never a live-values
+        dump, and fetching it can never itself touch hardware state
+        beyond the two dimension reads already made before this ticket.
         """
         size = self._backend.frame_size()
         settings: Dict[str, Any] = {
@@ -278,6 +307,8 @@ class Camera(_CameraBase):
             "frame_width": size[0] if size else None,
             "frame_height": size[1] if size else None,
         }
+        for key in self._settable_names():
+            settings.setdefault(key, None)
         return CameraConfig(name=self._slug, playfield=self._playfield, settings=settings)
 
     def apply_config(self, config: CameraConfig) -> None:
@@ -285,10 +316,17 @@ class Camera(_CameraBase):
 
         Called by ``DaemonService.set_camera_config`` on every push to a
         held-open camera (ticket 023-001) -- no longer aspirational.
-        Settings are read/written through :meth:`_settings_backend`:
-        *control_backend* when one was given at construction, else
-        *backend* itself, exactly as before this ticket (see the module
-        docstring).
+        Each key is read/written through whichever backend
+        :meth:`_backend_for_key` resolves it to -- *control_backend* for
+        every ordinary setting when one was given at construction, but
+        *backend* (the primary capture backend) unconditionally for
+        ``frame_width``/``frame_height`` (ticket 023-002 -- resolution is
+        a capture property, never a UVC control, see the module
+        docstring). Previous-value snapshotting and the rollback-on-
+        mid-push-failure contract both now operate per key through that
+        key's own backend, so a mixed push (some keys through
+        *control_backend*, ``frame_width``/``frame_height`` through
+        *backend*) still rolls back atomically as one whole-push unit.
         """
         if not self._backend.is_open:
             raise RuntimeError(f"{self._slug}: cannot apply_config while not open")
@@ -298,19 +336,24 @@ class Camera(_CameraBase):
             if key not in settable:
                 raise UnsupportedSetting(key)
 
-        settings_backend = self._settings_backend()
-        get_property = getattr(settings_backend, "get_property", None)
-        set_property = getattr(settings_backend, "set_property", None)
-        if get_property is None or set_property is None:
-            # Backend exposes no adjustable settings surface at all
-            # (e.g. v4l2 loopback -- the stream format is fixed by its
-            # writer, per v1's comment on V4l2CtlCapture.set()).
-            if config.settings:
-                raise UnsupportedSetting(next(iter(config.settings)))
-            return
+        # Resolve each key's get/set pair up front. A key whose backend
+        # exposes no settings surface at all (e.g. v4l2 loopback -- the
+        # stream format is fixed by its writer, per v1's comment on
+        # V4l2CtlCapture.set()) fails immediately, per-key rather than
+        # per-camera -- unchanged in effect from the prior whole-backend
+        # check for every case this codebase actually exercises, since a
+        # key can only be in *settable* if its own backend advertised it.
+        accessors: Dict[str, Tuple[Any, Any]] = {}
+        for key in config.settings:
+            backend = self._backend_for_key(key)
+            get_property = getattr(backend, "get_property", None)
+            set_property = getattr(backend, "set_property", None)
+            if get_property is None or set_property is None:
+                raise UnsupportedSetting(key)
+            accessors[key] = (get_property, set_property)
 
         previous: Dict[str, float] = {}
-        for key in config.settings:
+        for key, (get_property, _set_property) in accessors.items():
             value = get_property(key)
             if value is not None:
                 previous[key] = value
@@ -323,37 +366,68 @@ class Camera(_CameraBase):
             value = config.settings[key]
             if value is None:
                 continue  # blank -- nothing to push for this key
+            _get_property, set_property = accessors[key]
             if not set_property(key, float(value)):
                 # Whole push fails; undo everything already applied
-                # this call so the camera is left exactly as it was
-                # (interfaces.py's Camera.apply_config contract).
+                # this call, each key through its own backend, so the
+                # camera is left exactly as it was (interfaces.py's
+                # Camera.apply_config contract).
                 for applied_key in applied:
-                    set_property(applied_key, previous.get(applied_key, 0.0))
+                    _, applied_set_property = accessors[applied_key]
+                    applied_set_property(applied_key, previous.get(applied_key, 0.0))
                 raise UnsupportedSetting(key)
             applied.append(key)
 
     def _settings_backend(self) -> Any:
-        """The backend :meth:`apply_config`/:meth:`_settable_names` read
-        and write settings through: *control_backend* when one was given
-        at construction (ticket 023-001 -- real UVC control on macOS,
-        see the module docstring), else *backend* itself (unchanged
-        original behaviour -- every non-macOS platform and every
-        headless test)."""
+        """The backend ordinary (non-resolution) settings are read and
+        written through: *control_backend* when one was given at
+        construction (ticket 023-001 -- real UVC control on macOS, see
+        the module docstring), else *backend* itself (unchanged original
+        behaviour -- every non-macOS platform and every headless test).
+        ``frame_width``/``frame_height`` never go through this -- see
+        :meth:`_backend_for_key`."""
         return self._control_backend if self._control_backend is not None else self._backend
 
-    def _settable_names(self) -> set:
-        """Setting names :meth:`_settings_backend` itself claims to
-        support.
+    def _backend_for_key(self, key: str) -> Any:
+        """Which backend :meth:`apply_config`/:meth:`_settable_names`
+        read and write *key* through (ticket 023-002).
 
-        Delegates to that backend's own ``settable_names()`` (beyond the
-        ``CaptureBackend`` base class, like ``get_property``/``set_property``
-        -- a backend with none of these, e.g. v4l2 loopback, is simply
-        polled as having no settable keys at all).
+        ``frame_width``/``frame_height`` always resolve to *backend*
+        (the primary capture backend) -- a capture property
+        (``OpenCVBackend.property_map``'s ``CAP_PROP_FRAME_WIDTH``/
+        ``CAP_PROP_FRAME_HEIGHT``), never a UVC control, so it stays on
+        the primary capture path regardless of whether a narrower
+        *control_backend* is wired for everything else. Every other key
+        resolves to :meth:`_settings_backend`.
         """
-        settable_names = getattr(self._settings_backend(), "settable_names", None)
+        if key in _RESOLUTION_KEYS:
+            return self._backend
+        return self._settings_backend()
+
+    def _names_from(self, backend: Any) -> Set[str]:
+        """*backend*'s own ``settable_names()``, or an empty set if it
+        has none (beyond the ``CaptureBackend``/``ControlBackend`` base
+        surface -- a backend with neither, e.g. v4l2 loopback, is simply
+        polled as having no settable keys at all)."""
+        settable_names = getattr(backend, "settable_names", None)
         if settable_names is None:
             return set()
         return set(settable_names())
+
+    def _settable_names(self) -> Set[str]:
+        """The full settable-key set this camera reports (ticket
+        023-002): whatever :meth:`_settings_backend` itself claims to
+        support (*control_backend* when one was given, else *backend*),
+        unioned with *backend*'s own ``frame_width``/``frame_height``
+        support -- the resolution special case :meth:`_backend_for_key`
+        also applies, so a narrower *control_backend*'s settable names
+        (e.g. ``UvcUtilBackend``'s five UVC controls, which do not
+        include resolution at all) never hides ``frame_width``/
+        ``frame_height`` from the template.
+        """
+        names = self._names_from(self._settings_backend())
+        names |= self._names_from(self._backend) & _RESOLUTION_KEYS
+        return names
 
     def reset(self) -> None:
         """See ``camera.interfaces.Camera.reset``.

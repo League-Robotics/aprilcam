@@ -18,11 +18,15 @@ gain, white balance, ...). This is *not* a per-camera-model "what does
 this hardware actually support" answer — OpenCV's ``get``/``set`` do
 not reliably report that, and pretending otherwise would be exactly the
 kind of plausible-looking wrong answer ``errors.py`` exists to kill.
-Real per-model settable-key enumeration (UC-25.S-2's "each camera gets
-its own key set") needs a proper UVC introspection tool (v1 used
-``uvc-util`` on macOS) and is deferred to the config-push ticket; this
-map only backs the modest, best-effort ``apply_config`` this sprint
-scopes to (see ``camera/camera.py``).
+Real-hardware validation (ticket 023-001) found ``cv2.VideoCapture.set()``
+does not actually work for exposure/gain/white-balance on this project's
+macOS cameras at all -- see ``camera/backends/uvc_util.py`` for the
+mechanism that replaces this map for those controls on macOS
+(``Camera``'s optional ``control_backend``). This map still backs
+resolution (``frame_width``/``frame_height``, ticket 023-002 -- always
+routed through *this* backend regardless of ``control_backend``, since
+it is a capture property, not a UVC control) and remains the only
+settings surface at all on non-macOS platforms.
 """
 
 from __future__ import annotations
@@ -60,6 +64,14 @@ def property_map() -> Dict[str, int]:
     have been stable across OpenCV releases for years, but resolving
     them defensively means a very old/new binding missing one symbol
     degrades that one entry rather than failing this whole module.
+
+    ``frame_width``/``frame_height`` (ticket 023-002) are a capture
+    property, not a UVC control -- included here, not in
+    ``camera.backends.uvc_util``'s ``_CONTROLS`` table, so
+    ``Camera.apply_config``/``effective_config`` always route them
+    through this backend even when a narrower ``control_backend`` (e.g.
+    ``UvcUtilBackend``) is wired for everything else (``camera/camera.py``'s
+    module docstring).
     """
     return {
         "brightness": getattr(cv, "CAP_PROP_BRIGHTNESS", 10),
@@ -72,6 +84,8 @@ def property_map() -> Dict[str, int]:
         "auto_white_balance": getattr(cv, "CAP_PROP_AUTO_WB", 44),
         "focus": getattr(cv, "CAP_PROP_FOCUS", 28),
         "autofocus": getattr(cv, "CAP_PROP_AUTOFOCUS", 39),
+        "frame_width": getattr(cv, "CAP_PROP_FRAME_WIDTH", 3),
+        "frame_height": getattr(cv, "CAP_PROP_FRAME_HEIGHT", 4),
     }
 
 
