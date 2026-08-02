@@ -1,7 +1,7 @@
 ---
 id: '023'
 title: Config service completion and calibration trust
-status: planning-docs
+status: closed
 branch: sprint/023-config-service-completion-and-annotations
 worktree: false
 use-cases: []
