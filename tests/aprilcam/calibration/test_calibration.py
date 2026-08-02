@@ -25,7 +25,15 @@ import cv2 as cv
 import numpy as np
 import pytest
 
-from aprilcam.calibration.calibration import Calibration, Calibrator
+from aprilcam.calibration.calibration import (
+    DRIFT_CHECK_INTERVAL_S,
+    DRIFT_TOLERANCE_CM,
+    MAX_REPROJECTION_ERROR_CM,
+    MIN_DRIFT_CHECK_MARKERS,
+    Calibration,
+    Calibrator,
+    compute_drift_cm,
+)
 from aprilcam.config.interfaces import CameraConfig
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.errors import NoPlayfieldLinked
@@ -144,12 +152,17 @@ def _calibrator_for(
     *,
     camera_slug: str = "test-camera",
     playfield_name: str = "main-playfield",
+    max_reprojection_error_cm: float = MAX_REPROJECTION_ERROR_CM,
 ) -> Calibrator:
     """A ``Calibrator`` wired against in-memory config/playfield stores
     and a frame source that reads from *frames_holder* -- a plain
     ``dict`` so a test can swap ``frames_holder["frames"]`` between
     calls (e.g. the "failed retry" test below) without touching
-    ``Calibrator`` internals."""
+    ``Calibrator`` internals. ``max_reprojection_error_cm`` defaults to
+    the real module constant rather than being silently unset, so a
+    test that does not care about the threshold still exercises the
+    real default (ticket 023-006's "no regression" acceptance
+    criterion); tests below that *do* care override it explicitly."""
     camera_configs = {camera_slug: CameraConfig(name=camera_slug, playfield=playfield_name, settings={})}
     playfields = {playfield_name: definition}
 
@@ -160,6 +173,7 @@ def _calibrator_for(
         get_camera_config=camera_configs.get,
         get_playfield=playfields.get,
         capture_frames=capture_frames,
+        max_reprojection_error_cm=max_reprojection_error_cm,
     )
 
 
@@ -393,6 +407,154 @@ def test_calibrate_rejects_too_few_correspondence_points_naming_the_problem():
 
 
 # ---------------------------------------------------------------------------
+# Reprojection-error acceptance threshold (ticket 023-006, UC-04's open
+# question resolved -- SUC-005): complete (every required id found) but
+# sloppy is still rejected, distinctly from missing-ids/degenerate-
+# geometry failures above.
+# ---------------------------------------------------------------------------
+
+
+def test_calibrate_rejects_a_complete_solve_whose_reprojection_error_exceeds_the_threshold():
+    """A synthetic complete-but-degenerate point set: every one of the
+    ten required ArUco ids is detected (completeness holds -- UC-04's
+    all-or-nothing rule is satisfied), but ArUco 5 is rendered 20 cm
+    away from its surveyed position, dragging the homography fit's RMS
+    reprojection error well past ``MAX_REPROJECTION_ERROR_CM``. The
+    rejection must name the measured error and the threshold via
+    ``reason`` -- not ``missing_ids``, since nothing is missing -- and
+    must store nothing."""
+    definition = main_playfield_definition()
+    positions = dict(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    true_x, true_y = positions[5]
+    positions[5] = (true_x + 20.0, true_y)
+    frame = render_playfield_frame(positions)
+    calibrator = _calibrator_for(definition, {"frames": [frame]})
+
+    result = calibrator.calibrate("test-camera")
+
+    assert result.succeeded is False
+    assert result.missing_ids == ()  # every id WAS found -- a threshold failure, not a coverage one
+    assert result.matched_ids == tuple(range(1, 11))
+    assert result.reprojection_error_cm is not None
+    assert result.reprojection_error_cm > MAX_REPROJECTION_ERROR_CM
+    assert result.reason is not None
+    assert f"{result.reprojection_error_cm:.3f}" in result.reason
+    assert f"{MAX_REPROJECTION_ERROR_CM:.3f}" in result.reason
+    assert calibrator.get_calibration("test-camera") is None
+
+
+def test_calibrate_accepts_a_solve_at_or_below_the_threshold_exactly_as_before():
+    """A good, complete solve (the same fixture
+    ``test_calibrate_with_all_ten_required_aruco_ids_succeeds`` uses,
+    whose noise-free reprojection error is comfortably under 1.0 cm)
+    succeeds exactly as it did before this ticket -- no regression on
+    the ordinary case."""
+    definition = main_playfield_definition()
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    calibrator = _calibrator_for(definition, {"frames": [frame, frame, frame]})
+
+    result = calibrator.calibrate("test-camera")
+
+    assert result.succeeded is True
+    assert result.reprojection_error_cm is not None
+    assert result.reprojection_error_cm <= MAX_REPROJECTION_ERROR_CM
+    assert calibrator.get_calibration("test-camera") is not None
+
+
+def test_calibrate_accepts_a_solve_whose_error_exactly_equals_the_threshold():
+    """"At or below the threshold" is inclusive at the boundary --
+    proven by pointing the threshold exactly at a real measured error
+    rather than trying to hand-construct an exact-equality rms."""
+    definition = main_playfield_definition()
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    probe = _calibrator_for(definition, {"frames": [frame]})
+    probe_result = probe.calibrate("test-camera")
+    assert probe_result.succeeded is True
+    measured = probe_result.reprojection_error_cm
+    assert measured is not None
+
+    calibrator = _calibrator_for(
+        definition, {"frames": [frame]}, max_reprojection_error_cm=measured
+    )
+
+    result = calibrator.calibrate("test-camera")
+
+    assert result.succeeded is True
+    assert result.reprojection_error_cm == pytest.approx(measured)
+
+
+def test_a_threshold_rejection_leaves_the_prior_successful_calibration_untouched():
+    """UC-04/SUC-005: a failed threshold check does not disturb an
+    existing good calibration -- mirrors
+    ``test_a_failed_retry_leaves_the_prior_successful_calibration_untouched``
+    above, but for the new rejection branch specifically rather than
+    the missing-ids one."""
+    definition = main_playfield_definition()
+    good_frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    frames_holder = {"frames": [good_frame]}
+    calibrator = _calibrator_for(definition, frames_holder)
+
+    good_result = calibrator.calibrate("test-camera")
+    assert good_result.succeeded is True
+    first_calibration = calibrator.get_calibration("test-camera")
+
+    positions = dict(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    true_x, true_y = positions[5]
+    positions[5] = (true_x + 20.0, true_y)
+    frames_holder["frames"] = [render_playfield_frame(positions)]
+
+    retry_result = calibrator.calibrate("test-camera")
+    assert retry_result.succeeded is False
+    assert retry_result.missing_ids == ()
+    assert retry_result.reason is not None
+
+    assert calibrator.get_calibration("test-camera") == first_calibration
+
+
+def test_max_reprojection_error_cm_is_genuinely_overridable_to_reject_a_normally_good_solve():
+    """Lowering ``max_reprojection_error_cm`` well below what an
+    otherwise-good solve measures must reject it -- proving the
+    threshold used is the instance's own override, not a hardcoded
+    module constant baked into the comparison."""
+    definition = main_playfield_definition()
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    calibrator = _calibrator_for(
+        definition, {"frames": [frame]}, max_reprojection_error_cm=1e-6
+    )
+
+    result = calibrator.calibrate("test-camera")
+
+    assert result.succeeded is False
+    assert result.missing_ids == ()
+    assert result.reason is not None
+    assert calibrator.get_calibration("test-camera") is None
+
+
+def test_max_reprojection_error_cm_is_genuinely_overridable_to_accept_a_normally_rejected_solve():
+    """The inverse direction: raising ``max_reprojection_error_cm``
+    above what the default (1.0 cm) would reject lets the same
+    otherwise-degenerate solve from
+    ``test_calibrate_rejects_a_complete_solve_whose_reprojection_error_exceeds_the_threshold``
+    succeed -- confirming the override is a real per-instance ceiling,
+    not a one-directional safety clamp."""
+    definition = main_playfield_definition()
+    positions = dict(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    true_x, true_y = positions[5]
+    positions[5] = (true_x + 20.0, true_y)
+    frame = render_playfield_frame(positions)
+    calibrator = _calibrator_for(
+        definition, {"frames": [frame]}, max_reprojection_error_cm=10.0
+    )
+
+    result = calibrator.calibrate("test-camera")
+
+    assert result.succeeded is True
+    assert result.reprojection_error_cm is not None
+    assert result.reprojection_error_cm > MAX_REPROJECTION_ERROR_CM
+    assert calibrator.get_calibration("test-camera") is not None
+
+
+# ---------------------------------------------------------------------------
 # Geometry convention suite, at fixture level (permanent, never relaxed):
 # east -> larger x, north -> larger y, origin -- exercised through the real
 # detect + solve pipeline, not hand-built matrices (test_geometry.py's job).
@@ -475,3 +637,153 @@ def test_origin_shift_is_never_a_sign_inversion_on_either_axis():
 
     assert east.x > 0 > west.x
     assert north.y > 0 > south.y
+
+
+# ---------------------------------------------------------------------------
+# compute_drift_cm (ticket 023-007) -- the opportunistic staleness drift
+# check's pure geometry, exercised directly against a real ``Calibration``
+# from the fixtures above rather than through ``DetectionEngine``/
+# ``DaemonService`` (those modules' own tests cover the wiring; this module
+# covers the math and the "cannot verify" contract it must honour).
+# ---------------------------------------------------------------------------
+
+
+def _detected_at(positions: Dict[int, Tuple[float, float]]) -> Dict[int, PixelPoint]:
+    """*positions* (world cm, id -> (x, y)) as a drift-check ``detected``
+    dict -- pixel positions via the same synthetic camera mount
+    ``_calibrated()`` solved against, simulating "the marker was detected
+    here" for whatever world position is passed in (whether or not that
+    matches the marker's real surveyed position -- the caller decides,
+    to simulate either an unmoved camera or a bumped one)."""
+    return {tag_id: PixelPoint(*standard_pixel_for_world(x, y)) for tag_id, (x, y) in positions.items()}
+
+
+def test_drift_constants_match_the_stakeholder_confirmed_values():
+    """Pins the sprint.md Decisions values directly, the same way
+    ``test_ring_buffer_size_defaults_to_v1s_300`` pins its own constant --
+    a silent change to either number is exactly the kind of regression a
+    plain equality assertion catches immediately."""
+    assert DRIFT_TOLERANCE_CM == 2.0
+    assert DRIFT_CHECK_INTERVAL_S == 10.0
+    assert MIN_DRIFT_CHECK_MARKERS == 3
+
+
+def test_compute_drift_cm_is_near_zero_when_nothing_has_moved():
+    """An unmoved camera: every matched marker re-detected at exactly
+    its surveyed position (the same synthetic camera mount the
+    calibration was solved against) should reproject to within the
+    homography's own noise-free fit error, comfortably under the 2.0 cm
+    tolerance."""
+    calibration = _calibrated()
+    definition = main_playfield_definition()
+    detected = _detected_at(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+
+    drift = compute_drift_cm(calibration, definition, detected)
+
+    assert drift is not None
+    assert drift < 0.5
+
+
+def test_compute_drift_cm_flags_a_shift_beyond_tolerance():
+    """One matched marker detected 5 cm from its surveyed position --
+    well past the 2.0 cm tolerance -- simulating a bumped camera (or,
+    equivalently for this pure-geometry function, a marker that
+    genuinely moved). The max, not an average, decides the outcome, so
+    a single bad marker among nine good ones is not diluted away."""
+    calibration = _calibrated()
+    definition = main_playfield_definition()
+    positions = dict(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    true_x, true_y = positions[5]
+    positions[5] = (true_x + 5.0, true_y)
+    detected = _detected_at(positions)
+
+    drift = compute_drift_cm(calibration, definition, detected)
+
+    assert drift is not None
+    assert drift > DRIFT_TOLERANCE_CM
+
+
+def test_compute_drift_cm_within_tolerance_is_not_flagged():
+    """A small, sub-tolerance shift (0.5 cm -- comfortably inside the
+    2.0 cm tolerance, itself ~11x the observed real noise floor) must
+    not be reported as drift -- the false-positive guard on ordinary
+    detection jitter."""
+    calibration = _calibrated()
+    definition = main_playfield_definition()
+    positions = dict(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    true_x, true_y = positions[5]
+    positions[5] = (true_x + 0.5, true_y)
+    detected = _detected_at(positions)
+
+    drift = compute_drift_cm(calibration, definition, detected)
+
+    assert drift is not None
+    assert drift < DRIFT_TOLERANCE_CM
+
+
+def test_compute_drift_cm_returns_none_when_no_markers_are_visible():
+    """Darkness, a covered field, a lens cap -- zero matched markers
+    detected must read as "cannot verify," never as "confirmed no
+    drift" (never ``0.0``)."""
+    calibration = _calibrated()
+    definition = main_playfield_definition()
+
+    drift = compute_drift_cm(calibration, definition, {})
+
+    assert drift is None
+
+
+def test_compute_drift_cm_returns_none_below_the_minimum_marker_count():
+    """Fewer than ``MIN_DRIFT_CHECK_MARKERS`` matched markers visible --
+    even if every one of them individually shows a huge apparent shift --
+    is still "cannot verify," not evidence of drift. Proven with a
+    deliberately enormous single-marker shift that would trivially
+    exceed the tolerance if it were allowed to count on its own."""
+    calibration = _calibrated()
+    definition = main_playfield_definition()
+    assert MIN_DRIFT_CHECK_MARKERS > 1
+    huge_shift = {1: (MAIN_PLAYFIELD_ARUCO_POSITIONS[1][0] + 50.0, MAIN_PLAYFIELD_ARUCO_POSITIONS[1][1])}
+    detected = _detected_at(huge_shift)
+    assert len(detected) < MIN_DRIFT_CHECK_MARKERS
+
+    drift = compute_drift_cm(calibration, definition, detected)
+
+    assert drift is None
+
+
+def test_compute_drift_cm_exactly_at_the_minimum_marker_count_does_verify():
+    """The boundary case: exactly ``MIN_DRIFT_CHECK_MARKERS`` matched
+    markers visible is enough to draw a conclusion -- the guard is "fewer
+    than," not "fewer than or equal to.\""""
+    calibration = _calibrated()
+    definition = main_playfield_definition()
+    ids = list(calibration.matched_ids)[:MIN_DRIFT_CHECK_MARKERS]
+    positions = {tag_id: MAIN_PLAYFIELD_ARUCO_POSITIONS[tag_id] for tag_id in ids}
+    detected = _detected_at(positions)
+    assert len(detected) == MIN_DRIFT_CHECK_MARKERS
+
+    drift = compute_drift_cm(calibration, definition, detected)
+
+    assert drift is not None
+
+
+def test_compute_drift_cm_ignores_a_detected_id_the_calibration_never_matched():
+    """A detected id outside ``calibration.matched_ids`` (a stray ArUco
+    marker in frame, or an id that stopped being part of the playfield
+    definition) is simply not counted towards *visible* -- it must not
+    let an otherwise-insufficient reading sneak past the minimum-marker
+    guard."""
+    calibration = _calibrated()
+    definition = main_playfield_definition()
+    detected = _detected_at(
+        {
+            1: MAIN_PLAYFIELD_ARUCO_POSITIONS[1],
+            2: MAIN_PLAYFIELD_ARUCO_POSITIONS[2],
+        }
+    )
+    detected[999] = PixelPoint(*standard_pixel_for_world(0.0, 0.0))
+    assert 999 not in calibration.matched_ids
+
+    drift = compute_drift_cm(calibration, definition, detected)
+
+    assert drift is None  # still only 2 real matched markers -- below the minimum

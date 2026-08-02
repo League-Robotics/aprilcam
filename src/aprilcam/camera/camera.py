@@ -29,29 +29,76 @@ and broken" case (``types.CameraState``'s own docstring), not
 "unplugged", since a stopped self-heal loop is not evidence the
 hardware is gone.
 
-**This sprint's config surface is introspection-only.** ``apply_config``
-is implemented against the small set of controls
+**Reopen as a staleness trigger, notification only (ticket 023-007).**
+A successful self-heal reopen is a real-world event that can move a
+camera — someone unplugged it to swap a port, bumped it while
+investigating a problem — which is exactly what
+``calibration.interfaces.Calibration.stale`` exists to flag once a
+calibration is established. ``Camera`` itself has no notion of
+calibration (that stays a daemon-level concern, per this module's own
+existing "beyond the interface" divisions below), so it only exposes an
+optional, constructor-injected ``on_reopen`` callback — see
+:meth:`Camera.__init__`'s docstring — invoked with no arguments at the
+end of a *successful* :meth:`Camera._attempt_self_heal`, mirroring
+``daemon.detection.DetectionEngine``'s existing ``calibration_lookup``
+injection pattern. ``daemon.service.DaemonService`` is the one thing
+that wires this to anything meaningful.
+
+**Real UVC control, validated live (ticket 023-001).** ``apply_config``
+was originally implemented only against the small set of controls
 ``camera.backends.opencv_backend.property_map()`` exposes generically
-through OpenCV — not a verified per-camera-model settable-key list
-(that needs real UVC introspection, e.g. v1's ``uvc-util``, and is
-deferred to the config-push ticket per the sprint architecture's Open
-Question 1). Nothing in this sprint's CLI or daemon RPC surface calls
-``apply_config`` with a client-supplied document; it exists here so the
-``Camera`` base class's contract is fully satisfied and so the
-ordering/atomicity rules in its docstring are honoured by *something*
-runnable, not left purely aspirational.
+through OpenCV (``cv2.VideoCapture.set()``) — not a verified
+per-camera-model settable-key list. Ticket 023-001 validated that
+generic path live against camera 3 (the OV9782 this project's real
+playfield uses): ``cv2.VideoCapture.set()`` returns ``False`` for
+**every one** of ``auto_exposure``/``exposure``/``gain``/
+``auto_white_balance``/``white_balance_temperature`` on this exact
+hardware's AVFoundation capture session — matching archived v1 evidence
+that a generic capture-library property setter is not to be trusted here
+(``archive/src/aprilcam/camera/DESIGN.md`` §4). ``Camera`` therefore
+accepts an optional second backend, *control_backend* — a
+:class:`~aprilcam.camera.backends.ControlBackend` (e.g.
+``camera.backends.uvc_util.UvcUtilBackend``, a ``uvc-util`` subprocess
+adapter) — that, when given, becomes the **exclusive** source for
+``apply_config``'s settings surface (``get_property``/``set_property``/
+``settable_names``) in place of the primary capture backend, for every
+key except resolution (below).
+
+**Self-describing template + resolution key (ticket 023-002).**
+``effective_config`` reports the real, per-camera settable-key set —
+the union of whichever backend :meth:`Camera._settable_names` resolves
+to for most keys, plus ``frame_width``/``frame_height`` — rather than
+the two-key ``device_name``/dimensions placeholder it reported before
+this ticket. ``frame_width``/``frame_height`` are **always** routed
+through *backend* (:meth:`Camera._backend_for_key`), never through
+*control_backend*, because resolution is a capture property
+(``OpenCVBackend.property_map``'s ``CAP_PROP_FRAME_WIDTH``/
+``CAP_PROP_FRAME_HEIGHT`` entries), not a UVC control — the one
+special-case the ticket-001 module docstring flagged as a future
+ticket's job. Every settable key other than the two introspected
+dimensions is always reported blank (``None``): ``Camera`` itself holds
+no notion of "what was last pushed" (that is
+``daemon.service.DaemonService._camera_configs``'s job, one layer up —
+see :attr:`state`'s own docstring for the same division of
+responsibility) or of what a control's current hardware value happens
+to be, so ``effective_config`` is always the template a camera
+configuration starts from, never a live-values dump — this also means
+it never has to call a settings backend's ``get_property`` for those
+keys, so fetching the template cannot itself disturb hardware state.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 import numpy as np
 
-from aprilcam.camera.backends import CaptureBackend
+from aprilcam.camera.backends import CaptureBackend, ControlBackend
 from aprilcam.camera.interfaces import Camera as _CameraBase
 from aprilcam.config.interfaces import CameraConfig
+from aprilcam.config.interfaces import ConfigLoader as ConfigLoaderIface
 from aprilcam.errors import UnsupportedSetting
 from aprilcam.types import CameraState
 
@@ -73,6 +120,12 @@ MAX_REOPENS = 10
 #: auto-white-balance off before WB temperature").
 _GATE_KEYS = ("auto_exposure", "auto_white_balance")
 
+#: Keys that are a capture property, not a UVC control (ticket 023-002).
+#: Always routed through *backend* (the primary capture backend) for
+#: get/set, never through *control_backend* -- see the module docstring's
+#: "Real UVC control, validated live" section and :meth:`Camera._backend_for_key`.
+_RESOLUTION_KEYS = frozenset({"frame_width", "frame_height"})
+
 
 class Camera(_CameraBase):
     """Concrete ``camera.interfaces.Camera``.
@@ -93,6 +146,15 @@ class Camera(_CameraBase):
         chosen by whoever constructs it (``camera/discovery.py`` for
         USB/AVFoundation hardware; a Pi bring-up sprint would pass a
         ``V4l2LoopbackBackend`` instead).
+    control_backend:
+        Optional :class:`~aprilcam.camera.backends.ControlBackend` used
+        **exclusively** for ``apply_config``'s settings surface
+        (``get_property``/``set_property``/``settable_names``) in place
+        of *backend*, when given (ticket 023-001 -- see the module
+        docstring). ``None`` (the default) preserves the original
+        behaviour of reading/writing settings through *backend* itself,
+        which is what every non-macOS platform and every headless test
+        still does.
     device_name:
         OS-reported descriptor (``CameraIdentity.device_name``), carried
         through for ``effective_config``'s introspected facts. Purely
@@ -101,6 +163,38 @@ class Camera(_CameraBase):
         Static facts from the registry/config that ``state()`` reports
         verbatim; ``playfield`` is ``None`` this sprint (no config-push
         loop yet to link one).
+    config_loader, config_path:
+        Optional (ticket 023-004): what :meth:`reset`/:meth:`stored_config`
+        read *config_path* through, when both are given. ``daemon.
+        service.DaemonService._camera_for`` wires a real
+        ``config.loader.ConfigLoader`` plus this camera's resolved
+        ``config_dir/cameras/<slug>/config.json`` path (sprint.md
+        Decision 3: always this fixed location, never whatever was last
+        pushed) into every ``Camera`` it constructs. ``None`` (the
+        default -- every pre-existing test, and any ``Camera`` built by
+        hand rather than through ``_camera_for``) means there is nothing
+        to read: :meth:`reset` then falls back to the blank
+        introspected-plus-blank template, exactly like a camera whose
+        *config_path* does not exist on disk.
+    on_reopen:
+        Optional, constructor-injected notification (ticket 023-007,
+        sprint.md Decision 6) invoked with no arguments at the end of a
+        *successful* :meth:`_attempt_self_heal` reopen -- mirrors
+        ``daemon.detection.DetectionEngine``'s existing
+        ``calibration_lookup`` injection pattern: ``Camera`` gains no
+        notion of calibration itself, it only tells whoever is
+        listening "I just reopened." ``daemon.service.DaemonService``
+        wires this to a closure marking the camera's calibration stale
+        (a reopen correlates with a real-world event that can move a
+        camera far better than elapsed time alone -- sprint.md Design
+        Rationale Decision 6). **Not** invoked from :meth:`open`
+        itself: the very first open of a freshly constructed ``Camera``
+        (``DaemonService._camera_for``'s normal path, including for a
+        calibration reloaded from disk at daemon startup) is not a
+        reopen and must never mark a just-loaded, still-accurate
+        calibration stale. ``None`` (the default) means nobody is
+        listening -- every pre-existing test and any ``Camera`` built
+        without this parameter behaves exactly as before.
     """
 
     def __init__(
@@ -108,15 +202,23 @@ class Camera(_CameraBase):
         slug: str,
         backend: CaptureBackend,
         *,
+        control_backend: Optional[ControlBackend] = None,
         device_name: str = "",
         number: Optional[int] = None,
         playfield: Optional[str] = None,
+        config_loader: Optional[ConfigLoaderIface] = None,
+        config_path: Optional[Path] = None,
+        on_reopen: Optional[Callable[[], None]] = None,
     ) -> None:
         self._slug = slug
         self._backend = backend
+        self._control_backend = control_backend
         self._device_name = device_name or slug
         self._number = number
         self._playfield = playfield
+        self._config_loader = config_loader
+        self._config_path = config_path
+        self._on_reopen = on_reopen
         self._present = False
         self._consecutive_failures = 0
         self._reopens = 0
@@ -217,6 +319,13 @@ class Camera(_CameraBase):
         trivially succeeding while it never yields another frame) --
         ``usable`` must reflect "we gave up", not just "is a handle
         technically open".
+
+        **Staleness notification (ticket 023-007).** *on_reopen* fires
+        only when ``self._backend.open()`` above genuinely succeeds --
+        never on a failed reopen attempt (nothing physically changed
+        about the camera's mount if the reopen itself didn't happen)
+        and never when the budget is already exhausted (the ``return``
+        above short-circuits before this point).
         """
         if self._reopens >= MAX_REOPENS:
             self._exhausted = True
@@ -234,20 +343,28 @@ class Camera(_CameraBase):
             self._present = True
         except Exception as exc:
             logger.warning("%s: reopen failed: %s", self._slug, exc)
+            return
+        if self._on_reopen is not None:
+            self._on_reopen()
 
     # -- config --------------------------------------------------------
 
     def effective_config(self) -> CameraConfig:
         """See ``camera.interfaces.Camera.effective_config``.
 
-        Reports only what is genuinely introspectable: the device name
-        (always) and current frame dimensions (only while the backend
-        is open -- ``None`` otherwise, never guessed). The fuller
-        "every settable key, blank" self-describing template
-        (UC-25.S-1/S-2) needs real per-model UVC-control enumeration
-        this sprint does not implement (see the module docstring) --
-        reporting a fabricated key list would be a worse answer than
-        reporting none.
+        The self-describing template (UC-03.S-1, ticket 023-002):
+        introspected facts (``device_name``, always; ``frame_width``/
+        ``frame_height``, only while the backend is open -- ``None``
+        otherwise, never guessed) plus every other key
+        :meth:`_settable_names` reports for *this* camera's active
+        backend(s), each blank. Unlike the two introspected dimensions,
+        those other keys are never read back from hardware here --
+        ``Camera`` has no notion of "what was last pushed" (that is
+        ``DaemonService``'s job, one layer up; see :attr:`state`'s own
+        docstring for the same division) -- so this is always the blank
+        template a camera configuration starts from, never a live-values
+        dump, and fetching it can never itself touch hardware state
+        beyond the two dimension reads already made before this ticket.
         """
         size = self._backend.frame_size()
         settings: Dict[str, Any] = {
@@ -255,15 +372,26 @@ class Camera(_CameraBase):
             "frame_width": size[0] if size else None,
             "frame_height": size[1] if size else None,
         }
+        for key in self._settable_names():
+            settings.setdefault(key, None)
         return CameraConfig(name=self._slug, playfield=self._playfield, settings=settings)
 
     def apply_config(self, config: CameraConfig) -> None:
         """See ``camera.interfaces.Camera.apply_config``.
 
-        Not called by any CLI command or daemon RPC this sprint (the
-        config-push loop, UC-03, is out of scope) -- implemented so the
-        ``Camera`` base class's ordering/atomicity contract is real, not
-        aspirational, for whenever it is wired in.
+        Called by ``DaemonService.set_camera_config`` on every push to a
+        held-open camera (ticket 023-001) -- no longer aspirational.
+        Each key is read/written through whichever backend
+        :meth:`_backend_for_key` resolves it to -- *control_backend* for
+        every ordinary setting when one was given at construction, but
+        *backend* (the primary capture backend) unconditionally for
+        ``frame_width``/``frame_height`` (ticket 023-002 -- resolution is
+        a capture property, never a UVC control, see the module
+        docstring). Previous-value snapshotting and the rollback-on-
+        mid-push-failure contract both now operate per key through that
+        key's own backend, so a mixed push (some keys through
+        *control_backend*, ``frame_width``/``frame_height`` through
+        *backend*) still rolls back atomically as one whole-push unit.
         """
         if not self._backend.is_open:
             raise RuntimeError(f"{self._slug}: cannot apply_config while not open")
@@ -273,18 +401,24 @@ class Camera(_CameraBase):
             if key not in settable:
                 raise UnsupportedSetting(key)
 
-        get_property = getattr(self._backend, "get_property", None)
-        set_property = getattr(self._backend, "set_property", None)
-        if get_property is None or set_property is None:
-            # Backend exposes no adjustable settings surface at all
-            # (e.g. v4l2 loopback -- the stream format is fixed by its
-            # writer, per v1's comment on V4l2CtlCapture.set()).
-            if config.settings:
-                raise UnsupportedSetting(next(iter(config.settings)))
-            return
+        # Resolve each key's get/set pair up front. A key whose backend
+        # exposes no settings surface at all (e.g. v4l2 loopback -- the
+        # stream format is fixed by its writer, per v1's comment on
+        # V4l2CtlCapture.set()) fails immediately, per-key rather than
+        # per-camera -- unchanged in effect from the prior whole-backend
+        # check for every case this codebase actually exercises, since a
+        # key can only be in *settable* if its own backend advertised it.
+        accessors: Dict[str, Tuple[Any, Any]] = {}
+        for key in config.settings:
+            backend = self._backend_for_key(key)
+            get_property = getattr(backend, "get_property", None)
+            set_property = getattr(backend, "set_property", None)
+            if get_property is None or set_property is None:
+                raise UnsupportedSetting(key)
+            accessors[key] = (get_property, set_property)
 
         previous: Dict[str, float] = {}
-        for key in config.settings:
+        for key, (get_property, _set_property) in accessors.items():
             value = get_property(key)
             if value is not None:
                 previous[key] = value
@@ -297,37 +431,138 @@ class Camera(_CameraBase):
             value = config.settings[key]
             if value is None:
                 continue  # blank -- nothing to push for this key
+            _get_property, set_property = accessors[key]
             if not set_property(key, float(value)):
                 # Whole push fails; undo everything already applied
-                # this call so the camera is left exactly as it was
-                # (interfaces.py's Camera.apply_config contract).
+                # this call, each key through its own backend, so the
+                # camera is left exactly as it was (interfaces.py's
+                # Camera.apply_config contract).
                 for applied_key in applied:
-                    set_property(applied_key, previous.get(applied_key, 0.0))
+                    _, applied_set_property = accessors[applied_key]
+                    applied_set_property(applied_key, previous.get(applied_key, 0.0))
                 raise UnsupportedSetting(key)
             applied.append(key)
 
-    def _settable_names(self) -> set:
-        """Setting names the backend itself claims to support.
+    def _settings_backend(self) -> Any:
+        """The backend ordinary (non-resolution) settings are read and
+        written through: *control_backend* when one was given at
+        construction (ticket 023-001 -- real UVC control on macOS, see
+        the module docstring), else *backend* itself (unchanged original
+        behaviour -- every non-macOS platform and every headless test).
+        ``frame_width``/``frame_height`` never go through this -- see
+        :meth:`_backend_for_key`."""
+        return self._control_backend if self._control_backend is not None else self._backend
 
-        Delegates to the backend's own ``settable_names()`` (beyond the
-        ``CaptureBackend`` base class, like ``get_property``/``set_property``
-        -- a backend with none of these, e.g. v4l2 loopback, is simply
-        polled as having no settable keys at all).
+    def _backend_for_key(self, key: str) -> Any:
+        """Which backend :meth:`apply_config`/:meth:`_settable_names`
+        read and write *key* through (ticket 023-002).
+
+        ``frame_width``/``frame_height`` always resolve to *backend*
+        (the primary capture backend) -- a capture property
+        (``OpenCVBackend.property_map``'s ``CAP_PROP_FRAME_WIDTH``/
+        ``CAP_PROP_FRAME_HEIGHT``), never a UVC control, so it stays on
+        the primary capture path regardless of whether a narrower
+        *control_backend* is wired for everything else. Every other key
+        resolves to :meth:`_settings_backend`.
         """
-        settable_names = getattr(self._backend, "settable_names", None)
+        if key in _RESOLUTION_KEYS:
+            return self._backend
+        return self._settings_backend()
+
+    def _names_from(self, backend: Any) -> Set[str]:
+        """*backend*'s own ``settable_names()``, or an empty set if it
+        has none (beyond the ``CaptureBackend``/``ControlBackend`` base
+        surface -- a backend with neither, e.g. v4l2 loopback, is simply
+        polled as having no settable keys at all)."""
+        settable_names = getattr(backend, "settable_names", None)
         if settable_names is None:
             return set()
         return set(settable_names())
 
-    def reset(self) -> None:
-        """See ``camera.interfaces.Camera.reset``.
-
-        No ``ConfigLoader`` is wired this sprint (the config-push
-        ticket owns reading ``config.json`` back off disk) -- there is
-        nothing stored to discard live overrides back to yet. A
-        truthful no-op: leaving the camera exactly as it is, rather
-        than pretending to re-apply a document that does not exist.
+    def _settable_names(self) -> Set[str]:
+        """The full settable-key set this camera reports (ticket
+        023-002): whatever :meth:`_settings_backend` itself claims to
+        support (*control_backend* when one was given, else *backend*),
+        unioned with *backend*'s own ``frame_width``/``frame_height``
+        support -- the resolution special case :meth:`_backend_for_key`
+        also applies, so a narrower *control_backend*'s settable names
+        (e.g. ``UvcUtilBackend``'s five UVC controls, which do not
+        include resolution at all) never hides ``frame_width``/
+        ``frame_height`` from the template.
         """
+        names = self._names_from(self._settings_backend())
+        names |= self._names_from(self._backend) & _RESOLUTION_KEYS
+        return names
+
+    def reset(self) -> None:
+        """See ``camera.interfaces.Camera.reset`` (ticket 023-004).
+
+        The real on-disk document at *config_path* (:meth:`_on_disk_config`),
+        re-applied through :meth:`apply_config` -- the exact same
+        whole-push, ordered, hard-error, rollback-on-failure contract a
+        live push gets, since this is nothing more than ``apply_config``
+        fed a freshly-read document instead of an RPC-supplied one. No
+        separate, weaker code path exists here.
+
+        Nothing installed on disk (sprint.md Decision 3's "nothing to
+        revert to" case): applies an explicitly *empty* settings push --
+        a true no-op on hardware, never :meth:`effective_config`'s
+        template. That template's ``device_name`` is introspected-only,
+        never a settable key -- pushing it through ``apply_config``
+        would hard-error every time, which is exactly backwards for a
+        code path whose entire point is "nothing to revert to, not a
+        failure." :meth:`stored_config` is the accessor that reports
+        the *template* for display/config-service purposes; this method
+        only ever touches hardware with real, settable values.
+        """
+        config = self._on_disk_config()
+        if config is None:
+            config = CameraConfig(name=self._slug, playfield=self._playfield, settings={})
+        self.apply_config(config)
+
+    def stored_config(self) -> CameraConfig:
+        """The document that describes what is now in force after
+        :meth:`reset` (ticket 023-004): the real on-disk document at
+        *config_path* when one exists, else the blank
+        introspected-plus-blank template (:meth:`effective_config`, the
+        same document an unconfigured camera reports) -- sprint.md
+        Decision 3: a live override with nothing installed in
+        ``config_dir`` falls back to this blank template rather than
+        erroring, "discard the override, nothing to revert to" being an
+        honest answer. Unlike :meth:`reset`'s own fallback (an
+        explicitly empty push, since ``effective_config``'s
+        ``device_name`` is not a settable key), this method's fallback
+        is the full template -- this is what a caller reports back to a
+        client asking "what does this camera's config look like now,"
+        not what gets pushed to hardware.
+
+        Not part of ``camera.interfaces.Camera``'s declared contract --
+        an addition specific to this concrete class, the same way
+        ``DaemonService.active_slugs`` adds a capability ``Daemon``
+        itself does not declare -- so a caller
+        (``DaemonService.reset_camera_config``) can learn what is now in
+        force to keep its own config-service state in sync, without
+        re-deriving the same on-disk resolution itself.
+        """
+        config = self._on_disk_config()
+        return config if config is not None else self.effective_config()
+
+    def _on_disk_config(self) -> Optional[CameraConfig]:
+        """The real document at *config_path*, re-read fresh through
+        *config_loader* every call -- never cached, so a file edited
+        between resets is always picked up. ``None`` when either was
+        not injected at construction, or the resolved path does not
+        currently exist on disk -- the shared "is there really
+        something installed" check :meth:`reset`/:meth:`stored_config`
+        both build on, so the two methods can never disagree about
+        *whether* an on-disk document exists, only about what to do
+        when one does not."""
+        if (
+            self._config_loader is not None
+            and self._config_path is not None
+            and self._config_path.exists()
+        ):
+            return self._config_loader.load_camera_config(self._config_path)
         return None
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostics only

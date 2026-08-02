@@ -63,6 +63,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import threading
 import time
 from dataclasses import replace
@@ -75,14 +76,17 @@ import numpy as np
 from aprilcam.calibration.calibration import Calibration, Calibrator
 from aprilcam.calibration.deskew import Deskewer
 from aprilcam.calibration.interfaces import CalibrationResult
-from aprilcam.camera.backends import CaptureBackend
+from aprilcam.camera.backends import CaptureBackend, ControlBackend
 from aprilcam.camera.backends.opencv_backend import OpenCVBackend
+from aprilcam.camera.backends.uvc_util import UvcUtilBackend
 from aprilcam.camera.camera import Camera
 from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import CameraIdentity, resolve_all
 from aprilcam.camera.registry import CameraRecord, CameraRegistry
 from aprilcam.config.interfaces import CameraConfig, Directories
+from aprilcam.config.interfaces import ConfigLoader as ConfigLoaderIface
 from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitionIface
+from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
 from aprilcam.daemon.detection import DetectionEngine
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
 from aprilcam.errors import CameraNotPresent, NotCalibrated, UnknownCamera, UnknownPlayfield
@@ -117,14 +121,45 @@ def _default_backend_factory(index: int) -> CaptureBackend:
     return OpenCVBackend(index)
 
 
+def _default_control_backend_factory(device_name: str) -> Optional[ControlBackend]:
+    """The real per-control mechanism for a newly-opened camera's
+    settings surface (ticket 023-001, sprint.md Decision 2).
+
+    macOS only, unconditionally: real-hardware validation against camera
+    3 (an OV9782) found ``cv2.VideoCapture.set()`` -- ``OpenCVBackend``'s
+    settings path -- returns ``False`` for every one of
+    ``auto_exposure``/``exposure``/``gain``/``auto_white_balance``/
+    ``white_balance_temperature`` on this platform's AVFoundation capture
+    session, so ``UvcUtilBackend`` (``camera/backends/uvc_util.py``) is
+    unconditionally what a macOS ``Camera`` uses for those controls, not
+    a fallback tried only if something else fails first. Deliberately
+    **not** wrapped in a try/except that would swallow a missing
+    ``uvc-util`` binary into ``None`` -- sprint.md's Migration Concerns
+    are explicit that its absence "must surface as a clear, typed
+    error... never a silent fallback to a path that... may not actually
+    work", so :class:`~aprilcam.camera.backends.uvc_util.UvcUtilBackend`'s
+    constructor is left to raise straight through when ``uvc-util`` is
+    not on ``PATH``, rather than this factory quietly degrading to the
+    already-proven-broken ``OpenCVBackend`` control surface.
+
+    Returns ``None`` on every other platform, unchanged from before this
+    ticket -- Linux/Raspberry Pi UVC control is out of this sprint's
+    scope (sprint.md Scope); ``Camera`` falls back to *backend* itself
+    for settings exactly as it always has (``camera/camera.py``'s
+    module docstring).
+    """
+    if sys.platform != "darwin":
+        return None
+    return UvcUtilBackend(device_name)
+
+
 class DaemonService(Daemon):
     """Concrete ``daemon.interfaces.Daemon`` (this sprint's slice only).
 
     Derives from ``Daemon`` (see that class's module docstring for the
-    base-class-vs-``Protocol`` design rule): the 15 methods this sprint
-    does not implement (calibration, streams, annotations, tag
-    parameters, guides, ``reset_camera_config``, ``find_feature``) are
-    inherited as-is, so calling one raises
+    base-class-vs-``Protocol`` design rule): the 14 methods this sprint
+    does not implement (streams, annotations, tag parameters, guides,
+    ``find_feature``) are inherited as-is, so calling one raises
     ``NotImplementedError`` naming the missing method rather than an
     ``AttributeError`` -- ``isinstance(service, Daemon)`` is also simply
     true now, mechanically, rather than a Protocol structural guess.
@@ -156,6 +191,15 @@ class DaemonService(Daemon):
         via :meth:`get_frame` -- see :meth:`_camera_for`). Overridable
         for headless tests exactly like ``CameraDiscovery``'s own
         constructor; default to real hardware enumeration.
+    control_backend_factory:
+        Builds the optional :class:`~aprilcam.camera.backends.ControlBackend`
+        a newly-constructed ``Camera`` uses for ``apply_config``'s
+        settings surface (ticket 023-001 -- real UVC control validated
+        live on camera 3; see :func:`_default_control_backend_factory`).
+        Defaults to that real, macOS-only factory; headless tests
+        override with ``lambda device_name: None`` so a ``FakeBackend``
+        stands in for settings too, exactly like *backend_factory*
+        above.
     detection:
         The per-camera ring buffer plus burst orchestration
         (``daemon/detection.py``, ticket 021-004) that
@@ -174,6 +218,18 @@ class DaemonService(Daemon):
         -- tests that want a substitutable frame source or camera-config
         lookup construct their own ``Calibrator`` and pass it here
         instead, the same override pattern ``detection`` above uses.
+    config_loader:
+        The :class:`~aprilcam.config.interfaces.ConfigLoader` every
+        newly-constructed ``Camera`` is given (ticket 023-004), for
+        :meth:`Camera.reset`/:meth:`Camera.stored_config` to read a
+        camera's on-disk ``config_dir/cameras/<slug>/config.json`` back.
+        This service never calls it itself -- passing it through to
+        ``Camera`` at construction is the one piece of "where configs
+        come from" knowledge this service carries, targeted reads only,
+        never the boot-time directory scan (that stays in
+        ``daemon.__main__.build()``, sprint.md Architecture "Modules"
+        point 1). Defaults to a real ``config.loader.ConfigLoader``;
+        tests substitute their own when they need to.
     """
 
     def __init__(
@@ -185,8 +241,12 @@ class DaemonService(Daemon):
         cameras: Optional[Dict[str, Camera]] = None,
         identity_source: Callable[[], Dict[int, CameraIdentity]] = resolve_all,
         backend_factory: Callable[[int], CaptureBackend] = _default_backend_factory,
+        control_backend_factory: Callable[[str], Optional[ControlBackend]] = (
+            _default_control_backend_factory
+        ),
         detection: Optional[DetectionEngine] = None,
         calibrator: Optional[Calibrator] = None,
+        config_loader: Optional[ConfigLoaderIface] = None,
     ) -> None:
         self._registry = registry
         self._discovery = discovery
@@ -194,16 +254,29 @@ class DaemonService(Daemon):
         self._cameras: Dict[str, Camera] = cameras if cameras is not None else {}
         self._identity_source = identity_source
         self._backend_factory = backend_factory
-        # ``calibration_lookup=self.get_calibration``: a bound-method
-        # reference, resolved at call time, not at this line -- safe to
-        # pass before ``self._calibrations``/``self._lock`` exist below,
-        # since ``DetectionEngine`` never calls it during construction,
-        # only from a later ``run_burst`` (ticket 022-004, module
-        # docstring's "threaded through" section). Callers that pass
-        # their own ``detection=`` (tests pinning burst counts) own their
-        # engine's ``calibration_lookup`` themselves.
+        self._control_backend_factory = control_backend_factory
+        self._config_loader: ConfigLoaderIface = (
+            config_loader if config_loader is not None else JsonConfigLoader()
+        )
+        # ``calibration_lookup=self.get_calibration``/
+        # ``playfield_lookup=self._playfield_for_calibration``/
+        # ``mark_stale=self._mark_stale``: bound-method references,
+        # resolved at call time, not at this line -- safe to pass before
+        # ``self._calibrations``/``self._playfields``/``self._lock`` exist
+        # below, since ``DetectionEngine`` never calls any of them during
+        # construction, only from a later ``run_burst`` (ticket 022-004's
+        # ``calibration_lookup``; ticket 023-007's ``playfield_lookup``/
+        # ``mark_stale``, module docstring's "threaded through" section).
+        # Callers that pass their own ``detection=`` (tests pinning burst
+        # counts) own their engine's callables themselves.
         self._detection = (
-            detection if detection is not None else DetectionEngine(calibration_lookup=self.get_calibration)
+            detection
+            if detection is not None
+            else DetectionEngine(
+                calibration_lookup=self.get_calibration,
+                playfield_lookup=self._playfield_for_calibration,
+                mark_stale=self._mark_stale,
+            )
         )
         self._playfields: Dict[str, PlayfieldDefinitionIface] = {}
         self._camera_configs: Dict[str, CameraConfig] = {}
@@ -330,7 +403,10 @@ class DaemonService(Daemon):
         (``daemon.detection.DetectionEngine.latest`` -- a pure read) and
         stays ``None`` when it does not -- asking for pixels never
         triggers a detection burst of its own (sprint.md Decision 4,
-        ticket 021-004).
+        ticket 021-004). ``calibration_stale`` (ticket 023-007) is
+        overlaid from :meth:`get_calibration` on both branches -- ``ImageFrame``'s
+        in-band carrier, so a client fetching pixels sees real staleness
+        state without a second round trip.
         """
         if encoding not in VALID_ENCODINGS:
             raise ValueError(
@@ -349,6 +425,7 @@ class DaemonService(Daemon):
             raise RuntimeError(f"failed to encode frame from {camera!r} as {encoding}")
 
         height, width = frame.shape[:2]
+        calibration = self.get_calibration(cam.slug)
         return ImageFrame(
             data=buf.tobytes(),
             width=width,
@@ -357,6 +434,7 @@ class DaemonService(Daemon):
             timestamp=time.time(),
             deskewed=False,
             tags=self._detection.latest(cam.slug),
+            calibration_stale=calibration.stale if calibration is not None else False,
         )
 
     def _get_deskewed_frame(self, camera: str, *, encoding: str) -> ImageFrame:
@@ -427,6 +505,7 @@ class DaemonService(Daemon):
             px_per_cm=deskewer.px_per_cm,
             world_extent=deskewer.world_extent,
             tags=self._detection.latest(cam.slug),
+            calibration_stale=calibration.stale,
         )
 
     def get_tags(self, camera: str) -> TagFrame:
@@ -509,7 +588,7 @@ class DaemonService(Daemon):
             state_dir=str(self._directories.state_dir),
         )
 
-    # -- playfields / camera config (ticket 022-001) ----------------------
+    # -- playfields / camera config (ticket 022-001; reset, ticket 023-004) -
     #
     # The minimal config-service slice sprint.md's Architecture Decision 1
     # scopes for this sprint: playfields in full (held zero-or-more,
@@ -517,11 +596,10 @@ class DaemonService(Daemon):
     # only the playfield link. Both stores are plain in-memory dicts,
     # never written to disk (UC-01's ephemeral rule is structural here,
     # not a policy this class has to remember -- there is simply no
-    # write path). ``reset_camera_config`` is deliberately *not*
-    # overridden -- the inherited ``Daemon.reset_camera_config`` already
-    # raises ``NotImplementedError`` naming itself, exactly the
-    # "explicitly not built this sprint, never a silent no-op" contract
-    # the ticket asks for.
+    # write path). ``reset_camera_config`` (below, ticket 023-004) is the
+    # one deliberate exception to "never written to disk" -- it *reads*
+    # disk, never writes it, so the ephemeral rule for RPC-pushed state
+    # is undisturbed.
 
     def set_playfield(self, definition: PlayfieldDefinitionIface) -> None:
         """See ``daemon.interfaces.Daemon.set_playfield``.
@@ -568,46 +646,129 @@ class DaemonService(Daemon):
         """See ``daemon.interfaces.Daemon.get_camera_config``.
 
         Answers from whatever :meth:`set_camera_config` last held for
-        *camera* -- this sprint builds no introspected-plus-blank
-        template (UC-03.S-1's full behaviour is out of scope, Decision
-        1), so a camera nobody has configured yet is honestly
-        :class:`~aprilcam.errors.UnknownCamera` rather than a
-        fabricated blank document, naming every camera this daemon
-        currently holds a config for.
+        *camera* when one exists -- UC-03.S-2's "re-fetching the config
+        returns the pushed values," exactly the document, never a live
+        hardware readback merged in. This is deliberate, not an
+        omission: the dump -> install -> restart -> dump round trip
+        (UC-24.S-1) must reproduce exactly what was pushed or installed
+        on disk, and the blank-template case just below must report
+        ``None`` for every unset key even when the hardware itself has
+        real factory-default values in force -- a live readback would
+        get both of those wrong. Capturing what a camera's hardware is
+        *actually* doing right now (as opposed to what document is on
+        record for it) is a different, unbuilt capability -- ticket
+        023-005 (this ticket) deliberately leaves it that way; see that
+        ticket's notes.
+
+        A camera with no stored document but **held open** in this
+        process (:attr:`_cameras` -- populated by ``get_frame``/
+        ``tags``/a config-push attempt/... via :meth:`_camera_for`)
+        falls back to that camera's own introspected-plus-blank
+        template (:meth:`~aprilcam.camera.camera.Camera.effective_config`,
+        made real per-camera by ticket 023-002) -- UC-03.S-1's "freshly
+        enumerated... never configured" scenario and UC-24.S-3's
+        dump-as-template scenario, ticket 023-005's whole reason for
+        depending on 023-002. A camera merely *registered* (known from
+        a previous session or a probe, but never opened by this
+        process) still reports :class:`~aprilcam.errors.UnknownCamera`
+        here, matching UC-24.S-4 and every restart test's existing
+        expectation -- config, pushed or blank-template, is exactly as
+        ephemeral as everything else UC-01/UC-02 already establish;
+        only calibration survives a restart.
 
         *camera* accepts a persistent number or a slug (SUC-005),
-        resolved via :meth:`_resolve_slug_if_known` before the lookup
-        -- ``_camera_configs`` is keyed by slug only, so an unresolved
-        number would otherwise never match a real link. The error still
-        names whatever *camera* the caller actually typed, not the
-        resolved slug.
+        resolved via :meth:`_resolve_slug_if_known` before either
+        lookup -- both ``_camera_configs`` and ``_cameras`` are keyed by
+        slug only, so an unresolved number would otherwise never match
+        a real entry in either. The error still names whatever *camera*
+        the caller actually typed, not the resolved slug.
         """
         slug = self._resolve_slug_if_known(camera)
         with self._lock:
             config = self._camera_configs.get(slug)
+            held = self._cameras.get(slug)
             available = tuple(sorted(self._camera_configs.keys()))
-        if config is None:
-            raise UnknownCamera(camera, available)
-        return config
+        if config is not None:
+            return config
+        if held is not None:
+            return held.effective_config()
+        raise UnknownCamera(camera, available)
 
     def set_camera_config(self, config: CameraConfig) -> None:
         """See ``daemon.interfaces.Daemon.set_camera_config``.
 
-        This sprint's minimal slice (Decision 1): stores *config*
-        whole, keyed by its own ``name``, so :meth:`get_camera_config`/
-        :meth:`list_cameras`/a linked playfield's ``linked_cameras()``
-        all see the update immediately. ``config.settings`` is stored
-        and echoed back verbatim but **never applied to hardware** --
-        no ``Camera.apply_config`` call happens here, which is the
-        whole point of Decision 1's scoping (full settings push is
-        sprint 023). Accepts a config for a camera this daemon has
-        never enumerated (a config outliving, or arriving before, its
-        hardware is normal -- UC-25) and for a camera not currently
-        held open -- there is nothing to reconfigure on a closed
-        handle, only the link to record.
+        Stores *config* whole, keyed by its own ``name``, so
+        :meth:`get_camera_config`/:meth:`list_cameras`/a linked
+        playfield's ``linked_cameras()`` all see the update immediately.
+        Accepts a config for a camera this daemon has never enumerated
+        (a config outliving, or arriving before, its hardware is normal
+        -- UC-25) and for a camera not currently held open -- there is
+        nothing to reconfigure on a closed handle, only the link to
+        record (ticket 023-001 AC1). A config stored here for a camera
+        not yet open still takes effect the moment that camera is first
+        opened, via :meth:`_camera_for`'s apply-on-open step (ticket
+        023-003) -- the same mechanism that also applies a
+        boot-time-loaded config (``daemon.__main__.build()``), so a
+        pushed-while-absent config and a config installed on disk before
+        the daemon ever started are handled identically once the camera
+        actually appears.
+
+        **Applies to hardware when the camera is held open** (ticket
+        023-001, closing sprint 022's Decision 1 deferral -- UC-03's
+        "applies... immediately, not at next open"). ``Camera.
+        apply_config`` is called **before** the store, deliberately:
+        its whole-push, hard-error contract
+        (``camera.interfaces.Camera.apply_config``'s docstring) means an
+        ``UnsupportedSetting`` propagates straight out of this method
+        too, leaving *both* the hardware **and** the stored document
+        exactly as they were (UC-03.S-3's "re-fetching the config
+        returns the previous state") -- storing first and applying
+        after would leave the stored document ahead of the hardware on
+        exactly the failure path this rule exists to prevent.
         """
         with self._lock:
+            cam = self._cameras.get(config.name)
+        if cam is not None:
+            cam.apply_config(config)
+        with self._lock:
             self._camera_configs[config.name] = config
+
+    def reset_camera_config(self, camera: str) -> None:
+        """See ``daemon.interfaces.Daemon.reset_camera_config`` --
+        "the RPC face of ``Camera.reset()``" (that base-class docstring's
+        own words). Ticket 023-004.
+
+        Opens *camera* if it is not already held (:meth:`_camera_for`,
+        the same on-demand-open discipline every other camera-addressed
+        method here uses -- ``UnknownCamera``/``CameraNotPresent``
+        propagate exactly as they would from ``get_frame``/``calibrate``).
+        Every ``Camera`` :meth:`_camera_for` constructs already carries
+        the ``config_loader``/``config_path`` :meth:`Camera.reset` needs
+        (wired at construction, see :meth:`_config_path_for`), so this
+        method never touches ``config.loader`` or ``self._directories``
+        itself -- disk access for reset stays entirely inside ``Camera``,
+        this service only orchestrates (sprint.md Architecture "Modules"
+        point 1: this service stays ignorant of disk beyond handing the
+        already-resolved path/loader to ``Camera`` at construction).
+
+        :meth:`Camera.reset` re-reads and re-applies whatever is at
+        `config_dir/cameras/<slug>/config.json` (or the blank
+        introspected-plus-blank template when nothing is installed --
+        sprint.md Decision 3), discarding whatever live override this
+        service held. The resulting document
+        (:meth:`Camera.stored_config`) then replaces this service's
+        ``_camera_configs`` entry for the camera, so
+        :meth:`get_camera_config`/:meth:`list_cameras` reflect the reset
+        immediately -- exactly the way a live :meth:`set_camera_config`
+        push already would (SUC-003's postcondition: fetching the config
+        after a reset returns the on-disk document, or the blank
+        template, never the discarded override).
+        """
+        cam = self._camera_for(camera)
+        cam.reset()
+        config = cam.stored_config()
+        with self._lock:
+            self._camera_configs[cam.slug] = config
 
     def _playfield_link(self, slug: str) -> Optional[str]:
         """The playfield *slug* is currently linked to, per the last
@@ -689,6 +850,45 @@ class DaemonService(Daemon):
         slug = self._resolve_slug_if_known(camera)
         with self._lock:
             return self._calibrations.get(slug)
+
+    def _mark_stale(self, slug: str) -> None:
+        """Flip *slug*'s currently-held calibration's ``stale`` bit, if
+        it has one (ticket 023-007) -- the single mutation point both
+        staleness triggers share: wired as ``camera.camera.Camera``'s
+        ``on_reopen`` callback in :meth:`_camera_for` (sprint.md
+        Decision 6), and as ``daemon.detection.DetectionEngine``'s
+        ``mark_stale`` callable, called from its opportunistic drift
+        check (Decision 5). *slug* is always an already-resolved
+        registry slug in both callers -- never a raw number-or-slug
+        token -- so, unlike :meth:`calibrate`/:meth:`get_calibration`,
+        this method does not call :meth:`_resolve_slug_if_known` itself.
+
+        Takes :attr:`_lock` exactly like every other ``self._calibrations``
+        mutation already does (:meth:`calibrate`) -- pinned explicitly by
+        the ticket: two concurrent bursts (or a burst racing a reopen) on
+        the same camera must not corrupt the store. A no-op for a slug
+        with no held calibration (never calibrated -- nothing to flag as
+        wrong) or one already marked stale (idempotent, and avoids a
+        redundant disk write on repeated triggers for the same still-bad
+        camera).
+
+        Persists the change to ``calibration.json`` (:meth:`_persist_calibration`,
+        the same atomic write :meth:`calibrate` already uses) so a
+        staleness flip survives a daemon restart -- ``Calibration`` is
+        file-backed (UC-01), and a restart silently un-flagging a bumped
+        camera as "not stale" would reintroduce exactly the failure mode
+        this ticket exists to close. Persisted *after* releasing
+        :attr:`_lock`, mirroring :meth:`calibrate`'s own ordering, so a
+        slow disk write never holds up a concurrent caller's unrelated
+        camera.
+        """
+        with self._lock:
+            calibration = self._calibrations.get(slug)
+            if calibration is None or calibration.stale:
+                return
+            updated = replace(calibration, stale=True)
+            self._calibrations[slug] = updated
+        self._persist_calibration(slug, updated)
 
     def _camera_config_for_calibration(self, camera: str) -> Optional[CameraConfig]:
         """``Calibrator``'s ``get_camera_config`` callable -- a locked
@@ -845,6 +1045,23 @@ class DaemonService(Daemon):
         registry record outliving its hardware is normal (UC-25), so
         this is distinct from "never registered," not folded into
         :class:`UnknownCamera` the way it was before this ticket.
+
+        **Apply-on-open (ticket 023-003).** A freshly-opened camera
+        checks :attr:`_camera_configs` for a config already held under
+        its slug -- populated either by a live :meth:`set_camera_config`
+        push that arrived before this camera did, or by
+        ``daemon.__main__.build()``'s boot-time load from ``config_dir``
+        -- and applies it via :meth:`Camera.apply_config` *before* the
+        camera is cached into :attr:`_cameras` and handed back to the
+        caller. This is what makes a config installed on disk (or
+        pushed while the camera was absent) take effect the instant the
+        camera is actually opened, not only on a subsequent
+        :meth:`set_camera_config` call -- closing UC-01.S-4's
+        previously-broken playfield-link half. An ``UnsupportedSetting``
+        from a stored-but-now-invalid config propagates straight through,
+        exactly like a live push would; :attr:`_cameras` is only updated
+        after this succeeds, so a camera that fails to apply its stored
+        config is not left half-registered as held-open.
         """
         with self._lock:
             existing = self._cameras.get(token)
@@ -867,13 +1084,34 @@ class DaemonService(Daemon):
         cam = Camera(
             record.slug,
             self._backend_factory(index),
+            control_backend=self._control_backend_factory(record.device_name),
             device_name=record.device_name,
             number=record.number,
+            config_loader=self._config_loader,
+            config_path=self._config_path_for(record.slug),
+            on_reopen=lambda: self._mark_stale(record.slug),
         )
         cam.open()
         with self._lock:
+            config = self._camera_configs.get(record.slug)
+        if config is not None:
+            cam.apply_config(config)
+        with self._lock:
             self._cameras[record.slug] = cam
         return cam
+
+    def _config_path_for(self, slug: str) -> Path:
+        """``config_dir/cameras/<slug>/config.json`` -- sprint.md
+        Decision 3's fixed reset target (``ResetCameraConfig`` always
+        means re-reading exactly this location, never whatever was last
+        pushed), matching ``configuration.md``'s documented per-camera
+        layout and ``config.loader.ConfigLoader.load_config_dir``'s own
+        boot-time scan path for the same file. Computed fresh per call
+        from :attr:`_directories`, set once at construction -- every
+        ``Camera`` :meth:`_camera_for` builds gets this wired in
+        (ticket 023-004), whether or not anything is actually installed
+        there yet."""
+        return self._directories.config_dir / "cameras" / slug / "config.json"
 
     def _record_for(self, token: str) -> Optional[CameraRecord]:
         """Resolve *token* against the registry: an all-digits token by

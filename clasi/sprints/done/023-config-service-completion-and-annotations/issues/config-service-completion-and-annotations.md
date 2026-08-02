@@ -1,15 +1,35 @@
 ---
-status: pending
+status: in-progress
+sprint: '023'
+split_into:
+- annotation-store-for-shared-spatial-state.md
+tickets:
+- 023-001
+- 023-002
+- 023-003
+- 023-004
+- 023-005
+- 023-006
+- 023-007
 ---
-
-# Config service completion and the annotation store
-
 ## Description
 
-The fourth v2 vertical slice: make the system **operationally solid
-across restarts**, then give it the shared annotation store that lets
-services communicate spatially. Development-plan stage 9 in full, plus
-the annotation work from spec §9 decision 8 / UC-28.
+The v2 vertical slice that makes the system **operationally solid
+across restarts** and makes calibration trustworthy over time.
+Development-plan stage 9, plus UC-04's acceptance-threshold and
+staleness questions.
+
+**Split 2026-08-01:** this issue originally also covered the shared
+annotation store (UC-28, spec §9 decision 8) as "Part 2." That work is
+split out to `annotation-store-for-shared-spatial-state.md` for its own
+sprint (024) — sprint 023's planning found it independently valuable,
+with no dependency on Parts 1 or 3 below, and splitting kept sprint
+023's ticket count and architectural story coherent (Parts 1 and 3 are
+both about *trustworthiness over time* on already-built subsystems; the
+annotation store is a *new capability*). Part numbering below is kept
+as-is (Part 1, Part 3) rather than renumbered, for continuity with
+sprint 023's planning artifacts, which already reference these numbers
+throughout.
 
 ### Part 1 — Configuration that survives a restart (the headline)
 
@@ -53,23 +73,6 @@ Also in scope:
   settable key, blank when unset** (UC-03.S-1), so a client can
   discover what is adjustable without prior knowledge.
 
-### Part 2 — The annotation store (UC-28)
-
-The daemon holds world-coordinate annotations; it never renders them.
-Full design is already written — spec §9 decision 8, UC-28 in
-`use-cases/daemon.md`, and the `Annotation`/`AnnotationSet` types in
-`types.py`. In short: keyed `(playfield, layer, id)`, in-memory only
-(gone on restart, like the mobile-tag registry), named layers with no
-ownership enforcement, last-write-wins. `put_annotation`,
-`remove_annotation`, `replace_layer` (atomic), `clear_annotations`,
-`get_annotations`. Deskewed frames embed the current set with a
-monotonic revision; **raw frames carry none** (annotations are
-world-only and a raw frame has no world→pixel mapping).
-
-`client/renderer.py` already draws tags and has an annotation no-op
-waiting to be filled in; `playfield view` should then show them live.
-CLI: `playfield annotations` (list) and `--clear [--layer NAME]`.
-
 ### Part 3 — Two open questions sprint 022 deliberately deferred
 
 Both are now worth answering, and the second has teeth:
@@ -89,8 +92,7 @@ Both are now worth answering, and the second has teeth:
 
 Sprints 020–022 built cameras, detection, calibration, deskew, and the
 views. What is missing is the operational layer that makes it survive a
-restart and the shared-state layer that makes it a multi-service system
-rather than a single-client tool.
+restart and makes calibration trustworthy over time.
 
 ## Verification
 
@@ -100,9 +102,6 @@ rather than a single-client tool.
 - Push a bad setting; the whole push fails naming the key and the
   camera is unchanged.
 - Dump a live config, install it, restart, dump again — identical.
-- Draw a marker from one client; a second client sees it in
-  `list_annotations` and in `playfield view`'s rendering.
-- Restart the daemon; annotations are gone and the client re-draws.
 - Bump the camera physically; the system reports the calibration stale
   rather than serving confident wrong positions.
 
@@ -110,8 +109,10 @@ rather than a single-client tool.
 
 - `docs/design/development-plan.md` stage 9
 - `docs/design/configuration.md` — the two-directory model and cascade
-- `docs/design/use-cases/daemon.md` UC-01, UC-02, UC-03, UC-28;
+- `docs/design/use-cases/daemon.md` UC-01, UC-02, UC-03, UC-04;
   `use-cases/cli.md` UC-23, UC-24
-- `docs/design/specification.md` §9 decision 8 (daemon-held annotations)
 - Sprint 022 — where the restart trap was found, and whose two open
   questions Part 3 closes
+- `annotation-store-for-shared-spatial-state.md` — the split-off
+  annotation-store work (UC-28, spec §9 decision 8), planned for
+  sprint 024

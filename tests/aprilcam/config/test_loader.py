@@ -13,10 +13,12 @@ document types.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
 
+from aprilcam.config.directories import Directories
 from aprilcam.config.interfaces import CameraConfig
 from aprilcam.config.loader import ConfigLoader, PlayfieldFeatureEntry
 from aprilcam.errors import MalformedDocument
@@ -417,3 +419,91 @@ def test_playfield_feature_entry_is_frozen_and_kw_only():
     assert entry.slug == "s" and entry.tag_id == 3 and entry.colour == "red"
     with pytest.raises(Exception):
         entry.x = 99.0  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# ConfigLoader.load_config_dir -- directory scan (ticket 023-003)
+# ---------------------------------------------------------------------------
+
+
+def test_load_config_dir_returns_successes_and_names_the_malformed_files(loader, tmp_path):
+    """AC1: a directory-scan function reading playfields/*.json then
+    cameras/*/config.json, returning successes plus named per-file
+    errors -- never raising for one bad file."""
+    config_dir = tmp_path / "config"
+    (config_dir / "playfields").mkdir(parents=True)
+    (config_dir / "cameras" / "arducam-ov9782-usb-camera").mkdir(parents=True)
+    (config_dir / "cameras" / "hd-usb-camera").mkdir(parents=True)
+
+    (config_dir / "playfields" / "good-field.json").write_text(
+        json.dumps(_minimal_playfield_doc(name="good-field")), encoding="utf-8"
+    )
+    (config_dir / "playfields" / "broken.json").write_text("{not valid json", encoding="utf-8")
+    (config_dir / "cameras" / "arducam-ov9782-usb-camera" / "config.json").write_text(
+        json.dumps(
+            {"name": "arducam-ov9782-usb-camera", "playfield": "good-field", "settings": {}}
+        ),
+        encoding="utf-8",
+    )
+    # hd-usb-camera's config.json is present but malformed (no 'name').
+    (config_dir / "cameras" / "hd-usb-camera" / "config.json").write_text(
+        json.dumps({"playfield": "good-field"}), encoding="utf-8"
+    )
+
+    directories = Directories(config_dir=config_dir, state_dir=tmp_path / "state")
+
+    result = loader.load_config_dir(directories)
+
+    assert [p.name for p in result.playfields] == ["good-field"]
+    assert [c.name for c in result.camera_configs] == ["arducam-ov9782-usb-camera"]
+
+    assert len(result.errors) == 2
+    broken_playfield_errors = [e for e in result.errors if e.path.name == "broken.json"]
+    assert len(broken_playfield_errors) == 1
+
+    broken_camera_errors = [e for e in result.errors if e.path.parent.name == "hd-usb-camera"]
+    assert len(broken_camera_errors) == 1
+    assert "name" in broken_camera_errors[0].message
+
+
+def test_load_config_dir_on_an_empty_config_dir_returns_nothing_and_no_errors(loader, tmp_path):
+    """A missing playfields/cameras subdirectory is the ordinary
+    first-run case (UC-01.S-2), not an error."""
+    directories = Directories(config_dir=tmp_path / "nonexistent-config", state_dir=tmp_path / "state")
+
+    result = loader.load_config_dir(directories)
+
+    assert result.playfields == ()
+    assert result.camera_configs == ()
+    assert result.errors == ()
+
+
+def test_load_config_dir_ignores_a_camera_directory_with_no_config_json(loader, tmp_path):
+    """A ``cameras/<slug>/`` directory that exists but holds no
+    ``config.json`` yet is skipped silently -- nothing there has failed
+    to load."""
+    config_dir = tmp_path / "config"
+    (config_dir / "cameras" / "not-configured-yet").mkdir(parents=True)
+
+    directories = Directories(config_dir=config_dir, state_dir=tmp_path / "state")
+    result = loader.load_config_dir(directories)
+
+    assert result.camera_configs == ()
+    assert result.errors == ()
+
+
+def test_load_config_dir_loads_the_real_main_playfield_fixture(loader, tmp_path):
+    """The full-fixture round trip: the real checked-in main-playfield.json,
+    installed at the layout config.md documents, loads through the
+    directory scan exactly as :meth:`ConfigLoader.load_playfield` alone
+    already proves it does (see the tests above)."""
+    config_dir = tmp_path / "config"
+    (config_dir / "playfields").mkdir(parents=True)
+    shutil.copyfile(MAIN_PLAYFIELD_PATH, config_dir / "playfields" / "main-playfield.json")
+
+    directories = Directories(config_dir=config_dir, state_dir=tmp_path / "state")
+    result = loader.load_config_dir(directories)
+
+    assert len(result.playfields) == 1
+    assert result.playfields[0].name == "main-playfield"
+    assert result.errors == ()

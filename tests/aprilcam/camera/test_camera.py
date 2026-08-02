@@ -11,11 +11,13 @@ if either is not attached.
 
 from __future__ import annotations
 
+import sys
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pytest
 
+from aprilcam.camera.backends import ControlBackend
 from aprilcam.camera.backends.opencv_backend import property_map
 from aprilcam.camera.camera import FAILURE_THRESHOLD, MAX_REOPENS, Camera
 from aprilcam.camera.interfaces import Camera as CameraProtocol
@@ -250,6 +252,95 @@ def test_reopen_failure_leaves_camera_unusable_but_present():
 
 
 # ---------------------------------------------------------------------------
+# on_reopen (ticket 023-007): staleness trigger notification hook, fired at
+# the end of a *successful* self-heal reopen only -- never on plain open(),
+# never on a failed reopen attempt, never once the reopen budget is spent.
+# ---------------------------------------------------------------------------
+
+
+def test_on_reopen_invoked_after_a_successful_self_heal_reopen():
+    backend = FakeBackend()
+    calls = []
+    cam = Camera("cam-a", backend, on_reopen=lambda: calls.append(1))
+    cam.open()
+
+    for _ in range(FAILURE_THRESHOLD):
+        cam.read()
+
+    assert backend.open_calls == 2  # the reopen genuinely happened
+    assert calls == [1]
+
+
+def test_on_reopen_not_invoked_by_the_initial_open():
+    backend = FakeBackend()
+    calls = []
+    cam = Camera("cam-a", backend, on_reopen=lambda: calls.append(1))
+
+    cam.open()
+
+    assert calls == []
+
+
+def test_on_reopen_not_invoked_on_a_failed_reopen_attempt():
+    backend = FakeBackend()
+    calls = []
+    cam = Camera("cam-a", backend, on_reopen=lambda: calls.append(1))
+    cam.open()
+
+    backend.fail_open = True  # the reopen attempt itself will now fail
+    for _ in range(FAILURE_THRESHOLD):
+        cam.read()
+
+    assert backend.open_calls == 2  # the failed reopen attempt happened
+    assert calls == []  # but it never counts as a successful reopen
+
+
+def test_on_reopen_invoked_once_per_successful_reopen():
+    backend = FakeBackend()
+    calls = []
+    cam = Camera("cam-a", backend, on_reopen=lambda: calls.append(1))
+    cam.open()
+
+    for _ in range(3):
+        for _ in range(FAILURE_THRESHOLD):
+            cam.read()
+
+    assert backend.open_calls == 4  # initial open + 3 successful reopens
+    assert calls == [1, 1, 1]
+
+
+def test_on_reopen_not_invoked_once_the_reopen_budget_is_exhausted():
+    backend = FakeBackend()  # open() always trivially succeeds; never yields frames
+    calls = []
+    cam = Camera("cam-a", backend, on_reopen=lambda: calls.append(1))
+    cam.open()
+
+    for _ in range(FAILURE_THRESHOLD * MAX_REOPENS):
+        cam.read()
+    assert len(calls) == MAX_REOPENS  # every reopen attempt in the budget succeeded
+    assert cam.state.usable is True
+
+    calls.clear()
+    for _ in range(FAILURE_THRESHOLD):
+        cam.read()  # budget spent -- self-heal gives up before reopening
+    assert cam.state.usable is False
+    assert calls == []  # no further notification once nothing further happened
+
+
+def test_default_on_reopen_is_none_and_self_heal_still_works():
+    """No ``on_reopen`` passed (every pre-ticket-007 caller) -- self-heal
+    must behave exactly as before, never raising for lack of a listener."""
+    backend = FakeBackend()
+    cam = Camera("cam-a", backend)
+    cam.open()
+
+    for _ in range(FAILURE_THRESHOLD):
+        cam.read()
+
+    assert backend.open_calls == 2  # reopened without error
+
+
+# ---------------------------------------------------------------------------
 # effective_config() — introspected facts (AC3)
 # ---------------------------------------------------------------------------
 
@@ -270,6 +361,59 @@ def test_effective_config_reports_none_dims_when_not_open():
     cfg = cam.effective_config()
     assert cfg.settings["frame_width"] is None
     assert cfg.settings["frame_height"] is None
+
+
+def test_effective_config_reports_every_primary_backend_settable_key_blank():
+    """AC1 (ticket 023-002): the template's settable-key set comes from
+    the real backend's own ``settable_names()`` -- not the old fixed
+    ``device_name``/dimensions placeholder -- and every key beyond the
+    two introspected dimensions is blank, no ``control_backend``
+    involved (the common case: every non-macOS platform)."""
+    backend = FakeBackend(size=(640, 480))
+    cam = Camera("cam-a", backend, device_name="Cam A")
+    cam.open()
+
+    cfg = cam.effective_config()
+
+    for key in property_map():
+        assert key in cfg.settings, f"{key} missing from the template"
+    for key in set(property_map()) - {"frame_width", "frame_height"}:
+        assert cfg.settings[key] is None, f"{key} should be blank in the template"
+    # An unconfigured camera's introspected facts are still real, not
+    # fabricated -- the placeholder pair this ticket replaces.
+    assert cfg.settings["device_name"] == "Cam A"
+    assert cfg.settings["frame_width"] == 640
+    assert cfg.settings["frame_height"] == 480
+
+
+def test_effective_config_settable_keys_come_from_control_backend_when_given():
+    """When a narrower ``control_backend`` is wired (ticket 023-001's
+    real-hardware case), the template's settable-key set -- and its
+    blankness -- comes from *that* backend's own ``settable_names()``,
+    not the primary backend's full generic set (``brightness`` is in
+    ``FakeBackend``'s set but must not leak into the template once a
+    narrower ``UvcUtilBackend``-shaped control backend is wired). A key's
+    template value stays blank even when the control backend's own
+    ``get_property`` would report a real current hardware value --
+    ``effective_config`` never calls it for non-resolution keys (see the
+    method's own docstring), so a real value already in force is not
+    mistaken for "configured this session"."""
+    primary = FakeBackend()
+    control = FakeControlBackend(names=("exposure", "gain", "white_balance_temperature"))
+    control.set_property("gain", 42.0)  # a real hardware value -- still blank in the template
+    cam = Camera("cam-a", primary, control_backend=control, device_name="Cam A")
+    cam.open()
+
+    cfg = cam.effective_config()
+
+    assert "brightness" not in cfg.settings  # primary-only key, not in control's narrower set
+    for key in ("exposure", "gain", "white_balance_temperature"):
+        assert cfg.settings[key] is None
+    # Resolution stays on the primary backend and is real, per AC2 --
+    # present in the template even though control_backend knows nothing
+    # about it at all.
+    assert cfg.settings["frame_width"] == 640
+    assert cfg.settings["frame_height"] == 480
 
 
 def test_camera_config_round_trips_to_dict():
@@ -385,10 +529,304 @@ def test_apply_config_backend_without_settings_surface_rejects_any_push():
     cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={}))
 
 
-def test_reset_is_a_documented_noop():
-    cam = Camera("cam-a", FakeBackend())
+def test_reset_without_config_loader_or_path_falls_back_to_blank_template():
+    """No ``config_loader``/``config_path`` wired at all (every
+    pre-existing test, and any ``Camera`` built by hand rather than
+    through ``DaemonService._camera_for``) -- ticket 023-004's
+    Decision 3 fallback: there is nothing to revert to, so ``reset()``
+    applies the blank introspected-plus-blank template, an honest
+    no-op on hardware rather than an error."""
+    backend = FakeBackend()
+    cam = Camera("cam-a", backend)
     cam.open()
-    assert cam.reset() is None
+    backend.set_property("gain", 42.0)  # a pre-existing "live" value
+
+    cam.reset()  # no error
+
+    assert backend.get_property("gain") == 42.0  # nothing pushed -- unchanged
+
+
+def test_reset_with_no_installed_file_falls_back_to_blank_template(tmp_path):
+    """A ``config_loader``/``config_path`` *were* given, but no file
+    exists yet at that path (a camera whose ``config_dir`` entry was
+    never populated) -- the same blank-template fallback as no
+    injection at all."""
+    from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
+
+    backend = FakeBackend()
+    path = tmp_path / "cameras" / "cam-a" / "config.json"
+    cam = Camera("cam-a", backend, config_loader=JsonConfigLoader(), config_path=path)
+    cam.open()
+    backend.set_property("gain", 42.0)
+
+    cam.reset()
+
+    assert backend.get_property("gain") == 42.0  # nothing pushed -- unchanged
+    assert cam.stored_config().settings["gain"] is None
+
+
+def test_stored_config_reports_the_blank_template_when_nothing_is_installed():
+    cam = Camera("cam-a", FakeBackend(size=(640, 480)), device_name="Cam A")
+    cam.open()
+
+    config = cam.stored_config()
+
+    assert config.name == "cam-a"
+    assert config.settings["frame_width"] == 640
+    assert config.settings["gain"] is None
+
+
+def test_reset_reads_and_reapplies_the_real_on_disk_document(tmp_path):
+    """The round trip that matters (ticket 023-004's Definition of Done
+    #2): a document installed on disk is read fresh via a real
+    ``ConfigLoader`` and re-applied through ``apply_config``'s normal
+    ordering/hard-error path, discarding a live experimental override
+    pushed earlier -- verified by backend *readback*, not a setter's
+    return value."""
+    import json
+
+    from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
+
+    path = tmp_path / "cameras" / "cam-a" / "config.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "name": "cam-a",
+                "playfield": "main-playfield",
+                "settings": {"auto_exposure": 1, "exposure": 50, "gain": 3},
+            }
+        )
+    )
+
+    backend = FakeBackend()
+    cam = Camera("cam-a", backend, config_loader=JsonConfigLoader(), config_path=path)
+    cam.open()
+    # A live experimental override, different from what's on disk.
+    cam.apply_config(
+        CameraConfig(name="cam-a", playfield=None, settings={"exposure": 999, "gain": 99})
+    )
+    assert backend.get_property("gain") == 99.0
+
+    cam.reset()
+
+    assert backend.get_property("gain") == 3.0
+    assert backend.get_property("exposure") == 50.0
+    assert backend.get_property("auto_exposure") == 1.0
+
+
+def test_stored_config_matches_what_reset_just_applied(tmp_path):
+    import json
+
+    from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
+
+    path = tmp_path / "cameras" / "cam-a" / "config.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"name": "cam-a", "playfield": "main-playfield", "settings": {"gain": 3}})
+    )
+    cam = Camera("cam-a", FakeBackend(), config_loader=JsonConfigLoader(), config_path=path)
+    cam.open()
+
+    cam.reset()
+    stored = cam.stored_config()
+
+    assert stored.playfield == "main-playfield"
+    assert stored.settings["gain"] == 3
+
+
+def test_reset_reads_the_file_fresh_every_call_not_cached(tmp_path):
+    """A file edited between two resets is picked up on the second
+    one -- ``reset()``/``stored_config()`` never cache a prior read."""
+    import json
+
+    from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
+
+    path = tmp_path / "cameras" / "cam-a" / "config.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"name": "cam-a", "playfield": None, "settings": {"gain": 1}}))
+    backend = FakeBackend()
+    cam = Camera("cam-a", backend, config_loader=JsonConfigLoader(), config_path=path)
+    cam.open()
+
+    cam.reset()
+    assert backend.get_property("gain") == 1.0
+
+    path.write_text(json.dumps({"name": "cam-a", "playfield": None, "settings": {"gain": 2}}))
+    cam.reset()
+    assert backend.get_property("gain") == 2.0
+
+
+# ---------------------------------------------------------------------------
+# control_backend (ticket 023-001) -- real-hardware finding: cap.set()
+# does not work on camera 3, an optional ControlBackend replaces the
+# primary backend's settings surface exclusively when given.
+# ---------------------------------------------------------------------------
+
+
+class FakeControlBackend(ControlBackend):
+    """A ``ControlBackend`` test double -- mirrors ``FakeBackend``'s
+    settings surface but derives from ``ControlBackend`` (not
+    ``CaptureBackend``), matching ``UvcUtilBackend``'s real shape:
+    control-only, no capture methods at all."""
+
+    def __init__(self, *, names=("exposure", "gain")) -> None:
+        self._properties: Dict[str, float] = {}
+        self._names = set(names)
+        self.set_calls: List[Tuple[str, float]] = []
+
+    def get_property(self, name: str) -> Optional[float]:
+        return self._properties.get(name)
+
+    def set_property(self, name: str, value: float) -> bool:
+        self.set_calls.append((name, value))
+        self._properties[name] = value
+        return True
+
+    def settable_names(self):
+        return set(self._names)
+
+
+def test_apply_config_routes_settings_through_control_backend_when_given():
+    """When a ``control_backend`` is wired, ``apply_config`` must use
+    *it* -- never the primary capture backend -- for get/set/settable,
+    the exact routing ticket 023-001's real-hardware finding needs
+    (``cv2.VideoCapture.set()`` does not work on camera 3)."""
+    primary = FakeBackend()
+    control = FakeControlBackend(names=("exposure", "gain"))
+    cam = Camera("cam-a", primary, control_backend=control)
+    cam.open()
+
+    cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"exposure": 42}))
+
+    assert control.set_calls == [("exposure", 42.0)]
+    # The primary backend's own settings surface was never touched.
+    assert primary.get_property("exposure") is None
+
+
+def test_apply_config_control_backend_settable_names_are_exclusive():
+    """A key the primary ``FakeBackend`` would happily accept (it
+    mirrors ``OpenCVBackend``'s full ``property_map()``) is still
+    rejected once a narrower ``control_backend`` is wired -- the
+    control backend's ``settable_names()`` fully replaces the primary
+    backend's, it does not extend it. ``brightness`` is in
+    ``property_map()`` (so the bare-``FakeBackend`` case would accept
+    it) but not in this control backend's narrower set."""
+    primary = FakeBackend()
+    control = FakeControlBackend(names=("exposure", "gain"))
+    cam = Camera("cam-a", primary, control_backend=control)
+    cam.open()
+
+    with pytest.raises(UnsupportedSetting) as exc_info:
+        cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"brightness": 5}))
+    assert exc_info.value.key == "brightness"
+    assert control.set_calls == []
+
+
+def test_apply_config_without_control_backend_still_uses_primary_backend():
+    """No regression: a ``Camera`` built with no ``control_backend``
+    (every non-macOS platform, every pre-existing test) behaves exactly
+    as before this ticket."""
+    primary = FakeBackend()
+    cam = Camera("cam-a", primary)
+    cam.open()
+
+    cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"gain": 7}))
+
+    assert primary.get_property("gain") == 7.0
+
+
+def test_apply_config_control_backend_rollback_on_mid_push_failure():
+    """The whole-push rollback contract (already proven against the
+    primary backend in
+    ``test_apply_config_rolls_back_on_mid_push_failure``) holds the same
+    way through a ``control_backend``."""
+    control = FakeControlBackend(names=("gain", "exposure"))
+    control.set_property("gain", 5.0)  # pre-existing value to roll back to
+
+    def failing_set(name, value):
+        if name == "exposure":
+            return False
+        control._properties[name] = value
+        control.set_calls.append((name, value))
+        return True
+
+    control.set_property = failing_set  # type: ignore[method-assign]
+    cam = Camera("cam-a", FakeBackend(), control_backend=control)
+    cam.open()
+
+    with pytest.raises(UnsupportedSetting):
+        cam.apply_config(
+            CameraConfig(name="cam-a", playfield=None, settings={"gain": 9.0, "exposure": 100})
+        )
+    assert control.get_property("gain") == 5.0  # rolled back
+
+
+# ---------------------------------------------------------------------------
+# Resolution key (ticket 023-002) -- frame_width/frame_height always route
+# through the primary capture backend, never control_backend.
+# ---------------------------------------------------------------------------
+
+
+def test_apply_config_resolution_routes_through_primary_backend_even_with_control_backend():
+    """AC2: ``frame_width``/``frame_height`` must go through the primary
+    capture backend's own ``get_property``/``set_property`` (in
+    production, ``OpenCVBackend``'s ``CAP_PROP_FRAME_WIDTH``/
+    ``CAP_PROP_FRAME_HEIGHT`` path) even when a narrower
+    ``control_backend`` is wired that does not know these keys at all --
+    ``UvcUtilBackend``'s real ``_CONTROLS`` table has no resolution
+    entries. This is the special-case the ticket-001 module docstring
+    flagged as a future ticket's job, now built."""
+    primary = FakeBackend()
+    control = FakeControlBackend(names=("exposure", "gain"))  # no frame_width/frame_height
+    cam = Camera("cam-a", primary, control_backend=control)
+    cam.open()
+
+    cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"frame_width": 1280}))
+
+    assert primary.get_property("frame_width") == 1280.0
+    assert control.set_calls == []  # the control backend was never touched
+
+
+def test_apply_config_resolution_rejected_without_control_backend_support_from_primary():
+    """A camera whose primary backend does not advertise resolution
+    support at all (e.g. a hypothetical minimal capture backend) still
+    hard-errors on a ``frame_width`` push rather than silently routing
+    it through ``control_backend`` -- resolution is never a
+    ``control_backend`` concern, so there is no fallback to it."""
+
+    class NoResolutionBackend:
+        def __init__(self) -> None:
+            self._is_open = True
+
+        @property
+        def is_open(self) -> bool:
+            return self._is_open
+
+        def open(self) -> None:
+            self._is_open = True
+
+        def read(self):
+            return None
+
+        def close(self) -> None:
+            self._is_open = False
+
+        def frame_size(self):
+            return None
+
+    control = FakeControlBackend(names=("exposure", "gain", "frame_width"))
+    cam = Camera("cam-a", NoResolutionBackend(), control_backend=control)
+    cam.open()
+
+    # frame_width is not in _settable_names() at all: the primary
+    # backend advertises no settable_names(), so the resolution-key
+    # union contributes nothing, regardless of what control_backend
+    # (wrongly, for this test) claims to support.
+    with pytest.raises(UnsupportedSetting) as exc_info:
+        cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"frame_width": 1280}))
+    assert exc_info.value.key == "frame_width"
+    assert control.set_calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -396,9 +834,13 @@ def test_reset_is_a_documented_noop():
 # ---------------------------------------------------------------------------
 
 
-def _real_camera_index(name_substring: str) -> Optional[int]:
-    """OpenCV index for the first enumerated camera whose name contains
-    *name_substring* (case-insensitive), or ``None`` if not attached."""
+def _real_camera(name_substring: str) -> Optional[Tuple[int, str]]:
+    """``(index, exact device name)`` for the first enumerated camera
+    whose name contains *name_substring* (case-insensitive), or ``None``
+    if not attached. The exact name is what ``UvcUtilBackend`` needs for
+    its ``-N`` target -- the OS-reported descriptor, not the search
+    substring (which happens to match for the two fixture cameras below
+    but is not guaranteed to in general)."""
     try:
         import cv2 as cv
         from cv2_enumerate_cameras import enumerate_cameras
@@ -409,8 +851,16 @@ def _real_camera_index(name_substring: str) -> Optional[int]:
         name = getattr(cam, "name", "") or ""
         if name_substring.lower() in name.lower():
             raw = cam.index
-            return raw - avf_offset if raw >= avf_offset else raw
+            index = raw - avf_offset if raw >= avf_offset else raw
+            return index, name
     return None
+
+
+def _real_camera_index(name_substring: str) -> Optional[int]:
+    """OpenCV index for the first enumerated camera whose name contains
+    *name_substring* (case-insensitive), or ``None`` if not attached."""
+    found = _real_camera(name_substring)
+    return found[0] if found is not None else None
 
 
 @pytest.mark.camera
@@ -450,3 +900,98 @@ def test_real_camera_open_read_close(name_substring, expected_slug):
     finally:
         cam.close()
     assert cam.state.usable is False
+
+
+# ---------------------------------------------------------------------------
+# @pytest.mark.camera — real hardware, with the real control_backend a
+# macOS daemon actually wires (ticket 023-002, AC1/AC2/AC3/AC4).
+# ---------------------------------------------------------------------------
+
+#: The settable-key set both real macOS cameras are expected to report:
+#: UvcUtilBackend's fixed, per-control-not-per-model ``_CONTROLS`` table
+#: (the five UVC controls ticket 023-001 validated live) plus
+#: frame_width/frame_height (routed through OpenCVBackend regardless,
+#: ticket 023-002). Camera 3 and hd-usb-camera are expected to report
+#: the *same* set -- AC4's "same set with a documented reason" branch --
+#: because uvc_util.py's control table is fixed per-key, not probed per
+#: camera model; that fixed table is the documented reason.
+_EXPECTED_REAL_SETTABLE_KEYS = frozenset(
+    {
+        "auto_exposure",
+        "exposure",
+        "gain",
+        "auto_white_balance",
+        "white_balance_temperature",
+        "frame_width",
+        "frame_height",
+    }
+)
+
+
+@pytest.mark.camera
+@pytest.mark.parametrize(
+    "name_substring,expected_slug",
+    [
+        ("Arducam OV9782", "arducam-ov9782-usb-camera"),
+        ("HD USB", "hd-usb-camera"),
+    ],
+)
+def test_real_camera_effective_config_reports_full_settable_key_set_with_control_backend(
+    name_substring, expected_slug
+):
+    """UC-03.S-1, verified live, with the real ``control_backend`` a
+    macOS daemon actually wires (ticket 023-001's
+    ``_default_control_backend_factory``): the template's settable-key
+    set is the union of ``UvcUtilBackend``'s five real UVC controls and
+    ``frame_width``/``frame_height`` (AC2 -- routed through the primary
+    ``OpenCVBackend`` regardless of ``control_backend`` being wired),
+    every one of the five UVC keys blank (AC1), and camera 3 /
+    ``hd-usb-camera`` reporting the identical set (AC4).
+
+    **Deliberately does not open the capture backend.** Camera 3 is the
+    real, currently-calibrated ``main-playfield`` camera and may already
+    be held open by a live production daemon (an AVFoundation capture
+    session is exclusive per process -- ``tests/aprilcam/daemon/
+    test_service.py``'s real-hardware section documents this
+    precondition explicitly). This test's whole point -- the real
+    settable-key set and its blankness -- needs only construction
+    (``UvcUtilBackend.__init__`` still proves ``uvc-util`` is on
+    ``PATH`` and resolves against the real, enumerated device name) and
+    ``effective_config()``, neither of which requires the camera to be
+    open: ``_settable_names()`` reads static key tables, and
+    ``effective_config()`` never calls ``get_property``/``set_property``
+    for non-resolution keys at all (see that method's own docstring) --
+    so this test cannot disturb camera 3's live hardware settings or
+    contend with whoever already holds it open, and needs no baseline
+    restore. Real, positive dimensions when open are already covered,
+    unchanged, by ``test_real_camera_open_read_close`` above; with the
+    backend left closed here, ``frame_width``/``frame_height`` are
+    ``None`` -- still correct per ``effective_config``'s "never guessed"
+    contract, and itself evidence against fabrication, not for it.
+    """
+    from aprilcam.camera.backends.opencv_backend import OpenCVBackend
+    from aprilcam.camera.backends.uvc_util import UvcUtilBackend
+
+    if sys.platform != "darwin":
+        pytest.skip("UvcUtilBackend (the real control_backend) is macOS-only")
+
+    found = _real_camera(name_substring)
+    if found is None:
+        pytest.skip(f"no attached camera matching {name_substring!r}")
+    index, device_name = found
+
+    try:
+        control = UvcUtilBackend(device_name)
+    except RuntimeError:
+        pytest.skip("uvc-util not found on PATH")
+
+    cam = Camera(expected_slug, OpenCVBackend(index), control_backend=control, device_name=device_name)
+
+    cfg = cam.effective_config()
+
+    for key in _EXPECTED_REAL_SETTABLE_KEYS:
+        assert key in cfg.settings, f"{key} missing from the live template"
+    for key in _EXPECTED_REAL_SETTABLE_KEYS - {"frame_width", "frame_height"}:
+        assert cfg.settings[key] is None, f"{key} should be blank in the template"
+
+    assert cfg.settings["device_name"] == device_name

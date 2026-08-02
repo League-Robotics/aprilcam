@@ -98,6 +98,50 @@ def _row3(values: Sequence[Any]) -> _Row3:
 #: module/class docstrings).
 DEFAULT_CALIBRATION_FRAMES = 30
 
+#: Reprojection-error acceptance ceiling, in cm (ticket 023-006, UC-04's
+#: open question -- "completeness is necessary but may not be
+#: sufficient" -- now resolved). A solve where every required ArUco id
+#: was found (completeness holds) but whose RMS reprojection error
+#: exceeds this is still rejected: complete is not the same as good.
+#: **Confirmed 1.0 cm by the stakeholder** (sprint.md Decisions, Design
+#: Rationale Decision 4): ~5x headroom over the observed-good 0.179 cm
+#: live sprint-022 solve against the real ``main-playfield``, and 0.7%
+#: of that field's 134.3 cm width -- tight enough to catch a genuinely
+#: degenerate solve, loose enough not to fail an ordinary one. Named and
+#: overridable per :class:`Calibrator` instance
+#: (``max_reprojection_error_cm``) rather than hardcoded, since the
+#: exact number is a domain-tuning call, not a structural one -- trivial
+#: to retune once more field data exists.
+MAX_REPROJECTION_ERROR_CM = 1.0
+
+#: Staleness drift tolerance, in cm (ticket 023-007, sprint.md Decisions
+#: #2). **Confirmed 2.0 cm by the stakeholder**: ~11x the observed
+#: ~0.18 cm noise floor from the real sprint-022 solve, so ordinary
+#: detection jitter should not false-positive a still camera into
+#: reporting stale. Named and overridable
+#: (``daemon.detection.DetectionEngine.__init__``'s
+#: ``drift_tolerance_cm``), mirroring :data:`MAX_REPROJECTION_ERROR_CM`'s
+#: "domain-tuning call, not a structural one" framing above.
+DRIFT_TOLERANCE_CM = 2.0
+
+#: How often the opportunistic drift check may run per camera, in
+#: seconds (ticket 023-007, sprint.md Decision 5). **Confirmed 10 s.**
+#: This is a rate limit on repeated checks *while a camera is under
+#: active use* -- an unqueried camera already does zero extra work
+#: regardless of this number, since nothing calls
+#: ``daemon.detection.DetectionEngine.run_burst`` for it at all (no
+#: independent poll loop exists; see that module's docstring).
+DRIFT_CHECK_INTERVAL_S = 10.0
+
+#: Fewer than this many of a calibration's own matched static ArUco
+#: markers newly detected means "cannot verify," never "confirmed no
+#: drift" -- see :func:`compute_drift_cm`. Three is the same floor
+#: :func:`_is_collinear` uses for "can this even describe a 2D spread"
+#: (fewer points can trivially agree by chance), applied here to "is
+#: this reading trustworthy enough to accuse the calibration of having
+#: moved," not to a homography solve.
+MIN_DRIFT_CHECK_MARKERS = 3
+
 #: Below this ratio of the second-to-largest singular value of a
 #: (centred) correspondence point set, the points are treated as
 #: collinear -- see :func:`_is_collinear`.
@@ -142,8 +186,11 @@ class Calibration(_CalibrationBase):
     reprojection_error_cm: Optional[float] = None
     """RMS distance (cm) between each matched marker's surveyed world
     position and where the solved homography reprojects its detected
-    pixel position -- informational (sprint.md Open Question 1: no
-    acceptance threshold is enforced this sprint)."""
+    pixel position. A stored :class:`Calibration` always has this at or
+    below whatever :class:`Calibrator` instance produced it was
+    configured with (``MAX_REPROJECTION_ERROR_CM`` by default, ticket
+    023-006) -- a solve above the threshold never reaches this
+    dataclass at all; see :meth:`Calibrator.calibrate`."""
 
     def to_world(self, pixel: PixelPoint) -> WorldPoint:
         return geometry.pixel_to_world(self._matrix(), pixel)
@@ -285,6 +332,71 @@ def _matrix_to_tuple(matrix: np.ndarray) -> Tuple[_Row3, _Row3, _Row3]:
     return (_row3(matrix[0]), _row3(matrix[1]), _row3(matrix[2]))
 
 
+def compute_drift_cm(
+    calibration: Calibration,
+    definition: _ConcretePlayfieldDefinition,
+    detected: Dict[int, PixelPoint],
+) -> Optional[float]:
+    """How far *calibration*'s own matched static markers appear to have
+    moved, in cm (ticket 023-007's opportunistic drift check, sprint.md
+    Decision 5).
+
+    Reuses exactly the reprojection-error idea :meth:`Calibrator.calibrate`
+    already applies to *accept* a fresh solve
+    (:func:`_reprojection_error_cm`), pointed instead at a *later*
+    frame's detections: if the camera has not moved, re-detecting each of
+    *calibration*'s ``matched_ids`` and mapping the detected pixel through
+    the still-valid ``calibration.homography`` (:meth:`Calibration.to_world`)
+    must reproduce *definition*'s surveyed ground truth
+    (``aruco_position``), up to ordinary detection noise. A real bump
+    throws every matched marker's reprojection off by roughly how far the
+    camera moved -- this is "compare to their stored positions" (the
+    ticket's own phrasing) with ``PlayfieldDefinition.aruco_position`` as
+    the stored positions, so :class:`Calibration` itself needs no new
+    field to carry them.
+
+    *detected* is one frame's ArUco hits, keyed by id -- callers pass in
+    whatever a detection pass already produced (``daemon.detection.
+    DetectionEngine`` reuses the same ``detector.detect()`` call
+    ``run_burst`` makes for tag tracking; no independent detection pass
+    exists, preserving the idle-efficiency budget by construction).
+
+    Returns ``None`` -- never ``0.0`` -- when fewer than
+    :data:`MIN_DRIFT_CHECK_MARKERS` of *calibration*'s matched markers
+    are present in *detected*: darkness, an occluded lens, or a covered
+    field (all of which this project's stakeholder hits in practice) must
+    read as "cannot verify," never as either a spurious stale flip
+    (already true here, since nothing computes without real detections)
+    or, just as important, a *false confirmation* that nothing has moved
+    -- both would be wrong for the same reason UC-11.S-3 exists: an
+    advisory a caller cannot trust is worse than no advisory. Any id
+    *detected* carries that :meth:`PlayfieldDefinition.aruco_position`
+    no longer recognises (the playfield definition changed identity
+    between calibrating and now) is silently excluded from
+    *visible* rather than raising -- the same "cannot verify" stance
+    applies if that drops the count below the minimum.
+
+    The **maximum** single-marker error, not an RMS across every visible
+    marker, decides the outcome: a genuine camera bump throws off every
+    matched marker roughly uniformly, so either statistic would catch
+    it, but a max is the more conservative (never-diluted-by-averaging)
+    choice, and does not require deciding how many markers a particular
+    burst happened to catch in frame.
+    """
+    visible = [tag_id for tag_id in calibration.matched_ids if tag_id in detected]
+    errors: List[float] = []
+    for tag_id in visible:
+        try:
+            surveyed = definition.aruco_position(tag_id)
+        except KeyError:
+            continue
+        world = calibration.to_world(detected[tag_id])
+        errors.append(math.hypot(world.x - surveyed.x, world.y - surveyed.y))
+    if len(errors) < MIN_DRIFT_CHECK_MARKERS:
+        return None
+    return max(errors)
+
+
 class Calibrator(_CalibratorBase):
     """Concrete ``calibration.interfaces.Calibrator``.
 
@@ -318,6 +430,12 @@ class Calibrator(_CalibratorBase):
     pipeline_config:
         Passed straight through to ``vision.pipeline.run_pipeline`` for
         every captured frame. ``None`` uses that function's own default.
+    max_reprojection_error_cm:
+        The reprojection-error acceptance ceiling (ticket 023-006) --
+        defaults to the module-level :data:`MAX_REPROJECTION_ERROR_CM`
+        (1.0 cm) but is genuinely overridable per instance, since the
+        confirmed default is a domain-tuning call (sprint.md Decisions),
+        not a structural one.
     """
 
     def __init__(
@@ -328,12 +446,14 @@ class Calibrator(_CalibratorBase):
         capture_frames: FrameSource,
         detector_factory: DetectorFactory = _default_detector_factory,
         pipeline_config: Optional[PipelineConfig] = None,
+        max_reprojection_error_cm: float = MAX_REPROJECTION_ERROR_CM,
     ) -> None:
         self._get_camera_config = get_camera_config
         self._get_playfield = get_playfield
         self._capture_frames = capture_frames
         self._pipeline_config = pipeline_config
         self._detector = detector_factory()
+        self._max_reprojection_error_cm = max_reprojection_error_cm
         self._calibrations: Dict[str, Calibration] = {}
         self._lock = threading.Lock()
 
@@ -432,6 +552,26 @@ class Calibrator(_CalibratorBase):
             )
 
         rms = _reprojection_error_cm(homography, pixel_pts, world_pts)
+
+        if rms > self._max_reprojection_error_cm:
+            # Complete (every required id found -- missing_ids stays
+            # empty) but sloppy: UC-04's open question, resolved. Named
+            # via `reason`, not `missing_ids`, per the interface
+            # docstring's "why a failure failed when ids alone don't
+            # say" -- and nothing is stored, matching the "a failed
+            # attempt leaves the previous calibration as it was"
+            # contract every other rejection branch above already
+            # honors.
+            return CalibrationResult(
+                succeeded=False,
+                matched_ids=matched_ids,
+                missing_ids=(),
+                reprojection_error_cm=rms,
+                reason=(
+                    f"reprojection error {rms:.3f} cm exceeds the "
+                    f"{self._max_reprojection_error_cm:.3f} cm acceptance threshold"
+                ),
+            )
 
         calibration = Calibration(
             stale=False,

@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import os
 import sys
 from pathlib import Path
@@ -299,15 +300,55 @@ def cmd_config(
     discovery_factory: Callable[[], Discovery] = Discovery,
     loader_factory: Callable[[], ConfigLoader] = JsonConfigLoader,
 ) -> int:
-    """``aprilcam camera config <file> [-d HOST]`` (ticket 022-001).
+    """``aprilcam camera config <file> [-d HOST]`` pushes a whole
+    ``CameraConfig`` document (ticket 022-001; real hardware settings
+    apply ticket 023-001). ``aprilcam camera config <camera> --reset
+    [-d HOST]`` (ticket 023-004) discards any live override and
+    re-applies whatever is installed at `config_dir/cameras/<slug>/
+    config.json` -- or the blank introspected-plus-blank template when
+    nothing is installed -- with no daemon restart (sprint.md Decision
+    3: reset always means this fixed on-disk location, never whatever
+    was last pushed). ``aprilcam camera config <camera> --dump [-d
+    HOST]`` (ticket 023-005, UC-24) prints the live document to stdout
+    in exact on-disk JSON, via the already-existing ``GetCameraConfig``
+    RPC (``Daemon.get_camera_config``) -- nothing to push, this is the
+    read half of the same noun.
 
-    **Playfield-link only, this sprint** (sprint.md Architecture
-    Decision 1): pushes a whole ``CameraConfig`` document -- ``name``
-    and ``playfield`` take effect (the camera is linked); any
-    ``settings`` round-trip through ``camera config <file>`` -> a later
-    ``get_camera_config`` unchanged but are never applied to the
-    camera's hardware. Full settings push is sprint 023.
+    All three modes share the positional argument but are mutually
+    exclusive in meaning: with ``--reset`` or ``--dump`` it names a
+    *camera* (slug or persistent number), not a file path -- there is
+    no document to load client-side, the daemon answers from its own
+    memory (and, for ``--reset``, its own disk). ``--reset``/``--dump``
+    are themselves mutually exclusive with each other at the argparse
+    level (``add_subparser`` below), and each is checked here **before**
+    ``loader.load_camera_config`` ever runs, so neither mode risks
+    treating the camera token as a file path.
+
+    Pushing: ``name``/``playfield`` take effect (the camera is linked)
+    and ``settings`` are applied to the camera's hardware immediately
+    when it is currently held open (``DaemonService.set_camera_config``
+    -> ``Camera.apply_config``). An unsupported key or a value the
+    hardware will not take fails the **whole** push
+    (``UnsupportedSetting``, surfaced here through ``report_error`` like
+    any other typed error) and leaves both the hardware and the
+    previously-pushed document unchanged (UC-03.S-3).
     """
+    if args.dump:
+        try:
+            config = discovery_factory().connect(args.daemon).get_camera_config(args.file)
+        except AprilCamError as exc:
+            return report_error(exc)
+        print(json.dumps(config.to_dict(), indent=2, sort_keys=True))
+        return EXIT_OK
+
+    if args.reset:
+        try:
+            discovery_factory().connect(args.daemon).reset_camera_config(args.file)
+        except AprilCamError as exc:
+            return report_error(exc)
+        print(f"reset camera config for {args.file!r} -- on-disk document now in force")
+        return EXIT_OK
+
     loader = loader_factory()
     try:
         config = loader.load_camera_config(Path(args.file))
@@ -420,10 +461,29 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     p_tags.set_defaults(func=cmd_tags)
 
     p_config = sub.add_parser(
-        "config", help="push a camera config document (playfield link only, this sprint)"
+        "config",
+        help="push a camera config document, or --reset/--dump the live one",
     )
-    p_config.add_argument("file", help="path to a camera config JSON file")
+    p_config.add_argument(
+        "file",
+        help="path to a camera config JSON file to push; with --reset/--dump, the "
+        "camera name (slug or persistent number) instead",
+    )
     add_daemon_option(p_config)
+    mode_group = p_config.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--reset",
+        action="store_true",
+        help="discard any live override and re-apply config_dir/cameras/<slug>/"
+        "config.json (or the blank template if none is installed) -- no daemon "
+        "restart (ticket 023-004)",
+    )
+    mode_group.add_argument(
+        "--dump",
+        action="store_true",
+        help="print the live config document to stdout in exact on-disk JSON, "
+        "instead of pushing (ticket 023-005, UC-24)",
+    )
     p_config.set_defaults(func=cmd_config)
 
     p_view = sub.add_parser(

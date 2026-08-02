@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,7 +60,7 @@ def _frame(data: bytes = b"\xff\xd8\xff\xd9", encoding: str = "jpeg") -> ImageFr
 
 def _args(**overrides) -> argparse.Namespace:
     base = dict(daemon=None, all=False, camera="arducam-ov9782-usb-camera", output=None,
-                base64=False, encoding="jpeg", force=False)
+                base64=False, encoding="jpeg", force=False, reset=False, dump=False)
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -129,6 +130,11 @@ class _FakeDaemon:
     requested_tags_camera: Optional[str] = None
     set_camera_config_raises: Optional[Exception] = None
     pushed_camera_config: Optional[object] = None
+    reset_camera_config_raises: Optional[Exception] = None
+    reset_requested_camera: Optional[str] = None
+    get_camera_config_returns: Optional[object] = None
+    get_camera_config_raises: Optional[Exception] = None
+    get_camera_config_requested: Optional[str] = None
 
     def list_cameras(self) -> Tuple[CameraState, ...]:
         return self.cameras
@@ -153,6 +159,18 @@ class _FakeDaemon:
         if self.set_camera_config_raises is not None:
             raise self.set_camera_config_raises
         self.pushed_camera_config = config
+
+    def reset_camera_config(self, camera: str) -> None:
+        self.reset_requested_camera = camera
+        if self.reset_camera_config_raises is not None:
+            raise self.reset_camera_config_raises
+
+    def get_camera_config(self, camera: str):
+        self.get_camera_config_requested = camera
+        if self.get_camera_config_raises is not None:
+            raise self.get_camera_config_raises
+        assert self.get_camera_config_returns is not None, "test forgot to set get_camera_config_returns"
+        return self.get_camera_config_returns
 
 
 @dataclass
@@ -845,12 +863,184 @@ def test_config_is_wired_to_cmd_config():
     assert args.func is camera_cli.cmd_config
     assert args.file == "camera.json"
     assert args.daemon is None
+    assert args.reset is False
+    assert args.dump is False
 
 
 def test_config_h_prints_help_not_a_missing_hostname_error():
     parser = _build_parser()
     with pytest.raises(SystemExit) as excinfo:
         parser.parse_args(["camera", "config", "camera.json", "-h"])
+    assert excinfo.value.code == 0
+
+
+# ---------------------------------------------------------------------------
+# camera config --reset -- AC: SUC-003, ticket 023-004
+# ---------------------------------------------------------------------------
+
+
+def test_config_reset_flag_is_wired():
+    parser = _build_parser()
+    args = parser.parse_args(["camera", "config", "arducam-ov9782-usb-camera", "--reset"])
+    assert args.func is camera_cli.cmd_config
+    assert args.file == "arducam-ov9782-usb-camera"
+    assert args.reset is True
+
+
+def test_config_reset_calls_reset_camera_config_with_the_positional_as_camera_name(capsys):
+    daemon = _FakeDaemon()
+    discovery = _FakeDiscovery(daemon=daemon)
+    loader = _FakeCameraConfigLoader()  # never touched -- --reset skips the loader entirely
+
+    code = camera_cli.cmd_config(
+        _args(file="arducam-ov9782-usb-camera", reset=True),
+        discovery_factory=lambda: discovery,
+        loader_factory=lambda: loader,
+    )
+
+    assert code == 0
+    assert daemon.reset_requested_camera == "arducam-ov9782-usb-camera"
+    assert loader.requested_path is None  # no file was ever loaded client-side
+    assert "arducam-ov9782-usb-camera" in capsys.readouterr().out
+
+
+def test_config_reset_reports_a_daemon_side_rejection(capsys):
+    daemon = _FakeDaemon(
+        reset_camera_config_raises=UnknownCamera("never-registered", ("hd-usb-camera",))
+    )
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = camera_cli.cmd_config(
+        _args(file="never-registered", reset=True), discovery_factory=lambda: discovery
+    )
+
+    assert code == 1
+    assert "never-registered" in capsys.readouterr().err
+
+
+def test_config_reset_passes_the_daemon_flag_through_to_connect():
+    daemon = _FakeDaemon()
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    camera_cli.cmd_config(
+        _args(file="arducam-ov9782-usb-camera", reset=True, daemon="pi-field.local"),
+        discovery_factory=lambda: discovery,
+    )
+
+    assert discovery.connected_with == "pi-field.local"
+
+
+# ---------------------------------------------------------------------------
+# camera config --dump -- AC: UC-24, ticket 023-005
+# ---------------------------------------------------------------------------
+
+
+def test_config_dump_flag_is_wired():
+    parser = _build_parser()
+    args = parser.parse_args(["camera", "config", "arducam-ov9782-usb-camera", "--dump"])
+    assert args.func is camera_cli.cmd_config
+    assert args.file == "arducam-ov9782-usb-camera"
+    assert args.dump is True
+    assert args.reset is False
+
+
+def test_config_dump_and_reset_are_mutually_exclusive_at_parse_time():
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            ["camera", "config", "arducam-ov9782-usb-camera", "--dump", "--reset"]
+        )
+
+
+def test_config_dump_prints_the_live_document_in_exact_on_disk_json(capsys):
+    from aprilcam.config.interfaces import CameraConfig
+
+    config = CameraConfig(
+        name="arducam-ov9782-usb-camera",
+        playfield="main-playfield",
+        settings={"exposure": 6, "gain": 2},
+    )
+    daemon = _FakeDaemon(get_camera_config_returns=config)
+    discovery = _FakeDiscovery(daemon=daemon)
+    loader = _FakeCameraConfigLoader()  # never touched -- --dump skips the loader entirely
+
+    code = camera_cli.cmd_config(
+        _args(file="arducam-ov9782-usb-camera", dump=True),
+        discovery_factory=lambda: discovery,
+        loader_factory=lambda: loader,
+    )
+
+    assert code == 0
+    assert daemon.get_camera_config_requested == "arducam-ov9782-usb-camera"
+    assert loader.requested_path is None  # no file was ever loaded client-side
+    printed = json.loads(capsys.readouterr().out)
+    assert printed == config.to_dict()
+    assert printed["name"] == "arducam-ov9782-usb-camera"  # ConfigDocument.to_dict's contract
+
+
+def test_config_dump_round_trips_through_config_loader(capsys, tmp_path):
+    """The binding contract ``config/interfaces.py`` states for
+    ``ConfigLoader``: ``load(x.to_dict()) == x``. Dumped output, written
+    to a file and re-loaded through the real ``ConfigLoader`` (not the
+    fake used elsewhere in this file), reproduces an identical
+    document -- UC-24.S-1's round trip, exercised headlessly against a
+    fake ``Daemon``."""
+    from aprilcam.config.interfaces import CameraConfig
+    from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
+
+    config = CameraConfig(
+        name="arducam-ov9782-usb-camera",
+        playfield="main-playfield",
+        settings={"exposure": 6, "gain": 2, "auto_exposure": 1},
+    )
+    daemon = _FakeDaemon(get_camera_config_returns=config)
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = camera_cli.cmd_config(
+        _args(file="arducam-ov9782-usb-camera", dump=True), discovery_factory=lambda: discovery
+    )
+    assert code == 0
+
+    dumped_path = tmp_path / "dumped.json"
+    dumped_path.write_text(capsys.readouterr().out)
+    reloaded = JsonConfigLoader().load_camera_config(dumped_path)
+
+    assert reloaded == config
+
+
+def test_config_dump_reports_a_daemon_side_rejection(capsys):
+    daemon = _FakeDaemon(
+        get_camera_config_raises=UnknownCamera("never-configured", ("hd-usb-camera",))
+    )
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = camera_cli.cmd_config(
+        _args(file="never-configured", dump=True), discovery_factory=lambda: discovery
+    )
+
+    assert code == 1
+    assert "never-configured" in capsys.readouterr().err
+
+
+def test_config_dump_passes_the_daemon_flag_through_to_connect():
+    from aprilcam.config.interfaces import CameraConfig
+
+    config = CameraConfig(name="arducam-ov9782-usb-camera", playfield=None, settings={})
+    daemon = _FakeDaemon(get_camera_config_returns=config)
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    camera_cli.cmd_config(
+        _args(file="arducam-ov9782-usb-camera", dump=True, daemon="pi-field.local"),
+        discovery_factory=lambda: discovery,
+    )
+
+    assert discovery.connected_with == "pi-field.local"
+
+
+def test_config_dump_h_prints_help_not_a_missing_hostname_error():
+    parser = _build_parser()
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["camera", "config", "camera.json", "--dump", "-h"])
     assert excinfo.value.code == 0
 
 

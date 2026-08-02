@@ -2,17 +2,19 @@
 020-005; ``get_tags``/``get_tag``/``get_tag_history`` added by ticket
 021-005; ``set_playfield``/``get_playfield``/``list_playfields``/
 ``set_camera_config``/``get_camera_config`` added by ticket 022-001;
-``calibrate``/``get_calibration`` added by ticket 022-003): a typed
+``calibrate``/``get_calibration`` added by ticket 022-003;
+``reset_camera_config`` added by ticket 023-004): a typed
 wrapper over the generated gRPC stub for
 ``list_cameras``, ``probe_cameras``, ``get_frame``, ``status``,
 ``get_tags``, ``get_tag``, ``get_tag_history``, ``set_playfield``,
 ``get_playfield``, ``list_playfields``, ``set_camera_config``,
-``get_camera_config``, ``calibrate``, ``get_calibration``.
+``get_camera_config``, ``calibrate``, ``get_calibration``,
+``reset_camera_config``.
 
-**Only these fourteen methods are implemented**, mirroring
+**Only these fifteen methods are implemented**, mirroring
 ``daemon.service.DaemonService``'s own stance: ``daemon.interfaces.
 Daemon`` is a much larger base class (streams, annotations, tag
-parameters, guides, ``reset_camera_config``, ``find_feature``), and
+parameters, guides, ``find_feature``), and
 those are inherited as-is here rather than overridden -- calling one
 raises ``NotImplementedError`` naming itself instead of failing with a
 bare ``AttributeError``. ``isinstance(client,
@@ -274,6 +276,16 @@ class GrpcDaemon(Daemon):
     def set_camera_config(self, config: CameraConfig) -> None:
         request = aprilcam_v2_pb2.SetCameraConfigRequest(config=_camera_config_to_proto(config))
         self._call(self._stub.SetCameraConfig, request)
+
+    def reset_camera_config(self, camera: str) -> None:
+        """Discard *camera*'s live override and re-apply
+        `config_dir/cameras/<slug>/config.json` (ticket 023-004) --
+        ``daemon.interfaces.Daemon.reset_camera_config``'s "RPC face of
+        ``Camera.reset()``". Request carries only the camera token,
+        mirroring ``CalibrateRequest``'s shape -- there is nothing else
+        for a caller to supply, the daemon reads its own disk."""
+        request = aprilcam_v2_pb2.ResetCameraConfigRequest(camera=camera)
+        self._call(self._stub.ResetCameraConfig, request)
 
     def get_camera_config(self, camera: str) -> CameraConfig:
         request = aprilcam_v2_pb2.GetCameraConfigRequest(camera=camera)

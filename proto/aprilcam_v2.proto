@@ -44,6 +44,16 @@
 // nested-message matrix type, since nothing else in this file needs a
 // generic NxM matrix shape.
 //
+// Sprint 023 ticket 004 is the fourth: `ResetCameraConfig`. How an
+// experiment ends without a daemon restart (UC-01's `ResetCameraConfig`
+// bullet, spec section 4.1) -- the daemon re-reads
+// `config_dir/cameras/<slug>/config.json` for the named camera and
+// re-applies it, discarding whatever live override was previously in
+// force. `ResetCameraConfigRequest` mirrors `CalibrateRequest`'s shape
+// (just a camera token, never a document -- there is nothing for the
+// caller to supply, the whole point is the daemon reads its own disk);
+// `ResetCameraConfigResponse` is empty, mirroring `SetCameraConfigResponse`.
+//
 // Wire conventions this file follows (docs/design/design.md §6):
 //   - World-cm coordinates cross this boundary only inside `TagRecord`
 //     (`world`, `world_velocity`, `world_corners`), and every camera
@@ -156,6 +166,16 @@ service AprilCamV2 {
   // `Calibration`, mirroring `GetTagResponse.record`'s presence
   // discipline.
   rpc GetCalibration (GetCalibrationRequest) returns (GetCalibrationResponse);
+
+  // Discard whatever live override is in force for a camera and
+  // re-apply `config_dir/cameras/<slug>/config.json` -- how an
+  // experiment ends without a daemon restart (UC-01's
+  // `ResetCameraConfig` bullet, sprint 023 ticket 004). Never means
+  // "whatever was last pushed" -- always this fixed on-disk location.
+  // A camera with nothing installed there falls back to the
+  // introspected-plus-blank template (the same document an
+  // unconfigured camera reports) rather than erroring.
+  rpc ResetCameraConfig (ResetCameraConfigRequest) returns (ResetCameraConfigResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -540,3 +560,13 @@ message GetCalibrationResponse {
   // Calibration (see the RPC's own comment above).
   Calibration calibration = 1;
 }
+
+// ---------------------------------------------------------------------------
+// ResetCameraConfig (ticket 023-004)
+// ---------------------------------------------------------------------------
+
+message ResetCameraConfigRequest {
+  string camera = 1;
+}
+
+message ResetCameraConfigResponse {}

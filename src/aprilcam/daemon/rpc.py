@@ -2,13 +2,14 @@
 tag-detection RPCs below are ticket 021-005; ``SetPlayfield``/
 ``GetPlayfield``/``ListPlayfields``/``SetCameraConfig``/
 ``GetCameraConfig`` are ticket 022-001; ``Calibrate``/``GetCalibration``
-are ticket 022-003).
+are ticket 022-003; ``ResetCameraConfig`` is ticket 023-004).
 
 Translates between ``proto/aprilcam_v2.proto``'s service (sprint 020's
 four RPCs -- ``ListCameras``, ``ProbeCameras``, ``GetFrame``,
 ``GetStatus`` -- plus sprint 021's ``GetTags``/``GetTag``/
 ``GetTagHistory`` and the ``GetFrame`` tag embed, plus sprint 022's
-playfield/camera-config RPCs and ``Calibrate``/``GetCalibration`` above) and
+playfield/camera-config RPCs and ``Calibrate``/``GetCalibration``, plus
+sprint 023's ``ResetCameraConfig`` above) and
 ``daemon.service.DaemonService`` method calls. Everything here is
 (de)serialization and error-code mapping; no business logic, no camera
 access, no registry/discovery/vision calls -- see the sprint
@@ -590,6 +591,14 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
                 )
             response.calibration.CopyFrom(_calibration_to_proto(calibration))
         return response
+
+    def ResetCameraConfig(self, request, context):  # noqa: N802
+        try:
+            self._service.reset_camera_config(request.camera)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.ResetCameraConfigResponse()
+        return aprilcam_v2_pb2.ResetCameraConfigResponse()
 
 
 class _GrpcListener(ControlPlaneListener):

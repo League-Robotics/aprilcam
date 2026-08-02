@@ -8,11 +8,16 @@ RPCs) -- ``adapters.md``'s "adapters hold no authoritative state,
 adapters do no vision" rules apply here exactly as they do in
 ``cli/camera.py``.
 
-**Push only, for ``config``.** Fetching a playfield back
-(``get_playfield``/``list_playfields``) is exercised through the daemon
-API directly (tests, and any future MCP/Python caller) -- sprint.md's
-Builds section for this ticket names only the push command; a
-``playfield get``/``list`` CLI verb is not part of this slice.
+**Push, or ``--dump`` to read back.** ``config``'s first CLI *read*
+path (ticket 023-005, UC-24): ``aprilcam playfield config <name>
+--dump`` prints the live document via the already-existing
+``GetPlayfield`` RPC (``Daemon.get_playfield``), in exact on-disk JSON
+(``PlayfieldDefinition.to_dict()``). Before this ticket, fetching a
+playfield back (``get_playfield``/``list_playfields``) was exercised
+only through the daemon API directly (tests, any MCP/Python caller);
+no ``playfield get``/``list`` CLI verb exists yet -- ``--dump`` is a
+flag on ``config``, matching ``camera config``'s ``--reset``/``--dump``
+shape (a flag on the noun, not a new subcommand), not those.
 
 **Validate before any RPC.** ``ConfigLoader.load_playfield`` raises
 ``MalformedDocument`` (a no-``name`` document, invalid JSON, a
@@ -51,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import os
 import sys
 from pathlib import Path
@@ -81,7 +87,24 @@ def cmd_config(
     discovery_factory: Callable[[], Discovery] = Discovery,
     loader_factory: Callable[[], ConfigLoader] = JsonConfigLoader,
 ) -> int:
-    """``aprilcam playfield config <file> [-d HOST]``."""
+    """``aprilcam playfield config <file> [-d HOST]`` pushes a playfield
+    definition document. ``aprilcam playfield config <name> --dump [-d
+    HOST]`` (ticket 023-005, UC-24) prints the live document instead,
+    via the already-existing ``GetPlayfield`` RPC -- the module
+    docstring's "first CLI read path." The two modes share the
+    positional argument but are mutually exclusive in meaning, mirroring
+    ``cli/camera.py``'s ``cmd_config``: with ``--dump`` it names a
+    *playfield*, not a file to load and push, and the dump check runs
+    **before** ``loader.load_playfield`` ever touches the filesystem.
+    """
+    if args.dump:
+        try:
+            playfield = discovery_factory().connect(args.daemon).get_playfield(args.file)
+        except AprilCamError as exc:
+            return report_error(exc)
+        print(json.dumps(playfield.definition.to_dict(), indent=2, sort_keys=True))
+        return EXIT_OK
+
     loader = loader_factory()
     try:
         definition = loader.load_playfield(Path(args.file))
@@ -253,9 +276,21 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     parser.set_defaults(func=incomplete_command(parser))
     sub = parser.add_subparsers(dest="playfield_command", metavar="<command>")
 
-    p_config = sub.add_parser("config", help="push a playfield definition document")
-    p_config.add_argument("file", help="path to a playfield definition JSON file")
+    p_config = sub.add_parser(
+        "config", help="push a playfield definition document, or --dump the live one"
+    )
+    p_config.add_argument(
+        "file",
+        help="path to a playfield definition JSON file to push; with --dump, the "
+        "playfield name instead",
+    )
     add_daemon_option(p_config)
+    p_config.add_argument(
+        "--dump",
+        action="store_true",
+        help="print the live playfield document to stdout in exact on-disk JSON, "
+        "instead of pushing (ticket 023-005, UC-24)",
+    )
     p_config.set_defaults(func=cmd_config)
 
     p_image = sub.add_parser(

@@ -74,6 +74,25 @@ existed) reproduces sprint 021's output byte-for-byte -- ``world``,
 ``pixel``/``pixel_corners`` populated. This is a conditional branch
 added around sprint 021's code, not a rewrite of it.
 
+**Opportunistic staleness drift check (ticket 023-007, sprint.md
+Decision 5).** :meth:`DetectionEngine.run_burst` is also where
+``Calibration.stale`` becomes reachable rather than permanently
+``False``: for a calibrated camera, at most once every
+``drift_check_interval_s`` seconds, this method re-examines the
+detections it *already has* (no independent frame read or detection
+pass -- the whole point of piggybacking) for whichever of the
+calibration's matched static ArUco markers happen to be in view, and
+compares their reprojected position against the playfield definition's
+surveyed ground truth (``calibration.calibration.compute_drift_cm``). A
+measured drift beyond ``drift_tolerance_cm`` calls the injected
+``mark_stale`` callable; too few matched markers visible (darkness,
+occlusion, a covered field) is "cannot verify," never evidence of
+drift, and marks nothing. See :meth:`DetectionEngine._maybe_check_drift`
+for the full contract, and ``camera.camera.Camera``'s ``on_reopen``
+hook for staleness' *other* trigger (sprint.md Decision 6, outside this
+module entirely -- a reopen marks stale unconditionally, with no drift
+measurement involved).
+
 **Accepted scope boundary: the ring buffer is query-driven, not
 wall-clock-bounded, this sprint** (sprint.md Open Question 3). Because a
 buffer only grows when :meth:`run_burst` is called, and nothing calls it
@@ -93,13 +112,21 @@ import threading
 import time
 from collections import deque
 from dataclasses import replace
-from typing import Callable, Deque, Dict, List, Optional, Tuple
+from typing import Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from aprilcam.calibration.calibration import Calibration as _ConcreteCalibration
+from aprilcam.calibration.calibration import (
+    DRIFT_CHECK_INTERVAL_S,
+    DRIFT_TOLERANCE_CM,
+    compute_drift_cm,
+)
 from aprilcam.calibration.interfaces import Calibration
 from aprilcam.camera.interfaces import Camera
-from aprilcam.types import PixelPoint, TagFrame, TagId, TagRecord, WorldPoint
+from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitionIface
+from aprilcam.config.loader import PlayfieldDefinition as _ConcretePlayfieldDefinition
+from aprilcam.types import PixelPoint, TagFamily, TagFrame, TagId, TagRecord, WorldPoint
 from aprilcam.vision.detector import Detection, TagDetector
 from aprilcam.vision.motion import compute_motion
 from aprilcam.vision.pipeline import PipelineConfig, run_pipeline
@@ -129,6 +156,26 @@ DetectorFactory = Callable[[], TagDetector]
 #: calibration takes effect on the very next burst.
 CalibrationLookup = Callable[[str], Optional[Calibration]]
 
+#: A callable that resolves a playfield *name* -> its
+#: ``PlayfieldDefinition``, or ``None`` if the daemon does not currently
+#: hold one by that name -- ``daemon.service.DaemonService.
+#: _playfield_for_calibration`` in production, the same lookup
+#: ``calibration.calibration.Calibrator`` already uses for the identical
+#: reason (ticket 023-007's opportunistic drift check needs a matched
+#: marker's *surveyed* position, exactly like a fresh solve does). Called
+#: only when a drift check is actually due for a calibrated camera --
+#: see :meth:`DetectionEngine._maybe_check_drift`.
+PlayfieldLookup = Callable[[str], Optional[PlayfieldDefinitionIface]]
+
+#: A callable invoked with a camera slug when the drift check (ticket
+#: 023-007) has decided that camera's calibration should be marked
+#: stale. ``daemon.service.DaemonService._mark_stale`` in production --
+#: the single, ``self._lock``-guarded mutation point that also backs
+#: ``Camera``'s ``on_reopen`` hook, so both staleness triggers
+#: (sprint.md Decisions 5 and 6) share one implementation. Never called
+#: directly by :class:`DetectionEngine` for any other reason.
+MarkStale = Callable[[str], None]
+
 
 def _default_detector_factory() -> TagDetector:
     return TagDetector()
@@ -143,6 +190,27 @@ def _default_calibration_lookup(slug: str) -> Optional[Calibration]:
     always-uncalibrated behaviour exactly (module docstring's regression
     guarantee).
     """
+    return None
+
+
+def _default_playfield_lookup(name: str) -> Optional[PlayfieldDefinitionIface]:
+    """No playfield store wired in -- every drift check reports "cannot
+    verify" and marks nothing stale. The default for both
+    :class:`DetectionEngine`'s own constructor and every pre-ticket-007
+    test/caller that never passed ``playfield_lookup`` -- combined with
+    :func:`_default_calibration_lookup` always returning ``None``, this
+    also means the drift check never runs at all for those callers
+    (:meth:`DetectionEngine.run_burst` only invokes it for a calibrated
+    camera in the first place)."""
+    return None
+
+
+def _default_mark_stale(slug: str) -> None:
+    """No mutation point wired in -- a drift check that decides a camera
+    has moved has nowhere to report that decision, so it is silently
+    dropped. The default for both :class:`DetectionEngine`'s own
+    constructor and every pre-ticket-007 test/caller that never passed
+    ``mark_stale``."""
     return None
 
 
@@ -269,6 +337,44 @@ class DetectionEngine:
         producing honestly-uncalibrated records. ``daemon.service.
         DaemonService`` wires its own ``get_calibration`` in here for a
         real daemon process.
+    playfield_lookup:
+        Resolves a playfield *name* -> its ``PlayfieldDefinition``
+        (ticket 023-007's opportunistic drift check, sprint.md
+        Decision 5) -- the source of a matched marker's *surveyed*
+        position, since :class:`~aprilcam.calibration.calibration.Calibration`
+        itself carries no stored positions of its own (see
+        :func:`~aprilcam.calibration.calibration.compute_drift_cm`'s
+        docstring). Defaults to :func:`_default_playfield_lookup`
+        (always ``None``), under which the drift check always reports
+        "cannot verify" and marks nothing stale. ``daemon.service.
+        DaemonService`` wires its own ``_playfield_for_calibration`` in
+        here -- the same lookup ``calibration.calibration.Calibrator``
+        already uses for the identical reason.
+    mark_stale:
+        Invoked with a camera slug when the drift check decides that
+        camera's calibration should be marked stale (ticket 023-007).
+        Defaults to :func:`_default_mark_stale` (a no-op). ``daemon.
+        service.DaemonService`` wires its own ``_mark_stale`` in here --
+        the single ``self._lock``-guarded mutation point every
+        ``self._calibrations`` write beyond :meth:`~aprilcam.daemon.
+        service.DaemonService.calibrate` goes through (sprint.md
+        Decisions 5 and 6 share one implementation).
+    drift_tolerance_cm:
+        How far (cm) a matched marker's reprojected position may drift
+        from its surveyed position before the drift check calls
+        *mark_stale* (sprint.md Decision 5). Defaults to
+        :data:`~aprilcam.calibration.calibration.DRIFT_TOLERANCE_CM`
+        (2.0 cm, stakeholder-confirmed) but is genuinely overridable
+        per instance, the same "domain-tuning call" shape
+        ``calibration.calibration.Calibrator``'s
+        ``max_reprojection_error_cm`` already establishes.
+    drift_check_interval_s:
+        The minimum time (seconds) between two drift checks for the
+        same camera slug (sprint.md Decision 5, "at most once per 10
+        seconds"). Defaults to :data:`~aprilcam.calibration.calibration.
+        DRIFT_CHECK_INTERVAL_S` (10.0 s, stakeholder-confirmed),
+        overridable the same way *drift_tolerance_cm* is -- tests use a
+        small or zero value to avoid needing to wait on a real clock.
     """
 
     def __init__(
@@ -278,14 +384,23 @@ class DetectionEngine:
         pipeline_config: Optional[PipelineConfig] = None,
         detector_factory: DetectorFactory = _default_detector_factory,
         calibration_lookup: CalibrationLookup = _default_calibration_lookup,
+        playfield_lookup: PlayfieldLookup = _default_playfield_lookup,
+        mark_stale: MarkStale = _default_mark_stale,
+        drift_tolerance_cm: float = DRIFT_TOLERANCE_CM,
+        drift_check_interval_s: float = DRIFT_CHECK_INTERVAL_S,
     ) -> None:
         self._buffer_size = buffer_size
         self._pipeline_config = pipeline_config
         self._detector_factory = detector_factory
         self._calibration_lookup = calibration_lookup
+        self._playfield_lookup = playfield_lookup
+        self._mark_stale = mark_stale
+        self._drift_tolerance_cm = drift_tolerance_cm
+        self._drift_check_interval_s = drift_check_interval_s
         self._buffers: Dict[str, Deque[TagFrame]] = {}
         self._detectors: Dict[str, TagDetector] = {}
         self._frame_counts: Dict[str, int] = {}
+        self._last_drift_check: Dict[str, float] = {}
         self._lock = threading.Lock()
 
     def run_burst(self, slug: str, camera: Camera) -> TagFrame:
@@ -319,6 +434,21 @@ class DetectionEngine:
         camera skips this step entirely: ``record.world is None`` short-
         circuits before any history is gathered or ``compute_motion`` is
         ever called, leaving sprint 021's path untouched.
+
+        **Opportunistic drift check (ticket 023-007, sprint.md
+        Decision 5).** When *slug* is calibrated, this method also asks
+        :meth:`_maybe_check_drift` whether a drift check is due (at most
+        once every ``self._drift_check_interval_s`` seconds per camera)
+        and, if so, re-examines *this same burst's* ``detections`` -- no
+        independent frame read or detection pass, preserving the
+        idle-efficiency budget by construction: a camera with no
+        calibration, or simply never queried, never reaches this step at
+        all. The returned ``TagFrame.calibration_stale`` reflects
+        whatever :attr:`_calibration_lookup` reports for *slug*
+        immediately afterwards, so a drift check (or a concurrent
+        ``Camera.on_reopen`` firing on another thread) that just flipped
+        the calibration stale is reflected on the very same burst that
+        found it, not the next one.
         """
         frame = camera.read()
         if frame is None:
@@ -330,6 +460,10 @@ class DetectionEngine:
 
         timestamp = time.time()
         calibration = self._calibration_lookup(slug)
+        if calibration is not None:
+            self._maybe_check_drift(slug, calibration, detections, timestamp)
+            calibration = self._calibration_lookup(slug)  # re-fetch: may have just been marked stale
+
         records = tuple(
             self._finish_record(
                 _build_tag_record(detection, timestamp=timestamp, calibration=calibration),
@@ -341,9 +475,81 @@ class DetectionEngine:
             tags=records,
             timestamp=timestamp,
             frame_index=self._next_frame_index(slug),
+            calibration_stale=calibration.stale if calibration is not None else False,
         )
         self._append(slug, tag_frame)
         return tag_frame
+
+    def _maybe_check_drift(
+        self,
+        slug: str,
+        calibration: Calibration,
+        detections: Sequence[Detection],
+        now: float,
+    ) -> None:
+        """Ticket 023-007's opportunistic drift check body -- called only
+        from :meth:`run_burst`, only when *slug* is already calibrated.
+
+        Rate-limited to at most once every ``self._drift_check_interval_s``
+        seconds per camera slug, tracked in :attr:`_last_drift_check`
+        (locked, since concurrent bursts against the same camera are real
+        -- ``daemon/rpc.py``'s server runs a ``ThreadPoolExecutor``). The
+        rate limit consumes its slot on every *attempt*, whether or not
+        the attempt could actually verify anything -- a camera sitting in
+        the dark still only gets checked once per interval, not on every
+        single burst, which matters just as much for the idle-efficiency
+        budget as for a calibrated-and-queried one.
+
+        *detections* is *this burst's* own detection results -- already
+        read, already run through the detector for tag tracking; this
+        method performs no I/O and no additional detection pass of its
+        own, only filters and geometry (module docstring's "piggybacks on
+        frames already being read").
+
+        Calls :attr:`_mark_stale` at most once, only when
+        :func:`~aprilcam.calibration.calibration.compute_drift_cm`
+        returns a real measurement (never ``None`` -- "cannot verify" is
+        never treated as evidence of drift) exceeding
+        ``self._drift_tolerance_cm``.
+
+        *calibration*'s declared type is ``calibration.interfaces.
+        Calibration`` (this module's injection surface types against the
+        interface throughout, matching *camera*'s own ``camera.
+        interfaces.Camera`` typing) -- but ``compute_drift_cm`` needs
+        ``matched_ids``, which only the concrete ``calibration.
+        calibration.Calibration`` declares. The ``isinstance`` check
+        below narrows to that concrete type, mirroring
+        ``Calibrator.calibrate``'s identical defensive check for
+        ``PlayfieldDefinition``: every calibration this module is ever
+        actually handed (``daemon.service.DaemonService.get_calibration``
+        in production, every test fixture) already is one, so this
+        never fires in practice -- it exists so a hypothetical future
+        ``Calibration`` implementation fails this check safely (`cannot
+        verify`) instead of an ``AttributeError``.
+        """
+        with self._lock:
+            last = self._last_drift_check.get(slug)
+            if last is not None and now - last < self._drift_check_interval_s:
+                return
+            self._last_drift_check[slug] = now
+
+        if not isinstance(calibration, _ConcreteCalibration):
+            return  # cannot verify -- no matched_ids to check drift against
+
+        definition = self._playfield_lookup(calibration.playfield)
+        if not isinstance(definition, _ConcretePlayfieldDefinition):
+            return  # cannot verify -- never treated as evidence of drift
+
+        detected = {
+            detection.number: detection.center
+            for detection in detections
+            if detection.family == TagFamily.ARUCO and detection.number in calibration.matched_ids
+        }
+        drift_cm = compute_drift_cm(calibration, definition, detected)
+        if drift_cm is None:
+            return  # too few matched markers visible -- cannot verify
+        if drift_cm > self._drift_tolerance_cm:
+            self._mark_stale(slug)
 
     def _finish_record(self, record: TagRecord, *, slug: str) -> TagRecord:
         """Fill in *record*'s motion fields from its tag's world-position

@@ -30,13 +30,20 @@ plan:
 from __future__ import annotations
 
 import math
-from typing import List, Optional, Sequence, Tuple
+from dataclasses import replace
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import cv2 as cv
 import numpy as np
 import pytest
 
-from aprilcam.calibration.calibration import Calibration, Calibrator
+from aprilcam.calibration.calibration import (
+    DRIFT_CHECK_INTERVAL_S,
+    DRIFT_TOLERANCE_CM,
+    MIN_DRIFT_CHECK_MARKERS,
+    Calibration,
+    Calibrator,
+)
 from aprilcam.camera.camera import Camera
 from aprilcam.config.interfaces import CameraConfig
 from aprilcam.daemon.detection import RING_BUFFER_SIZE, DetectionEngine
@@ -623,3 +630,305 @@ def test_uncalibrated_camera_output_is_byte_for_byte_sprint_021_shape():
     assert record.pixel is not None
     assert record.pixel_corners is not None
     assert len(record.pixel_corners) == 4
+
+
+# ---------------------------------------------------------------------------
+# Opportunistic staleness drift check (ticket 023-007) -- piggybacked on
+# run_burst's already-read frame/already-run detections, per sprint.md
+# Decision 5. Real geometry throughout (a real Calibrator-solved
+# Calibration, real Calibration.to_world conversion), scripted detections
+# for a controlled marker trajectory -- same fixture style as the
+# world-coordinate suite above.
+# ---------------------------------------------------------------------------
+
+
+def _aruco_hits(positions: Dict[int, Tuple[float, float]]) -> List[Detection]:
+    """One ArUco ``Detection`` per *positions* entry (id -> world cm),
+    via :func:`_detection_at` -- simulates a burst's detector output
+    that happens to include some of a calibration's matched static
+    corner markers alongside whatever else was in frame."""
+    return [_detection_at(TagFamily.ARUCO, tag_id, center_world=pos) for tag_id, pos in positions.items()]
+
+
+def test_drift_beyond_tolerance_marks_the_calibration_stale():
+    """A camera bump, simulated: one matched marker re-detected 5 cm from
+    its surveyed position -- well past the 2.0 cm tolerance -- flips
+    stale via the injected ``mark_stale`` callable."""
+    calibration = _fixture_calibration("cal-camera")
+    definition = main_playfield_definition()
+    positions = dict(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    true_x, true_y = positions[5]
+    positions[5] = (true_x + 5.0, true_y)
+    mark_stale_calls: List[str] = []
+    engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([_aruco_hits(positions)]),
+        calibration_lookup=lambda slug: calibration,
+        playfield_lookup=lambda name: definition if name == calibration.playfield else None,
+        mark_stale=lambda slug: mark_stale_calls.append(slug),
+    )
+    cam = _camera("cal-camera", frames=[_blank_frame()])
+
+    engine.run_burst("cal-camera", cam)
+
+    assert mark_stale_calls == ["cal-camera"]
+
+
+def test_drift_within_tolerance_does_not_mark_stale():
+    """A small, sub-tolerance shift (0.5 cm, comfortably inside the 2.0
+    cm tolerance) must not flip stale -- the false-positive guard on
+    ordinary detection jitter."""
+    calibration = _fixture_calibration("cal-camera")
+    definition = main_playfield_definition()
+    positions = dict(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    true_x, true_y = positions[5]
+    positions[5] = (true_x + 0.5, true_y)
+    mark_stale_calls: List[str] = []
+    engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([_aruco_hits(positions)]),
+        calibration_lookup=lambda slug: calibration,
+        playfield_lookup=lambda name: definition if name == calibration.playfield else None,
+        mark_stale=lambda slug: mark_stale_calls.append(slug),
+    )
+    cam = _camera("cal-camera", frames=[_blank_frame()])
+
+    engine.run_burst("cal-camera", cam)
+
+    assert mark_stale_calls == []
+
+
+def test_no_markers_visible_does_not_mark_stale():
+    """Darkness, a covered field, a lens cap -- zero of the calibration's
+    matched markers detected this burst must never be treated as
+    evidence of drift (the design question this ticket explicitly
+    resolves: 'cannot see markers' is not 'drift detected')."""
+    calibration = _fixture_calibration("cal-camera")
+    definition = main_playfield_definition()
+    mark_stale_calls: List[str] = []
+    engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[]]),  # nothing detected at all
+        calibration_lookup=lambda slug: calibration,
+        playfield_lookup=lambda name: definition if name == calibration.playfield else None,
+        mark_stale=lambda slug: mark_stale_calls.append(slug),
+    )
+    cam = _camera("cal-camera", frames=[_blank_frame()])
+
+    tag_frame = engine.run_burst("cal-camera", cam)
+
+    assert mark_stale_calls == []
+    assert tag_frame.tags == ()
+    assert tag_frame.calibration_stale is False
+
+
+def test_insufficient_markers_does_not_mark_stale_even_with_a_huge_shift():
+    """Fewer than :data:`MIN_DRIFT_CHECK_MARKERS` matched markers visible
+    -- even with an enormous single-marker shift that would trivially
+    exceed the tolerance on its own -- must still read as 'cannot
+    verify,' never as drift. Exercises the same guard as
+    ``test_compute_drift_cm_returns_none_below_the_minimum_marker_count``
+    in ``test_calibration.py``, through the real ``run_burst`` call path
+    this time."""
+    calibration = _fixture_calibration("cal-camera")
+    definition = main_playfield_definition()
+    assert MIN_DRIFT_CHECK_MARKERS > 1
+    huge_shift = {1: (MAIN_PLAYFIELD_ARUCO_POSITIONS[1][0] + 50.0, MAIN_PLAYFIELD_ARUCO_POSITIONS[1][1])}
+    mark_stale_calls: List[str] = []
+    engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([_aruco_hits(huge_shift)]),
+        calibration_lookup=lambda slug: calibration,
+        playfield_lookup=lambda name: definition if name == calibration.playfield else None,
+        mark_stale=lambda slug: mark_stale_calls.append(slug),
+    )
+    cam = _camera("cal-camera", frames=[_blank_frame()])
+
+    engine.run_burst("cal-camera", cam)
+
+    assert mark_stale_calls == []
+
+
+def test_drift_check_is_rate_limited_to_at_most_once_per_interval():
+    """Three consecutive bursts, each with the same drift-beyond-tolerance
+    marker shift, but an interval far longer than this test can possibly
+    take to run -- only the first burst's check may actually run."""
+    calibration = _fixture_calibration("cal-camera")
+    definition = main_playfield_definition()
+    positions = dict(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    true_x, true_y = positions[5]
+    positions[5] = (true_x + 5.0, true_y)
+    hits = _aruco_hits(positions)
+    mark_stale_calls: List[str] = []
+    engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([hits, hits, hits]),
+        calibration_lookup=lambda slug: calibration,
+        playfield_lookup=lambda name: definition if name == calibration.playfield else None,
+        mark_stale=lambda slug: mark_stale_calls.append(slug),
+        drift_check_interval_s=1000.0,
+    )
+    cam = _camera("cal-camera", frames=[_blank_frame() for _ in range(3)])
+
+    engine.run_burst("cal-camera", cam)
+    engine.run_burst("cal-camera", cam)
+    engine.run_burst("cal-camera", cam)
+
+    assert mark_stale_calls == ["cal-camera"]
+
+
+def test_drift_check_runs_again_once_the_interval_elapses():
+    """The inverse of the rate-limit test above: a zero-second interval
+    means every burst is due for its own check -- proves the interval is
+    a genuine, honoured parameter, not a one-shot latch."""
+    calibration = _fixture_calibration("cal-camera")
+    definition = main_playfield_definition()
+    positions = dict(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    true_x, true_y = positions[5]
+    positions[5] = (true_x + 5.0, true_y)
+    hits = _aruco_hits(positions)
+    mark_stale_calls: List[str] = []
+    engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([hits, hits]),
+        calibration_lookup=lambda slug: calibration,
+        playfield_lookup=lambda name: definition if name == calibration.playfield else None,
+        mark_stale=lambda slug: mark_stale_calls.append(slug),
+        drift_check_interval_s=0.0,
+    )
+    cam = _camera("cal-camera", frames=[_blank_frame(), _blank_frame()])
+
+    engine.run_burst("cal-camera", cam)
+    engine.run_burst("cal-camera", cam)
+
+    assert mark_stale_calls == ["cal-camera", "cal-camera"]
+
+
+def test_drift_constants_default_from_the_calibration_module():
+    """``DetectionEngine``'s own defaults are the stakeholder-confirmed
+    module constants, not independently hardcoded numbers -- a change to
+    one must change the other, never silently drift apart."""
+    engine = DetectionEngine()
+    assert engine._drift_tolerance_cm == DRIFT_TOLERANCE_CM  # noqa: SLF001 - internal, pinning the default
+    assert engine._drift_check_interval_s == DRIFT_CHECK_INTERVAL_S  # noqa: SLF001
+
+
+def test_drift_check_reuses_the_burst_own_detections_no_extra_detect_call():
+    """The idle-efficiency budget's other half: even when a drift check
+    genuinely runs (a calibrated camera, due for its check), it triggers
+    no independent frame read or detection pass -- exactly one
+    ``detect()`` call per burst, drift check included."""
+    calibration = _fixture_calibration("cal-camera")
+    definition = main_playfield_definition()
+    hits = _aruco_hits(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    counting = _CountingDetector(hits=hits)
+    engine = DetectionEngine(
+        detector_factory=lambda: counting,
+        calibration_lookup=lambda slug: calibration,
+        playfield_lookup=lambda name: definition if name == calibration.playfield else None,
+        mark_stale=lambda slug: None,
+    )
+    cam = _camera("cal-camera", frames=[_blank_frame()])
+
+    engine.run_burst("cal-camera", cam)
+
+    assert counting.calls == 1
+
+
+def test_uncalibrated_camera_never_calls_playfield_lookup_or_mark_stale():
+    """A camera with no calibration incurs zero extra work from the
+    drift-check machinery -- ``playfield_lookup``/``mark_stale`` are
+    never even consulted, matching the idle-efficiency budget's "a
+    camera with no calibration... incurs zero extra detection work"
+    acceptance criterion."""
+    playfield_calls: List[str] = []
+    mark_stale_calls: List[str] = []
+
+    def playfield_lookup(name: str) -> None:
+        playfield_calls.append(name)
+        return None
+
+    engine = DetectionEngine(
+        detector_factory=lambda: _CountingDetector(),
+        calibration_lookup=lambda slug: None,
+        playfield_lookup=playfield_lookup,
+        mark_stale=lambda slug: mark_stale_calls.append(slug),
+    )
+    cam = _camera("cam-uncalibrated", frames=[_blank_frame()])
+
+    engine.run_burst("cam-uncalibrated", cam)
+
+    assert playfield_calls == []
+    assert mark_stale_calls == []
+
+
+def test_never_queried_camera_incurs_zero_drift_check_work():
+    """No ``run_burst`` call at all -> the drift-check machinery never
+    runs, trivially -- mirrors ``test_idle_engine_runs_zero_detections``
+    above for the drift check specifically."""
+    playfield_calls: List[str] = []
+    DetectionEngine(playfield_lookup=lambda name: (playfield_calls.append(name), None)[1])
+    assert playfield_calls == []
+
+
+def test_default_playfield_lookup_and_mark_stale_are_inert():
+    """The constructor defaults (module docstring) -- pinned directly,
+    the same way :func:`test_default_calibration_lookup_is_always_none`
+    pins its own default."""
+    from aprilcam.daemon.detection import _default_mark_stale, _default_playfield_lookup
+
+    assert _default_playfield_lookup("main-playfield") is None
+    assert _default_mark_stale("any-slug") is None
+
+
+def test_tag_frame_calibration_stale_reflects_a_just_flipped_calibration():
+    """``TagFrame.calibration_stale`` (ticket 023-007's other wiring
+    half) reflects the *post*-drift-check calibration state on the same
+    burst that found the drift, not only on a subsequent call --
+    ``run_burst`` re-fetches ``calibration_lookup`` after the drift
+    check runs, precisely so a mid-burst mark-stale is visible
+    immediately."""
+    calibration = _fixture_calibration("cal-camera")
+    definition = main_playfield_definition()
+    positions = dict(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    true_x, true_y = positions[5]
+    positions[5] = (true_x + 5.0, true_y)
+    calibrations: Dict[str, Calibration] = {"cal-camera": calibration}
+
+    def calibration_lookup(slug: str) -> Optional[Calibration]:
+        return calibrations.get(slug)
+
+    def mark_stale(slug: str) -> None:
+        calibrations[slug] = replace(calibrations[slug], stale=True)
+
+    engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([_aruco_hits(positions)]),
+        calibration_lookup=calibration_lookup,
+        playfield_lookup=lambda name: definition if name == calibration.playfield else None,
+        mark_stale=mark_stale,
+    )
+    cam = _camera("cal-camera", frames=[_blank_frame()])
+
+    tag_frame = engine.run_burst("cal-camera", cam)
+
+    assert tag_frame.calibration_stale is True
+    assert calibrations["cal-camera"].stale is True
+
+
+def test_tag_frame_calibration_stale_is_false_when_nothing_drifted():
+    calibration = _fixture_calibration("cal-camera")
+    definition = main_playfield_definition()
+    engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([_aruco_hits(MAIN_PLAYFIELD_ARUCO_POSITIONS)]),
+        calibration_lookup=lambda slug: calibration,
+        playfield_lookup=lambda name: definition if name == calibration.playfield else None,
+        mark_stale=lambda slug: None,
+    )
+    cam = _camera("cal-camera", frames=[_blank_frame()])
+
+    tag_frame = engine.run_burst("cal-camera", cam)
+
+    assert tag_frame.calibration_stale is False
+
+
+def test_tag_frame_calibration_stale_is_false_for_an_uncalibrated_camera():
+    engine = DetectionEngine(detector_factory=lambda: _CountingDetector())
+    cam = _camera("cam-n", frames=[_blank_frame()])
+
+    tag_frame = engine.run_burst("cam-n", cam)
+
+    assert tag_frame.calibration_stale is False

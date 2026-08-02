@@ -32,6 +32,7 @@ from aprilcam.camera.camera import Camera
 from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.registry import CameraRegistry
 from aprilcam.config.directories import Directories
+from aprilcam.config.loader import ConfigLoader
 from aprilcam.daemon.lifecycle import SOCKET_FILENAME, DaemonLifecycle
 from aprilcam.daemon.rpc import build_server
 from aprilcam.daemon.service import DaemonService
@@ -61,6 +62,19 @@ def build(
     collide with a real running daemon on this machine (this ticket's
     Testing section requirement).
 
+    **Boot-time config load (ticket 023-003).** Immediately after
+    *service* is constructed and before the control-plane listener is
+    ever built, this reads *directories*.config_dir via
+    :func:`_load_config_dir` and feeds every document found there into
+    *service* through its already-existing ``set_playfield``/
+    ``set_camera_config`` setters -- the fix for the restart trap sprint
+    022 hit live (UC-01.S-4): a playfield and a camera config installed
+    once in ``config_dir`` come back linked and ready on every
+    subsequent start, with no RPC push required. A malformed individual
+    file is skipped and logged at WARNING, never refused (sprint.md
+    Design Rationale, Decision 1) -- see
+    ``config.loader.ConfigLoader.load_config_dir``'s docstring.
+
     ``start_watch`` (default ``True``) controls both halves of UC-01's
     "enumerate, then keep watching" startup step -- the one-time active
     probe run synchronously inside ``start()`` (see
@@ -87,6 +101,8 @@ def build(
         directories=directories,
         cameras=held_cameras,
     )
+
+    _load_config_dir(service, directories)
 
     resolved_socket_path = (
         Path(socket_path) if socket_path is not None else directories.socket_dir / SOCKET_FILENAME
@@ -117,6 +133,42 @@ def build(
         lock_path=lock_path,
         socket_path=socket_path,
     )
+
+
+def _load_config_dir(service: DaemonService, directories: Directories) -> None:
+    """UC-01 main flow steps 2-3, and ticket 023-003's whole point:
+    read every document already installed under *directories*.config_dir
+    and feed it into *service* via its already-existing
+    ``set_playfield``/``set_camera_config`` setters -- **not** a new
+    ``DaemonService`` method (sprint.md Architecture, "Modules" point 1:
+    this assembly module owns "where documents come from"; ``DaemonService``
+    stays ignorant of disk entirely).
+
+    A camera config loaded here for a camera not yet held open does
+    nothing to hardware immediately -- there is no open handle to push
+    settings to (exactly ``set_camera_config``'s existing "camera not
+    currently held open" branch). It still takes effect the moment that
+    camera *is* first opened, via ``DaemonService._camera_for``'s own
+    apply-on-open step (this same ticket) -- so a camera enumerated
+    after this function returns, or never opened until a client asks
+    for it, still ends up configured exactly as if the document had
+    just been pushed by hand.
+
+    Every per-file failure is caught inside
+    ``ConfigLoader.load_config_dir`` itself (never raised here) and
+    logged at WARNING, naming the file and the reason -- skip-and-warn,
+    not refuse-to-start (Design Rationale, Decision 1), matching the
+    existing precedent in ``DaemonService._load_calibrations``.
+    """
+    scan = ConfigLoader().load_config_dir(directories)
+    for error in scan.errors:
+        logger.warning(
+            "config_dir: skipping malformed config file %s: %s", error.path, error.message
+        )
+    for playfield in scan.playfields:
+        service.set_playfield(playfield)
+    for camera_config in scan.camera_configs:
+        service.set_camera_config(camera_config)
 
 
 def main() -> None:

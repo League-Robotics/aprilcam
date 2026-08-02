@@ -108,6 +108,11 @@ class AprilCamV2Stub(object):
                 request_serializer=aprilcam__v2__pb2.GetCalibrationRequest.SerializeToString,
                 response_deserializer=aprilcam__v2__pb2.GetCalibrationResponse.FromString,
                 _registered_method=True)
+        self.ResetCameraConfig = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/ResetCameraConfig',
+                request_serializer=aprilcam__v2__pb2.ResetCameraConfigRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.ResetCameraConfigResponse.FromString,
+                _registered_method=True)
 
 
 class AprilCamV2Servicer(object):
@@ -258,6 +263,20 @@ class AprilCamV2Servicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ResetCameraConfig(self, request, context):
+        """Discard whatever live override is in force for a camera and
+        re-apply `config_dir/cameras/<slug>/config.json` -- how an
+        experiment ends without a daemon restart (UC-01's
+        `ResetCameraConfig` bullet, sprint 023 ticket 004). Never means
+        "whatever was last pushed" -- always this fixed on-disk location.
+        A camera with nothing installed there falls back to the
+        introspected-plus-blank template (the same document an
+        unconfigured camera reports) rather than erroring.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_AprilCamV2Servicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -330,6 +349,11 @@ def add_AprilCamV2Servicer_to_server(servicer, server):
                     servicer.GetCalibration,
                     request_deserializer=aprilcam__v2__pb2.GetCalibrationRequest.FromString,
                     response_serializer=aprilcam__v2__pb2.GetCalibrationResponse.SerializeToString,
+            ),
+            'ResetCameraConfig': grpc.unary_unary_rpc_method_handler(
+                    servicer.ResetCameraConfig,
+                    request_deserializer=aprilcam__v2__pb2.ResetCameraConfigRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.ResetCameraConfigResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -714,6 +738,33 @@ class AprilCamV2(object):
             '/aprilcam.v2.AprilCamV2/GetCalibration',
             aprilcam__v2__pb2.GetCalibrationRequest.SerializeToString,
             aprilcam__v2__pb2.GetCalibrationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ResetCameraConfig(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/ResetCameraConfig',
+            aprilcam__v2__pb2.ResetCameraConfigRequest.SerializeToString,
+            aprilcam__v2__pb2.ResetCameraConfigResponse.FromString,
             options,
             channel_credentials,
             insecure,
