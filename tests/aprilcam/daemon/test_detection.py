@@ -46,7 +46,7 @@ from aprilcam.calibration.calibration import (
 )
 from aprilcam.camera.camera import Camera
 from aprilcam.config.interfaces import CameraConfig
-from aprilcam.daemon.detection import RING_BUFFER_SIZE, DetectionEngine
+from aprilcam.daemon.detection import CONFIRMATION_STREAK, RING_BUFFER_SIZE, DetectionEngine
 from aprilcam.types import PixelPoint, TagFamily, TagId
 from aprilcam.vision.detector import Detection, TagDetector
 
@@ -128,9 +128,17 @@ def test_run_burst_raises_and_appends_nothing_when_no_frame_available():
 
 
 def test_run_burst_builds_an_honestly_uncalibrated_tag_record():
+    """Ticket 024-006: a single burst no longer reports immediately --
+    the same tag must be seen in two strictly consecutive bursts before
+    it is built into a ``TagRecord`` at all (default
+    ``CONFIRMATION_STREAK``). Re-burst against the same synthetic image
+    and assert on the *second* call's result, exercising the real
+    confirmed path rather than bypassing confirmation."""
     engine = DetectionEngine()
-    cam = _camera("cam-c", frames=[_tag_frame_bgr(TagFamily.APRILTAG, 7)])
+    tag_image = _tag_frame_bgr(TagFamily.APRILTAG, 7)
+    cam = _camera("cam-c", frames=[tag_image, tag_image])
 
+    engine.run_burst("cam-c", cam)
     tag_frame = engine.run_burst("cam-c", cam)
 
     assert len(tag_frame.tags) == 1
@@ -152,15 +160,20 @@ def test_run_burst_builds_an_honestly_uncalibrated_tag_record():
 def test_run_burst_on_a_family_disambiguated_field():
     """AprilTag 7 and ArUco 7 in the same burst are reported as two
     distinct records (family disambiguates the shared numeric id) --
-    UC-09.S-3's guarantee, exercised at the burst-construction layer."""
+    UC-09.S-3's guarantee, exercised at the burst-construction layer.
+
+    Ticket 024-006: re-burst against the same canvas twice and assert on
+    the second call -- both ids need two consecutive sightings to
+    confirm, exactly like a single-tag burst."""
     canvas = np.full((600, 1200), 255, dtype=np.uint8)
     canvas[:, :600] = synthetic_tag_image(TagFamily.APRILTAG, 7)
     canvas[:, 600:] = synthetic_tag_image(TagFamily.ARUCO, 7)
     frame_bgr = cv.cvtColor(canvas, cv.COLOR_GRAY2BGR)
 
     engine = DetectionEngine()
-    cam = _camera("cam-d", frames=[frame_bgr])
+    cam = _camera("cam-d", frames=[frame_bgr, frame_bgr])
 
+    engine.run_burst("cam-d", cam)
     tag_frame = engine.run_burst("cam-d", cam)
 
     tags = {r.tag for r in tag_frame.tags}
@@ -411,14 +424,23 @@ def test_default_calibration_lookup_is_always_none():
 
 
 def test_calibrated_camera_populates_world_fields_on_first_sighting():
+    """Ticket 024-006: confirmation gates *reporting*, not *history* --
+    the same hit is scripted for two consecutive bursts (the "more
+    honest fix" per the ticket, exercising the real confirmed path
+    rather than an override), and the assertions are made against the
+    second call. Because the first (unconfirmed) burst was never
+    buffered, this second call is still this tag's first entry in the
+    ring buffer/motion history, so "first sighting -- no motion fields
+    yet" remains exactly true of the reported result."""
     calibration = _fixture_calibration()
     hit = _detection_at(TagFamily.APRILTAG, 1, center_world=(10.0, 20.0))
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        detector_factory=lambda: _ScriptedDetector([[hit], [hit]]),
         calibration_lookup=lambda slug: calibration,
     )
-    cam = _camera("cal-cam", frames=[_blank_frame()])
+    cam = _camera("cal-cam", frames=[_blank_frame(), _blank_frame()])
 
+    engine.run_burst("cal-cam", cam)
     tag_frame = engine.run_burst("cal-cam", cam)
 
     assert len(tag_frame.tags) == 1
@@ -430,10 +452,10 @@ def test_calibrated_camera_populates_world_fields_on_first_sighting():
     assert record.world_corners is not None
     assert len(record.world_corners) == 4
     assert record.yaw_rad is not None
-    # First sighting -- insufficient history, so motion fields stay
-    # None, never a fabricated zero (vision.motion.compute_motion's own
-    # contract, exercised here through the real call path for the first
-    # time).
+    # First *reported* sighting -- insufficient history, so motion
+    # fields stay None, never a fabricated zero (vision.motion.
+    # compute_motion's own contract, exercised here through the real
+    # call path for the first time).
     assert record.heading_rad is None
     assert record.world_velocity is None
     assert record.speed is None
@@ -443,15 +465,20 @@ def test_calibrated_camera_populates_world_fields_on_first_sighting():
 
 
 def test_yaw_rad_matches_atan2_of_the_front_edge_at_a_known_rotation():
+    """Ticket 024-006: same hit scripted twice, assert on the second
+    (confirmed) call -- see
+    test_calibrated_camera_populates_world_fields_on_first_sighting's
+    docstring for why this is the correct fix for a world-field test."""
     calibration = _fixture_calibration()
     known_yaw = math.radians(37.0)  # non-axis-aligned, like vision/detector.py's own convention check
     hit = _detection_at(TagFamily.APRILTAG, 1, center_world=(0.0, 0.0), yaw_rad=known_yaw)
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        detector_factory=lambda: _ScriptedDetector([[hit], [hit]]),
         calibration_lookup=lambda slug: calibration,
     )
-    cam = _camera("cal-cam", frames=[_blank_frame()])
+    cam = _camera("cal-cam", frames=[_blank_frame(), _blank_frame()])
 
+    engine.run_burst("cal-cam", cam)
     tag_frame = engine.run_burst("cal-cam", cam)
     record = tag_frame.tags[0]
 
@@ -468,7 +495,15 @@ def test_yaw_rad_matches_atan2_of_the_front_edge_at_a_known_rotation():
 def test_moving_east_across_bursts_reports_strictly_increasing_world_x():
     """SUC-004's mirror-catching check, at fixture level: physically-east
     pixel motion (through a real, solved homography) must never produce
-    a decreasing or constant reported ``world.x``."""
+    a decreasing or constant reported ``world.x``.
+
+    ``confirmation_streak=1`` (ticket 024-006): this test is about
+    homography sign/motion correctness across a deliberately controlled
+    3-position trajectory, not about confirmation timing -- the "test
+    genuinely about something else entirely" case the ticket's testing
+    section names, so it keeps today's single-burst-reports-immediately
+    behaviour rather than losing one of its three samples to
+    confirmation delay."""
     calibration = _fixture_calibration()
     hits = [
         [_detection_at(TagFamily.APRILTAG, 1, center_world=(-20.0, 0.0))],
@@ -478,6 +513,7 @@ def test_moving_east_across_bursts_reports_strictly_increasing_world_x():
     engine = DetectionEngine(
         detector_factory=lambda: _ScriptedDetector(hits),
         calibration_lookup=lambda slug: calibration,
+        confirmation_streak=1,
     )
     cam = _camera("cal-cam", frames=[_blank_frame() for _ in hits])
 
@@ -501,7 +537,12 @@ def test_moving_north_across_bursts_reports_strictly_increasing_world_y():
     """SUC-004's mirror-catching check for the other axis: physically-
     north pixel motion must never produce a decreasing or constant
     reported ``world.y`` -- the specific check this project fears
-    failing (a silent north/south mirror)."""
+    failing (a silent north/south mirror).
+
+    ``confirmation_streak=1`` (ticket 024-006): see
+    test_moving_east_across_bursts_reports_strictly_increasing_world_x's
+    docstring -- this is a homography-correctness test, not a
+    confirmation test."""
     calibration = _fixture_calibration()
     hits = [
         [_detection_at(TagFamily.APRILTAG, 1, center_world=(0.0, -20.0))],
@@ -511,6 +552,7 @@ def test_moving_north_across_bursts_reports_strictly_increasing_world_y():
     engine = DetectionEngine(
         detector_factory=lambda: _ScriptedDetector(hits),
         calibration_lookup=lambda slug: calibration,
+        confirmation_streak=1,
     )
     cam = _camera("cal-cam", frames=[_blank_frame() for _ in hits])
 
@@ -529,7 +571,13 @@ def test_motion_fields_populate_once_a_second_calibrated_sample_exists():
     ``heading_rad``/``world_velocity``/``speed`` are populated and
     ``heading_rad == atan2(world_vy, world_vx)`` from the same two
     samples -- pinning ``vision.motion.compute_motion``'s existing
-    contract against the real call path for the first time."""
+    contract against the real call path for the first time.
+
+    ``confirmation_streak=1`` (ticket 024-006): this test is
+    specifically about motion-field population given two *reported*
+    samples, not about confirmation delay -- see
+    test_moving_east_across_bursts_reports_strictly_increasing_world_x's
+    docstring for the same reasoning."""
     calibration = _fixture_calibration()
     hits = [
         [_detection_at(TagFamily.APRILTAG, 1, center_world=(-10.0, 0.0))],
@@ -538,6 +586,7 @@ def test_motion_fields_populate_once_a_second_calibrated_sample_exists():
     engine = DetectionEngine(
         detector_factory=lambda: _ScriptedDetector(hits),
         calibration_lookup=lambda slug: calibration,
+        confirmation_streak=1,
     )
     cam = _camera("cal-cam", frames=[_blank_frame() for _ in hits])
 
@@ -566,17 +615,21 @@ def test_world_corners_preserve_order_and_use_the_same_homography_as_world():
     converted through the identical homography used for ``world`` --
     never independently recomputed. Checked by re-deriving each
     ``world_corners`` entry via ``calibration.to_world`` on the matching
-    ``pixel_corners`` entry and requiring an exact match."""
+    ``pixel_corners`` entry and requiring an exact match.
+
+    Ticket 024-006: same hit scripted twice, assert on the second
+    (confirmed) call."""
     calibration = _fixture_calibration()
     hit = _detection_at(
         TagFamily.APRILTAG, 1, center_world=(15.0, -8.0), yaw_rad=math.radians(20.0)
     )
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        detector_factory=lambda: _ScriptedDetector([[hit], [hit]]),
         calibration_lookup=lambda slug: calibration,
     )
-    cam = _camera("cal-cam", frames=[_blank_frame()])
+    cam = _camera("cal-cam", frames=[_blank_frame(), _blank_frame()])
 
+    engine.run_burst("cal-cam", cam)
     tag_frame = engine.run_burst("cal-cam", cam)
     record = tag_frame.tags[0]
 
@@ -603,7 +656,11 @@ def test_uncalibrated_camera_output_is_byte_for_byte_sprint_021_shape():
     the ticket's explicit regression test, not just an assumption
     inherited from sprint 021's own suite (which still passes unchanged
     -- see :func:`test_run_burst_builds_an_honestly_uncalibrated_tag_record`
-    above)."""
+    above).
+
+    Ticket 024-006: ``_CountingDetector`` returns the same hit on every
+    call, so re-bursting and asserting on the second call exercises the
+    real confirmed path without changing what is scripted."""
     calibration = _fixture_calibration()
 
     def calibration_lookup(slug: str) -> Optional[Calibration]:
@@ -614,8 +671,9 @@ def test_uncalibrated_camera_output_is_byte_for_byte_sprint_021_shape():
         detector_factory=lambda: _CountingDetector(hits=[hit]),
         calibration_lookup=calibration_lookup,
     )
-    cam = _camera("uncalibrated-cam", frames=[_blank_frame()])
+    cam = _camera("uncalibrated-cam", frames=[_blank_frame(), _blank_frame()])
 
+    engine.run_burst("uncalibrated-cam", cam)
     tag_frame = engine.run_burst("uncalibrated-cam", cam)
 
     assert len(tag_frame.tags) == 1
@@ -932,3 +990,223 @@ def test_tag_frame_calibration_stale_is_false_for_an_uncalibrated_camera():
     tag_frame = engine.run_burst("cam-n", cam)
 
     assert tag_frame.calibration_stale is False
+
+
+# ---------------------------------------------------------------------------
+# Temporal confirmation (ticket 024-006) -- the phantom-detection fix.
+# Presence-based: a tag id must be detected in two strictly consecutive
+# bursts (default CONFIRMATION_STREAK) before it is built into a
+# TagRecord at all. See daemon/detection.py's module docstring and
+# DetectionEngine._confirm_detections for the full mechanism and the
+# presence-vs-position rationale this suite exercises directly.
+# ---------------------------------------------------------------------------
+
+
+def test_confirmation_streak_constant_and_default_are_two():
+    """The module constant itself, and that the constructor default
+    actually wires it in -- the same style as
+    :func:`test_ring_buffer_size_defaults_to_v1s_300` and
+    :func:`test_drift_constants_default_from_the_calibration_module`."""
+    assert CONFIRMATION_STREAK == 2
+    engine = DetectionEngine()
+    assert engine._confirmation_streak == CONFIRMATION_STREAK  # noqa: SLF001 - internal, pinning the default
+
+
+def test_unconfirmed_single_sighting_never_appears_in_tags_or_the_buffer():
+    """The core phantom-detection fix, acceptance criterion 1: an id
+    seen in exactly one burst, with no immediately-following confirming
+    burst, never appears in that burst's ``TagFrame.tags`` -- and never
+    makes it into the ring buffer either, since only confirmed records
+    are ever built and appended."""
+    hit = _detection_at(TagFamily.ARUCO, 17, center_world=(-59.4, -19.6))
+    engine = DetectionEngine(detector_factory=lambda: _ScriptedDetector([[hit], []]))
+    cam = _camera("phantom-cam", frames=[_blank_frame(), _blank_frame()])
+
+    first = engine.run_burst("phantom-cam", cam)
+    second = engine.run_burst("phantom-cam", cam)
+
+    assert first.tags == ()
+    assert second.tags == ()
+    assert all(frame.tags == () for frame in engine.history("phantom-cam"))
+
+
+def test_phantom_recurring_at_different_positions_across_gaps_is_never_reported():
+    """The ticket's own observed live data, replayed almost verbatim:
+    ArUco 17 (not on the field) seen once, absent for two bursts, seen
+    once more at a *different* world position -- never two strictly
+    consecutive sightings, so it must never be reported at all across
+    any of the five bursts, and can therefore never acquire a
+    fabricated speed/heading."""
+    sighting_a = _detection_at(TagFamily.ARUCO, 17, center_world=(-59.4, -19.6))
+    sighting_b = _detection_at(TagFamily.ARUCO, 17, center_world=(50.1, -30.3))
+    engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[], [sighting_a], [], [], [sighting_b]])
+    )
+    cam = _camera("phantom-cam-2", frames=[_blank_frame() for _ in range(5)])
+
+    frames = [engine.run_burst("phantom-cam-2", cam) for _ in range(5)]
+
+    assert all(frame.tags == () for frame in frames)
+
+
+def test_two_strictly_consecutive_sightings_confirm_on_the_second_burst():
+    """Acceptance criterion 2: exactly two strictly consecutive bursts
+    is sufficient -- the id appears in the *second* burst's
+    ``TagFrame.tags``, not the first."""
+    hit = _detection_at(TagFamily.APRILTAG, 3, center_world=(0.0, 0.0))
+    engine = DetectionEngine(detector_factory=lambda: _ScriptedDetector([[hit], [hit]]))
+    cam = _camera("confirm-cam", frames=[_blank_frame(), _blank_frame()])
+
+    first = engine.run_burst("confirm-cam", cam)
+    second = engine.run_burst("confirm-cam", cam)
+
+    assert first.tags == ()
+    assert len(second.tags) == 1
+    assert second.tags[0].tag == TagId(family=TagFamily.APRILTAG, number=3)
+
+
+def test_a_gap_of_one_burst_restarts_confirmation_not_carrying_over_a_prior_streak():
+    """Acceptance criterion 3: detected, absent for one burst, then
+    detected again -- the third burst's sighting starts a *fresh*
+    streak at 1, not a resumed streak at 2, so it is not reported on
+    that third burst either (a gap of even one burst restarts
+    confirmation; accepted trade-off, sprint.md Migration Concerns). A
+    genuine fourth, immediately-following sighting then confirms
+    normally, proving the id is not permanently broken -- just reset."""
+    hit = _detection_at(TagFamily.APRILTAG, 4, center_world=(0.0, 0.0))
+    engine = DetectionEngine(detector_factory=lambda: _ScriptedDetector([[hit], [], [hit], [hit]]))
+    cam = _camera("gap-cam", frames=[_blank_frame() for _ in range(4)])
+
+    first = engine.run_burst("gap-cam", cam)
+    second = engine.run_burst("gap-cam", cam)
+    third = engine.run_burst("gap-cam", cam)
+    fourth = engine.run_burst("gap-cam", cam)
+
+    assert first.tags == ()
+    assert second.tags == ()  # the explicit gap
+    assert third.tags == ()  # fresh streak of 1 -- NOT a resumed streak of 2
+    assert len(fourth.tags) == 1  # second strictly-consecutive sighting since the gap
+    assert fourth.tags[0].tag == TagId(family=TagFamily.APRILTAG, number=4)
+
+
+def test_confirmation_is_presence_only_two_consecutive_different_positions_still_confirm():
+    """Acceptance criterion 4, the mobile-tag hard constraint, proved
+    directly: a real, fast-moving robot tag whose position legitimately
+    differs between two consecutive sightings must still confirm on the
+    second burst -- confirmation checks id presence only, never
+    position. This is the load-bearing design choice (daemon/
+    detection.py's module docstring / ``_confirm_detections``'s
+    docstring); do not skip this test and do not add a
+    position-similarity check to the implementation."""
+    first_hit = _detection_at(TagFamily.APRILTAG, 9, center_world=(-40.0, 10.0))
+    second_hit = _detection_at(TagFamily.APRILTAG, 9, center_world=(35.0, -22.0))
+    engine = DetectionEngine(detector_factory=lambda: _ScriptedDetector([[first_hit], [second_hit]]))
+    cam = _camera("mobile-cam", frames=[_blank_frame(), _blank_frame()])
+
+    first = engine.run_burst("mobile-cam", cam)
+    second = engine.run_burst("mobile-cam", cam)
+
+    assert first.tags == ()
+    assert len(second.tags) == 1
+    assert second.tags[0].tag == TagId(family=TagFamily.APRILTAG, number=9)
+    # The confirmed record reflects the *second* burst's own pixel
+    # position, not the first's -- confirmation gates whether the
+    # detection is reported at all, never which position gets reported.
+    assert second.tags[0].pixel == second_hit.center
+
+
+def test_steady_state_reporting_is_unaffected_by_confirmation_once_past_the_threshold():
+    """Acceptance criterion 5: once confirmed, a scripted detector
+    double producing the same id every burst reports it every burst
+    from the second one on -- identically to pre-fix behaviour aside
+    from that one-burst offset (the streak keeps growing past the
+    threshold; there is no re-drop once confirmed and steadily
+    redetected)."""
+    hit = _detection_at(TagFamily.APRILTAG, 5, center_world=(0.0, 0.0))
+    script = [[hit]] * 5
+    engine = DetectionEngine(detector_factory=lambda: _ScriptedDetector(script))
+    cam = _camera("steady-cam", frames=[_blank_frame() for _ in range(5)])
+
+    frames = [engine.run_burst("steady-cam", cam) for _ in range(5)]
+
+    assert frames[0].tags == ()  # first burst: fresh streak of 1, unconfirmed
+    for frame in frames[1:]:
+        assert len(frame.tags) == 1
+        assert frame.tags[0].tag == TagId(family=TagFamily.APRILTAG, number=5)
+
+
+def test_an_unconfirmed_detection_never_carries_motion_or_seeds_motion_history():
+    """'Confirmation also subsumes the motion problem for free' (the
+    ticket Description): an unconfirmed detection is never reported at
+    all, so it trivially never carries a velocity/heading -- and, just
+    as importantly, its position never leaks into this tag's motion
+    history for a *later*, genuinely confirmed sighting to be measured
+    against. A phantom sighting followed (after a gap) by a real tag's
+    first two sightings must report the real tag's second sighting with
+    ``heading_rad``/``world_velocity``/``speed`` still ``None`` --
+    exactly like any other tag's genuine first *reported* sighting, not
+    a fabricated motion between the phantom and the real position."""
+    calibration = _fixture_calibration()
+    phantom = _detection_at(TagFamily.APRILTAG, 1, center_world=(-59.4, -19.6))
+    real = _detection_at(TagFamily.APRILTAG, 1, center_world=(0.0, 0.0))
+    script = [[phantom], [], [real], [real]]
+    engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector(script),
+        calibration_lookup=lambda slug: calibration,
+    )
+    cam = _camera("motion-cam", frames=[_blank_frame() for _ in script])
+
+    frame0 = engine.run_burst("motion-cam", cam)
+    frame1 = engine.run_burst("motion-cam", cam)
+    frame2 = engine.run_burst("motion-cam", cam)
+    frame3 = engine.run_burst("motion-cam", cam)
+
+    assert frame0.tags == ()  # the phantom -- unconfirmed
+    assert frame1.tags == ()  # the explicit gap
+    assert frame2.tags == ()  # the real tag's own first (unconfirmed) sighting
+    assert len(frame3.tags) == 1
+    record = frame3.tags[0]
+    assert record.heading_rad is None
+    assert record.world_velocity is None
+    assert record.speed is None
+
+
+def test_confirmation_streak_is_genuinely_overridable_to_one_reports_immediately():
+    """Acceptance criterion / DoD: the constant is genuinely overridable
+    -- ``confirmation_streak=1`` restores exactly pre-ticket, single-
+    burst-reports-immediately behaviour (this is the override every
+    "genuinely about something else" test elsewhere in this module and
+    in ``test_service.py`` relies on)."""
+    hit = _detection_at(TagFamily.APRILTAG, 6, center_world=(0.0, 0.0))
+    engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[hit]]), confirmation_streak=1
+    )
+    cam = _camera("override-cam-1", frames=[_blank_frame()])
+
+    tag_frame = engine.run_burst("override-cam-1", cam)
+
+    assert len(tag_frame.tags) == 1
+    assert tag_frame.tags[0].tag == TagId(family=TagFamily.APRILTAG, number=6)
+
+
+def test_confirmation_streak_is_genuinely_overridable_to_three_requires_three_bursts():
+    """The other direction: a raised ``confirmation_streak`` genuinely
+    requires that many strictly consecutive bursts -- ticket 024-006's
+    Description names 3 as the documented next step if ticket 024-007's
+    real-hardware run shows a residual false accept, so this override
+    path must actually work, not just accept the parameter."""
+    hit = _detection_at(TagFamily.APRILTAG, 8, center_world=(0.0, 0.0))
+    engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[hit], [hit], [hit]]),
+        confirmation_streak=3,
+    )
+    cam = _camera("override-cam-3", frames=[_blank_frame() for _ in range(3)])
+
+    first = engine.run_burst("override-cam-3", cam)
+    second = engine.run_burst("override-cam-3", cam)
+    third = engine.run_burst("override-cam-3", cam)
+
+    assert first.tags == ()
+    assert second.tags == ()  # only 2 consecutive so far -- below the raised threshold
+    assert len(third.tags) == 1
+    assert third.tags[0].tag == TagId(family=TagFamily.APRILTAG, number=8)
