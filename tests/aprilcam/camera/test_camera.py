@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pytest
 
+from aprilcam.camera.backends import ControlBackend
 from aprilcam.camera.backends.opencv_backend import property_map
 from aprilcam.camera.camera import FAILURE_THRESHOLD, MAX_REOPENS, Camera
 from aprilcam.camera.interfaces import Camera as CameraProtocol
@@ -389,6 +390,111 @@ def test_reset_is_a_documented_noop():
     cam = Camera("cam-a", FakeBackend())
     cam.open()
     assert cam.reset() is None
+
+
+# ---------------------------------------------------------------------------
+# control_backend (ticket 023-001) -- real-hardware finding: cap.set()
+# does not work on camera 3, an optional ControlBackend replaces the
+# primary backend's settings surface exclusively when given.
+# ---------------------------------------------------------------------------
+
+
+class FakeControlBackend(ControlBackend):
+    """A ``ControlBackend`` test double -- mirrors ``FakeBackend``'s
+    settings surface but derives from ``ControlBackend`` (not
+    ``CaptureBackend``), matching ``UvcUtilBackend``'s real shape:
+    control-only, no capture methods at all."""
+
+    def __init__(self, *, names=("exposure", "gain")) -> None:
+        self._properties: Dict[str, float] = {}
+        self._names = set(names)
+        self.set_calls: List[Tuple[str, float]] = []
+
+    def get_property(self, name: str) -> Optional[float]:
+        return self._properties.get(name)
+
+    def set_property(self, name: str, value: float) -> bool:
+        self.set_calls.append((name, value))
+        self._properties[name] = value
+        return True
+
+    def settable_names(self):
+        return set(self._names)
+
+
+def test_apply_config_routes_settings_through_control_backend_when_given():
+    """When a ``control_backend`` is wired, ``apply_config`` must use
+    *it* -- never the primary capture backend -- for get/set/settable,
+    the exact routing ticket 023-001's real-hardware finding needs
+    (``cv2.VideoCapture.set()`` does not work on camera 3)."""
+    primary = FakeBackend()
+    control = FakeControlBackend(names=("exposure", "gain"))
+    cam = Camera("cam-a", primary, control_backend=control)
+    cam.open()
+
+    cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"exposure": 42}))
+
+    assert control.set_calls == [("exposure", 42.0)]
+    # The primary backend's own settings surface was never touched.
+    assert primary.get_property("exposure") is None
+
+
+def test_apply_config_control_backend_settable_names_are_exclusive():
+    """A key the primary ``FakeBackend`` would happily accept (it
+    mirrors ``OpenCVBackend``'s full ``property_map()``) is still
+    rejected once a narrower ``control_backend`` is wired -- the
+    control backend's ``settable_names()`` fully replaces the primary
+    backend's, it does not extend it. ``brightness`` is in
+    ``property_map()`` (so the bare-``FakeBackend`` case would accept
+    it) but not in this control backend's narrower set."""
+    primary = FakeBackend()
+    control = FakeControlBackend(names=("exposure", "gain"))
+    cam = Camera("cam-a", primary, control_backend=control)
+    cam.open()
+
+    with pytest.raises(UnsupportedSetting) as exc_info:
+        cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"brightness": 5}))
+    assert exc_info.value.key == "brightness"
+    assert control.set_calls == []
+
+
+def test_apply_config_without_control_backend_still_uses_primary_backend():
+    """No regression: a ``Camera`` built with no ``control_backend``
+    (every non-macOS platform, every pre-existing test) behaves exactly
+    as before this ticket."""
+    primary = FakeBackend()
+    cam = Camera("cam-a", primary)
+    cam.open()
+
+    cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"gain": 7}))
+
+    assert primary.get_property("gain") == 7.0
+
+
+def test_apply_config_control_backend_rollback_on_mid_push_failure():
+    """The whole-push rollback contract (already proven against the
+    primary backend in
+    ``test_apply_config_rolls_back_on_mid_push_failure``) holds the same
+    way through a ``control_backend``."""
+    control = FakeControlBackend(names=("gain", "exposure"))
+    control.set_property("gain", 5.0)  # pre-existing value to roll back to
+
+    def failing_set(name, value):
+        if name == "exposure":
+            return False
+        control._properties[name] = value
+        control.set_calls.append((name, value))
+        return True
+
+    control.set_property = failing_set  # type: ignore[method-assign]
+    cam = Camera("cam-a", FakeBackend(), control_backend=control)
+    cam.open()
+
+    with pytest.raises(UnsupportedSetting):
+        cam.apply_config(
+            CameraConfig(name="cam-a", playfield=None, settings={"gain": 9.0, "exposure": 100})
+        )
+    assert control.get_property("gain") == 5.0  # rolled back
 
 
 # ---------------------------------------------------------------------------

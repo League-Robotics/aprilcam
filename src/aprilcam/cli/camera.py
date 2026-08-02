@@ -299,14 +299,17 @@ def cmd_config(
     discovery_factory: Callable[[], Discovery] = Discovery,
     loader_factory: Callable[[], ConfigLoader] = JsonConfigLoader,
 ) -> int:
-    """``aprilcam camera config <file> [-d HOST]`` (ticket 022-001).
+    """``aprilcam camera config <file> [-d HOST]`` (ticket 022-001; real
+    hardware settings apply ticket 023-001).
 
-    **Playfield-link only, this sprint** (sprint.md Architecture
-    Decision 1): pushes a whole ``CameraConfig`` document -- ``name``
-    and ``playfield`` take effect (the camera is linked); any
-    ``settings`` round-trip through ``camera config <file>`` -> a later
-    ``get_camera_config`` unchanged but are never applied to the
-    camera's hardware. Full settings push is sprint 023.
+    Pushes a whole ``CameraConfig`` document -- ``name``/``playfield``
+    take effect (the camera is linked) and ``settings`` are applied to
+    the camera's hardware immediately when it is currently held open
+    (``DaemonService.set_camera_config`` -> ``Camera.apply_config``). An
+    unsupported key or a value the hardware will not take fails the
+    **whole** push (``UnsupportedSetting``, surfaced here through
+    ``report_error`` like any other typed error) and leaves both the
+    hardware and the previously-pushed document unchanged (UC-03.S-3).
     """
     loader = loader_factory()
     try:

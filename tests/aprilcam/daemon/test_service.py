@@ -24,7 +24,9 @@ detection instead).
 from __future__ import annotations
 
 import json
+import re
 import shutil
+import subprocess
 import tempfile
 import time
 from contextlib import contextmanager
@@ -57,6 +59,7 @@ from aprilcam.errors import (
     NotCalibrated,
     UnknownCamera,
     UnknownPlayfield,
+    UnsupportedSetting,
 )
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
 from aprilcam.types import PixelPoint, TagFamily, TagFrame, TagId, TagRecord, WorldPoint
@@ -1276,12 +1279,15 @@ def test_list_cameras_reports_the_playfield_link_after_set_camera_config(service
     assert service.list_cameras()[0].playfield == "main-playfield"
 
 
-def test_camera_config_settings_round_trip_without_hardware_application(directories, registry):
-    """AC6: a pushed ``settings`` dict survives the round trip through
-    ``get_camera_config`` unchanged, but a spy ``set_property`` proves
-    zero setting-application calls reach the backend -- ``Decision 1``'s
-    "accepted and echoed back but never applied" is asserted here
-    behaviourally, not just by absence of a call in the source."""
+def test_camera_config_settings_round_trip_and_apply_to_held_open_camera(directories, registry):
+    """Ticket 023-001: a pushed ``settings`` dict survives the round trip
+    through ``get_camera_config`` unchanged (as before), and a spy
+    ``set_property`` now proves the settings **do** reach the backend --
+    sprint 022's ``Decision 1`` scoping ("accepted and echoed back but
+    never applied") is exactly what this ticket closes. Superseded
+    version of the old
+    ``test_camera_config_settings_round_trip_without_hardware_application``,
+    which asserted the opposite (``calls == []``)."""
     identity = _identity("hw:spy", "Spy Camera")
     slug = registry.resolve(identity)
     number = registry.get(slug).number
@@ -1313,7 +1319,107 @@ def test_camera_config_settings_round_trip_without_hardware_application(director
     fetched = service.get_camera_config(slug)
 
     assert fetched.settings == {"exposure": 100, "gain": 2.5}
-    assert calls == []  # zero setting-application calls
+    assert calls == [("exposure", 100.0), ("gain", 2.5)]
+
+
+def test_set_camera_config_for_a_not_held_open_camera_stores_without_applying(
+    service, absent_camera
+):
+    """AC1's other half: a config for a camera not currently held open
+    (registered but absent -- UC-25) is still stored, unchanged from
+    before this ticket, with nothing to apply yet since there is no
+    open handle to push settings to."""
+    slug, _number = absent_camera
+
+    service.set_camera_config(CameraConfig(name=slug, playfield=None, settings={"gain": 5}))
+
+    assert service.get_camera_config(slug).settings == {"gain": 5}
+
+
+def test_set_camera_config_unsupported_key_fails_whole_push_leaves_config_unset(
+    service, held_camera
+):
+    """UC-03.S-3 at the service level: an unsupported key on a
+    held-open camera's *first-ever* push raises ``UnsupportedSetting``
+    (propagated straight through from ``Camera.apply_config``) and
+    leaves nothing stored -- ``get_camera_config`` still reports the
+    camera as never configured, exactly as if the push never
+    happened."""
+    _, slug, _ = held_camera
+
+    with pytest.raises(UnsupportedSetting) as exc_info:
+        service.set_camera_config(
+            CameraConfig(name=slug, playfield=None, settings={"not_a_real_key": 1})
+        )
+    assert exc_info.value.key == "not_a_real_key"
+
+    with pytest.raises(UnknownCamera):
+        service.get_camera_config(slug)
+
+
+def test_set_camera_config_unsupported_key_leaves_prior_config_untouched(service, held_camera):
+    """UC-03.S-3's defining postcondition: "re-fetching the config
+    returns the previous state." A camera already configured, then
+    pushed a second, failing document, must still report the *first*
+    document afterward -- not the rejected one, and not an unconfigured
+    state either."""
+    _, slug, _ = held_camera
+
+    service.set_camera_config(
+        CameraConfig(name=slug, playfield="main-playfield", settings={"gain": 3})
+    )
+    with pytest.raises(UnsupportedSetting):
+        service.set_camera_config(
+            CameraConfig(name=slug, playfield="other-field", settings={"not_a_real_key": 1})
+        )
+
+    fetched = service.get_camera_config(slug)
+    assert fetched.playfield == "main-playfield"
+    assert fetched.settings == {"gain": 3}
+
+
+def test_set_camera_config_gate_key_ordering_reaches_the_real_backend(directories, registry):
+    """Ticket 023-001 AC5: ``_GATE_KEYS`` ordering (``camera/camera.py``)
+    is exercised through the *service* entry point, not just directly
+    against ``Camera`` (``test_camera.py`` already covers that unit in
+    isolation) -- proving the ordering discipline survives being wired
+    through ``DaemonService.set_camera_config``."""
+    identity = _identity("hw:order", "Order Camera")
+    slug = registry.resolve(identity)
+    number = registry.get(slug).number
+    backend = FakeBackend(read_queue=[_frame()])
+    order: List[str] = []
+    original_set = backend.set_property
+
+    def spy_set(name, value):
+        order.append(name)
+        return original_set(name, value)
+
+    backend.set_property = spy_set  # type: ignore[method-assign]
+    cam = Camera(slug, backend, number=number)
+    cam.open()
+    cameras: Dict[str, Camera] = {slug: cam}
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(cameras.keys()),
+        identity_source=lambda: {0: identity},
+        backend_factory=lambda index: FakeBackend(),
+    )
+    service = DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        cameras=cameras,
+        identity_source=lambda: {0: identity},
+    )
+
+    service.set_camera_config(
+        CameraConfig(
+            name=slug, playfield=None, settings={"exposure": 100, "auto_exposure": 1}
+        )
+    )
+
+    assert order == ["auto_exposure", "exposure"]
 
 
 def test_get_camera_config_unknown_camera_raises_unknown_camera(service):
@@ -2063,3 +2169,276 @@ def test_rpc_calibrate_no_playfield_linked_maps_to_failed_precondition(stub, hel
     metadata = dict(excinfo.value.trailing_metadata())
     assert metadata["aprilcam-error-type"] == "NoPlayfieldLinked"
     assert metadata["aprilcam-camera"] == slug
+
+
+# ---------------------------------------------------------------------------
+# @pytest.mark.camera -- real hardware, end to end through DaemonService
+# (ticket 023-001, UC-03.S-2/S-3/S-4). Requires the real `aprilcam daemon`
+# process to be stopped first: this builds a genuine DaemonService that
+# opens real OpenCVBackend/UvcUtilBackend handles, and an AVFoundation
+# capture session is exclusive per process (the same precondition
+# test_camera.py's own real-hardware section already carries).
+#
+# Camera 3 (arducam-ov9782-usb-camera) is the real, currently-calibrated
+# main-playfield camera -- every test below that touches it restores its
+# exact pre-test hardware settings in a ``finally`` block, so a real run
+# of this module never leaves it altered for whoever uses it next.
+# ---------------------------------------------------------------------------
+
+#: Camera 3's baseline settings as installed on this project's real rig
+#: (queried live via ``uvc-util`` before ticket 023-001's changes were
+#: made) -- restored after every real-hardware test that touches it.
+_CAMERA_3_BASELINE_SETTINGS: Dict[str, float] = {
+    "auto_exposure": 1,
+    "exposure": 6,
+    "gain": 2,
+    "auto_white_balance": 0,
+    "white_balance_temperature": 4600,
+}
+
+#: ``hd-usb-camera``'s factory-default auto-exposure mode (aperture
+#: priority) -- restored after the independence test below leaves it in
+#: manual mode.
+_HD_USB_CAMERA_AUTO_EXPOSURE_DEFAULT: Dict[str, float] = {"auto_exposure": 8}
+
+#: Seconds to wait after a settings push before capturing a frame meant
+#: to show the effect -- an exposure/gain change takes a frame or two to
+#: reach the sensor's actual output; capturing immediately after a
+#: successful push (`UvcUtilBackend.set_property` has already verified
+#: the *control* took, this is a separate settling delay on the *pixels*)
+#: was found live to sometimes still return the previous frame.
+_SETTLE_S = 0.5
+
+
+def _real_identity(name_substring: str) -> Optional[CameraIdentity]:
+    """The real ``CameraIdentity`` for the first attached camera whose
+    device name contains *name_substring* (case-insensitive), or
+    ``None`` if not attached -- the ``DaemonService``-level counterpart
+    to ``test_camera.py``'s ``_real_camera_index`` (that one resolves a
+    bare OpenCV index; this resolves a full identity, since
+    ``DaemonService``/``CameraRegistry`` address cameras by slug)."""
+    for identity in identity_module.resolve_all().values():
+        if name_substring.lower() in identity.device_name.lower():
+            return identity
+    return None
+
+
+@pytest.fixture
+def real_daemon_service(tmp_path: Path):
+    """A genuine ``DaemonService`` against real, currently-attached
+    hardware -- registry/state live under *tmp_path* (never the real
+    ``~/.local/share/aprilcam``), but every camera open is a real
+    ``OpenCVBackend``/``UvcUtilBackend`` pair against whatever is
+    physically attached, via ``DaemonService``'s own real defaults
+    (``identity_source=resolve_all``, ``backend_factory=
+    _default_backend_factory``, ``control_backend_factory=
+    _default_control_backend_factory``) -- no override needed, this is
+    exactly what a real daemon process builds."""
+    directories = Directories(config_dir=tmp_path / "config", state_dir=tmp_path / "state")
+    registry = CameraRegistry(tmp_path / "state" / "cameras")
+    for identity in identity_module.resolve_all().values():
+        registry.resolve(identity)
+    discovery = CameraDiscovery(registry, active_slugs=lambda: frozenset())
+    service = DaemonService(registry=registry, discovery=discovery, directories=directories)
+    try:
+        yield service
+    finally:
+        service.close()
+
+
+def _mean_brightness(jpeg_bytes: bytes) -> float:
+    array = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+    image = cv.imdecode(array, cv.IMREAD_GRAYSCALE)
+    assert image is not None, "failed to decode captured JPEG frame"
+    return float(image.mean())
+
+
+_UVC_UTIL_CURRENT_VALUE_RE = re.compile(r"current-value:\s*(\S+)")
+
+
+def _uvc_util_current_value(binary: str, device_name: str, control: str) -> Optional[float]:
+    """Query *control*'s live value straight off the hardware via
+    ``uvc-util``, independent of anything ``UvcUtilBackend`` or
+    ``DaemonService`` remembers -- the strongest possible check that a
+    setting really reached the physical device."""
+    result = subprocess.run(
+        [binary, "-N", device_name, "-S", control],
+        shell=False,
+        capture_output=True,
+        text=True,
+        timeout=5.0,
+    )
+    if result.returncode != 0:
+        return None
+    match = _UVC_UTIL_CURRENT_VALUE_RE.search(result.stdout)
+    if match is None:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+@pytest.mark.camera
+def test_set_camera_config_manual_low_exposure_darkens_a_real_frame(real_daemon_service):
+    """UC-03.S-2, live: pushing a manual low-exposure config to camera 3
+    through ``DaemonService.set_camera_config`` -> ``Camera.
+    apply_config`` -> ``UvcUtilBackend`` produces a visibly, measurably
+    darker frame than a brighter manual-exposure push -- the real-hardware
+    finding this ticket exists to prove (``cv2.VideoCapture.set()`` does
+    not do this on this hardware; ``uvc-util`` does)."""
+    identity = _real_identity("Arducam OV9782")
+    if identity is None:
+        pytest.skip("no attached camera matching 'Arducam OV9782'")
+    slug = identity.slug
+
+    try:
+        real_daemon_service.get_frame(slug)  # open + hold -- apply_config needs this
+
+        real_daemon_service.set_camera_config(
+            CameraConfig(
+                name=slug,
+                playfield=None,
+                settings={"auto_exposure": 1, "exposure": 5000, "gain": 50},
+            )
+        )
+        time.sleep(_SETTLE_S)  # the sensor needs a frame or two to apply a new exposure
+        bright = real_daemon_service.get_frame(slug)
+
+        real_daemon_service.set_camera_config(
+            CameraConfig(
+                name=slug, playfield=None, settings={"auto_exposure": 1, "exposure": 1, "gain": 0}
+            )
+        )
+        time.sleep(_SETTLE_S)
+        dark = real_daemon_service.get_frame(slug)
+
+        assert _mean_brightness(dark.data) < _mean_brightness(bright.data)
+    finally:
+        real_daemon_service.set_camera_config(
+            CameraConfig(name=slug, playfield=None, settings=_CAMERA_3_BASELINE_SETTINGS)
+        )
+
+
+@pytest.mark.camera
+def test_set_camera_config_unsupported_key_fails_whole_push_camera_unchanged_live(
+    real_daemon_service,
+):
+    """UC-03.S-3, live: an unsupported key fails the **whole** push and
+    leaves the previously-pushed document in place -- re-fetching the
+    config after the failed push shows the pre-push values, not the
+    rejected ones."""
+    identity = _real_identity("Arducam OV9782")
+    if identity is None:
+        pytest.skip("no attached camera matching 'Arducam OV9782'")
+    slug = identity.slug
+
+    try:
+        real_daemon_service.get_frame(slug)  # open + hold -- apply_config needs this
+
+        real_daemon_service.set_camera_config(
+            CameraConfig(name=slug, playfield=None, settings={"auto_exposure": 1, "exposure": 6})
+        )
+        before = real_daemon_service.get_camera_config(slug)
+
+        with pytest.raises(UnsupportedSetting) as exc_info:
+            real_daemon_service.set_camera_config(
+                CameraConfig(
+                    name=slug, playfield=None, settings={"not_a_real_control": 1}
+                )
+            )
+        assert exc_info.value.key == "not_a_real_control"
+
+        after = real_daemon_service.get_camera_config(slug)
+        assert after == before
+    finally:
+        real_daemon_service.set_camera_config(
+            CameraConfig(name=slug, playfield=None, settings=_CAMERA_3_BASELINE_SETTINGS)
+        )
+
+
+@pytest.mark.camera
+def test_set_camera_config_out_of_range_value_fails_whole_push_camera_unchanged_live(
+    real_daemon_service,
+):
+    """UC-03.S-3's other half, live: an out-of-range *value* (not an
+    unknown key) also fails the whole push. Real-hardware finding
+    (ticket 023-001): ``uvc-util`` can report success while silently
+    clamping an out-of-range request instead of rejecting it --
+    ``UvcUtilBackend.set_property``'s readback verification is what
+    catches that and turns it into this same hard error."""
+    identity = _real_identity("Arducam OV9782")
+    if identity is None:
+        pytest.skip("no attached camera matching 'Arducam OV9782'")
+    slug = identity.slug
+
+    try:
+        real_daemon_service.get_frame(slug)  # open + hold -- apply_config needs this
+
+        real_daemon_service.set_camera_config(
+            CameraConfig(name=slug, playfield=None, settings={"auto_exposure": 1, "exposure": 6})
+        )
+        before = real_daemon_service.get_camera_config(slug)
+
+        with pytest.raises(UnsupportedSetting) as exc_info:
+            real_daemon_service.set_camera_config(
+                CameraConfig(name=slug, playfield=None, settings={"exposure": 999999})
+            )
+        assert exc_info.value.key == "exposure"
+
+        after = real_daemon_service.get_camera_config(slug)
+        assert after == before
+    finally:
+        real_daemon_service.set_camera_config(
+            CameraConfig(name=slug, playfield=None, settings=_CAMERA_3_BASELINE_SETTINGS)
+        )
+
+
+@pytest.mark.camera
+def test_set_camera_config_two_real_cameras_configured_independently(real_daemon_service):
+    """UC-03.S-4, live: camera 3 and ``hd-usb-camera`` configured in the
+    same session -- pushing to one does not change the other."""
+    id3 = _real_identity("Arducam OV9782")
+    id2 = _real_identity("HD USB")
+    if id3 is None or id2 is None:
+        pytest.skip("requires both arducam-ov9782-usb-camera and hd-usb-camera attached")
+    slug3, slug2 = id3.slug, id2.slug
+
+    try:
+        real_daemon_service.get_frame(slug3)  # open + hold both -- apply_config needs this
+        real_daemon_service.get_frame(slug2)
+
+        real_daemon_service.set_camera_config(
+            CameraConfig(
+                name=slug3, playfield=None, settings={"auto_exposure": 1, "exposure": 6, "gain": 2}
+            )
+        )
+        real_daemon_service.set_camera_config(
+            CameraConfig(
+                name=slug2,
+                playfield=None,
+                settings={"auto_exposure": 1, "exposure": 300, "gain": 10},
+            )
+        )
+
+        cfg3 = real_daemon_service.get_camera_config(slug3)
+        cfg2 = real_daemon_service.get_camera_config(slug2)
+        assert cfg3.settings["exposure"] == 6
+        assert cfg2.settings["exposure"] == 300
+
+        # Stronger than the config-store check above: read each
+        # control straight off the hardware via uvc-util, independent
+        # of anything DaemonService remembers, to prove the *physical*
+        # controls -- not just two in-memory dict entries -- are
+        # independent.
+        binary = shutil.which("uvc-util")
+        if binary is not None:
+            assert _uvc_util_current_value(binary, id3.device_name, "exposure-time-abs") == 6.0
+            assert _uvc_util_current_value(binary, id2.device_name, "exposure-time-abs") == 300.0
+    finally:
+        real_daemon_service.set_camera_config(
+            CameraConfig(name=slug3, playfield=None, settings=_CAMERA_3_BASELINE_SETTINGS)
+        )
+        real_daemon_service.set_camera_config(
+            CameraConfig(name=slug2, playfield=None, settings=_HD_USB_CAMERA_AUTO_EXPOSURE_DEFAULT)
+        )
