@@ -37,7 +37,7 @@ from aprilcam.client.interfaces import Guides as GuidesBase
 from aprilcam.mcp.connection import ConnectionManager
 from aprilcam.mcp.errors import handle_tool_errors
 from aprilcam.mcp.images import create_temp_dir
-from aprilcam.mcp.tools import perception
+from aprilcam.mcp.tools import configuration, perception
 
 __all__ = ["build_server"]
 
@@ -142,5 +142,10 @@ def build_server(
     # `mcp.tools.*.register(mcp, connection, temp_dir)` call against
     # these exact locals, matching this one.
     perception.register(mcp, connection, temp_dir)
+
+    # Ticket 003: whole-document camera/playfield configuration and
+    # calibration -- see `mcp/tools/configuration.py`'s module
+    # docstring. Same `register(mcp, connection, temp_dir)` shape.
+    configuration.register(mcp, connection, temp_dir)
 
     return mcp

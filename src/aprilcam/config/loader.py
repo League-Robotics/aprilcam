@@ -41,6 +41,19 @@ filename), missing/invalid field geometry, a feature entry missing
 outside the declared field's half-extents ("field-size/corner
 inconsistency"), and an ArUco or AprilTag id repeated at two different
 coordinates within its own family.
+
+**Dict-based entry points (ticket 026-003).** ``parse_camera_config``/
+``parse_playfield`` run the exact same whole-document validation as
+``load_camera_config``/``load_playfield`` above, just fed an
+already-parsed ``dict`` instead of a file ``Path`` -- what
+``mcp.tools.configuration``'s ``set_camera_config``/``set_playfield``
+tools call, since an MCP client has no filesystem the daemon can reach
+to hand over a path (spec principle 7). ``load_camera_config``/
+``load_playfield`` are themselves now thin wrappers: read the file,
+then delegate to the matching ``parse_*`` method, so every validation
+rule (self-naming, geometry, per-section entry checks, duplicate-id
+rejection) lives in exactly one place regardless of which entry point a
+caller uses.
 """
 
 from __future__ import annotations
@@ -297,34 +310,58 @@ class ConfigLoader(_ConfigLoaderBase):
 
     def load_camera_config(self, path: Path) -> CameraConfig:
         data = _read_json_object(path, kind="camera config")
-        name = _require_name(data, path, kind="camera config")
+        return self.parse_camera_config(data, source=str(path))
+
+    def load_playfield(self, path: Path) -> "PlayfieldDefinition":
+        data = _read_json_object(path, kind="playfield definition")
+        return self.parse_playfield(data, source=str(path))
+
+    def parse_camera_config(
+        self, data: Dict[str, Any], *, source: str = "the pushed document"
+    ) -> CameraConfig:
+        """Dict-based counterpart of :meth:`load_camera_config` (ticket
+        026-003) -- see the module docstring's "Dict-based entry
+        points" section. *source* only shapes error-message wording (a
+        file path for the file-based caller above, a generic label for
+        every other caller); it carries no other meaning.
+        """
+        if not isinstance(data, dict):
+            raise MalformedDocument(f"camera config in {source} must be a JSON object")
+        name = _require_name(data, kind="camera config", source=source)
 
         playfield = data.get("playfield")
         if playfield is not None and not isinstance(playfield, str):
             raise MalformedDocument(
-                f"camera config {path}: 'playfield' must be a string or null, got {playfield!r}"
+                f"camera config in {source}: 'playfield' must be a string or null, got {playfield!r}"
             )
 
         settings = data.get("settings", {})
         if settings is None:
             settings = {}
         if not isinstance(settings, dict):
-            raise MalformedDocument(f"camera config {path}: 'settings' must be an object")
+            raise MalformedDocument(f"camera config in {source}: 'settings' must be an object")
 
         return CameraConfig(name=name, playfield=playfield, settings=dict(settings))
 
-    def load_playfield(self, path: Path) -> "PlayfieldDefinition":
-        data = _read_json_object(path, kind="playfield definition")
-        name = _require_name(data, path, kind="playfield definition")
-        width_cm, height_cm = _require_geometry(data, path)
+    def parse_playfield(
+        self, data: Dict[str, Any], *, source: str = "the pushed document"
+    ) -> "PlayfieldDefinition":
+        """Dict-based counterpart of :meth:`load_playfield` (ticket
+        026-003) -- see the module docstring's "Dict-based entry
+        points" section. *source* only shapes error-message wording;
+        see :meth:`parse_camera_config`."""
+        if not isinstance(data, dict):
+            raise MalformedDocument(f"playfield definition in {source} must be a JSON object")
+        name = _require_name(data, kind="playfield definition", source=source)
+        width_cm, height_cm = _require_geometry(data, source=source)
 
         sections: Dict[str, Tuple[PlayfieldFeatureEntry, ...]] = {}
         for section in _ALL_SECTIONS:
             sections[section] = _parse_section(
-                data, section, path=path, width_cm=width_cm, height_cm=height_cm
+                data, section, source=source, width_cm=width_cm, height_cm=height_cm
             )
 
-        _reject_duplicate_ids(sections, path)
+        _reject_duplicate_ids(sections, source=source)
 
         return PlayfieldDefinition(
             name=name,
@@ -356,45 +393,51 @@ def _read_json_object(path: Path, *, kind: str) -> Dict[str, Any]:
     return data
 
 
-def _require_name(data: Dict[str, Any], path: Path, *, kind: str) -> str:
-    """The self-naming rule: a document with no ``name`` is malformed,
-    and the target is never inferred from the filename (UC-23.S-4)."""
+def _require_name(data: Dict[str, Any], *, kind: str, source: str) -> str:
+    """The self-naming rule: a document with no ``name`` is malformed --
+    the target is always the document's own ``name`` field, never
+    inferred from a path, filename, or any other context (UC-23.S-4).
+    *source* only shapes the message (a file path or a generic label);
+    shared by both :meth:`ConfigLoader.load_camera_config`/
+    :meth:`~ConfigLoader.load_playfield` (file-based, *source* is
+    ``str(path)``) and :meth:`ConfigLoader.parse_camera_config`/
+    :meth:`~ConfigLoader.parse_playfield` (dict-based)."""
     name = data.get("name")
     if not isinstance(name, str) or not name.strip():
         raise MalformedDocument(
-            f"{kind} at {path} has no 'name' field -- the target is never inferred "
-            "from the filename"
+            f"{kind} in {source} has no 'name' field -- the target is always the "
+            "document's own 'name' field, never inferred from a path or filename"
         )
     return name
 
 
-def _require_geometry(data: Dict[str, Any], path: Path) -> Tuple[float, float]:
+def _require_geometry(data: Dict[str, Any], *, source: str) -> Tuple[float, float]:
     pf = data.get("playfield")
     if not isinstance(pf, dict):
         raise MalformedDocument(
-            f"playfield definition {path} has no 'playfield' geometry block"
+            f"playfield definition in {source} has no 'playfield' geometry block"
         )
     try:
         width_cm = float(pf["width_cm"])
         height_cm = float(pf["height_cm"])
     except (KeyError, TypeError, ValueError) as exc:
         raise MalformedDocument(
-            f"playfield definition {path} is missing/invalid width_cm/height_cm: {exc}"
+            f"playfield definition in {source} is missing/invalid width_cm/height_cm: {exc}"
         ) from exc
     if width_cm <= 0 or height_cm <= 0:
         raise MalformedDocument(
-            f"playfield definition {path}: width_cm/height_cm must be positive "
+            f"playfield definition in {source}: width_cm/height_cm must be positive "
             f"(got {width_cm}x{height_cm})"
         )
     return width_cm, height_cm
 
 
 def _parse_section(
-    data: Dict[str, Any], section: str, *, path: Path, width_cm: float, height_cm: float
+    data: Dict[str, Any], section: str, *, source: str, width_cm: float, height_cm: float
 ) -> Tuple[PlayfieldFeatureEntry, ...]:
     raw_list = data.get(section, []) or []
     if not isinstance(raw_list, list):
-        raise MalformedDocument(f"playfield definition {path}: {section!r} must be a list")
+        raise MalformedDocument(f"playfield definition in {source}: {section!r} must be a list")
 
     half_w = width_cm / 2 + _BOUNDS_EPSILON_CM
     half_h = height_cm / 2 + _BOUNDS_EPSILON_CM
@@ -404,19 +447,19 @@ def _parse_section(
     for raw in raw_list:
         if not isinstance(raw, dict):
             raise MalformedDocument(
-                f"playfield definition {path}: an entry in {section!r} is not an object"
+                f"playfield definition in {source}: an entry in {section!r} is not an object"
             )
         slug = raw.get("slug")
         if not isinstance(slug, str) or not slug.strip():
             raise MalformedDocument(
-                f"playfield definition {path}: an entry in {section!r} has no 'slug'"
+                f"playfield definition in {source}: an entry in {section!r} has no 'slug'"
             )
         try:
             x = float(raw["x"])
             y = float(raw["y"])
         except (KeyError, TypeError, ValueError) as exc:
             raise MalformedDocument(
-                f"playfield definition {path}: {slug!r} has invalid/missing x/y: {exc}"
+                f"playfield definition in {source}: {slug!r} has invalid/missing x/y: {exc}"
             ) from exc
 
         tag_id: Optional[int] = None
@@ -425,12 +468,12 @@ def _parse_section(
                 tag_id = int(raw["id"])
             except (KeyError, TypeError, ValueError) as exc:
                 raise MalformedDocument(
-                    f"playfield definition {path}: {slug!r} in {section!r} has no valid 'id': {exc}"
+                    f"playfield definition in {source}: {slug!r} in {section!r} has no valid 'id': {exc}"
                 ) from exc
 
         if abs(x) > half_w or abs(y) > half_h:
             raise MalformedDocument(
-                f"playfield definition {path}: {slug!r} at ({x}, {y}) lies outside the "
+                f"playfield definition in {source}: {slug!r} at ({x}, {y}) lies outside the "
                 f"declared {width_cm}x{height_cm} cm field -- field-size/corner inconsistency"
             )
 
@@ -439,7 +482,9 @@ def _parse_section(
     return tuple(entries)
 
 
-def _reject_duplicate_ids(sections: Dict[str, Tuple[PlayfieldFeatureEntry, ...]], path: Path) -> None:
+def _reject_duplicate_ids(
+    sections: Dict[str, Tuple[PlayfieldFeatureEntry, ...]], *, source: str
+) -> None:
     """A duplicate id *within one family* (April vs ArUco are distinct
     identities, ``types.TagFamily``'s own docstring) at two different
     coordinates is rejected whole, naming the id (UC-02.S-2). The same
@@ -454,7 +499,7 @@ def _reject_duplicate_ids(sections: Dict[str, Tuple[PlayfieldFeatureEntry, ...]]
             prior = seen.get(entry.tag_id)
             if prior is not None and prior != pos:
                 raise MalformedDocument(
-                    f"playfield definition {path}: duplicate {family} id {entry.tag_id} "
+                    f"playfield definition in {source}: duplicate {family} id {entry.tag_id} "
                     f"at different coordinates ({prior} vs {pos})"
                 )
             seen[entry.tag_id] = pos

@@ -1,7 +1,7 @@
 ---
 id: '003'
 title: Configuration tools (camera config, playfield, calibration)
-status: open
+status: done
 use-cases:
 - SUC-002
 depends-on:
@@ -37,7 +37,7 @@ before 001 merges. Independent of tickets 002/004/005.
 
 ## Acceptance Criteria
 
-- [ ] `config/loader.py` gains dict-based parsing entry points (e.g.
+- [x] `config/loader.py` gains dict-based parsing entry points (e.g.
       `ConfigLoader.parse_camera_config(data: dict) -> CameraConfig`,
       `ConfigLoader.parse_playfield(data: dict) -> PlayfieldDefinition`)
       factored out of the existing `_read_json_object` +
@@ -47,29 +47,29 @@ before 001 merges. Independent of tickets 002/004/005.
       rejection). `load_camera_config`/`load_playfield` (file-based)
       keep their existing signatures and behaviour unchanged — this is a
       refactor of shared internals, not a contract change.
-- [ ] `set_camera_config(document: dict)` / `set_playfield(document: dict)`
+- [x] `set_camera_config(document: dict)` / `set_playfield(document: dict)`
       accept a JSON object; a malformed document raises
       `MalformedDocument`, mapped to a tool error naming exactly what
       was wrong, with **no RPC attempted** (client-side validation
       catches it first, per UC-23.S-4).
-- [ ] `get_camera_config(camera)` / `get_playfield(name)` /
+- [x] `get_camera_config(camera)` / `get_playfield(name)` /
       `list_playfields()` return the whole document in its
       `to_dict()`-equivalent shape — loadable verbatim, matching the
       round-trip contract `config/loader.py` already documents.
-- [ ] `reset_camera_config(camera)` -> re-applies the stored on-disk
+- [x] `reset_camera_config(camera)` -> re-applies the stored on-disk
       config, discarding any live override.
-- [ ] `calibrate(camera)` -> `CalibrationResult` (`succeeded`,
+- [x] `calibrate(camera)` -> `CalibrationResult` (`succeeded`,
       `matched_ids`, `missing_ids`, `reprojection_error_cm`, `reason`).
       A camera with no playfield link fails with the daemon's
       `NoPlayfieldLinked` error **before any frame is requested** —
       verified against a fake `Daemon` that raises if any frame-related
       method is ever called for that case.
-- [ ] `get_calibration(camera)` -> a `Calibration` or `None`, never a
+- [x] `get_calibration(camera)` -> a `Calibration` or `None`, never a
       fabricated default (mirrors `get_tag`'s Optional-not-zero-valued
       discipline).
-- [ ] Every tool wrapped with ticket 001's error-mapping decorator.
-- [ ] `uv run mypy` clean; zero `typing.Protocol`.
-- [ ] Full suite green.
+- [x] Every tool wrapped with ticket 001's error-mapping decorator.
+- [x] `uv run mypy` clean; zero `typing.Protocol`.
+- [x] Full suite green.
 
 ## Testing
 
