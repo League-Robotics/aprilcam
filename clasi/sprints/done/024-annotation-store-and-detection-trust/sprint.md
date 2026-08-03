@@ -1,7 +1,7 @@
 ---
 id: '024'
 title: Annotation store and detection trust
-status: planning-docs
+status: closed
 branch: sprint/024-annotation-store-and-detection-trust
 worktree: false
 use-cases: []
