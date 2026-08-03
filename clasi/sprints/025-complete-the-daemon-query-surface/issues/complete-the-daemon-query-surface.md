@@ -1,5 +1,14 @@
 ---
-status: pending
+status: in-progress
+sprint: '025'
+tickets:
+- 025-001
+- 025-002
+- 025-003
+- 025-004
+- 025-005
+- 025-006
+- 025-007
 ---
 
 # Complete the daemon's query surface (features, mounts, guides)

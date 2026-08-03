@@ -8,11 +8,11 @@ command.
 Wires the ``daemon`` and ``camera`` subcommands (ticket 020-006,
 ``cli/daemon.py`` / ``cli/camera.py``) into the ``-h``/``--help``-only
 stub ticket 001 left here, plus ``playfield`` (ticket 022-001,
-``cli/playfield.py``). Each subcommand module owns its own argparse
-shape and dispatch functions; this module only assembles them and
-routes ``argv`` to whichever ``func`` argparse resolved — itself zero
-business logic, per ``adapters.md``'s "adapters hold no authoritative
-state" rule.
+``cli/playfield.py``) and ``tags`` (ticket 025-005, ``cli/tags.py``).
+Each subcommand module owns its own argparse shape and dispatch
+functions; this module only assembles them and routes ``argv`` to
+whichever ``func`` argparse resolved — itself zero business logic, per
+``adapters.md``'s "adapters hold no authoritative state" rule.
 """
 
 from __future__ import annotations
@@ -21,12 +21,13 @@ import argparse
 import sys
 from typing import Optional, Sequence
 
-from aprilcam.cli import camera, daemon, playfield
+from aprilcam.cli import camera, daemon, playfield, tags
 
 
 def _build_parser() -> argparse.ArgumentParser:
     """The top-level ``argparse`` parser: ``-h``/``--help`` plus the
-    ``daemon``, ``camera``, and ``playfield`` subcommand trees."""
+    ``daemon``, ``camera``, ``playfield``, and ``tags`` subcommand
+    trees."""
     parser = argparse.ArgumentParser(
         prog="aprilcam",
         description=(
@@ -39,6 +40,7 @@ def _build_parser() -> argparse.ArgumentParser:
     daemon.add_subparser(subparsers)
     camera.add_subparser(subparsers)
     playfield.add_subparser(subparsers)
+    tags.add_subparser(subparsers)
     return parser
 
 
