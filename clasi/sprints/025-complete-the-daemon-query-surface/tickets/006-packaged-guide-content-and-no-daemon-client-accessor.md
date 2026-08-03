@@ -1,7 +1,7 @@
 ---
 id: '006'
 title: Packaged guide content and no-daemon client accessor
-status: open
+status: done
 use-cases:
 - SUC-003
 depends-on: []
@@ -70,24 +70,24 @@ running" property, not merely "doesn't happen to fail today."
 
 ## Acceptance Criteria
 
-- [ ] `aprilcam/guides.py` holds packaged text for `"agent"` and
+- [x] `aprilcam/guides.py` holds packaged text for `"agent"` and
       `"robot"` guides, rewritten for v2 conventions (not a copy of
       v1's text).
-- [ ] `client/guides.py`'s `Guides` concrete implementation derives
+- [x] `client/guides.py`'s `Guides` concrete implementation derives
       from `client.interfaces.Guides`.
-- [ ] UC-27.S-1: `Guides().get()` (no name — defaults to `"agent"`)
+- [x] UC-27.S-1: `Guides().get()` (no name — defaults to `"agent"`)
       succeeds with zero daemon/network objects constructed anywhere
       in the call path.
-- [ ] UC-27.S-2: the returned "agent" guide text contains the
+- [x] UC-27.S-2: the returned "agent" guide text contains the
       world-frame statement (+x east, +y north, A1-centred, heading 0
       = east CCW positive) verbatim or equivalently.
-- [ ] UC-27.S-3: `Guides().get("nonexistent")` raises
+- [x] UC-27.S-3: `Guides().get("nonexistent")` raises
       `errors.UnknownGuide` naming `"agent"` and `"robot"` as the
       guides that exist.
-- [ ] `available()` returns exactly `("agent", "robot")`.
-- [ ] Guide text explicitly states the per-session re-registration
+- [x] `available()` returns exactly `("agent", "robot")`.
+- [x] Guide text explicitly states the per-session re-registration
       rule for mounts (UC-12) and annotations (UC-28).
-- [ ] `uv run mypy` clean; `Guides` derives from the existing plain
+- [x] `uv run mypy` clean; `Guides` derives from the existing plain
       base class, no `typing.Protocol`.
 
 ## Implementation Plan
