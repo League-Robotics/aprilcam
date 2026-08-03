@@ -1257,6 +1257,98 @@ def test_daemon_holds_two_differently_named_playfields_without_interference(serv
     assert service.get_playfield("field-b").definition.required_aruco_ids() == (5, 6, 7)
 
 
+# ---------------------------------------------------------------------------
+# find_feature (ticket 025-002, UC-08)
+# ---------------------------------------------------------------------------
+
+
+def _real_main_playfield_definition() -> PlayfieldDefinition:
+    """The real ``main-playfield.json`` on disk -- includes dots and
+    rectangles ``_playfield_definition()`` above (ArUco-only) does not,
+    which ``find_feature``'s worked example (UC-08.S-1/S-2/S-3:
+    ``dot-west-blue``, the four orange dots) needs. Same fixture file
+    ``tests/aprilcam/playfield/test_query.py``'s
+    ``real_main_playfield_query`` loads."""
+    path = Path(__file__).resolve().parents[3] / "config" / "aprilcam-old" / "playfields" / "main-playfield.json"
+    assert path.exists(), f"fixture missing: {path}"
+    return ConfigLoader().load_playfield(path)
+
+
+def test_find_feature_delegates_to_feature_query_blue_dot_west(service):
+    service.set_playfield(_real_main_playfield_definition())
+
+    matches = service.find_feature("main-playfield", "the blue dot")
+
+    assert len(matches) == 1
+    assert matches[0].slug == "dot-west-blue"
+    assert matches[0].position == WorldPoint(x=-50, y=0)
+
+
+def test_find_feature_ambiguous_query_returns_all_four_orange_dots(service):
+    service.set_playfield(_real_main_playfield_definition())
+
+    matches = service.find_feature("main-playfield", "the orange dot")
+
+    assert {m.slug for m in matches} == {
+        "dot-northwest-orange",
+        "dot-northeast-orange",
+        "dot-southeast-orange",
+        "dot-southwest-orange",
+    }
+
+
+def test_find_feature_no_match_returns_empty_tuple_not_nearest_guess(service):
+    service.set_playfield(_real_main_playfield_definition())
+
+    matches = service.find_feature("main-playfield", "the orange triangle")
+
+    assert matches == ()
+
+
+def test_find_feature_unknown_playfield_raises_unknown_playfield_listing_held_playfields(service):
+    service.set_playfield(_real_main_playfield_definition())
+
+    with pytest.raises(UnknownPlayfield) as excinfo:
+        service.find_feature("no-such-field", "the blue dot")
+
+    assert excinfo.value.requested == "no-such-field"
+    assert excinfo.value.available == ("main-playfield",)
+
+
+def test_find_feature_on_a_service_with_no_playfields_lists_none_available(service):
+    with pytest.raises(UnknownPlayfield) as excinfo:
+        service.find_feature("main-playfield", "the blue dot")
+    assert excinfo.value.available == ()
+
+
+def test_find_feature_opens_no_camera(directories, registry):
+    """UC-08's own claim: answered from the surveyed definition, never
+    vision -- no camera is opened and no calibration is required. Built
+    against a service holding *zero* cameras (unlike the ``service``
+    fixture used above, which has one held open for other tests) so
+    there is nothing ``find_feature`` could open even by accident."""
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(),
+        identity_source=lambda: {},
+        backend_factory=lambda index: FakeBackend(),
+    )
+    camera_free_service = DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        cameras={},
+        identity_source=lambda: {},
+    )
+    camera_free_service.set_playfield(_real_main_playfield_definition())
+
+    matches = camera_free_service.find_feature("main-playfield", "the blue dot")
+
+    assert len(matches) == 1
+    assert matches[0].slug == "dot-west-blue"
+    assert camera_free_service._cameras == {}  # no camera was opened as a side effect
+
+
 def test_set_camera_config_links_camera_and_get_camera_config_echoes_it_back(service, held_camera):
     _, slug, _ = held_camera
     service.set_playfield(_playfield_definition())
@@ -1847,6 +1939,97 @@ def test_rpc_get_playfield_reports_a_linked_camera(stub, held_camera):
     response = stub.GetPlayfield(aprilcam_v2_pb2.GetPlayfieldRequest(name="main-playfield"))
 
     assert list(response.playfield.linked_cameras) == [slug]
+
+
+# ---------------------------------------------------------------------------
+# FindFeature -- RPC round trips (ticket 025-002, UC-08)
+# ---------------------------------------------------------------------------
+
+
+def _playfield_definition_msg_with_dots() -> aprilcam_v2_pb2.PlayfieldDefinition:
+    """A hand-built proto message (mirroring ``_playfield_definition_msg``'s
+    existing convention above) that includes the ``dots`` section that
+    helper does not -- ``FindFeature``'s round trip needs findable
+    coloured features, not just ArUco ids, to exercise UC-08.S-1/S-2/S-3
+    over the real wire."""
+    return aprilcam_v2_pb2.PlayfieldDefinition(
+        name="main-playfield",
+        width_cm=134.3,
+        height_cm=89.3,
+        dots=[
+            aprilcam_v2_pb2.PlayfieldFeatureEntry(slug="dot-west-blue", x=-50.0, y=0.0, colour="blue"),
+            aprilcam_v2_pb2.PlayfieldFeatureEntry(
+                slug="dot-northwest-orange", x=-50.0, y=30.0, colour="orange"
+            ),
+            aprilcam_v2_pb2.PlayfieldFeatureEntry(
+                slug="dot-northeast-orange", x=50.0, y=30.0, colour="orange"
+            ),
+            aprilcam_v2_pb2.PlayfieldFeatureEntry(
+                slug="dot-southeast-orange", x=50.0, y=-30.0, colour="orange"
+            ),
+            aprilcam_v2_pb2.PlayfieldFeatureEntry(
+                slug="dot-southwest-orange", x=-50.0, y=-30.0, colour="orange"
+            ),
+        ],
+    )
+
+
+def test_rpc_find_feature_unique_match_round_trips_slug_kind_colour_and_position(stub):
+    stub.SetPlayfield(
+        aprilcam_v2_pb2.SetPlayfieldRequest(definition=_playfield_definition_msg_with_dots())
+    )
+
+    response = stub.FindFeature(
+        aprilcam_v2_pb2.FindFeatureRequest(playfield="main-playfield", query="the blue dot")
+    )
+
+    assert len(response.features) == 1
+    match = response.features[0]
+    assert match.slug == "dot-west-blue"
+    assert match.kind == "dot"
+    assert match.colour == "blue"
+    assert (match.position.x, match.position.y) == (-50.0, 0.0)
+
+
+def test_rpc_find_feature_ambiguous_query_round_trips_all_four_orange_dots(stub):
+    stub.SetPlayfield(
+        aprilcam_v2_pb2.SetPlayfieldRequest(definition=_playfield_definition_msg_with_dots())
+    )
+
+    response = stub.FindFeature(
+        aprilcam_v2_pb2.FindFeatureRequest(playfield="main-playfield", query="the orange dot")
+    )
+
+    assert {f.slug for f in response.features} == {
+        "dot-northwest-orange",
+        "dot-northeast-orange",
+        "dot-southeast-orange",
+        "dot-southwest-orange",
+    }
+
+
+def test_rpc_find_feature_no_match_round_trips_an_empty_list(stub):
+    stub.SetPlayfield(
+        aprilcam_v2_pb2.SetPlayfieldRequest(definition=_playfield_definition_msg_with_dots())
+    )
+
+    response = stub.FindFeature(
+        aprilcam_v2_pb2.FindFeatureRequest(playfield="main-playfield", query="the orange triangle")
+    )
+
+    assert list(response.features) == []
+
+
+def test_rpc_find_feature_unknown_playfield_maps_to_not_found(stub):
+    with pytest.raises(grpc.RpcError) as excinfo:
+        stub.FindFeature(
+            aprilcam_v2_pb2.FindFeatureRequest(playfield="no-such-field", query="the blue dot")
+        )
+
+    assert excinfo.value.code() == grpc.StatusCode.NOT_FOUND
+    metadata = dict(excinfo.value.trailing_metadata())
+    assert metadata["aprilcam-error-type"] == "UnknownPlayfield"
+    assert metadata["aprilcam-requested"] == "no-such-field"
 
 
 def test_rpc_set_camera_config_and_get_camera_config_round_trip_settings(stub, held_camera):

@@ -1,6 +1,7 @@
 """Tests for ``aprilcam.cli.playfield`` (ticket 022-001; ``cmd_image``
 added by ticket 022-005; ``cmd_view`` added by ticket 022-006;
-``cmd_annotations`` added by ticket 024-004).
+``cmd_annotations`` added by ticket 024-004; ``cmd_where`` added by
+ticket 025-002).
 
 Headless, matching ``test_camera_cli.py``'s established style: a fake
 ``ConfigLoader`` and a fake ``Daemon``/``Discovery`` pair injected
@@ -25,6 +26,7 @@ from typing import Optional, Tuple
 import pytest
 
 from aprilcam.cli import playfield as playfield_cli
+from aprilcam.config.interfaces import Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.errors import (
     CameraNotPresent,
@@ -116,6 +118,9 @@ class _FakeDaemon:
     get_annotations_requested: Optional[Tuple[str, Optional[str]]] = None
     clear_annotations_raises: Optional[Exception] = None
     clear_annotations_requested: Optional[Tuple[str, Optional[str]]] = None
+    find_feature_returns: Tuple[Feature, ...] = ()
+    find_feature_raises: Optional[Exception] = None
+    find_feature_requested: Optional[Tuple[str, str]] = None
 
     def set_playfield(self, definition) -> None:
         if self.set_playfield_raises is not None:
@@ -155,6 +160,12 @@ class _FakeDaemon:
         self.clear_annotations_requested = (playfield, layer)
         if self.clear_annotations_raises is not None:
             raise self.clear_annotations_raises
+
+    def find_feature(self, playfield: str, query: str) -> Tuple[Feature, ...]:
+        self.find_feature_requested = (playfield, query)
+        if self.find_feature_raises is not None:
+            raise self.find_feature_raises
+        return self.find_feature_returns
 
 
 @dataclass
@@ -203,6 +214,7 @@ def _args(**overrides) -> argparse.Namespace:
         playfield="main-playfield",
         clear=False,
         layer=None,
+        query="the blue dot",
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -1193,4 +1205,168 @@ def test_playfield_list_h_prints_help_not_a_missing_hostname_error():
     parser = _build_parser()
     with pytest.raises(SystemExit) as excinfo:
         parser.parse_args(["playfield", "list", "-h"])
+    assert excinfo.value.code == 0
+
+
+# ---------------------------------------------------------------------------
+# where -- find_feature (ticket 025-002, UC-08)
+# ---------------------------------------------------------------------------
+
+
+def _feature(
+    slug: str, kind: str = "dot", *, colour: Optional[str] = None, x: float = 0.0, y: float = 0.0
+) -> Feature:
+    return Feature(slug=slug, kind=kind, position=WorldPoint(x=x, y=y), colour=colour)
+
+
+def test_where_prints_slug_kind_colour_and_position_for_each_match(capsys):
+    daemon = _FakeDaemon(
+        find_feature_returns=(_feature("dot-west-blue", "dot", colour="blue", x=-50.0, y=0.0),)
+    )
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = playfield_cli.cmd_where(_args(query="the blue dot"), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    assert daemon.find_feature_requested == ("main-playfield", "the blue dot")
+    out = capsys.readouterr().out
+    assert "dot-west-blue" in out
+    assert "dot" in out
+    assert "blue" in out
+    assert "-50.00" in out and "0.00" in out
+
+
+def test_where_ambiguous_query_prints_every_match(capsys):
+    daemon = _FakeDaemon(
+        find_feature_returns=(
+            _feature("dot-northwest-orange", colour="orange", x=-50.0, y=30.0),
+            _feature("dot-northeast-orange", colour="orange", x=50.0, y=30.0),
+            _feature("dot-southeast-orange", colour="orange", x=50.0, y=-30.0),
+            _feature("dot-southwest-orange", colour="orange", x=-50.0, y=-30.0),
+        )
+    )
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = playfield_cli.cmd_where(_args(query="the orange dot"), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    for slug in (
+        "dot-northwest-orange",
+        "dot-northeast-orange",
+        "dot-southeast-orange",
+        "dot-southwest-orange",
+    ):
+        assert slug in out
+
+
+def test_where_no_match_prints_an_explicit_no_matches_not_silent_empty_output(capsys):
+    daemon = _FakeDaemon(find_feature_returns=())
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = playfield_cli.cmd_where(
+        _args(query="the orange triangle"), discovery_factory=lambda: discovery
+    )
+
+    assert code == 0
+    assert "(no matches)" in capsys.readouterr().out
+
+
+def test_where_feature_with_no_colour_prints_a_dash_not_none(capsys):
+    daemon = _FakeDaemon(
+        find_feature_returns=(_feature("apriltag-center-a1", "april_tag", colour=None),)
+    )
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = playfield_cli.cmd_where(_args(query="tag"), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "apriltag-center-a1" in out
+    assert "None" not in out
+
+
+def test_where_unknown_playfield_surfaces_the_daemon_error(capsys):
+    daemon = _FakeDaemon(find_feature_raises=UnknownPlayfield("ghost-field", ("main-playfield",)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = playfield_cli.cmd_where(
+        _args(playfield="ghost-field"), discovery_factory=lambda: discovery
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "ghost-field" in err
+    assert "main-playfield" in err
+
+
+def test_where_passes_the_daemon_flag_through_to_connect():
+    daemon = _FakeDaemon(find_feature_returns=())
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    playfield_cli.cmd_where(
+        _args(daemon="pi-field.local"), discovery_factory=lambda: discovery
+    )
+
+    assert discovery.connected_with == "pi-field.local"
+
+
+def test_where_all_fans_out_and_reports_one_unreachable_daemon(capsys):
+    good = _FakeDaemon(find_feature_returns=(_feature("dot-west-blue", colour="blue"),))
+    discovery = _FakeDiscovery(
+        infos=(_Info(host="localhost", is_local=True), _Info(host="unreachable-host", is_local=False)),
+        daemons_by_host={
+            None: good,
+            "unreachable-host": ConnectionFailed("unreachable-host", reason="no answer"),
+        },
+    )
+
+    code = playfield_cli.cmd_where(_args(all=True), discovery_factory=lambda: discovery)
+
+    assert code == 1  # partial failure is visible in the exit code
+    out, err = capsys.readouterr()
+    assert "localhost (local):" in out
+    assert "dot-west-blue" in out
+    assert "unreachable-host: unreachable" in err
+    assert "no answer" in err
+
+
+def test_where_all_with_zero_daemons_found_is_success_not_error(capsys):
+    discovery = _FakeDiscovery(infos=())
+
+    code = playfield_cli.cmd_where(_args(all=True), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    assert "(no daemons found)" in capsys.readouterr().out
+
+
+def test_where_all_reports_discovery_failed_distinctly(capsys):
+    discovery = _FakeDiscovery(find_all_raises=DiscoveryFailed("multicast blocked"))
+
+    code = playfield_cli.cmd_where(_args(all=True), discovery_factory=lambda: discovery)
+
+    assert code == 1
+    assert "multicast blocked" in capsys.readouterr().err
+
+
+def test_where_is_wired_to_cmd_where_with_playfield_and_query_positionals():
+    parser = _build_parser()
+    args = parser.parse_args(["playfield", "where", "main-playfield", "the blue dot"])
+    assert args.func is playfield_cli.cmd_where
+    assert args.playfield == "main-playfield"
+    assert args.query == "the blue dot"
+    assert args.daemon is None
+    assert args.all is False
+
+
+def test_where_requires_both_positional_arguments():
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["playfield", "where", "main-playfield"])
+
+
+def test_where_h_prints_help_not_a_missing_hostname_error():
+    parser = _build_parser()
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["playfield", "where", "main-playfield", "the blue dot", "-h"])
     assert excinfo.value.code == 0

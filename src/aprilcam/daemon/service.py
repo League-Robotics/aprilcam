@@ -83,7 +83,7 @@ from aprilcam.camera.camera import Camera
 from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import CameraIdentity, resolve_all
 from aprilcam.camera.registry import CameraRecord, CameraRegistry
-from aprilcam.config.interfaces import CameraConfig, Directories
+from aprilcam.config.interfaces import CameraConfig, Directories, Feature
 from aprilcam.config.interfaces import ConfigLoader as ConfigLoaderIface
 from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitionIface
 from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
@@ -91,6 +91,7 @@ from aprilcam.daemon.detection import DetectionEngine
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
 from aprilcam.errors import CameraNotPresent, NotCalibrated, UnknownCamera, UnknownPlayfield
 from aprilcam.playfield.playfield import Playfield
+from aprilcam.playfield.query import FeatureQuery
 from aprilcam.types import (
     Annotation,
     AnnotationSet,
@@ -166,12 +167,12 @@ class DaemonService(Daemon):
     """Concrete ``daemon.interfaces.Daemon`` (this sprint's slice only).
 
     Derives from ``Daemon`` (see that class's module docstring for the
-    base-class-vs-``Protocol`` design rule): the 14 methods this sprint
-    does not implement (streams, annotations, tag parameters, guides,
-    ``find_feature``) are inherited as-is, so calling one raises
-    ``NotImplementedError`` naming the missing method rather than an
-    ``AttributeError`` -- ``isinstance(service, Daemon)`` is also simply
-    true now, mechanically, rather than a Protocol structural guess.
+    base-class-vs-``Protocol`` design rule): the methods this sprint
+    does not implement (streams, tag parameters, guides) are inherited
+    as-is, so calling one raises ``NotImplementedError`` naming the
+    missing method rather than an ``AttributeError`` -- ``isinstance(
+    service, Daemon)`` is also simply true now, mechanically, rather
+    than a Protocol structural guess.
 
     Parameters
     ----------
@@ -673,6 +674,29 @@ class DaemonService(Daemon):
         return tuple(
             Playfield(name=d.name, definition=d, camera_configs=camera_configs) for d in definitions
         )
+
+    def find_feature(self, playfield: str, query: str) -> Tuple[Feature, ...]:
+        """See ``daemon.interfaces.Daemon.find_feature``. Ticket 025-002.
+
+        Delegates to ticket 025-001's ``playfield.query.FeatureQuery``,
+        built **fresh on every call** against the named playfield's
+        *current* ``PlayfieldDefinition`` -- cheap (a tuple of already-
+        materialized ``Feature``s, no vision, no camera), so there is
+        nothing to cache and no staleness to reason about, the same
+        "derived at serve time" discipline ``Playfield.linked_cameras()``
+        already uses. Raises :class:`~aprilcam.errors.UnknownPlayfield`,
+        naming every playfield this daemon currently holds, for a name
+        it does not recognise -- the same precedent :meth:`get_playfield`
+        established. Ambiguity returns every match (UC-08.S-2); no
+        match returns an empty tuple (UC-08.S-3) -- neither is an error
+        at this layer, matching ``FeatureQuery.find``'s own contract.
+        """
+        with self._lock:
+            definition = self._playfields.get(playfield)
+            available = tuple(sorted(self._playfields.keys()))
+        if definition is None:
+            raise UnknownPlayfield(playfield, available)
+        return FeatureQuery(features=definition.features()).find(query)
 
     def get_camera_config(self, camera: str) -> CameraConfig:
         """See ``daemon.interfaces.Daemon.get_camera_config``.
