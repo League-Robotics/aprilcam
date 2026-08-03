@@ -37,7 +37,14 @@ class FakeBackend:
 
     ``read_queue`` items are popped one per ``read()`` call; once
     exhausted, ``read()`` returns ``None`` (a failure) as long as the
-    backend is open. ``fail_open`` makes ``open()`` raise instead of
+    backend is open — unless ``loop=True`` (ticket 027-003), in which
+    case an exhausted queue is refilled from *read_queue* as originally
+    given and popping continues, so a background reader (a
+    ``daemon.streaming.TagStreamProducer``, in production) has
+    continuous frames to read for as long as it runs, rather than
+    degrading to "no frame available" once a short, fixed queue runs
+    out — development-plan.md Stage 8's "fake-camera daemon (fixture
+    replay backend)". ``fail_open`` makes ``open()`` raise instead of
     succeeding — for AC "present but unopenable" style scenarios.
     """
 
@@ -48,11 +55,24 @@ class FakeBackend:
         fail_open: bool = False,
         size: Tuple[int, int] = (640, 480),
         read_delay: float = 0.0,
+        loop: bool = False,
     ) -> None:
         self._is_open = False
-        self._queue: List[Optional[np.ndarray]] = list(read_queue) if read_queue else []
+        #: ticket 027-003 -- the original frames, kept aside so a
+        #: ``loop=True`` backend can refill ``self._queue`` from it once
+        #: exhausted, rather than exhausting to ``None`` permanently.
+        self._original_queue: List[Optional[np.ndarray]] = list(read_queue) if read_queue else []
+        self._queue: List[Optional[np.ndarray]] = list(self._original_queue)
         self.fail_open = fail_open
         self._size = size
+        #: ticket 027-003 -- when ``True`` and the queue is exhausted,
+        #: ``read()`` refills it from the original frames instead of
+        #: returning ``None`` -- the "looping/fixture-replay fake camera
+        #: backend" this ticket's testing infrastructure needs so a
+        #: continuously-running background producer never runs dry.
+        #: Default ``False`` leaves every pre-existing exhaust-to-``None``
+        #: test unaffected.
+        self.loop = loop
         self.open_calls = 0
         self.close_calls = 0
         self.read_calls = 0
@@ -104,6 +124,8 @@ class FakeBackend:
                 time.sleep(self.read_delay)
             if not self._is_open:
                 return None
+            if not self._queue and self.loop and self._original_queue:
+                self._queue = list(self._original_queue)
             if self._queue:
                 return self._queue.pop(0)
             return None

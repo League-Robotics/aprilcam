@@ -330,6 +330,53 @@ def test_close_closes_every_held_camera(service, held_camera):
     assert service.active_slugs() == frozenset()
 
 
+# ---------------------------------------------------------------------------
+# stream_tags (ticket 027-003, UC-11/SUC-001) -- in-process only this
+# ticket: no socket/gRPC endpoint, just DaemonService.stream_tags wired
+# to daemon.streaming.TagStreamProducer/BroadcasterTagStream.
+# ---------------------------------------------------------------------------
+
+
+def test_stream_tags_returns_a_tag_stream_that_publishes_real_frames(service, held_camera):
+    _, slug, _ = held_camera
+
+    stream = service.stream_tags(slug)
+    try:
+        frame = next(iter(stream))
+        assert isinstance(frame, TagFrame)
+    finally:
+        stream.close()
+
+
+def test_stream_tags_reuses_the_same_producer_across_repeated_calls(service, held_camera):
+    _, slug, _ = held_camera
+
+    stream1 = service.stream_tags(slug)
+    stream2 = service.stream_tags(slug)
+    try:
+        producer = service._tag_stream_producers[slug]  # noqa: SLF001 - internal, pinning reuse
+        assert producer.broadcaster.subscriber_count == 2
+    finally:
+        stream1.close()
+        stream2.close()
+
+
+def test_close_stops_every_tracked_tag_stream_producer(service, held_camera):
+    _, slug, _ = held_camera
+
+    service.stream_tags(slug)
+    producer = service._tag_stream_producers[slug]  # noqa: SLF001 - internal, pinning shutdown
+    deadline = time.monotonic() + 2.0
+    while not producer.running and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert producer.running is True
+
+    service.close()
+
+    assert producer.running is False
+    assert service._tag_stream_producers == {}  # noqa: SLF001
+
+
 def test_valid_encodings_matches_daemon_get_frame_contract():
     assert VALID_ENCODINGS == ("jpeg", "png")
 

@@ -94,7 +94,8 @@ from aprilcam.config.interfaces import ConfigLoader as ConfigLoaderIface
 from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitionIface
 from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
 from aprilcam.daemon.detection import DetectionEngine
-from aprilcam.daemon.interfaces import Daemon, DaemonStatus
+from aprilcam.daemon.interfaces import Daemon, DaemonStatus, TagStream
+from aprilcam.daemon.streaming import BroadcasterTagStream, TagStreamProducer
 from aprilcam.errors import (
     CameraNotPresent,
     NotCalibrated,
@@ -327,6 +328,18 @@ class DaemonService(Daemon):
         # here, the same structural guarantee every other store in this
         # class already has.
         self._mount_params: Dict[TagId, MountParameters] = {}
+        # slug -> its live TagStreamProducer (ticket 027-003, UC-11).
+        # Populated lazily by :meth:`stream_tags` on that camera's first
+        # call, reused for every subsequent call against the same slug
+        # (sprint.md Open Question 3's recommended reuse default,
+        # applied here at the in-process layer). Entries are never
+        # removed on idle -- a producer with zero subscribers is simply
+        # a stopped thread (``TagStreamProducer.running`` is ``False``);
+        # keeping the dict entry around means :meth:`close` can still
+        # find and (harmlessly, idempotently) stop it, and a later
+        # ``stream_tags`` call for the same camera reuses the same
+        # producer object rather than constructing a second one.
+        self._tag_stream_producers: Dict[str, TagStreamProducer] = {}
         self._lock = threading.Lock()
         self._calibrator = calibrator if calibrator is not None else Calibrator(
             get_camera_config=self._camera_config_for_calibration,
@@ -631,6 +644,45 @@ class DaemonService(Daemon):
             )
 
         return buffered
+
+    # -- streams: tags (ticket 027-003, UC-11/SUC-001) ----------------------
+
+    def stream_tags(self, camera: str) -> TagStream:
+        """See ``daemon.interfaces.Daemon.stream_tags``.
+
+        **In-process only, this ticket.** No socket or gRPC endpoint is
+        allocated here -- this method hands back a ``daemon.interfaces.
+        TagStream`` any in-process caller (a test, or a future
+        ``daemon/stream_transport.py`` connection handler, ticket 005)
+        can iterate directly. ``daemon/rpc.py``'s ``GetTagStream``
+        RPC (endpoint allocation) and the raw-socket bridge that calls
+        this method per accepted connection are ticket 005's job, not
+        this one's -- exactly the production/transport split
+        ``sprint.md`` Design Rationale 1 draws.
+
+        Resolves *camera* via :meth:`_camera_for`, exactly like
+        :meth:`get_tags` -- SUC-005 number-or-slug addressing, and
+        ``UnknownCamera``/``CameraNotPresent`` both apply, inherited for
+        free. Lazily builds (and this service tracks, keyed by slug) one
+        ``daemon.streaming.TagStreamProducer`` per camera the first time
+        it is asked for, reusing it on every subsequent call for the
+        same camera rather than constructing a second, independent one
+        (sprint.md Open Question 3's recommended reuse default, applied
+        here at the in-process layer ticket 005's endpoint allocation
+        will sit on top of). The producer's own idle-gating (ticket 003)
+        starts/stops its background thread on *this* camera's
+        ``Broadcaster``'s first-subscriber/last-unsubscriber transition
+        -- this method does no lifecycle management of its own beyond
+        constructing the producer once and subscribing to it.
+        """
+        cam = self._camera_for(camera)
+        with self._lock:
+            producer = self._tag_stream_producers.get(cam.slug)
+            if producer is None:
+                producer = TagStreamProducer(cam.slug, cam, self._detection)
+                self._tag_stream_producers[cam.slug] = producer
+        subscriber_queue = producer.broadcaster.subscribe()
+        return BroadcasterTagStream(producer.broadcaster, subscriber_queue)
 
     def status(self) -> DaemonStatus:
         """See ``daemon.interfaces.Daemon.status``.
@@ -1400,13 +1452,36 @@ class DaemonService(Daemon):
     # -- beyond the interface: shutdown cleanup ----------------------------
 
     def close(self) -> None:
-        """Close every held-open camera. Not part of the ``Daemon``
-        base class -- ``daemon/lifecycle.py``'s ``on_stop`` hook calls
-        this during a clean shutdown so no backend handle outlives the
-        process that opened it."""
+        """Stop every tracked ``TagStreamProducer``, then close every
+        held-open camera. Not part of the ``Daemon`` base class --
+        ``daemon/lifecycle.py``'s ``on_stop`` hook calls this during a
+        clean shutdown so no backend handle, and no background stream
+        thread, outlives the process that opened it (sprint.md
+        Migration Concerns, "Clean daemon shutdown" -- ticket 027-003's
+        own acceptance criterion).
+
+        **Producers stop first, cameras close second, deliberately.**
+        ``TagStreamProducer.stop()`` joins its background thread with a
+        bounded timeout before returning -- stopping every producer
+        before any camera is closed guarantees no producer thread is
+        still mid-``Camera.read()`` when that camera's backend handle
+        is torn down. ``TagStreamProducer.stop()`` is already a safe,
+        idempotent no-op for a producer with no live thread (an idle
+        one), so this loop does not need to distinguish active from
+        idle producers first.
+        """
         with self._lock:
+            producers = list(self._tag_stream_producers.values())
+            self._tag_stream_producers.clear()
             held = list(self._cameras.values())
             self._cameras.clear()
+        for producer in producers:
+            try:
+                producer.stop()
+            except Exception:  # pragma: no cover - defensive
+                logger.exception(
+                    "error stopping tag stream producer %s during shutdown", producer.slug
+                )
         for cam in held:
             try:
                 cam.close()
