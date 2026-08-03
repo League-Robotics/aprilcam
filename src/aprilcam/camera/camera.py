@@ -90,6 +90,7 @@ keys, so fetching the template cannot itself disturb hardware state.
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Set, Tuple
 
@@ -223,6 +224,18 @@ class Camera(_CameraBase):
         self._consecutive_failures = 0
         self._reopens = 0
         self._exhausted = False
+        #: Guards the entire body of :meth:`read` -- including any
+        #: self-heal reopen it triggers -- so a background stream
+        #: producer (ticket 027-003/004) and a one-shot RPC read
+        #: (``get_frame``/``get_tags``) never interleave calls to the
+        #: same underlying ``CaptureBackend`` handle (ticket 027-002).
+        #: A plain, non-reentrant ``Lock`` is safe here: nothing reached
+        #: from within :meth:`read` (including :meth:`_attempt_self_heal`
+        #: and *on_reopen*) calls back into :meth:`read` itself, so there
+        #: is no same-thread re-acquisition to deadlock on. Deliberately
+        #: *not* held by :meth:`open`/:meth:`close`/:meth:`apply_config`
+        #: -- see :meth:`read`'s own docstring for the scope rationale.
+        self._read_lock = threading.Lock()
 
     @property
     def slug(self) -> str:
@@ -287,18 +300,38 @@ class Camera(_CameraBase):
         backend raises out of its own ``read()``, which by contract it
         should not, but this guards regardless -- counts the same as
         an ordinary dropped frame.
+
+        **Read lock (ticket 027-002).** The entire method body runs
+        under :attr:`_read_lock`, held for as long as this call touches
+        the backend -- including a self-heal reopen (:meth:`
+        _attempt_self_heal`'s ``close()``/``open()``) when five
+        consecutive failures trip it, since that also drives the same
+        ``CaptureBackend`` handle. This exists because sprint 027 adds a
+        persistent background stream producer (tickets 003/004) that
+        calls ``read()`` on a timer, coexisting with the one-shot RPC
+        reads (``get_frame``/``get_tags`` via ``DetectionEngine.
+        run_burst``) that were previously this method's only caller --
+        without the lock, two threads could interleave calls into the
+        same OpenCV/backend capture object. Deliberately narrow: the
+        lock guards only ``read()``, not ``open()``/``close()``/
+        ``apply_config()`` or read-only accessors like
+        ``effective_config()`` -- nothing this sprint calls those
+        concurrently with a background reader, so locking them would be
+        unnecessary serialization (see this method's docstring and
+        ticket 027-002's acceptance criteria).
         """
-        frame = self._safe_read()
-        if frame is not None:
-            self._consecutive_failures = 0
-            self._reopens = 0
-            self._exhausted = False
-            return frame
-        self._consecutive_failures += 1
-        if self._consecutive_failures >= FAILURE_THRESHOLD:
-            self._consecutive_failures = 0
-            self._attempt_self_heal()
-        return None
+        with self._read_lock:
+            frame = self._safe_read()
+            if frame is not None:
+                self._consecutive_failures = 0
+                self._reopens = 0
+                self._exhausted = False
+                return frame
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= FAILURE_THRESHOLD:
+                self._consecutive_failures = 0
+                self._attempt_self_heal()
+            return None
 
     def _safe_read(self) -> Optional[np.ndarray]:
         try:
