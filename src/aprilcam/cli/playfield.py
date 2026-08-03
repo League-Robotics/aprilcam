@@ -1,7 +1,8 @@
 """``aprilcam playfield config <file>`` (ticket 022-001); ``aprilcam
 playfield image`` (ticket 022-005, UC-06/UC-19); ``aprilcam playfield
 view`` (ticket 022-006, UC-18); ``aprilcam playfield annotations``
-(ticket 024-004, UC-28).
+(ticket 024-004, UC-28); ``aprilcam playfield where`` (ticket 025-002,
+UC-08).
 
 Thin argv-to-client-call shell over ``config/loader.py`` (client-side
 document validation) and ``client/daemon_client.py`` (the push/capture
@@ -83,6 +84,21 @@ not a gap to close silently.
 out (``cli.md``'s fan-out table), refused up front -- before any
 ``discovery_factory()``/``connect()`` call -- mirroring ``cmd_view``'s
 own up-front ``--all`` refusal shape and wording exactly.
+
+**``playfield where`` (ticket 025-002, UC-08).** "Where is the blue
+dot" -- answered entirely from the named playfield's surveyed
+definition via ``Daemon.find_feature``: no camera opened, no
+calibration required. ``playfield`` is a required positional naming the
+target directly, exactly like ``cmd_annotations`` above (this module's
+own "decided, not deferred" precedent) -- ``find_feature(playfield,
+query)`` has no camera to resolve a default from, so there is nothing
+for ``cli._common.resolve_playfield_camera`` to do here. ``query`` is a
+second positional, a free-text string (quote multi-word queries, e.g.
+``"the blue dot"``). Read-only, so it fans out like ``cmd_list``/bare
+``cmd_annotations`` (``cli.md``'s fan-out table). An empty result
+prints an explicit ``(no matches)`` rather than nothing at all, matching
+this file's ``(no playfields)``/``(no annotations)`` convention
+(UC-08.S-3: no match is not an error).
 """
 
 from __future__ import annotations
@@ -106,7 +122,7 @@ from aprilcam.cli._common import (
     resolve_playfield_camera,
 )
 from aprilcam.client.discovery import Discovery
-from aprilcam.config.interfaces import ConfigLoader
+from aprilcam.config.interfaces import ConfigLoader, Feature
 from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
 from aprilcam.daemon.interfaces import Daemon
 from aprilcam.errors import AprilCamError, NotCalibrated
@@ -129,6 +145,7 @@ __all__ = [
     "cmd_image",
     "cmd_view",
     "cmd_annotations",
+    "cmd_where",
 ]
 
 
@@ -502,9 +519,72 @@ def cmd_annotations(
     return EXIT_OK
 
 
+def _format_feature_row(feature: Feature) -> str:
+    """One ``find_feature`` match: slug, kind, colour (or ``-`` when
+    unset), and surveyed world position -- everything the acceptance
+    criteria ask for, nothing invented (there is no detection status to
+    report here; the definition is ground truth, not observation, per
+    ``FeatureQuery``'s own docstring)."""
+    colour = feature.colour if feature.colour is not None else "-"
+    return (
+        f"  {feature.slug:<28} {feature.kind:<10} {colour:<8} "
+        f"({feature.position.x:.2f}, {feature.position.y:.2f})"
+    )
+
+
+def _print_features(features: Tuple[Feature, ...]) -> None:
+    """A ``find_feature`` result, printed verbatim. An empty result
+    reads as an explicit ``(no matches)`` (UC-08.S-3: no match is a
+    normal, non-error answer), matching this module's ``(no
+    playfields)``/``(no annotations)`` convention rather than silent
+    empty output."""
+    if not features:
+        print("  (no matches)")
+        return
+    for feature in features:
+        print(_format_feature_row(feature))
+
+
+def cmd_where(
+    args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
+) -> int:
+    """``aprilcam playfield where <playfield> <query> [-d HOST]
+    [--all]`` (ticket 025-002, UC-08) -- "where is the blue dot,"
+    answered entirely from the named playfield's surveyed definition via
+    ``Daemon.find_feature``: no camera opened, no calibration required.
+
+    ``playfield`` is a required positional naming the target directly,
+    exactly like ``cmd_annotations`` above (module docstring's
+    "decided, not deferred" note) -- there is no camera to resolve a
+    default from here, unlike ``cmd_image``/``cmd_view``.
+
+    Read-only, so it fans out (``cli.md``'s fan-out table): nothing
+    changes state, so ``--all`` runs the same query against every
+    discovered daemon, one labelled block per daemon, mirroring
+    ``cmd_list``/bare ``cmd_annotations`` exactly.
+    """
+    discovery = discovery_factory()
+
+    if args.all:
+        def render(label: str, features: Tuple[Feature, ...]) -> None:
+            print(f"{label}:")
+            _print_features(features)
+
+        return fan_out(
+            discovery, lambda daemon: daemon.find_feature(args.playfield, args.query), render
+        )
+
+    try:
+        features = discovery.connect(args.daemon).find_feature(args.playfield, args.query)
+    except AprilCamError as exc:
+        return report_error(exc)
+    _print_features(features)
+    return EXIT_OK
+
+
 def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     """Wire ``playfield list``/``config``/``image``/``view``/
-    ``annotations`` into the top-level parser."""
+    ``annotations``/``where`` into the top-level parser."""
     parser = subparsers.add_parser("playfield", help="playfield definitions")
     parser.set_defaults(func=incomplete_command(parser))
     sub = parser.add_subparsers(dest="playfield_command", metavar="<command>")
@@ -596,3 +676,13 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
         "(clearing an absent layer is a no-op, not an error)",
     )
     p_annotations.set_defaults(func=cmd_annotations)
+
+    p_where = sub.add_parser(
+        "where",
+        help="find a surveyed feature by free-text query (UC-08, no camera/calibration needed)",
+    )
+    p_where.add_argument("playfield", help="playfield name")
+    p_where.add_argument("query", help="free-text query, e.g. 'the blue dot' (quote multi-word queries)")
+    add_daemon_option(p_where)
+    add_all_option(p_where)
+    p_where.set_defaults(func=cmd_where)

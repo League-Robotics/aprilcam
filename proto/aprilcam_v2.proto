@@ -77,6 +77,22 @@
 // playfield is never an error one level down (a no-op for `remove`/
 // `clear`, empty for `get`).
 //
+// Sprint 025 ticket 002 is the sixth: `FindFeature` (UC-08, "where is
+// the blue dot") -- answered from the named playfield's surveyed
+// definition only, via `aprilcam.playfield.query.FeatureQuery` (ticket
+// 025-001): no camera opened, no calibration required. `FeatureMatch`
+// is a new message, not a reuse of `PlayfieldFeatureEntry` above --
+// that message mirrors `config.loader.PlayfieldDefinition`'s raw
+// per-section storage (an optional numeric `id`, no `kind`), while
+// `FindFeature`'s answer is the more abstract
+// `aprilcam.config.interfaces.Feature` view (`kind` as a string,
+// deliberately no numeric id -- see that class's docstring), which is
+// exactly `PlayfieldFeatureEntry`'s wrong shape for this: calibration
+// (`GetPlayfield`) needs the id, feature lookup needs the kind. Empty
+// `FindFeatureResponse.features` means no match (UC-08.S-3) -- never an
+// error, and unknown playfield -> `NOT_FOUND` naming the playfields
+// held, matching `GetPlayfield`'s own precedent exactly.
+//
 // Wire conventions this file follows (docs/design/design.md §6):
 //   - World-cm coordinates cross this boundary only inside `TagRecord`
 //     (`world`, `world_velocity`, `world_corners`), and every camera
@@ -227,6 +243,15 @@ service AprilCamV2 {
   // without fetching pixels. After a restart this is an empty set at
   // revision 0 (UC-28.S-4): the wipe is the contract, not a fault.
   rpc GetAnnotations (GetAnnotationsRequest) returns (GetAnnotationsResponse);
+
+  // Fuzzy-match a free-text query against a playfield's surveyed
+  // features -- "where is the blue dot" (UC-08, ticket 025-002).
+  // Answered from the surveyed definition only: no camera opened, no
+  // calibration required. Ambiguous queries return every match, never
+  // an arbitrary pick (UC-08.S-2); no match returns an empty list
+  // (UC-08.S-3), never an error. Unknown playfield -> `NOT_FOUND`,
+  // naming the playfields held (matching `GetPlayfield`'s precedent).
+  rpc FindFeature (FindFeatureRequest) returns (FindFeatureResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -764,4 +789,32 @@ message GetAnnotationsResponse {
   // off" rule as GetFrameResponse.annotations above, applied to this
   // query response too).
   AnnotationSet annotations = 1;
+}
+
+// ---------------------------------------------------------------------------
+// FindFeature (ticket 025-002)
+// ---------------------------------------------------------------------------
+
+// One surveyed feature matched by a free-text query (UC-08). Mirrors
+// aprilcam.config.interfaces.Feature field-for-field -- deliberately
+// not PlayfieldFeatureEntry (see this file's header comment): Feature
+// carries `kind` as a string and no numeric id, which is exactly the
+// shape FindFeature's answer needs and PlayfieldFeatureEntry does not
+// have.
+message FeatureMatch {
+  string slug = 1;
+  string kind = 2;
+  WorldPoint position = 3;
+  optional string colour = 4;
+}
+
+message FindFeatureRequest {
+  string playfield = 1;
+  string query = 2;
+}
+
+message FindFeatureResponse {
+  // Empty means no match (UC-08.S-3) -- never an error and never a
+  // fabricated near-miss.
+  repeated FeatureMatch features = 1;
 }

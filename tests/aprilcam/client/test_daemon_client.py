@@ -35,7 +35,8 @@ from aprilcam.camera.identity import CameraIdentity
 from aprilcam.camera.registry import CameraRegistry
 from aprilcam.client.daemon_client import GrpcDaemon
 from aprilcam.config.directories import Directories
-from aprilcam.config.interfaces import CameraConfig
+from aprilcam.config.interfaces import CameraConfig, Feature
+from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.rpc import build_server
 from aprilcam.daemon.service import CALIBRATION_FRAME_COUNT, DaemonService
 from aprilcam.errors import (
@@ -458,6 +459,76 @@ def test_get_frame_tags_is_none_when_no_detection_has_run(tag_client_factory):
         frame = client.get_frame(slug)
 
     assert frame.tags is None
+
+
+# ---------------------------------------------------------------------------
+# find_feature -- client wire round trips (ticket 025-002, UC-08).
+# Exercises the full proto boundary both directions: GrpcDaemon builds the
+# FindFeatureRequest, client/models.py's feature_from_proto turns the
+# response back into real config.interfaces.Feature dataclasses.
+# ---------------------------------------------------------------------------
+
+
+def _playfield_definition_with_dots(name: str = "main-playfield") -> PlayfieldDefinition:
+    """A small real definition with dots -- ``find_feature``'s round trip
+    needs findable coloured features, which ``test_service.py``'s
+    ``_playfield_definition()`` (ArUco ids only, reused above) does not
+    carry."""
+    return PlayfieldDefinition(
+        name=name,
+        width_cm=134.3,
+        height_cm=89.3,
+        dots=(
+            PlayfieldFeatureEntry(slug="dot-west-blue", x=-50.0, y=0.0, colour="blue"),
+            PlayfieldFeatureEntry(slug="dot-northwest-orange", x=-50.0, y=30.0, colour="orange"),
+            PlayfieldFeatureEntry(slug="dot-northeast-orange", x=50.0, y=30.0, colour="orange"),
+            PlayfieldFeatureEntry(slug="dot-southeast-orange", x=50.0, y=-30.0, colour="orange"),
+            PlayfieldFeatureEntry(slug="dot-southwest-orange", x=-50.0, y=-30.0, colour="orange"),
+        ),
+    )
+
+
+def test_find_feature_round_trip_returns_feature_dataclasses(client):
+    client.set_playfield(_playfield_definition_with_dots())
+
+    matches = client.find_feature("main-playfield", "the blue dot")
+
+    assert len(matches) == 1
+    match = matches[0]
+    assert isinstance(match, Feature)
+    assert match.slug == "dot-west-blue"
+    assert match.kind == "dot"
+    assert match.colour == "blue"
+    assert match.position == WorldPoint(x=-50.0, y=0.0)
+
+
+def test_find_feature_ambiguous_query_round_trip_returns_all_four_orange_dots(client):
+    client.set_playfield(_playfield_definition_with_dots())
+
+    matches = client.find_feature("main-playfield", "the orange dot")
+
+    assert {m.slug for m in matches} == {
+        "dot-northwest-orange",
+        "dot-northeast-orange",
+        "dot-southeast-orange",
+        "dot-southwest-orange",
+    }
+
+
+def test_find_feature_no_match_round_trip_returns_empty_tuple(client):
+    client.set_playfield(_playfield_definition_with_dots())
+
+    matches = client.find_feature("main-playfield", "the orange triangle")
+
+    assert matches == ()
+
+
+def test_find_feature_unknown_playfield_raises_unknown_playfield_naming_available(client):
+    with pytest.raises(UnknownPlayfield) as excinfo:
+        client.find_feature("no-such-field", "the blue dot")
+
+    assert excinfo.value.requested == "no-such-field"
+    assert excinfo.value.available == ()
 
 
 # ---------------------------------------------------------------------------

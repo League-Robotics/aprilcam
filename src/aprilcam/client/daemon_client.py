@@ -5,19 +5,21 @@
 ``calibrate``/``get_calibration`` added by ticket 022-003;
 ``reset_camera_config`` added by ticket 023-004; ``put_annotation``/
 ``remove_annotation``/``replace_layer``/``clear_annotations``/
-``get_annotations`` added by ticket 024-002): a typed
+``get_annotations`` added by ticket 024-002; ``find_feature`` added by
+ticket 025-002): a typed
 wrapper over the generated gRPC stub for
 ``list_cameras``, ``probe_cameras``, ``get_frame``, ``status``,
 ``get_tags``, ``get_tag``, ``get_tag_history``, ``set_playfield``,
 ``get_playfield``, ``list_playfields``, ``set_camera_config``,
 ``get_camera_config``, ``calibrate``, ``get_calibration``,
 ``reset_camera_config``, ``put_annotation``, ``remove_annotation``,
-``replace_layer``, ``clear_annotations``, ``get_annotations``.
+``replace_layer``, ``clear_annotations``, ``get_annotations``,
+``find_feature``.
 
-**Only these twenty methods are implemented**, mirroring
+**Only these twenty-one methods are implemented**, mirroring
 ``daemon.service.DaemonService``'s own stance: ``daemon.interfaces.
-Daemon`` is a much larger base class (streams, tag parameters, guides,
-``find_feature``), and
+Daemon`` is a much larger base class (streams, tag parameters, guides),
+and
 those are inherited as-is here rather than overridden -- calling one
 raises ``NotImplementedError`` naming itself instead of failing with a
 bare ``AttributeError``. ``isinstance(client,
@@ -62,6 +64,7 @@ from aprilcam.client.models import (
     camera_config_from_proto,
     camera_states_from_proto,
     daemon_status_from_proto,
+    features_from_proto,
     image_frame_from_proto,
     playfield_from_proto,
     playfields_from_proto,
@@ -69,7 +72,7 @@ from aprilcam.client.models import (
     tag_frame_from_proto,
     tag_record_from_get_tag_response,
 )
-from aprilcam.config.interfaces import CameraConfig
+from aprilcam.config.interfaces import CameraConfig, Feature
 from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitionIface
 from aprilcam.config.loader import PlayfieldDefinition
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
@@ -370,6 +373,16 @@ class GrpcDaemon(Daemon):
     def list_playfields(self) -> Tuple[Playfield, ...]:
         response = self._call(self._stub.ListPlayfields, aprilcam_v2_pb2.ListPlayfieldsRequest())
         return playfields_from_proto(response.playfields)
+
+    def find_feature(self, playfield: str, query: str) -> Tuple[Feature, ...]:
+        """See ``daemon.interfaces.Daemon.find_feature`` (ticket
+        025-002, UC-08). No camera opened, no calibration required --
+        answered entirely from the named playfield's surveyed
+        definition. Ambiguous queries return every match (UC-08.S-2);
+        no match returns an empty tuple (UC-08.S-3), not an error."""
+        request = aprilcam_v2_pb2.FindFeatureRequest(playfield=playfield, query=query)
+        response = self._call(self._stub.FindFeature, request)
+        return features_from_proto(response.features)
 
     def set_camera_config(self, config: CameraConfig) -> None:
         request = aprilcam_v2_pb2.SetCameraConfigRequest(config=_camera_config_to_proto(config))

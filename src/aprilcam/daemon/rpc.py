@@ -5,7 +5,7 @@ tag-detection RPCs below are ticket 021-005; ``SetPlayfield``/
 are ticket 022-003; ``ResetCameraConfig`` is ticket 023-004;
 ``PutAnnotation``/``RemoveAnnotation``/``ReplaceLayer``/
 ``ClearAnnotations``/``GetAnnotations`` and the ``GetFrame`` annotation
-embed are ticket 024-001).
+embed are ticket 024-001; ``FindFeature`` is ticket 025-002).
 
 Translates between ``proto/aprilcam_v2.proto``'s service (sprint 020's
 four RPCs -- ``ListCameras``, ``ProbeCameras``, ``GetFrame``,
@@ -13,7 +13,8 @@ four RPCs -- ``ListCameras``, ``ProbeCameras``, ``GetFrame``,
 ``GetTagHistory`` and the ``GetFrame`` tag embed, plus sprint 022's
 playfield/camera-config RPCs and ``Calibrate``/``GetCalibration``, plus
 sprint 023's ``ResetCameraConfig``, plus sprint 024's annotation-store
-RPCs and the ``GetFrame`` annotation embed above) and
+RPCs and the ``GetFrame`` annotation embed above, plus sprint 025's
+``FindFeature``) and
 ``daemon.service.DaemonService`` method calls. Everything here is
 (de)serialization and error-code mapping; no business logic, no camera
 access, no registry/discovery/vision calls -- see the sprint
@@ -64,7 +65,7 @@ import grpc
 
 from aprilcam.calibration.calibration import Calibration
 from aprilcam.calibration.interfaces import CalibrationResult
-from aprilcam.config.interfaces import CameraConfig
+from aprilcam.config.interfaces import CameraConfig, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
 from aprilcam.daemon.lifecycle import ControlPlaneListener
@@ -368,6 +369,20 @@ def _playfield_entry_to_proto(playfield: Playfield) -> aprilcam_v2_pb2.Playfield
         definition=_playfield_definition_to_proto(definition),
         linked_cameras=list(playfield.linked_cameras()),
     )
+
+
+def _feature_match_to_proto(feature: Feature) -> aprilcam_v2_pb2.FeatureMatch:
+    """Python -> proto, for a ``FindFeature`` response (ticket 025-002).
+    Mirrors ``config.interfaces.Feature`` field-for-field -- not
+    :func:`_playfield_feature_entry_to_proto`'s ``PlayfieldFeatureEntry``
+    shape, which carries an optional numeric ``id`` and no ``kind``
+    (this file's header comment)."""
+    msg = aprilcam_v2_pb2.FeatureMatch(
+        slug=feature.slug, kind=feature.kind, position=_world_point_to_proto(feature.position)
+    )
+    if feature.colour is not None:
+        msg.colour = feature.colour
+    return msg
 
 
 def _camera_config_to_proto(config: CameraConfig) -> aprilcam_v2_pb2.CameraConfig:
@@ -811,6 +826,16 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
             return aprilcam_v2_pb2.GetAnnotationsResponse()
         return aprilcam_v2_pb2.GetAnnotationsResponse(
             annotations=_annotation_set_to_proto(annotations)
+        )
+
+    def FindFeature(self, request, context):  # noqa: N802
+        try:
+            features = self._service.find_feature(request.playfield, request.query)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.FindFeatureResponse()
+        return aprilcam_v2_pb2.FindFeatureResponse(
+            features=[_feature_match_to_proto(f) for f in features]
         )
 
 

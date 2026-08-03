@@ -39,7 +39,7 @@ from typing import Optional, Tuple
 
 from aprilcam.calibration.calibration import Calibration
 from aprilcam.calibration.interfaces import CalibrationResult
-from aprilcam.config.interfaces import CameraConfig
+from aprilcam.config.interfaces import CameraConfig, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import DaemonStatus
 from aprilcam.playfield.playfield import Playfield
@@ -75,6 +75,8 @@ __all__ = [
     "camera_state_from_proto",
     "camera_states_from_proto",
     "daemon_status_from_proto",
+    "feature_from_proto",
+    "features_from_proto",
     "image_frame_from_proto",
     "playfield_definition_from_proto",
     "playfield_from_proto",
@@ -325,6 +327,25 @@ def playfield_from_proto(msg: aprilcam_v2_pb2.PlayfieldEntry) -> Playfield:
 
 def playfields_from_proto(msgs) -> Tuple[Playfield, ...]:
     return tuple(playfield_from_proto(m) for m in msgs)
+
+
+def feature_from_proto(msg: aprilcam_v2_pb2.FeatureMatch) -> Feature:
+    """The client-side mirror of ``daemon/rpc.py``'s
+    ``_feature_match_to_proto`` (ticket 025-002, UC-08) -- field for
+    field, in reverse. Not :func:`_playfield_feature_entry_from_proto`'s
+    ``PlayfieldFeatureEntry`` shape: a ``FindFeature`` match is the more
+    abstract ``config.interfaces.Feature`` view (``kind`` as a string,
+    no numeric id)."""
+    return Feature(
+        slug=msg.slug,
+        kind=msg.kind,
+        position=_world_point_from_proto(msg.position),
+        colour=msg.colour if msg.HasField("colour") else None,
+    )
+
+
+def features_from_proto(msgs) -> Tuple[Feature, ...]:
+    return tuple(feature_from_proto(m) for m in msgs)
 
 
 def camera_config_from_proto(msg: aprilcam_v2_pb2.CameraConfig) -> CameraConfig:
