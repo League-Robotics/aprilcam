@@ -1,7 +1,7 @@
 ---
 id: '025'
 title: Complete the daemon query surface
-status: ticketing
+status: closed
 branch: sprint/025-complete-the-daemon-query-surface
 worktree: false
 use-cases: []
