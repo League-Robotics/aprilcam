@@ -1,5 +1,9 @@
 ---
-status: pending
+status: in-progress
+sprint: '024'
+tickets:
+- 024-006
+- 024-007
 ---
 
 # Phantom tag detections are reported as real, moving objects
