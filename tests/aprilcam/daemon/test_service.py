@@ -49,7 +49,7 @@ from aprilcam.config.directories import Directories
 from aprilcam.config.interfaces import CameraConfig
 from aprilcam.config.loader import ConfigLoader, PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon import __main__ as daemon_main
-from aprilcam.daemon.detection import DetectionEngine
+from aprilcam.daemon.detection import CONFIRMATION_STREAK, DetectionEngine
 from aprilcam.daemon.interfaces import Daemon
 from aprilcam.daemon.lifecycle import DaemonLifecycle
 from aprilcam.daemon.rpc import build_server
@@ -2376,22 +2376,24 @@ def test_get_tags_on_a_calibrated_camera_reports_real_world_coordinates(director
     daemon process constructs.
 
     Ticket 024-006: the production ``DetectionEngine`` uses the default
-    ``CONFIRMATION_STREAK`` (2), and ``calibrate()`` does not itself run
-    any bursts through ``DetectionEngine`` (it captures its own frames
+    ``CONFIRMATION_STREAK`` (3, raised from 2 by ticket 024-007's
+    real-hardware run), and ``calibrate()`` does not itself run any
+    bursts through ``DetectionEngine`` (it captures its own frames
     directly), so the first ``get_tags`` call against this camera is
     this tag's first-ever sighting through the engine -- unconfirmed.
-    ``get_tags`` is therefore called *twice*, against two identical
-    rendered frames, with the assertions made against the second
-    (confirmed) call -- the "more honest fix" pattern the ticket
-    prescribes for tests specifically about world-field behaviour."""
+    ``get_tags`` is therefore called ``CONFIRMATION_STREAK`` times,
+    against identical rendered frames, with the assertions made against
+    the last (confirmed) call -- the "more honest fix" pattern the
+    ticket prescribes for tests specifically about world-field
+    behaviour."""
     frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
-    # CALIBRATION_FRAME_COUNT reads for calibrate(), plus two more for
-    # get_tags' own two bursts (first unconfirmed, second confirmed) --
-    # the same rendered image serves all of them, since real ArUco
+    # CALIBRATION_FRAME_COUNT reads for calibrate(), plus CONFIRMATION_STREAK
+    # more for get_tags' own bursts (all but the last unconfirmed) -- the
+    # same rendered image serves all of them, since real ArUco
     # detection/homography is what's under test here, not distinct
     # per-call imagery.
     identity, slug, cam, _backend = _open_camera_with_frames(
-        registry, [frame] * (CALIBRATION_FRAME_COUNT + 2)
+        registry, [frame] * (CALIBRATION_FRAME_COUNT + CONFIRMATION_STREAK)
     )
     service = _service_with_camera(directories, registry, identity, slug, cam)
     service.set_playfield(main_playfield_definition())
@@ -2400,7 +2402,8 @@ def test_get_tags_on_a_calibrated_camera_reports_real_world_coordinates(director
     result = service.calibrate(slug)
     assert result.succeeded is True
 
-    service.get_tags(slug)
+    for _ in range(CONFIRMATION_STREAK - 1):
+        service.get_tags(slug)
     tag_frame = service.get_tags(slug)
 
     aruco_1 = next(r for r in tag_frame.tags if r.tag == TagId(family=TagFamily.ARUCO, number=1))
