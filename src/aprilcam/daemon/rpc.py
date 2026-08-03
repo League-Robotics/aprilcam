@@ -2,14 +2,18 @@
 tag-detection RPCs below are ticket 021-005; ``SetPlayfield``/
 ``GetPlayfield``/``ListPlayfields``/``SetCameraConfig``/
 ``GetCameraConfig`` are ticket 022-001; ``Calibrate``/``GetCalibration``
-are ticket 022-003; ``ResetCameraConfig`` is ticket 023-004).
+are ticket 022-003; ``ResetCameraConfig`` is ticket 023-004;
+``PutAnnotation``/``RemoveAnnotation``/``ReplaceLayer``/
+``ClearAnnotations``/``GetAnnotations`` and the ``GetFrame`` annotation
+embed are ticket 024-001).
 
 Translates between ``proto/aprilcam_v2.proto``'s service (sprint 020's
 four RPCs -- ``ListCameras``, ``ProbeCameras``, ``GetFrame``,
 ``GetStatus`` -- plus sprint 021's ``GetTags``/``GetTag``/
 ``GetTagHistory`` and the ``GetFrame`` tag embed, plus sprint 022's
 playfield/camera-config RPCs and ``Calibrate``/``GetCalibration``, plus
-sprint 023's ``ResetCameraConfig`` above) and
+sprint 023's ``ResetCameraConfig``, plus sprint 024's annotation-store
+RPCs and the ``GetFrame`` annotation embed above) and
 ``daemon.service.DaemonService`` method calls. Everything here is
 (de)serialization and error-code mapping; no business logic, no camera
 access, no registry/discovery/vision calls -- see the sprint
@@ -76,14 +80,23 @@ from aprilcam.errors import (
 from aprilcam.playfield.interfaces import Playfield
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
 from aprilcam.types import (
+    Annotation,
+    AnnotationSet,
+    AnnotationShape,
     CameraState,
+    Circle,
     ImageFrame,
+    Marker,
+    PathShape,
     PixelPoint,
+    Polygon,
     ProbeReport,
+    Style,
     TagFamily,
     TagFrame,
     TagId,
     TagRecord,
+    Text,
     WorldPoint,
 )
 
@@ -176,6 +189,14 @@ def _image_frame_to_proto(frame: ImageFrame) -> aprilcam_v2_pb2.GetFrameResponse
         msg.world_extent.CopyFrom(
             aprilcam_v2_pb2.WorldExtent(width_cm=width_cm, height_cm=height_cm)
         )
+    # Ticket 024-001: present only on a deskewed frame, and -- unlike
+    # `tags` above -- *always* set on that branch, even for an empty
+    # AnnotationSet (frame.annotations is a real, non-None object
+    # whenever DaemonService._get_deskewed_frame built this frame; see
+    # that method's own docstring). Never set for a raw frame
+    # (frame.annotations stays None by contract, UC-16).
+    if frame.annotations is not None:
+        msg.annotations.CopyFrom(_annotation_set_to_proto(frame.annotations))
     return msg
 
 
@@ -201,6 +222,16 @@ _TAG_FAMILY_FROM_PROTO = {v: k for k, v in _TAG_FAMILY_TO_PROTO.items()}
 
 def _world_point_to_proto(point: WorldPoint) -> aprilcam_v2_pb2.WorldPoint:
     return aprilcam_v2_pb2.WorldPoint(x=point.x, y=point.y)
+
+
+def _world_point_from_proto(msg: aprilcam_v2_pb2.WorldPoint) -> WorldPoint:
+    """Proto -> Python. Needed server-side only for the annotation RPCs
+    (ticket 024-001): a ``PutAnnotation``/``ReplaceLayer`` request's
+    shape geometry has to become ``types.WorldPoint`` before it can be
+    passed to ``DaemonService`` -- the same "reading this module's own
+    incoming requests" exception :func:`_tag_id_from_proto` and
+    :func:`_playfield_definition_from_proto` already document."""
+    return WorldPoint(x=msg.x, y=msg.y)
 
 
 def _pixel_point_to_proto(point: PixelPoint) -> aprilcam_v2_pb2.PixelPoint:
@@ -387,6 +418,142 @@ def _calibration_to_proto(calibration: Calibration) -> aprilcam_v2_pb2.Calibrati
     if calibration.reprojection_error_cm is not None:
         msg.reprojection_error_cm = calibration.reprojection_error_cm
     return msg
+
+
+#: Annotations (ticket 024-001, UC-28, specification.md section 9
+#: decision 8). Every converter below mirrors the exact
+#: ``types.py``/``aprilcam_v2.proto`` field-for-field shape -- see this
+#: module's docstring and ``aprilcam_v2.proto``'s Annotations header
+#: comment for the design notes. ``*_from_proto`` exists for these
+#: (unlike most of this module's converters) because ``PutAnnotation``/
+#: ``ReplaceLayer`` *receive* shapes on the wire -- the same "reading
+#: this module's own incoming requests" exception :func:`_tag_id_from_proto`
+#: already documents, just extended to a five-way ``oneof`` instead of a
+#: single message.
+
+
+def _marker_to_proto(marker: Marker) -> aprilcam_v2_pb2.Marker:
+    msg = aprilcam_v2_pb2.Marker(at=_world_point_to_proto(marker.at))
+    if marker.label is not None:
+        msg.label = marker.label
+    return msg
+
+
+def _marker_from_proto(msg: aprilcam_v2_pb2.Marker) -> Marker:
+    return Marker(at=_world_point_from_proto(msg.at), label=msg.label if msg.HasField("label") else None)
+
+
+def _path_shape_to_proto(path: PathShape) -> aprilcam_v2_pb2.PathShape:
+    return aprilcam_v2_pb2.PathShape(points=[_world_point_to_proto(p) for p in path.points])
+
+
+def _path_shape_from_proto(msg: aprilcam_v2_pb2.PathShape) -> PathShape:
+    return PathShape(points=tuple(_world_point_from_proto(p) for p in msg.points))
+
+
+def _polygon_to_proto(polygon: Polygon) -> aprilcam_v2_pb2.Polygon:
+    return aprilcam_v2_pb2.Polygon(points=[_world_point_to_proto(p) for p in polygon.points])
+
+
+def _polygon_from_proto(msg: aprilcam_v2_pb2.Polygon) -> Polygon:
+    return Polygon(points=tuple(_world_point_from_proto(p) for p in msg.points))
+
+
+def _circle_to_proto(circle: Circle) -> aprilcam_v2_pb2.Circle:
+    return aprilcam_v2_pb2.Circle(center=_world_point_to_proto(circle.center), radius_cm=circle.radius_cm)
+
+
+def _circle_from_proto(msg: aprilcam_v2_pb2.Circle) -> Circle:
+    return Circle(center=_world_point_from_proto(msg.center), radius_cm=msg.radius_cm)
+
+
+def _text_to_proto(text: Text) -> aprilcam_v2_pb2.Text:
+    return aprilcam_v2_pb2.Text(at=_world_point_to_proto(text.at), text=text.text)
+
+
+def _text_from_proto(msg: aprilcam_v2_pb2.Text) -> Text:
+    return Text(at=_world_point_from_proto(msg.at), text=msg.text)
+
+
+def _style_to_proto(style: Style) -> aprilcam_v2_pb2.Style:
+    msg = aprilcam_v2_pb2.Style()
+    if style.color is not None:
+        msg.color = style.color
+    if style.line_width is not None:
+        msg.line_width = style.line_width
+    return msg
+
+
+def _style_from_proto(msg: aprilcam_v2_pb2.Style) -> Style:
+    return Style(
+        color=msg.color if msg.HasField("color") else None,
+        line_width=msg.line_width if msg.HasField("line_width") else None,
+    )
+
+
+def _annotation_to_proto(annotation: Annotation) -> aprilcam_v2_pb2.Annotation:
+    """Python -> proto. Exactly one ``oneof shape`` field is set,
+    matching ``types.AnnotationShape``'s ``Union[Marker, PathShape,
+    Polygon, Circle, Text]`` -- a shape of a type not in that union
+    cannot construct a valid ``Annotation`` in the first place, so the
+    ``else`` branch below is unreachable through normal use; it exists
+    to fail loudly rather than silently serialize an empty ``oneof`` if
+    a future shape is ever added to the union without a matching wire
+    case here."""
+    msg = aprilcam_v2_pb2.Annotation(
+        id=annotation.id, layer=annotation.layer, style=_style_to_proto(annotation.style)
+    )
+    shape = annotation.shape
+    if isinstance(shape, Marker):
+        msg.marker.CopyFrom(_marker_to_proto(shape))
+    elif isinstance(shape, PathShape):
+        msg.path.CopyFrom(_path_shape_to_proto(shape))
+    elif isinstance(shape, Polygon):
+        msg.polygon.CopyFrom(_polygon_to_proto(shape))
+    elif isinstance(shape, Circle):
+        msg.circle.CopyFrom(_circle_to_proto(shape))
+    elif isinstance(shape, Text):
+        msg.text.CopyFrom(_text_to_proto(shape))
+    else:
+        raise TypeError(
+            f"cannot serialize annotation {annotation.id!r}: unknown shape type "
+            f"{type(shape).__name__}"
+        )
+    if annotation.ttl_seconds is not None:
+        msg.ttl_seconds = annotation.ttl_seconds
+    return msg
+
+
+def _annotation_from_proto(msg: aprilcam_v2_pb2.Annotation) -> Annotation:
+    which = msg.WhichOneof("shape")
+    shape: AnnotationShape
+    if which == "marker":
+        shape = _marker_from_proto(msg.marker)
+    elif which == "path":
+        shape = _path_shape_from_proto(msg.path)
+    elif which == "polygon":
+        shape = _polygon_from_proto(msg.polygon)
+    elif which == "circle":
+        shape = _circle_from_proto(msg.circle)
+    elif which == "text":
+        shape = _text_from_proto(msg.text)
+    else:
+        raise ValueError(f"annotation {msg.id!r} has no shape set")
+    return Annotation(
+        id=msg.id,
+        layer=msg.layer,
+        shape=shape,
+        style=_style_from_proto(msg.style),
+        ttl_seconds=msg.ttl_seconds if msg.HasField("ttl_seconds") else None,
+    )
+
+
+def _annotation_set_to_proto(annotation_set: AnnotationSet) -> aprilcam_v2_pb2.AnnotationSet:
+    return aprilcam_v2_pb2.AnnotationSet(
+        annotations=[_annotation_to_proto(a) for a in annotation_set.annotations],
+        revision=annotation_set.revision,
+        timestamp=annotation_set.timestamp,
+    )
 
 
 def _abort(context: grpc.ServicerContext, exc: Exception) -> None:
@@ -599,6 +766,52 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
             _abort(context, exc)
             return aprilcam_v2_pb2.ResetCameraConfigResponse()
         return aprilcam_v2_pb2.ResetCameraConfigResponse()
+
+    def PutAnnotation(self, request, context):  # noqa: N802
+        annotation = _annotation_from_proto(request.annotation)
+        try:
+            self._service.put_annotation(request.playfield, annotation)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.PutAnnotationResponse()
+        return aprilcam_v2_pb2.PutAnnotationResponse()
+
+    def RemoveAnnotation(self, request, context):  # noqa: N802
+        try:
+            self._service.remove_annotation(request.playfield, request.layer, request.id)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.RemoveAnnotationResponse()
+        return aprilcam_v2_pb2.RemoveAnnotationResponse()
+
+    def ReplaceLayer(self, request, context):  # noqa: N802
+        annotations = tuple(_annotation_from_proto(a) for a in request.annotations)
+        try:
+            self._service.replace_layer(request.playfield, request.layer, annotations)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.ReplaceLayerResponse()
+        return aprilcam_v2_pb2.ReplaceLayerResponse()
+
+    def ClearAnnotations(self, request, context):  # noqa: N802
+        layer = request.layer if request.HasField("layer") else None
+        try:
+            self._service.clear_annotations(request.playfield, layer)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.ClearAnnotationsResponse()
+        return aprilcam_v2_pb2.ClearAnnotationsResponse()
+
+    def GetAnnotations(self, request, context):  # noqa: N802
+        layer = request.layer if request.HasField("layer") else None
+        try:
+            annotations = self._service.get_annotations(request.playfield, layer)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.GetAnnotationsResponse()
+        return aprilcam_v2_pb2.GetAnnotationsResponse(
+            annotations=_annotation_set_to_proto(annotations)
+        )
 
 
 class _GrpcListener(ControlPlaneListener):

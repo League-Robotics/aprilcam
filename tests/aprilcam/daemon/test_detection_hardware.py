@@ -76,10 +76,13 @@ from aprilcam.camera.camera import Camera
 from aprilcam.camera.identity import resolve_all
 from aprilcam.client.daemon_client import GrpcDaemon
 from aprilcam.config.directories import Directories
+from aprilcam.config.interfaces import CameraConfig
 from aprilcam.daemon import __main__ as daemon_main
-from aprilcam.daemon.detection import DetectionEngine
+from aprilcam.daemon.detection import CONFIRMATION_STREAK, DetectionEngine
 from aprilcam.proto import aprilcam_v2_pb2_grpc
 from aprilcam.types import TagFamily, TagId
+from aprilcam.vision.detector import TagDetector
+from tests.aprilcam.calibration.test_calibration import main_playfield_definition
 
 pytestmark = pytest.mark.camera
 
@@ -149,12 +152,33 @@ def daemon(tmp_path):
         shutil.rmtree(short_dir, ignore_errors=True)
 
 
+def _prime(daemon: GrpcDaemon) -> None:
+    """**Ticket 024-007 finding and fix.** Run ``CONFIRMATION_STREAK - 1``
+    throwaway ``get_tags`` bursts against a just-built ``daemon``
+    fixture before any test below makes its one real, asserted-on call.
+    Ticket 024-006's presence-based confirmation means a brand-new
+    ``DetectionEngine``'s very first burst can never report anything
+    confirmed (a streak of 1 never meets the threshold) -- every test
+    in this module that made exactly one ``get_tags``/``camera tags``
+    call against a freshly-built daemon was silently broken by that
+    change (three hard failures, one permanently-skipping test) until
+    this fix, discoverable only by actually running this module against
+    real hardware, which is this ticket's whole purpose. Real bursts
+    against the real camera, discarded -- exactly what a real
+    long-running daemon has already accumulated by the time an agent's
+    first query arrives.
+    """
+    for _ in range(max(CONFIRMATION_STREAK - 1, 0)):
+        daemon.get_tags(ARDUCAM_SLUG)
+
+
 # ---------------------------------------------------------------------------
 # AC: get_tags detects AprilTag 1 and a plausible subset of ArUco 1-10
 # ---------------------------------------------------------------------------
 
 
 def test_get_tags_detects_apriltag_1_and_a_plausible_aruco_subset(daemon):
+    _prime(daemon)
     frame = daemon.get_tags(ARDUCAM_SLUG)
     observed = [(r.tag.family.value, r.tag.number) for r in frame.tags]
 
@@ -181,6 +205,7 @@ def test_get_tags_detects_apriltag_1_and_a_plausible_aruco_subset(daemon):
 
 
 def test_no_negative_tag_ids_ever_appear(daemon):
+    _prime(daemon)
     frame = daemon.get_tags(ARDUCAM_SLUG)
     assert frame.tags, "no tags detected this burst -- re-run with main-playfield in view"
     for record in frame.tags:
@@ -197,6 +222,7 @@ def test_no_negative_tag_ids_ever_appear(daemon):
 
 
 def test_every_record_is_honestly_uncalibrated_with_usable_pixel_corners(daemon):
+    _prime(daemon)
     frame = daemon.get_tags(ARDUCAM_SLUG)
     assert frame.tags, "no tags detected this burst -- re-run with main-playfield in view"
     for record in frame.tags:
@@ -248,6 +274,7 @@ def test_corner_order_matches_apriltag_1s_known_canonical_mounting(daemon):
     against real captured pixels (real lens distortion, real focus,
     real JPEG compression) instead of a synthetic affine warp.
     """
+    _prime(daemon)
     frame_response = daemon.get_frame(ARDUCAM_SLUG, deskewed=False, encoding="jpeg")
     tag_frame = daemon.get_tags(ARDUCAM_SLUG)
     record = next((r for r in tag_frame.tags if r.tag == APRILTAG_1), None)
@@ -438,6 +465,26 @@ class _OccludingBackend(CaptureBackend):
 
 
 def test_get_tag_history_shows_explicit_gap_for_a_digitally_occluded_tag():
+    """**Ticket 024-007 finding and fix.** Before this fix, this test
+    always skipped instead of exercising its gap logic: ticket 024-006's
+    presence-based confirmation means a fresh ``DetectionEngine()``'s
+    very first burst can never report anything confirmed (a streak of 1
+    never meets ``CONFIRMATION_STREAK``'s threshold), so the original
+    ``present1`` check on the *first* raw burst was always ``False`` --
+    a silently disabled test, worse than a failing one. The fix: run
+    ``CONFIRMATION_STREAK - 1`` unused priming bursts first, so the six
+    bursts this test actually examines start from an already-confirmed
+    baseline -- exactly the state a real long-running daemon is already
+    in by the time an agent's first ``get_tags`` call arrives. The
+    expected present/absent pattern below is also derived from
+    ``CONFIRMATION_STREAK`` rather than hardcoded, so this test keeps
+    working correctly whatever that constant is tuned to (ticket
+    024-007's own acceptance run may change it from 2 to 3): confirmation
+    re-earns itself the same way a brand-new sighting does after a gap
+    (``_confirm_detections``'s docstring -- a gap drops the id from the
+    streak dict entirely), so recovery from the occlusion takes
+    ``CONFIRMATION_STREAK`` real captures, not one.
+    """
     _skip_if_arducam_not_attached()
     identities = resolve_all()
     index = next(
@@ -450,7 +497,14 @@ def test_get_tag_history_shows_explicit_gap_for_a_digitally_occluded_tag():
     engine = DetectionEngine()
     camera.open()
     try:
-        # -- frames 1-2: establish AprilTag 1 present, real captures ---
+        # -- priming: bring the streak counter to the doorstep of
+        # confirmation before the bursts this test actually examines
+        # begin (see this test's docstring for why this is necessary).
+        for _ in range(max(CONFIRMATION_STREAK - 1, 0)):
+            engine.run_burst(ARDUCAM_SLUG, camera)
+        baseline_len = len(engine.history(ARDUCAM_SLUG))
+
+        # -- bursts 1-2: establish AprilTag 1 present, real captures ---
         frame1 = engine.run_burst(ARDUCAM_SLUG, camera)
         frame2 = engine.run_burst(ARDUCAM_SLUG, camera)
         present1 = any(r.tag == APRILTAG_1 for r in frame1.tags)
@@ -476,33 +530,41 @@ def test_get_tag_history_shows_explicit_gap_for_a_digitally_occluded_tag():
         backend.occlude_region(region)
         backend.occlude_next(2)
 
-        frame3 = engine.run_burst(ARDUCAM_SLUG, camera)
-        frame4 = engine.run_burst(ARDUCAM_SLUG, camera)
+        for _ in range(2):
+            engine.run_burst(ARDUCAM_SLUG, camera)
 
-        # -- occlusion lifts: frames 5-6, real captures again -----------
-        frame5 = engine.run_burst(ARDUCAM_SLUG, camera)
-        frame6 = engine.run_burst(ARDUCAM_SLUG, camera)
+        # -- occlusion lifts here: recovery takes CONFIRMATION_STREAK
+        # real captures (a gap drops the id from the streak dict
+        # entirely -- see this test's docstring), not one.
+        for _ in range(CONFIRMATION_STREAK):
+            engine.run_burst(ARDUCAM_SLUG, camera)
 
-        history = engine.history(ARDUCAM_SLUG)
-        assert len(history) == 6, (
-            f"expected 6 buffered frames (one per run_burst call), got "
-            f"{len(history)} -- history must never be shortened"
+        history = engine.history(ARDUCAM_SLUG)[baseline_len:]
+        expected_len = 2 + 2 + CONFIRMATION_STREAK
+        assert len(history) == expected_len, (
+            f"expected {expected_len} buffered frames after the priming "
+            f"baseline (one per run_burst call), got {len(history)} -- "
+            f"history must never be shortened"
         )
 
         present = [any(r.tag == APRILTAG_1 for r in f.tags) for f in history]
-        assert present == [True, True, False, False, True, True], (
-            f"expected present/absent pattern "
-            f"[True, True, False, False, True, True] (present, present, "
-            f"gap, gap, present, present), got {present}"
+        expected_present = (
+            [True, True] + [False, False] + [False] * (CONFIRMATION_STREAK - 1) + [True]
+        )
+        assert present == expected_present, (
+            f"expected present/absent pattern {expected_present} (present, "
+            f"present, gap, gap, then CONFIRMATION_STREAK="
+            f"{CONFIRMATION_STREAK} real captures before AprilTag 1 "
+            f"re-earns confirmation), got {present}"
         )
 
         # The "gap" entries are real TagFrame records with real,
         # monotonically-increasing frame_index/timestamp -- an explicit
         # absence, not a dropped or interpolated slot.
         indices = [f.frame_index for f in history]
-        assert indices == sorted(indices) and len(set(indices)) == 6, (
-            f"frame_index values are not a clean monotonic sequence of 6 "
-            f"distinct entries: {indices}"
+        assert indices == sorted(indices) and len(set(indices)) == expected_len, (
+            f"frame_index values are not a clean monotonic sequence of "
+            f"{expected_len} distinct entries: {indices}"
         )
     finally:
         camera.close()
@@ -526,6 +588,16 @@ def _run(bin_path: Path, *args: str, env: Dict[str, str], timeout: float = 30.0)
     return subprocess.run(
         [str(bin_path), *args], capture_output=True, env=env, timeout=timeout
     )
+
+
+def _prime_cli(bin_path: Path, env: Dict[str, str]) -> None:
+    """CLI-subprocess counterpart of :func:`_prime` -- same ticket
+    024-007 finding, same fix: ``CONFIRMATION_STREAK - 1`` throwaway
+    ``camera tags`` invocations against a just-started real daemon
+    subprocess before this module's asserted-on CLI call, so that call
+    is not always the engine's un-confirmable first burst."""
+    for _ in range(max(CONFIRMATION_STREAK - 1, 0)):
+        _run(bin_path, "camera", "tags", ARDUCAM_SLUG, env=env)
 
 
 @pytest.fixture
@@ -569,6 +641,7 @@ def test_camera_tags_cli_output_is_legible_against_real_hardware(cli_env):
         probe = _run(bin_path, "camera", "probe", env=env)
         assert probe.returncode == 0, probe.stderr
 
+        _prime_cli(bin_path, env)
         result = _run(bin_path, "camera", "tags", ARDUCAM_SLUG, env=env)
         assert result.returncode == 0, result.stderr
         out = result.stdout.decode()
@@ -612,6 +685,7 @@ def test_camera_tags_by_cli_number_and_slug_agree_on_real_hardware(cli_env):
         assert match is not None, f"{ARDUCAM_SLUG!r} not found in camera list output:\n{list_out}"
         number = match.group(1)
 
+        _prime_cli(bin_path, env)
         by_slug = _run(bin_path, "camera", "tags", ARDUCAM_SLUG, env=env)
         by_number = _run(bin_path, "camera", "tags", number, env=env)
         assert by_slug.returncode == 0, by_slug.stderr
@@ -626,3 +700,290 @@ def test_camera_tags_by_cli_number_and_slug_agree_on_real_hardware(cli_env):
     finally:
         stop = _run(bin_path, "daemon", "stop", env=env)
         assert stop.returncode == 0, stop.stderr
+
+
+# ---------------------------------------------------------------------------
+# Ticket 024-007 -- the empirical acceptance gate for ticket 024-006's
+# CONFIRMATION_STREAK. Three tests: a 20+ poll clean-field false-accept
+# check (with raw-vs-confirmed counts), a new-tag latency measurement,
+# and a motion regression check against sprint 022 ticket 007's
+# already-established real-hardware motion contract.
+# ---------------------------------------------------------------------------
+
+#: main-playfield's full surveyed set, current as of this ticket (all 10
+#: ArUco markers plus AprilTag 1 visible -- ticket description's ground
+#: truth). Anything outside this set reaching *confirmed* output is a
+#: false accept.
+_SURVEYED_ARUCO_IDS = frozenset(range(1, 11))
+
+
+def _is_phantom(family: TagFamily, number: int) -> bool:
+    if family == TagFamily.APRILTAG:
+        return number != 1
+    return number not in _SURVEYED_ARUCO_IDS
+
+
+def test_twenty_poll_clean_field_shows_no_confirmed_phantom_detections():
+    """The actual empirical gate for ticket 024-006's
+    ``CONFIRMATION_STREAK`` (ticket 024-007's Description) -- polls the
+    real, static, clean ``main-playfield`` 25 times through a real
+    ``DetectionEngine``/real camera 3, recording both the *raw* detector
+    output (captured by wrapping ``TagDetector.detect`` -- the same
+    detector object ``DetectionEngine`` itself builds and reuses, so
+    this is the exact raw data confirmation actually filters) and the
+    *confirmed* output (``run_burst``'s returned ``TagFrame``, exactly
+    what ``get_tags``/``camera tags`` hand a real caller).
+
+    Hard assertion: zero ids outside the surveyed set (AprilTag 1, ArUco
+    1-10) ever reach *confirmed* output over this run -- what a real
+    caller actually sees, and the substance of the acceptance criterion.
+    Raw phantom occurrences are recorded and printed as an informational
+    count, never asserted on: a raw phantom that confirmation correctly
+    filters out is confirmation working as designed, not a defect. See
+    ticket 024-007's completion notes for the real counts observed
+    during its acceptance run and whether they motivated raising
+    ``CONFIRMATION_STREAK``.
+    """
+    _skip_if_arducam_not_attached()
+    identities = resolve_all()
+    index = next(
+        (idx for idx, ident in identities.items() if ident.slug == ARDUCAM_SLUG), None
+    )
+    assert index is not None  # guaranteed by _skip_if_arducam_not_attached
+
+    backend = OpenCVBackend(index)
+    camera = Camera(ARDUCAM_SLUG, backend)
+    engine = DetectionEngine()
+
+    raw_bursts = []
+    original_detect = TagDetector.detect
+
+    def _recording_detect(self, gray, scale=1.0):
+        detections = original_detect(self, gray, scale=scale)
+        raw_bursts.append(list(detections))
+        return detections
+
+    TagDetector.detect = _recording_detect  # type: ignore[method-assign]
+    camera.open()
+    try:
+        num_polls = 25
+        confirmed_frames = [engine.run_burst(ARDUCAM_SLUG, camera) for _ in range(num_polls)]
+    finally:
+        camera.close()
+        TagDetector.detect = original_detect  # type: ignore[method-assign]
+
+    raw_phantom_count = sum(
+        1
+        for burst in raw_bursts
+        for detection in burst
+        if _is_phantom(detection.family, detection.number)
+    )
+    confirmed_phantom_records = [
+        (frame_i, record.tag)
+        for frame_i, frame in enumerate(confirmed_frames)
+        for record in frame.tags
+        if _is_phantom(record.tag.family, record.tag.number)
+    ]
+
+    print(
+        f"\n[024-007 acceptance data] {num_polls} polls -- raw detector "
+        f"phantom occurrences: {raw_phantom_count}/{sum(len(b) for b in raw_bursts)} "
+        f"raw hits, confirmed (reported) phantom occurrences: "
+        f"{len(confirmed_phantom_records)} "
+        f"({confirmed_phantom_records if confirmed_phantom_records else 'none'})"
+    )
+
+    assert not confirmed_phantom_records, (
+        f"false accept(s) reached confirmed output over {num_polls} polls: "
+        f"{confirmed_phantom_records} -- CONFIRMATION_STREAK="
+        f"{CONFIRMATION_STREAK} is not sufficient at its current value; "
+        "see ticket 024-007"
+    )
+
+
+def test_new_tag_first_appears_in_confirmed_output_after_the_predicted_latency():
+    """Measures the number of bursts between a tag's first physical
+    appearance and its first appearance in confirmed output. Ticket
+    024-007's Description explicitly permits recording this as
+    "documented latency," and ticket 024-006's design predicts exactly
+    ``CONFIRMATION_STREAK - 1`` bursts of latency (two, at the current
+    default of 3, raised from one at the ticket 024-006 default of 2 --
+    see ``CONFIRMATION_STREAK``'s docstring in ``daemon/detection.py``
+    for the real-hardware evidence that motivated the raise).
+
+    No physical actuator is available to this test module (see the
+    module docstring) to place a genuinely new tag on the field
+    mid-run, so this reuses the module's own established "digital
+    occlusion, not physical occlusion" technique in reverse: AprilTag
+    1's real, known pixel region is blacked out on every real capture
+    from the *very first* burst of a fresh ``DetectionEngine`` (so this
+    engine has never once seen this id -- indistinguishable, from the
+    software's perspective, from a tag that was not physically present
+    until this moment), then the occlusion lifts and the burst count
+    until the tag is first confirmed is measured against real, genuinely
+    fresh captures and the real, unmodified detection/confirmation
+    pipeline. Flagged here and in ticket 024-007's completion notes as a
+    scope decision a human may want to re-verify by hand (physically
+    placing a new tag on the field mid-session), exactly as the
+    digital-occlusion gap test already discloses for its own
+    substitution.
+    """
+    _skip_if_arducam_not_attached()
+    identities = resolve_all()
+    index = next(
+        (idx for idx, ident in identities.items() if ident.slug == ARDUCAM_SLUG), None
+    )
+    assert index is not None  # guaranteed by _skip_if_arducam_not_attached
+
+    # -- Step 1: probe AprilTag 1's real pixel region with a plain,
+    # unwrapped backend and a throwaway confirmation_streak=1 engine (so
+    # this probe reports immediately) -- geometry only, discarded
+    # afterward; the real backend is stationary, so this region is still
+    # valid for the fresh engine constructed in step 2.
+    probe_backend = OpenCVBackend(index)
+    probe_camera = Camera(ARDUCAM_SLUG, probe_backend)
+    probe_engine = DetectionEngine(confirmation_streak=1)
+    probe_camera.open()
+    try:
+        probe_frame = probe_engine.run_burst(ARDUCAM_SLUG, probe_camera)
+    finally:
+        probe_camera.close()
+    probe_record = next((r for r in probe_frame.tags if r.tag == APRILTAG_1), None)
+    if probe_record is None:
+        pytest.skip("AprilTag 1 not detected during pixel-region probe -- re-run")
+
+    xs = [c.x for c in probe_record.pixel_corners]
+    ys = [c.y for c in probe_record.pixel_corners]
+    pad = 20
+    region = (
+        max(0, int(min(xs) - pad)),
+        max(0, int(min(ys) - pad)),
+        int(max(xs) + pad),
+        int(max(ys) + pad),
+    )
+
+    # -- Step 2: fresh engine, occluded from burst 1 -- "first physical
+    # appearance" is the moment the occlusion lifts.
+    backend = _OccludingBackend(OpenCVBackend(index))
+    backend.occlude_region(region)
+    backend.occlude_next(3)
+    camera = Camera(ARDUCAM_SLUG, backend)
+    engine = DetectionEngine()
+    camera.open()
+    try:
+        for _ in range(3):
+            hidden_frame = engine.run_burst(ARDUCAM_SLUG, camera)
+            assert not any(r.tag == APRILTAG_1 for r in hidden_frame.tags), (
+                "AprilTag 1 reported while still digitally occluded -- "
+                "the region computed from the probe does not actually "
+                "cover it"
+            )
+
+        max_bursts_to_check = CONFIRMATION_STREAK + 3
+        first_reported_burst = None
+        for burst_number in range(1, max_bursts_to_check + 1):
+            frame = engine.run_burst(ARDUCAM_SLUG, camera)
+            if any(r.tag == APRILTAG_1 for r in frame.tags):
+                first_reported_burst = burst_number
+                break
+
+        assert first_reported_burst is not None, (
+            f"AprilTag 1 never reached confirmed output within "
+            f"{max_bursts_to_check} bursts after its occlusion lifted"
+        )
+        latency_bursts = first_reported_burst - 1
+        print(
+            f"\n[024-007 acceptance data] new-tag latency: AprilTag 1 "
+            f"first appeared in confirmed output on burst "
+            f"{first_reported_burst} after its first physical appearance "
+            f"({latency_bursts} burst(s) of latency) -- "
+            f"CONFIRMATION_STREAK={CONFIRMATION_STREAK} predicts "
+            f"{CONFIRMATION_STREAK - 1}"
+        )
+        assert latency_bursts == CONFIRMATION_STREAK - 1, (
+            f"expected exactly {CONFIRMATION_STREAK - 1} burst(s) of "
+            f"latency (ticket 024-006's design), observed {latency_bursts}"
+        )
+    finally:
+        camera.close()
+
+
+def test_stationary_tag_motion_fields_match_pre_confirmation_behavior_from_second_sample(daemon):
+    """Regression check (mirrors sprint 022 ticket 007's real-hardware
+    motion checks -- ticket 024-007's Description says this explicitly:
+    "not new territory"). Ticket 024-006's presence-based confirmation
+    sits in front of the ring buffer (module docstring: an unconfirmed
+    detection never reaches ``_build_tag_record`` or the ring buffer at
+    all), so ``DetectionEngine._finish_record``'s world-position history
+    is built from *confirmed* entries only. This test confirms that
+    change did not disturb sprint 022 ticket 007's already-established
+    motion contract: a tag's first-ever confirmed calibrated sample has
+    insufficient history for motion (``speed``/``heading_rad`` both
+    ``None``), and from its second confirmed sample onward, ``speed``
+    becomes a real non-negative float while ``heading_rad`` stays
+    ``None`` for a genuinely stationary real marker (sub-jitter-
+    threshold displacement, ``vision.motion.MIN_RELIABLE_DISPLACEMENT_CM``)
+    -- exactly the pre-024-006 behaviour this ticket's confirmation
+    change must not regress.
+
+    **Mobile-tag sub-criterion -- not performed.** Ticket 024-007's
+    acceptance criteria also ask, conditionally ("if a mobile tag is
+    available"), to physically move a tag across the field between polls
+    and confirm continued tracking. No physical actuator is available to
+    this automation environment (the same limitation sprint 022 ticket
+    007's completion notes already recorded for its own east/north
+    motion checks) -- there is no loose, hand-movable tag on this field
+    for this agent to place or move, only the fixed surveyed markers and
+    the stakeholder's own basket, neither of which this ticket permits
+    disturbing. This sub-criterion is therefore N/A this run and flagged
+    for stakeholder hand-verification in ticket 024-007's completion
+    notes, exactly as sprint 022 ticket 007 flagged its own un-actuated
+    motion checks.
+    """
+    daemon.set_playfield(main_playfield_definition())
+    daemon.set_camera_config(
+        CameraConfig(name=ARDUCAM_SLUG, playfield="main-playfield", settings={})
+    )
+    result = daemon.calibrate(ARDUCAM_SLUG)
+    assert result.succeeded is True, f"setup calibration failed: {result.reason}"
+
+    samples = []
+    for _ in range(6):
+        frame = daemon.get_tags(ARDUCAM_SLUG)
+        record = next((r for r in frame.tags if r.tag == APRILTAG_1), None)
+        if record is not None:
+            samples.append(record)
+
+    if len(samples) < 2:
+        pytest.skip(
+            f"AprilTag 1 confirmed in fewer than 2 of 6 polls ({len(samples)}) "
+            "-- cannot exercise the second-sample-onward motion contract; re-run"
+        )
+
+    first, rest = samples[0], samples[1:]
+    assert first.speed is None and first.heading_rad is None, (
+        f"first confirmed calibrated sample already carries motion data "
+        f"(speed={first.speed}, heading_rad={first.heading_rad}) -- the "
+        "insufficient-history contract has regressed"
+    )
+    for i, record in enumerate(rest, start=2):
+        assert record.speed is not None, (
+            f"sample {i}: speed is None -- expected a real, honestly-"
+            "computed non-negative float from the second confirmed "
+            "sample onward"
+        )
+        assert record.speed >= 0.0
+        assert record.heading_rad is None, (
+            f"sample {i}: heading_rad={record.heading_rad} -- AprilTag 1 "
+            "is physically stationary this run; a confident heading from "
+            "sub-jitter-threshold displacement would reproduce the exact "
+            "bug sprint 022 ticket 007 fixed "
+            "(vision.motion.MIN_RELIABLE_DISPLACEMENT_CM)"
+        )
+
+    print(
+        f"\n[024-007 acceptance data] motion regression: {len(samples)} "
+        f"confirmed AprilTag 1 samples, speeds="
+        f"{[round(r.speed, 3) if r.speed is not None else None for r in samples]}, "
+        f"headings={[r.heading_rad for r in samples]}"
+    )

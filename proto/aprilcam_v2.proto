@@ -54,6 +54,29 @@
 // caller to supply, the whole point is the daemon reads its own disk);
 // `ResetCameraConfigResponse` is empty, mirroring `SetCameraConfigResponse`.
 //
+// Sprint 024 ticket 001 is the fifth: the annotation store
+// (specification.md section 9 decision 8, UC-28) -- `Marker`/
+// `PathShape`/`Polygon`/`Circle`/`Text`/`Style`/`Annotation`/
+// `AnnotationSet`, plus `PutAnnotation`/`RemoveAnnotation`/
+// `ReplaceLayer`/`ClearAnnotations`/`GetAnnotations`, all
+// playfield-addressed. `GetFrameResponse.annotations` -- reserved in
+// comment since sprint 022 ticket 005 with "a later stage adds it here,
+// additively" -- goes live here, present only on a deskewed frame, and
+// (Architecture resolution 1) *always* set on that branch, even for an
+// empty set, never omitted -- unlike `tags`, which has a genuine
+// on/off state, annotations have only "empty" to represent once a
+// playfield link and calibration exist. `Annotation.shape` is a
+// `oneof` -- the wire's version of `aprilcam.types.AnnotationShape`'s
+// `Union[Marker, PathShape, Polygon, Circle, Text]` -- exactly one
+// shape field set, mirroring the Python union's "a state that makes no
+// sense is unrepresentable, not merely discouraged" discipline.
+// Unknown playfield -> `NOT_FOUND` uniformly across all five RPCs
+// (matching `GetPlayfield`'s existing precedent, not the mobile-tag
+// registry's accept-and-hold analogy -- sprint.md Architecture,
+// resolved UC-28 open question 2); an unknown *layer* within a known
+// playfield is never an error one level down (a no-op for `remove`/
+// `clear`, empty for `get`).
+//
 // Wire conventions this file follows (docs/design/design.md §6):
 //   - World-cm coordinates cross this boundary only inside `TagRecord`
 //     (`world`, `world_velocity`, `world_corners`), and every camera
@@ -176,6 +199,34 @@ service AprilCamV2 {
   // introspected-plus-blank template (the same document an
   // unconfigured camera reports) rather than erroring.
   rpc ResetCameraConfig (ResetCameraConfigRequest) returns (ResetCameraConfigResponse);
+
+  // Upsert one annotation by its (layer, id) key (UC-28, ticket
+  // 024-001). Last write wins on a colliding key -- documented
+  // semantics, not a race bug (UC-28.S-6). Unknown playfield ->
+  // `NOT_FOUND`, naming the playfields held.
+  rpc PutAnnotation (PutAnnotationRequest) returns (PutAnnotationResponse);
+
+  // Delete one annotation. Removing an absent (layer, id) key -- or a
+  // layer that does not exist -- on a *known* playfield is a no-op,
+  // never an error; an unknown *playfield* still -> `NOT_FOUND`.
+  rpc RemoveAnnotation (RemoveAnnotationRequest) returns (RemoveAnnotationResponse);
+
+  // Atomically swap a layer's entire contents in one call (UC-28.S-2)
+  // -- no consumer ever observes a half-updated layer; every frame
+  // embeds the old set or the new one, never a mix.
+  rpc ReplaceLayer (ReplaceLayerRequest) returns (ReplaceLayerResponse);
+
+  // Clear one layer, or every layer on the playfield when `layer` is
+  // absent. Clearing an already-empty or nonexistent layer on a
+  // *known* playfield is a no-op -- a known-empty state is the
+  // caller's actual goal.
+  rpc ClearAnnotations (ClearAnnotationsRequest) returns (ClearAnnotationsResponse);
+
+  // The current annotation set for a playfield, optionally filtered to
+  // one layer (UC-28.S-3) -- how a robot reads another robot's plan
+  // without fetching pixels. After a restart this is an empty set at
+  // revision 0 (UC-28.S-4): the wipe is the contract, not a fault.
+  rpc GetAnnotations (GetAnnotationsRequest) returns (GetAnnotationsResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -344,11 +395,19 @@ message GetFrameResponse {
   // deskewed frames" contract. Both are *derived and reported*, never
   // a chosen constant (specification.md Sec.4.1): `px_per_cm` is
   // `frame_width / field_width_cm`, exactly as the daemon actually
-  // produced this frame's dimensions. `annotations` is still NOT
-  // carried this sprint -- the annotation store does not exist yet
-  // (sprint 022's Decision 5); a later stage adds it here, additively.
+  // produced this frame's dimensions.
   optional double px_per_cm = 10;
   optional WorldExtent world_extent = 11;
+
+  // Ticket 024-001: the linked playfield's current annotation set
+  // (UC-28, specification.md section 9 decision 8). Present
+  // (HasField true) only on a deskewed frame, and -- unlike `tags`
+  // above -- *always* set on that branch, even for an empty set
+  // (revision 0): annotations have no on/off state to distinguish,
+  // only "empty" (Architecture resolution 1). Never set on a raw
+  // frame: annotations are world-only and a raw frame publishes no
+  // world->pixel mapping to render them with (UC-16, "raw means raw").
+  optional AnnotationSet annotations = 12;
 }
 
 // A field's world extent (width_cm, height_cm) -- distinct from
@@ -570,3 +629,139 @@ message ResetCameraConfigRequest {
 }
 
 message ResetCameraConfigResponse {}
+
+// ---------------------------------------------------------------------------
+// Annotations (ticket 024-001). specification.md section 9 decision 8,
+// UC-28: the daemon stores and embeds; it never renders. Every message
+// below mirrors its aprilcam.types counterpart field for field -- see
+// this file's header comment for the RPC-level design notes.
+// ---------------------------------------------------------------------------
+
+// A point of interest, optionally labelled. Mirrors aprilcam.types.Marker.
+message Marker {
+  WorldPoint at = 1;
+  optional string label = 2;
+}
+
+// An open polyline -- a route, a trajectory, a planned motion. Mirrors
+// aprilcam.types.PathShape.
+message PathShape {
+  repeated WorldPoint points = 1;
+}
+
+// A closed region -- a zone, a keep-out area. Mirrors
+// aprilcam.types.Polygon.
+message Polygon {
+  repeated WorldPoint points = 1;
+}
+
+// A circular region. `radius_cm` is world units, like everything else
+// crossing this boundary. Mirrors aprilcam.types.Circle.
+message Circle {
+  WorldPoint center = 1;
+  double radius_cm = 2;
+}
+
+// A free-standing label anchored at a world position. Mirrors
+// aprilcam.types.Text.
+message Text {
+  WorldPoint at = 1;
+  string text = 2;
+}
+
+// Presentation hints for an annotation. Geometry is world-cm, always;
+// style is presentation, and a renderer may ignore any hint -- do not
+// "fix" line_width to cm, it is pixels on the rendered image. Mirrors
+// aprilcam.types.Style.
+message Style {
+  optional string color = 1;
+  optional double line_width = 2;
+}
+
+// One drawing on a playfield, held by the daemon (UC-28). Keyed
+// (playfield, layer, id) -- `id` is client-chosen and unique *within*
+// its layer, so this message carries `layer` itself (not just the
+// enclosing request) so a flattened, whole-playfield `AnnotationSet`
+// (`GetAnnotations` with no `layer` filter) still tells every entry's
+// layer apart. Exactly one `shape` field is set -- the wire's version
+// of aprilcam.types.AnnotationShape's `Union[Marker, PathShape,
+// Polygon, Circle, Text]`: a state that makes no sense (a circle with
+// path points) is unrepresentable here, the same way the Python union
+// makes it unrepresentable there. Mirrors aprilcam.types.Annotation
+// field for field.
+message Annotation {
+  string id = 1;
+  string layer = 2;
+  oneof shape {
+    Marker marker = 3;
+    PathShape path = 4;
+    Polygon polygon = 5;
+    Circle circle = 6;
+    Text text = 7;
+  }
+  Style style = 8;
+  // Stored and served back verbatim; drives no expiry behaviour this
+  // sprint (sprint.md's Resolved UC-28 open questions, item 5 -- a
+  // deliberate deferral, not an oversight). Absent means "no TTL",
+  // mirroring aprilcam.types.Annotation.ttl_seconds's Optional[float].
+  optional double ttl_seconds = 9;
+}
+
+// A playfield's complete annotation state at one moment (UC-28).
+// Mirrors aprilcam.types.AnnotationSet field for field. `revision` is
+// monotonic per playfield and bumps on every actual mutation -- an
+// unchanged revision is a renderer's licence to skip re-rasterizing an
+// overlay it has already drawn (that dataclass's own docstring).
+message AnnotationSet {
+  repeated Annotation annotations = 1;
+  int32 revision = 2;
+  double timestamp = 3;
+}
+
+message PutAnnotationRequest {
+  string playfield = 1;
+  Annotation annotation = 2;
+}
+
+message PutAnnotationResponse {}
+
+message RemoveAnnotationRequest {
+  string playfield = 1;
+  string layer = 2;
+  string id = 3;
+}
+
+message RemoveAnnotationResponse {}
+
+message ReplaceLayerRequest {
+  string playfield = 1;
+  string layer = 2;
+  repeated Annotation annotations = 3;
+}
+
+message ReplaceLayerResponse {}
+
+message ClearAnnotationsRequest {
+  string playfield = 1;
+  // Absent means every layer on this playfield -- mirrors
+  // Daemon.clear_annotations(layer: Optional[str] = None).
+  optional string layer = 2;
+}
+
+message ClearAnnotationsResponse {}
+
+message GetAnnotationsRequest {
+  string playfield = 1;
+  // Absent means every layer's annotations -- mirrors
+  // Daemon.get_annotations(layer: Optional[str] = None).
+  optional string layer = 2;
+}
+
+message GetAnnotationsResponse {
+  // Always a real AnnotationSet, never omitted -- even an empty
+  // playfield's answer is revision 0 with an empty `annotations` list,
+  // not an absent field (the same "only empty to represent, never
+  // off" rule as GetFrameResponse.annotations above, applied to this
+  // query response too).
+  AnnotationSet annotations = 1;
+}

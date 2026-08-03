@@ -35,17 +35,49 @@ from aprilcam.camera.identity import CameraIdentity
 from aprilcam.camera.registry import CameraRegistry
 from aprilcam.client.daemon_client import GrpcDaemon
 from aprilcam.config.directories import Directories
+from aprilcam.config.interfaces import CameraConfig
 from aprilcam.daemon.rpc import build_server
-from aprilcam.daemon.service import DaemonService
-from aprilcam.errors import CameraNotPresent, ConnectionFailed, NotCalibrated, UnknownCamera
+from aprilcam.daemon.service import CALIBRATION_FRAME_COUNT, DaemonService
+from aprilcam.errors import (
+    CameraNotPresent,
+    ConnectionFailed,
+    NotCalibrated,
+    UnknownCamera,
+    UnknownPlayfield,
+)
 from aprilcam.proto import aprilcam_v2_pb2_grpc
-from aprilcam.types import CameraState, ImageFrame, ProbeReport, TagFamily, TagFrame, TagId, TagRecord
+from aprilcam.types import (
+    Annotation,
+    AnnotationSet,
+    CameraState,
+    Circle,
+    ImageFrame,
+    Marker,
+    PathShape,
+    Polygon,
+    ProbeReport,
+    Style,
+    TagFamily,
+    TagFrame,
+    TagId,
+    TagRecord,
+    Text,
+    WorldPoint,
+)
+from tests.aprilcam.calibration.test_calibration import (
+    MAIN_PLAYFIELD_ARUCO_POSITIONS,
+    main_playfield_definition,
+    render_playfield_frame,
+)
 from tests.aprilcam.camera.test_camera import FakeBackend
 from tests.aprilcam.daemon.test_service import (
     _build_tag_service,
     _CountingDetector,
     _detection,
+    _open_camera_with_frames,
+    _playfield_definition,
     _ScriptedDetector,
+    _service_with_camera,
 )
 
 
@@ -426,3 +458,282 @@ def test_get_frame_tags_is_none_when_no_detection_has_run(tag_client_factory):
         frame = client.get_frame(slug)
 
     assert frame.tags is None
+
+
+# ---------------------------------------------------------------------------
+# Annotation store -- client wire round trips (ticket 024-002, UC-28).
+# Exercises the full proto boundary both directions: GrpcDaemon builds the
+# request (client/daemon_client.py's own _annotation_to_proto and friends),
+# client/models.py's from_proto converters turn the response back into real
+# aprilcam.types dataclasses -- mirroring test_service.py's DaemonService
+# annotation-store test section, one layer further out over a real gRPC
+# channel.
+# ---------------------------------------------------------------------------
+
+
+def _marker_annotation(id: str, layer: str, x: float = 1.0, y: float = 2.0) -> Annotation:
+    return Annotation(id=id, layer=layer, shape=Marker(at=WorldPoint(x=x, y=y)))
+
+
+@pytest.fixture
+def playfield_client(client: GrpcDaemon) -> GrpcDaemon:
+    """``client`` with ``main-playfield`` already pushed -- every
+    annotation RPC below requires a known playfield (UC-28.S-5), and
+    this fixture pushes it the same way a real caller would: over the
+    wire via ``set_playfield``, not by reaching into the service."""
+    client.set_playfield(_playfield_definition())
+    return client
+
+
+def test_put_annotation_then_get_annotations_round_trip_returns_annotation_dataclasses(
+    playfield_client,
+):
+    playfield_client.put_annotation(
+        "main-playfield", _marker_annotation("goal", "planner", x=50.0, y=30.0)
+    )
+
+    result = playfield_client.get_annotations("main-playfield")
+
+    assert isinstance(result, AnnotationSet)
+    assert len(result.annotations) == 1
+    annotation = result.annotations[0]
+    assert isinstance(annotation, Annotation)
+    assert annotation.id == "goal"
+    assert annotation.layer == "planner"
+    assert annotation.shape == Marker(at=WorldPoint(x=50.0, y=30.0))
+    # revision/timestamp survive the round trip, not just the shape.
+    assert result.revision == 1
+    assert result.timestamp > 0.0
+
+
+def test_put_annotation_every_shape_in_the_annotation_shape_union_round_trips(playfield_client):
+    shapes = {
+        "marker": Marker(at=WorldPoint(x=1.0, y=1.0), label="m"),
+        "path": PathShape(points=(WorldPoint(x=0.0, y=0.0), WorldPoint(x=1.0, y=1.0))),
+        "polygon": Polygon(
+            points=(
+                WorldPoint(x=0.0, y=0.0),
+                WorldPoint(x=1.0, y=0.0),
+                WorldPoint(x=0.0, y=1.0),
+            )
+        ),
+        "circle": Circle(center=WorldPoint(x=0.0, y=0.0), radius_cm=5.0),
+        "text": Text(at=WorldPoint(x=0.0, y=0.0), text="hi"),
+    }
+    for name, shape in shapes.items():
+        playfield_client.put_annotation(
+            "main-playfield",
+            Annotation(id=name, layer="planner", shape=shape, style=Style(color="blue")),
+        )
+
+    after = playfield_client.get_annotations("main-playfield")
+
+    by_id = {a.id: a for a in after.annotations}
+    assert set(by_id) == set(shapes)
+    for name, shape in shapes.items():
+        assert by_id[name].shape == shape
+        assert by_id[name].style == Style(color="blue")
+
+
+def test_put_annotation_style_with_unset_fields_stays_none_not_defaulted(playfield_client):
+    playfield_client.put_annotation(
+        "main-playfield",
+        Annotation(id="goal", layer="planner", shape=Marker(at=WorldPoint(x=1.0, y=1.0))),
+    )
+
+    after = playfield_client.get_annotations("main-playfield")
+
+    style = after.annotations[0].style
+    assert style.color is None
+    assert style.line_width is None
+
+
+def test_put_annotation_ttl_seconds_round_trips(playfield_client):
+    playfield_client.put_annotation(
+        "main-playfield",
+        Annotation(
+            id="goal",
+            layer="planner",
+            shape=Marker(at=WorldPoint(x=1.0, y=1.0)),
+            ttl_seconds=30.0,
+        ),
+    )
+
+    after = playfield_client.get_annotations("main-playfield")
+
+    assert after.annotations[0].ttl_seconds == 30.0
+
+
+def test_remove_annotation_round_trip(playfield_client):
+    playfield_client.put_annotation("main-playfield", _marker_annotation("goal", "planner"))
+
+    playfield_client.remove_annotation("main-playfield", "planner", "goal")
+
+    after = playfield_client.get_annotations("main-playfield")
+    assert after.annotations == ()
+
+
+def test_remove_annotation_absent_key_on_known_playfield_is_a_no_op(playfield_client):
+    playfield_client.remove_annotation(
+        "main-playfield", "planner", "no-such-id"
+    )  # must not raise
+
+    after = playfield_client.get_annotations("main-playfield")
+    assert after.annotations == ()
+
+
+def test_replace_layer_round_trip_swaps_a_layers_contents(playfield_client):
+    playfield_client.put_annotation("main-playfield", _marker_annotation("old", "planner"))
+
+    playfield_client.replace_layer(
+        "main-playfield", "planner", (_marker_annotation("new", "planner", x=2.0, y=2.0),)
+    )
+
+    after = playfield_client.get_annotations("main-playfield")
+    assert [a.id for a in after.annotations] == ["new"]
+
+
+def test_clear_annotations_named_layer_and_everything_round_trip(playfield_client):
+    playfield_client.put_annotation("main-playfield", _marker_annotation("goal", "planner"))
+    playfield_client.put_annotation("main-playfield", _marker_annotation("robot", "robot-3"))
+
+    playfield_client.clear_annotations("main-playfield", layer="planner")
+    after_one = playfield_client.get_annotations("main-playfield")
+    assert [a.id for a in after_one.annotations] == ["robot"]
+
+    playfield_client.clear_annotations("main-playfield")
+    after_all = playfield_client.get_annotations("main-playfield")
+    assert after_all.annotations == ()
+
+
+def test_get_annotations_filtered_by_layer_round_trip(playfield_client):
+    playfield_client.put_annotation("main-playfield", _marker_annotation("goal", "planner"))
+    playfield_client.put_annotation("main-playfield", _marker_annotation("robot", "robot-3"))
+
+    filtered = playfield_client.get_annotations("main-playfield", layer="planner")
+
+    assert [a.id for a in filtered.annotations] == ["goal"]
+
+
+def test_get_annotations_on_a_fresh_playfield_returns_empty_set_at_revision_zero(
+    playfield_client,
+):
+    result = playfield_client.get_annotations("main-playfield")
+
+    assert result.annotations == ()
+    assert result.revision == 0
+
+
+def test_get_frame_raw_never_carries_annotations_even_after_a_put(playfield_client, held_camera):
+    _, slug, _ = held_camera
+    playfield_client.put_annotation("main-playfield", _marker_annotation("goal", "planner"))
+
+    raw = playfield_client.get_frame(slug)
+
+    assert raw.deskewed is False
+    assert raw.annotations is None
+
+
+# ---------------------------------------------------------------------------
+# UnknownPlayfield reconstructs client-side for the new RPCs too -- the
+# mapping already exists (established by get_playfield); these confirm it
+# fires here as well, not just there (ticket 024-002 AC).
+# ---------------------------------------------------------------------------
+
+
+def test_put_annotation_unknown_playfield_raises_unknown_playfield_with_fields_intact(client):
+    client.set_playfield(_playfield_definition("main-playfield"))
+
+    with pytest.raises(UnknownPlayfield) as excinfo:
+        client.put_annotation("practice-field", _marker_annotation("goal", "planner"))
+
+    assert excinfo.value.requested == "practice-field"
+    assert excinfo.value.available == ("main-playfield",)
+
+
+def test_get_annotations_unknown_playfield_raises_unknown_playfield_with_fields_intact(client):
+    with pytest.raises(UnknownPlayfield) as excinfo:
+        client.get_annotations("no-such-field")
+
+    assert excinfo.value.requested == "no-such-field"
+    assert excinfo.value.available == ()
+
+
+def test_remove_annotation_unknown_playfield_raises_unknown_playfield(client):
+    with pytest.raises(UnknownPlayfield):
+        client.remove_annotation("no-such-field", "planner", "goal")
+
+
+def test_replace_layer_unknown_playfield_raises_unknown_playfield(client):
+    with pytest.raises(UnknownPlayfield):
+        client.replace_layer("no-such-field", "planner", ())
+
+
+def test_clear_annotations_unknown_playfield_raises_unknown_playfield(client):
+    with pytest.raises(UnknownPlayfield):
+        client.clear_annotations("no-such-field")
+
+
+# ---------------------------------------------------------------------------
+# Multi-client: a put on one GrpcDaemon instance is visible via
+# get_annotations on a second, independently-connected GrpcDaemon instance
+# -- UC-28.S-1/S-3, the scenario ticket 005's integration ticket leans on
+# being proven here at the wire level first.
+# ---------------------------------------------------------------------------
+
+
+def test_put_by_one_client_is_visible_to_a_second_independently_connected_client(service):
+    service.set_playfield(_playfield_definition())
+
+    with _bind_client(service) as client_a, _bind_client(service) as client_b:
+        client_a.put_annotation(
+            "main-playfield", _marker_annotation("goal", "planner", x=50.0, y=30.0)
+        )
+
+        seen_by_b = client_b.get_annotations("main-playfield")
+
+    assert len(seen_by_b.annotations) == 1
+    assert seen_by_b.annotations[0].id == "goal"
+    assert seen_by_b.annotations[0].shape == Marker(at=WorldPoint(x=50.0, y=30.0))
+
+
+# ---------------------------------------------------------------------------
+# GetFrame's annotations embed, over the real client wire (ticket 024-002):
+# a deskewed frame always carries a real AnnotationSet (empty-but-present
+# survives, not coerced to None); a raw frame never does, unconditionally
+# -- test_get_frame_raw_never_carries_annotations_even_after_a_put above
+# covers the raw side without needing calibration. These two need a real
+# calibrated camera (ArUco-rendered frames), mirroring
+# test_service.py's test_rpc_get_frame_deskewed_embeds_annotations_round_trip
+# one layer further out, through GrpcDaemon/image_frame_from_proto instead
+# of the bare stub.
+# ---------------------------------------------------------------------------
+
+
+def test_get_frame_deskewed_embeds_the_current_annotation_set_via_client(directories, registry):
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(
+        registry, [frame] * (CALIBRATION_FRAME_COUNT + 2)
+    )
+    calibrated_service = _service_with_camera(directories, registry, identity, slug, cam)
+    calibrated_service.set_playfield(main_playfield_definition())
+    calibrated_service.set_camera_config(
+        CameraConfig(name=slug, playfield="main-playfield", settings={})
+    )
+    assert calibrated_service.calibrate(slug).succeeded is True
+
+    with _bind_client(calibrated_service) as client:
+        empty = client.get_frame(slug, deskewed=True)
+        assert empty.annotations is not None
+        assert empty.annotations.annotations == ()
+        assert empty.annotations.revision == 0
+
+        client.put_annotation(
+            "main-playfield", _marker_annotation("goal", "planner", x=50.0, y=30.0)
+        )
+        filled = client.get_frame(slug, deskewed=True)
+
+    assert filled.annotations is not None
+    assert len(filled.annotations.annotations) == 1
+    assert filled.annotations.annotations[0].id == "goal"
+    assert filled.annotations.revision == 1

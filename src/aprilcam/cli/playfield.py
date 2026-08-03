@@ -1,6 +1,7 @@
 """``aprilcam playfield config <file>`` (ticket 022-001); ``aprilcam
 playfield image`` (ticket 022-005, UC-06/UC-19); ``aprilcam playfield
-view`` (ticket 022-006, UC-18).
+view`` (ticket 022-006, UC-18); ``aprilcam playfield annotations``
+(ticket 024-004, UC-28).
 
 Thin argv-to-client-call shell over ``config/loader.py`` (client-side
 document validation) and ``client/daemon_client.py`` (the push/capture
@@ -50,6 +51,38 @@ substitute a raw frame; ``run_playfield_view`` itself never falls back,
 this only adds the pointer to the message). ``--all`` is refused up
 front, before any connection is attempted, matching ``camera view``'s
 single-target rule.
+
+**``playfield annotations`` (ticket 024-004, UC-28).** List/clear only
+-- authoring (``put``/``draw``) stays Python-client-only this sprint,
+per the issue's explicit scope and sprint.md's resolved open question
+7; ``cmd_annotations`` never calls ``put_annotation``/``replace_layer``.
+Bare form lists the current :class:`~aprilcam.types.AnnotationSet` via
+``Daemon.get_annotations``; ``--clear [--layer NAME]`` clears one layer
+or everything via ``Daemon.clear_annotations`` instead -- one flag on
+the noun changing which RPC runs, mirroring ``cmd_config``'s ``--dump``
+shape exactly, per the ticket's own implementation-plan note.
+
+**Playfield resolution -- decided, not deferred.** Unlike ``image``/
+``view``, annotations are **playfield-addressed directly**
+(``get_annotations(playfield: str, ...)``), so there is no
+camera-to-playfield indirection for ``cli._common.resolve_playfield_camera``
+to resolve here at all -- the daemon API simply never mentions a
+camera. ``playfield`` is therefore a **required positional** naming the
+playfield outright, with no implicit single-playfield default: every
+worked example in the ticket (its Acceptance Criteria and Builds
+section alike) passes an explicit name, and -- unlike camera
+resolution, where ``CameraState.playfield`` links give an established,
+already-documented convention to reuse (the "Playfield commands
+resolve their camera" rule in ``cli.md``) -- there is no analogous,
+already-agreed default-playfield convention on record here. Inventing
+one now would be new design the ticket explicitly warns against
+("implements exactly what is already documented, not a new design"),
+not a gap to close silently.
+
+``--clear`` and ``--all`` are mutually exclusive: a write does not fan
+out (``cli.md``'s fan-out table), refused up front -- before any
+``discovery_factory()``/``connect()`` call -- mirroring ``cmd_view``'s
+own up-front ``--all`` refusal shape and wording exactly.
 """
 
 from __future__ import annotations
@@ -67,6 +100,7 @@ from aprilcam.cli._common import (
     EXIT_OK,
     add_all_option,
     add_daemon_option,
+    fan_out,
     incomplete_command,
     report_error,
     resolve_playfield_camera,
@@ -76,9 +110,24 @@ from aprilcam.config.interfaces import ConfigLoader
 from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
 from aprilcam.daemon.interfaces import Daemon
 from aprilcam.errors import AprilCamError, NotCalibrated
+from aprilcam.types import (
+    Annotation,
+    AnnotationSet,
+    Circle,
+    Marker,
+    PathShape,
+    Polygon,
+    Text,
+)
 from aprilcam.view import viewer
 
-__all__ = ["add_subparser", "cmd_config", "cmd_image", "cmd_view"]
+__all__ = [
+    "add_subparser",
+    "cmd_config",
+    "cmd_image",
+    "cmd_view",
+    "cmd_annotations",
+]
 
 
 def cmd_config(
@@ -269,9 +318,131 @@ def cmd_view(
     return EXIT_OK
 
 
+def _format_shape(shape: object) -> str:
+    """One :class:`~aprilcam.types.AnnotationShape` as a human-readable
+    string -- geometry only, world-cm always (``WorldPoint``'s own
+    contract), one branch per member of the closed union in
+    ``types.py``. The ``AssertionError`` fallback can only fire if a
+    sixth shape type is ever added without updating this function --
+    the union is closed by construction, so every real value takes one
+    of the branches above it."""
+    if isinstance(shape, Marker):
+        at = f"({shape.at.x:.2f}, {shape.at.y:.2f})"
+        label = f" {shape.label!r}" if shape.label is not None else ""
+        return f"marker at {at}{label}"
+    if isinstance(shape, PathShape):
+        points = " -> ".join(f"({p.x:.2f}, {p.y:.2f})" for p in shape.points)
+        return f"path [{points}]"
+    if isinstance(shape, Polygon):
+        points = " -> ".join(f"({p.x:.2f}, {p.y:.2f})" for p in shape.points)
+        return f"polygon [{points}]"
+    if isinstance(shape, Circle):
+        center = f"({shape.center.x:.2f}, {shape.center.y:.2f})"
+        return f"circle center={center} radius={shape.radius_cm:.2f}cm"
+    if isinstance(shape, Text):
+        at = f"({shape.at.x:.2f}, {shape.at.y:.2f})"
+        return f"text {shape.text!r} at {at}"
+    raise AssertionError(f"unknown annotation shape: {shape!r}")  # pragma: no cover
+
+
+def _print_annotations(annotation_set: AnnotationSet) -> None:
+    """A ``get_annotations`` result, printed to invent no separate
+    truth from what the daemon actually holds (the acceptance
+    criterion's own phrase, echoing ``cmd_config --dump``'s "print the
+    daemon's document verbatim" discipline) -- every annotation in
+    *annotation_set* gets one row, nothing added or summarised away.
+
+    ``revision`` prints first: it is how someone debugging a push can
+    tell whether it landed, without diffing rows by eye. Grouped by
+    layer -- the organising concept the viewer's own panels toggle by
+    (``cli.md``'s UC-18 open-question note on the panel model) -- rather
+    than one flat list. An empty set still reads as explicitly empty
+    (UC-28.S-4: a fresh daemon's empty set is a normal state, not an
+    error), matching ``_common.print_cameras``'s ``(no cameras)``
+    convention rather than printing nothing at all.
+    """
+    print(f"revision {annotation_set.revision}")
+    if not annotation_set.annotations:
+        print("  (no annotations)")
+        return
+
+    by_layer: dict[str, list[Annotation]] = {}
+    for annotation in annotation_set.annotations:
+        by_layer.setdefault(annotation.layer, []).append(annotation)
+
+    for layer in sorted(by_layer):
+        print(f"  layer {layer!r}:")
+        for annotation in by_layer[layer]:
+            kind = type(annotation.shape).__name__
+            print(f"    {annotation.id:<12} {kind:<10} {_format_shape(annotation.shape)}")
+
+
+def cmd_annotations(
+    args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
+) -> int:
+    """``aprilcam playfield annotations <playfield> [-d HOST] [--all]``
+    (UC-28, ticket 024-004) lists the current annotation set.
+    ``aprilcam playfield annotations <playfield> --clear [--layer
+    NAME] [-d HOST]`` clears one layer or everything instead -- the
+    same ``--dump``-style "flag on the noun picks the RPC" shape
+    ``cmd_config`` uses, per the module docstring above.
+
+    ``playfield`` is a required positional naming the target directly
+    (module docstring's "decided, not deferred" note) -- there is no
+    camera to resolve here, unlike ``cmd_image``/``cmd_view``.
+
+    ``--clear --all`` is refused **before** ``discovery_factory()`` is
+    even called -- an annotation write does not fan out (``cli.md``'s
+    fan-out table), mirroring ``cmd_view``'s own up-front ``--all``
+    refusal exactly, including checking before any connection is
+    attempted so a doomed multi-daemon write never touches the
+    network.
+    """
+    if args.clear and args.all:
+        print(
+            "error: 'playfield annotations --clear' is single-target -- "
+            "an annotation write does not fan out (UC-28, matching "
+            "'playfield view'/'playfield config'). Drop --all and "
+            "target one daemon.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+
+    discovery = discovery_factory()
+
+    if args.clear:
+        try:
+            discovery.connect(args.daemon).clear_annotations(args.playfield, args.layer)
+        except AprilCamError as exc:
+            return report_error(exc)
+        if args.layer is not None:
+            print(f"cleared layer {args.layer!r} on playfield {args.playfield!r}")
+        else:
+            print(f"cleared all annotations on playfield {args.playfield!r}")
+        return EXIT_OK
+
+    if args.all:
+        def render(label: str, annotation_set: AnnotationSet) -> None:
+            print(f"{label}:")
+            _print_annotations(annotation_set)
+
+        return fan_out(
+            discovery,
+            lambda daemon: daemon.get_annotations(args.playfield, args.layer),
+            render,
+        )
+
+    try:
+        annotation_set = discovery.connect(args.daemon).get_annotations(args.playfield, args.layer)
+    except AprilCamError as exc:
+        return report_error(exc)
+    _print_annotations(annotation_set)
+    return EXIT_OK
+
+
 def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
-    """Wire ``playfield config``/``image``/``view`` into the top-level
-    parser."""
+    """Wire ``playfield config``/``image``/``view``/``annotations`` into
+    the top-level parser."""
     parser = subparsers.add_parser("playfield", help="playfield definitions")
     parser.set_defaults(func=incomplete_command(parser))
     sub = parser.add_subparsers(dest="playfield_command", metavar="<command>")
@@ -335,3 +506,24 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     add_daemon_option(p_view)
     add_all_option(p_view, note=" (refused -- viewing is single-target)")
     p_view.set_defaults(func=cmd_view)
+
+    p_annotations = sub.add_parser(
+        "annotations",
+        help="list or clear the daemon-held annotation store (UC-28, list/clear only)",
+    )
+    p_annotations.add_argument("playfield", help="playfield name")
+    add_daemon_option(p_annotations)
+    add_all_option(p_annotations, note=" (list only -- refused with --clear)")
+    p_annotations.add_argument(
+        "--clear",
+        action="store_true",
+        help="clear annotations instead of listing them (refuses --all)",
+    )
+    p_annotations.add_argument(
+        "--layer",
+        metavar="NAME",
+        default=None,
+        help="restrict to one layer; with --clear, clear only that layer "
+        "(clearing an absent layer is a no-op, not an error)",
+    )
+    p_annotations.set_defaults(func=cmd_annotations)

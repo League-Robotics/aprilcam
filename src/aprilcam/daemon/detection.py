@@ -103,6 +103,41 @@ seconds, before it fills. This is an accepted, honest consequence of
 shipping burst detection before streaming (Decision 1), not a defect;
 revisit once a background/streaming producer can genuinely fill the
 buffer at frame rate.
+
+**Presence-based temporal confirmation (ticket 024-006; streak raised to
+3 by ticket 024-007's real-hardware run).** Before any ``Detection``
+becomes a ``TagRecord``, :meth:`DetectionEngine.run_burst` requires it
+to have been detected in ``confirmation_streak`` (default
+:data:`CONFIRMATION_STREAK`, 3) strictly consecutive bursts for that
+camera -- checked by tag id alone, never position, so a real
+fast-moving tag whose reported position legitimately differs between
+consecutive sightings still confirms normally. This exists because a
+single false ArUco decode (observed live: ArUco 17, not on the field,
+recurring at a *different* world position each time it happened) would
+otherwise enter the ring buffer and, joined by the motion pipeline with
+a second phantom sighting, be reported with a fabricated speed/heading
+for an object that does not exist. Ticket 024-007's real-hardware run
+against a static, clean ``main-playfield`` on camera 3 found **zero**
+off-field ids in *confirmed* ``Daemon.get_tags`` output over 25 polls
+at the then-current streak=2 -- no confirmed false accept was directly
+observed in that sample. But a separate raw-detector sample (``run_
+pipeline`` + ``TagDetector.detect`` called directly, bypassing
+confirmation, on 40 fetched frames) found an off-field id in 6 of those
+40 frames across four distinct phantom ids, and a follow-up
+60-consecutive-frame streak-length analysis of that same raw stream
+found one phantom persisting 2 strictly consecutive frames -- exactly
+what streak=2 requires to confirm. The 25-poll confirmed sample simply
+did not happen to land on that timing; the raw data shows it can occur.
+The constant is raised to 3 on that boundary evidence -- one above the
+longest phantom streak actually observed -- not on a directly-observed
+confirmed false accept. See :data:`CONFIRMATION_STREAK`'s own docstring
+and ticket 024-007's completion notes for the full real counts. An
+unconfirmed detection is not reported with a pending flag -- it is
+simply absent from that burst's ``TagFrame.tags``, exactly as if it had
+not been detected at all, and therefore never reaches the ring buffer
+or ``vision.motion.compute_motion`` either. See :meth:`DetectionEngine.
+_confirm_detections` for the full mechanism and the presence-vs-position
+rationale.
 """
 
 from __future__ import annotations
@@ -112,7 +147,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import replace
-from typing import Callable, Deque, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Deque, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -131,7 +166,7 @@ from aprilcam.vision.detector import Detection, TagDetector
 from aprilcam.vision.motion import compute_motion
 from aprilcam.vision.pipeline import PipelineConfig, run_pipeline
 
-__all__ = ["RING_BUFFER_SIZE", "DetectionEngine"]
+__all__ = ["RING_BUFFER_SIZE", "CONFIRMATION_STREAK", "DetectionEngine"]
 
 #: v1's ``RingBuffer(maxlen=300)`` sizing (``archive/src/aprilcam/core/
 #: detection.py``) -- roughly 10 seconds at 30 fps *when something fills
@@ -139,6 +174,43 @@ __all__ = ["RING_BUFFER_SIZE", "DetectionEngine"]
 #: this sprint's buffer only grows on demand, so that "~10 seconds"
 #: framing is v1's, not a guarantee this sprint makes.
 RING_BUFFER_SIZE = 300
+
+#: Number of strictly consecutive detection bursts a tag id must be
+#: detected in before it enters any returned or buffered ``TagFrame`` --
+#: ticket 024-006's phantom-detection fix. **Raised from 2 to 3 by
+#: ticket 024-007's real-hardware acceptance run**: the provisional
+#: value of 2 (chosen from thin evidence -- on the order of a dozen
+#: real polls across two sessions, two phantom hits, zero consecutive)
+#: was tested three ways against real camera 3 / the real, static,
+#: clean main-playfield, daemon restarted onto the build under test.
+#: (1) 25 polls of *confirmed* ``Daemon.get_tags`` output at the
+#: then-current streak=2: zero off-field ids -- no confirmed false
+#: accept was directly observed in this sample. (2) The *raw* detector
+#: output (``run_pipeline`` + ``TagDetector.detect`` called directly,
+#: bypassing confirmation entirely) on 40 fetched frames: 6 of 40
+#: frames (15%) contained an off-field id, across four distinct phantom
+#: ids -- ``aruco 37`` (x3), ``aruco 17`` (x1), ``aruco 22`` (x1),
+#: ``aruco 16`` (x1). (3) A consecutive-streak analysis of 60 further
+#: raw frames, tracking how many frames in a row each phantom id
+#: persisted: 6 frames contained a phantom, streak-length histogram
+#: ``{1: 4, 2: 1}`` -- four phantoms lasted a single frame, one
+#: persisted across 2 strictly consecutive frames (the observed
+#: maximum). Streak=2 confirms on exactly 2 consecutive detections, so
+#: that observed 2-run sat exactly at the confirmation boundary: it
+#: would have passed the streak=2 filter had it landed inside a polled
+#: window instead of the un-polled raw stream sampled in (3). The
+#: constant is raised to 3 on that boundary evidence -- one above the
+#: longest phantom streak actually observed across (2) and (3) -- not
+#: on a directly-observed confirmed false accept from (1). This is
+#: still a bounded sample (60 consecutive frames); a longer real-
+#: hardware campaign could in principle observe a 3-frame phantom
+#: streak, which is exactly why this value stays constructor-injectable
+#: rather than hardcoded (see ticket 024-007's completion notes for the
+#: full real counts and the honest limits of this sample). Overridable
+#: per instance via the constructor's ``confirmation_streak`` parameter,
+#: matching ``drift_tolerance_cm``'s override pattern. See
+#: :meth:`DetectionEngine._confirm_detections` for the mechanism.
+CONFIRMATION_STREAK = 3
 
 #: A callable that builds one ``TagDetector`` (or, in tests, a
 #: duck-typed substitute exposing the same ``detect(gray, scale=...)``
@@ -375,6 +447,17 @@ class DetectionEngine:
         DRIFT_CHECK_INTERVAL_S` (10.0 s, stakeholder-confirmed),
         overridable the same way *drift_tolerance_cm* is -- tests use a
         small or zero value to avoid needing to wait on a real clock.
+    confirmation_streak:
+        Number of strictly consecutive detection bursts a tag id must be
+        detected in, for a given camera, before it is built into a
+        ``TagRecord`` and included in the returned/buffered ``TagFrame``
+        at all (ticket 024-006's phantom-detection fix, raised from 2 to
+        3 by ticket 024-007's real-hardware run). Defaults to
+        :data:`CONFIRMATION_STREAK` (3) but is genuinely overridable per
+        instance, the same "domain-tuning call" shape *drift_tolerance_cm*
+        already establishes -- tests that are not themselves about
+        confirmation pass ``confirmation_streak=1`` to keep today's
+        single-burst-reports-immediately behaviour.
     """
 
     def __init__(
@@ -388,6 +471,7 @@ class DetectionEngine:
         mark_stale: MarkStale = _default_mark_stale,
         drift_tolerance_cm: float = DRIFT_TOLERANCE_CM,
         drift_check_interval_s: float = DRIFT_CHECK_INTERVAL_S,
+        confirmation_streak: int = CONFIRMATION_STREAK,
     ) -> None:
         self._buffer_size = buffer_size
         self._pipeline_config = pipeline_config
@@ -397,10 +481,12 @@ class DetectionEngine:
         self._mark_stale = mark_stale
         self._drift_tolerance_cm = drift_tolerance_cm
         self._drift_check_interval_s = drift_check_interval_s
+        self._confirmation_streak = confirmation_streak
         self._buffers: Dict[str, Deque[TagFrame]] = {}
         self._detectors: Dict[str, TagDetector] = {}
         self._frame_counts: Dict[str, int] = {}
         self._last_drift_check: Dict[str, float] = {}
+        self._streaks: Dict[str, Dict[TagId, int]] = {}
         self._lock = threading.Lock()
 
     def run_burst(self, slug: str, camera: Camera) -> TagFrame:
@@ -408,9 +494,14 @@ class DetectionEngine:
 
         The full pipeline: read one frame, run
         ``vision.pipeline.run_pipeline``, run *slug*'s (lazily built,
-        reused) ``TagDetector``, build one ``TagRecord`` per hit, wrap
-        into a ``TagFrame``, append to the ring buffer, and return that
-        same ``TagFrame`` -- the one ``get_tags``/``get_tag`` need.
+        reused) ``TagDetector``, filter the raw hits through
+        :meth:`_confirm_detections` (ticket 024-006's temporal
+        confirmation -- module docstring), build one ``TagRecord`` per
+        *confirmed* hit, wrap into a ``TagFrame``, append to the ring
+        buffer, and return that same ``TagFrame`` -- the one
+        ``get_tags``/``get_tag`` need. A detection whose id was not also
+        present in the immediately preceding burst never reaches
+        ``TagRecord`` construction at all this call.
 
         Raises ``RuntimeError`` if the camera yields no frame this call
         (mirrors ``DaemonService.get_frame``'s existing "no frame
@@ -457,10 +548,21 @@ class DetectionEngine:
         gray, rescale = run_pipeline(frame, self._pipeline_config)
         detector = self._detector_for(slug)
         detections = detector.detect(gray, scale=rescale.scale)
+        confirmed = self._confirm_detections(slug, detections)
 
         timestamp = time.time()
         calibration = self._calibration_lookup(slug)
         if calibration is not None:
+            # Drift-check geometry uses *detections* (this burst's raw
+            # hits), not *confirmed* -- ticket 023-007's matched corner
+            # markers are a separate, already-trusted mechanism (a
+            # camera's calibration only exists because those ids were
+            # already matched during calibration), and gating the drift
+            # check on confirmation would only add reporting latency to
+            # staleness detection for no benefit: a phantom id is never
+            # one of ``calibration.matched_ids`` in the first place, so
+            # confirmation status of the corner markers is orthogonal to
+            # this ticket's fix.
             self._maybe_check_drift(slug, calibration, detections, timestamp)
             calibration = self._calibration_lookup(slug)  # re-fetch: may have just been marked stale
 
@@ -469,7 +571,7 @@ class DetectionEngine:
                 _build_tag_record(detection, timestamp=timestamp, calibration=calibration),
                 slug=slug,
             )
-            for detection in detections
+            for detection in confirmed
         )
         tag_frame = TagFrame(
             tags=records,
@@ -479,6 +581,75 @@ class DetectionEngine:
         )
         self._append(slug, tag_frame)
         return tag_frame
+
+    def _confirm_detections(
+        self, slug: str, detections: Sequence[Detection]
+    ) -> Tuple[Detection, ...]:
+        """Presence-based temporal confirmation (ticket 024-006, streak
+        raised to 3 by ticket 024-007's real-hardware run).
+
+        Filters *detections* down to only the ids that have now been
+        detected in ``self._confirmation_streak`` (default
+        :data:`CONFIRMATION_STREAK`, 3) strictly consecutive bursts for
+        *slug*, updating this camera's per-id streak counters as a side
+        effect. Called exactly once per :meth:`run_burst`, before any
+        ``TagRecord`` is built -- an unconfirmed detection never reaches
+        :func:`_build_tag_record` and therefore never enters the
+        returned ``TagFrame`` or the ring buffer. It is not reported
+        with a pending flag; it is simply absent, exactly as if it had
+        not been detected at all.
+
+        **Presence, never position -- the load-bearing design choice.**
+        The only question asked is "was this exact ``TagId`` also
+        present in the immediately preceding burst for this camera" --
+        never *where* it was. The bug this exists to fix (a single false
+        ArUco decode, observed live as ArUco 17 -- not on the field --
+        recurring at a *different* world position each time: ``(-59.4,
+        -19.6)`` in one session, ``(50.1, -30.3)`` in another) rules out
+        a same-place-twice rule: that would catch this particular
+        phantom, but would just as reliably reject a real, fast-moving
+        robot tag whose reported position legitimately differs between
+        two consecutive sightings simply because it moved. Checking
+        presence only satisfies that mobile-tag constraint by
+        construction, and is simpler to reason about besides. Do not add
+        a position-similarity check here -- it would look like a
+        reasonable extra safeguard and would actually reintroduce the
+        exact bug this design avoids (ticket 024-006).
+
+        A gap of even one burst -- this id detected, then absent, then
+        detected again -- drops it from the streak dict entirely (the
+        dict comprehension below only ever keys *this* burst's ids), so
+        the next sighting starts a fresh streak at 1 rather than
+        resuming a prior count. A flickering real tag therefore
+        re-confirms after an occlusion gap exactly as slowly as a
+        brand-new tag would -- ``self._confirmation_streak - 1`` bursts
+        of latency after detection resumes (two, at the current default
+        of 3, raised from one at the ticket 024-006 default of 2 -- see
+        :data:`CONFIRMATION_STREAK`'s docstring) -- an accepted
+        trade-off (sprint.md Migration Concerns), not a defect to work
+        around.
+
+        Once confirmed, a steadily-redetected id's streak keeps growing
+        past ``self._confirmation_streak`` on every further consecutive
+        burst, so it stays confirmed (and reported) on every one of
+        them -- there is no re-drop once past the threshold.
+        """
+        ids_this_burst: Set[TagId] = {
+            TagId(family=detection.family, number=detection.number) for detection in detections
+        }
+        with self._lock:
+            previous = self._streaks.get(slug, {})
+            streaks = {tag_id: previous.get(tag_id, 0) + 1 for tag_id in ids_this_burst}
+            self._streaks[slug] = streaks
+
+        confirmed_ids = {
+            tag_id for tag_id, streak in streaks.items() if streak >= self._confirmation_streak
+        }
+        return tuple(
+            detection
+            for detection in detections
+            if TagId(family=detection.family, number=detection.number) in confirmed_ids
+        )
 
     def _maybe_check_drift(
         self,

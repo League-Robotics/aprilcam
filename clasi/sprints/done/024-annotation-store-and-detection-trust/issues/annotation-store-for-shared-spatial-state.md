@@ -1,6 +1,13 @@
 ---
-status: pending
+status: in-progress
 split_from: config-service-completion-and-annotations.md
+sprint: '024'
+tickets:
+- 024-001
+- 024-002
+- 024-003
+- 024-004
+- 024-005
 ---
 
 # The annotation store
