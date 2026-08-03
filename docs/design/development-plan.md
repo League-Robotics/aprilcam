@@ -32,26 +32,70 @@ what is **reused** from v1, what is **rewritten**, and what is **new**.
 > them; per-stage test detail still applies to whichever slice of a
 > stage a sprint takes.
 >
-> Sprint sequence (first sprint firm, rest indicative):
+> Sprint sequence. **020–024 are done and merged**; 025 onward is the
+> remaining plan, re-derived 2026-08-03 from what is actually built.
 >
-> 1. **Sprint 020 — Daemon bring-up + basic camera CLI.** A daemon that
->    starts, enumerates, and serves raw frames, driven from the shell:
->    lifecycle (`daemon start|stop|status`, flock singleton, control
->    plane), camera identity/registry/discovery, raw capture, and the
->    minimum client library under `aprilcam daemon …`, `camera list`,
->    `camera probe`, `camera image`. Draws on stages 0, 1 (targeted
->    demolition), 2, 3 (capture + effective-config parts), and 8
->    (lifecycle slice). Use cases: UC-14, UC-17, UC-25 (probe/hotplug
->    basics), UC-13 and UC-01 in their local-lifecycle parts.
-> 2. Detection + tag queries with `playfield tags` (stages 4–5 + slice
->    of 8).
-> 3. Calibration, deskew, playfield definitions with `camera calibrate`
->    / `playfield image` (stages 6–7, 9 slice).
-> 4. Config service + annotations (`camera/playfield config`,
->    `playfield annotations`; stage 9 + annotation store).
-> 5. **MCP server** over the now-proven daemon + client (stage 11's MCP
->    half).
-> 6. Viewer + restructure/cleanup (stages 10 renderer, 12).
+> 1. ✅ **020 — Daemon bring-up + basic camera CLI.** Lifecycle
+>    (flock singleton, control plane), camera identity/registry/
+>    discovery, raw capture, minimum client library, `daemon
+>    start|stop|status`, `camera list|probe|image`.
+> 2. ✅ **021 — Detection + tag queries.** Vision pipeline, AprilTag
+>    36h11 + ArUco 4x4, ring buffer, `camera tags`, camera-by-number
+>    addressing.
+> 3. ✅ **022 — Calibration, deskew, live view.** Playfield definitions,
+>    homography, world coordinates, deskew to a fixed bounding box,
+>    `camera calibrate`, `playfield image`, `camera view`/`playfield
+>    view`.
+> 4. ✅ **023 — Config service + calibration trust.** Boot-time config
+>    load (config now survives restart), real hardware settings via
+>    `uvc-util`, `--dump`/`--reset`, reprojection threshold, reachable
+>    calibration staleness.
+> 5. ✅ **024 — Annotation store + detection trust.** Daemon-held
+>    world-coordinate annotations with client rendering, `playfield
+>    annotations`, and presence-based temporal confirmation that
+>    eliminates phantom tag detections.
+>
+> **Remaining, in dependency order:**
+>
+> 6. **025 — Complete the daemon's query surface.** The last
+>    non-streaming capabilities that are *declared but unimplemented*:
+>    `find_feature` (UC-08, "where is the blue dot"), the mobile-tag
+>    registry `register_tag`/`unregister_tag`/`list_tag_parameters`
+>    (UC-12 — the difference between reporting where a *tag* is and
+>    where the *robot* is), and `get_guide` (UC-27, packaged
+>    instructions). **Deliberately before the MCP server**: all three
+>    are tools the MCP server must expose, and building MCP on an
+>    incomplete daemon means doing the wire layer twice.
+> 7. **026 — MCP server.** `src/aprilcam/mcp/` and `aprilcam mcp`
+>    (UC-22) — the project's stated purpose, and the only major
+>    subsystem that does not exist at all. Perception, configuration,
+>    and annotation tools over the now-complete daemon.
+> 8. **027 — Streams.** `stream_images`/`stream_tags` (UC-07, UC-11),
+>    the two remaining unimplemented `Daemon` methods. The viewer stops
+>    polling at ~2 Hz, and the ring buffer becomes wall-clock bounded
+>    rather than query-driven — closing sprint 021's recorded scope
+>    boundary. Robot control loops need this; an MCP agent does not,
+>    which is why it sits after 026.
+> 9. **028 — Tag generation + daemon discovery.** `tags/` has zero
+>    implementation files: `aprilcam tags generate` (UC-21) is how a
+>    playfield gets built in the first place. Plus real mDNS and
+>    `aprilcam daemon list` (UC-13) — discovery is currently stubbed
+>    local-only, so `--all` fan-out can never find a second daemon.
+> 10. **029 — Hardening, cleanup, and the design-doc set.** The
+>    accumulated issue pool: the v1/v2 control-socket collision, the
+>    stale pidfile and orphaned-daemon processes, `BrokenPipeError` on
+>    piped CLI output, the deferred libcamera capture backend (needed
+>    before any Pi-over-the-field deployment), the broken
+>    `testdev/capture_matrix.py` fixture regenerator, per-subsystem
+>    `DESIGN.md` bootstrap (`clasi design validate` currently fails),
+>    and stage 12's package restructure. Also the `camera view` vs
+>    `playfield view` signposting, which has already cost real
+>    debugging time.
+>
+> **Not scheduled, deliberately**: multi-camera on one playfield (the
+> cardinality is designed for it and nothing blocks it, but no use case
+> demands it yet), the ROS bridge (adapters.md §8 future), and
+> streamable-HTTP MCP transport.
 
 Read this before anything else — it is the operating philosophy of the
 whole rebuild:
