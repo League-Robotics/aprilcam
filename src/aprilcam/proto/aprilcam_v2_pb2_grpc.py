@@ -138,6 +138,31 @@ class AprilCamV2Stub(object):
                 request_serializer=aprilcam__v2__pb2.GetAnnotationsRequest.SerializeToString,
                 response_deserializer=aprilcam__v2__pb2.GetAnnotationsResponse.FromString,
                 _registered_method=True)
+        self.FindFeature = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/FindFeature',
+                request_serializer=aprilcam__v2__pb2.FindFeatureRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.FindFeatureResponse.FromString,
+                _registered_method=True)
+        self.RegisterTag = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/RegisterTag',
+                request_serializer=aprilcam__v2__pb2.RegisterTagRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.RegisterTagResponse.FromString,
+                _registered_method=True)
+        self.UnregisterTag = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/UnregisterTag',
+                request_serializer=aprilcam__v2__pb2.UnregisterTagRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.UnregisterTagResponse.FromString,
+                _registered_method=True)
+        self.ListTagParameters = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/ListTagParameters',
+                request_serializer=aprilcam__v2__pb2.ListTagParametersRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.ListTagParametersResponse.FromString,
+                _registered_method=True)
+        self.GetGuide = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/GetGuide',
+                request_serializer=aprilcam__v2__pb2.GetGuideRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.GetGuideResponse.FromString,
+                _registered_method=True)
 
 
 class AprilCamV2Servicer(object):
@@ -350,6 +375,57 @@ class AprilCamV2Servicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def FindFeature(self, request, context):
+        """Fuzzy-match a free-text query against a playfield's surveyed
+        features -- "where is the blue dot" (UC-08, ticket 025-002).
+        Answered from the surveyed definition only: no camera opened, no
+        calibration required. Ambiguous queries return every match, never
+        an arbitrary pick (UC-08.S-2); no match returns an empty list
+        (UC-08.S-3), never an error. Unknown playfield -> `NOT_FOUND`,
+        naming the playfields held (matching `GetPlayfield`'s precedent).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RegisterTag(self, request, context):
+        """Describe how a tag is mounted on its robot (UC-12, ticket 025-004)
+        -- upserts by tag id, in memory only. Takes effect on the very next
+        detection burst for that tag; does not survive a daemon restart.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def UnregisterTag(self, request, context):
+        """Forget a mount registration -- the tag reports as itself again on
+        the next detection burst. Removing an absent registration is a
+        no-op, never an error.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListTagParameters(self, request, context):
+        """Every currently registered tag -> mount parameters, as a snapshot.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetGuide(self, request, context):
+        """The packaged agent/robot usage guide (UC-27, ticket 025-007) -- the
+        RPC face of `client.guides.Guides`, for a caller that already has a
+        daemon connection. Absent `name` means the default ("agent") guide;
+        an unknown name -> `NOT_FOUND`, naming the guides that exist
+        ("agent", "robot"). Serves byte-identical text to the no-daemon
+        `client.guides.Guides` accessor by construction -- both read
+        `aprilcam.guides.read_guide`, never a second copy of the text.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_AprilCamV2Servicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -452,6 +528,31 @@ def add_AprilCamV2Servicer_to_server(servicer, server):
                     servicer.GetAnnotations,
                     request_deserializer=aprilcam__v2__pb2.GetAnnotationsRequest.FromString,
                     response_serializer=aprilcam__v2__pb2.GetAnnotationsResponse.SerializeToString,
+            ),
+            'FindFeature': grpc.unary_unary_rpc_method_handler(
+                    servicer.FindFeature,
+                    request_deserializer=aprilcam__v2__pb2.FindFeatureRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.FindFeatureResponse.SerializeToString,
+            ),
+            'RegisterTag': grpc.unary_unary_rpc_method_handler(
+                    servicer.RegisterTag,
+                    request_deserializer=aprilcam__v2__pb2.RegisterTagRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.RegisterTagResponse.SerializeToString,
+            ),
+            'UnregisterTag': grpc.unary_unary_rpc_method_handler(
+                    servicer.UnregisterTag,
+                    request_deserializer=aprilcam__v2__pb2.UnregisterTagRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.UnregisterTagResponse.SerializeToString,
+            ),
+            'ListTagParameters': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListTagParameters,
+                    request_deserializer=aprilcam__v2__pb2.ListTagParametersRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.ListTagParametersResponse.SerializeToString,
+            ),
+            'GetGuide': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetGuide,
+                    request_deserializer=aprilcam__v2__pb2.GetGuideRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.GetGuideResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -998,6 +1099,141 @@ class AprilCamV2(object):
             '/aprilcam.v2.AprilCamV2/GetAnnotations',
             aprilcam__v2__pb2.GetAnnotationsRequest.SerializeToString,
             aprilcam__v2__pb2.GetAnnotationsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def FindFeature(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/FindFeature',
+            aprilcam__v2__pb2.FindFeatureRequest.SerializeToString,
+            aprilcam__v2__pb2.FindFeatureResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RegisterTag(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/RegisterTag',
+            aprilcam__v2__pb2.RegisterTagRequest.SerializeToString,
+            aprilcam__v2__pb2.RegisterTagResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UnregisterTag(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/UnregisterTag',
+            aprilcam__v2__pb2.UnregisterTagRequest.SerializeToString,
+            aprilcam__v2__pb2.UnregisterTagResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListTagParameters(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/ListTagParameters',
+            aprilcam__v2__pb2.ListTagParametersRequest.SerializeToString,
+            aprilcam__v2__pb2.ListTagParametersResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetGuide(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/GetGuide',
+            aprilcam__v2__pb2.GetGuideRequest.SerializeToString,
+            aprilcam__v2__pb2.GetGuideResponse.FromString,
             options,
             channel_credentials,
             insecure,

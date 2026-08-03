@@ -332,9 +332,30 @@ class MountParameters:
     connects, every session**, like re-drawing annotations
     (UC-28.S-4).
 
-    Open (UC-12): the robot's "reference point" needs a stated convention
-    — geometric centre, drive-axle centre, or client-defined. Offsets are
-    meaningless without it.
+    **Reference point: client-defined, not daemon-mandated** (resolved
+    2026-08-03, sprint 025). The daemon has no way to inspect a robot's
+    physical geometry, so it does not — and cannot — mandate a specific
+    point (geometric centre, drive-axle centre, or anything else). It
+    applies whatever ``mount_x``/``mount_y``/``mount_z``/``mount_yaw_rad``
+    it is given, purely mechanically; what physical point on the robot
+    those offsets are measured *from* is entirely the client's choice and
+    responsibility. The packaged guide (UC-27) recommends centre of
+    rotation as a sensible default for teams with no reason to choose
+    otherwise, but that recommendation lives in the guide's prose, never
+    enforced or even checked in code.
+
+    **Frame convention: carried forward from v1, unchanged** (resolved
+    2026-08-03, sprint 025) — the robot's own frame, ``+x`` forward,
+    ``+y`` left, rotating with ``mount_yaw_rad``. Offsets are in this
+    frame, not the world frame, because that is what makes yaw compose
+    correctly (UC-12): as the robot turns in place, ``mount_x``/
+    ``mount_y`` turn with it. This matches v1's own ``x_mm`` forward /
+    ``y_mm`` left convention (``archive/src/aprilcam/daemon/
+    mobile_tags.py``) exactly — no new sign convention was invented for
+    v2. See ``calibration.geometry.apply_mount_offset`` for the composed
+    math and a worked example of the seam between this frame and the
+    world frame's own ``+x`` east / ``+y`` north / CCW-positive-yaw
+    convention.
     """
 
     size_cm: Optional[float] = None

@@ -4,7 +4,12 @@ implementation for ``list_cameras``, ``probe_cameras``, ``get_frame``,
 ``get_tag_history`` (ticket 021-004), plus ``set_playfield``/
 ``get_playfield``/``list_playfields``/``set_camera_config``/
 ``get_camera_config`` (ticket 022-001), plus ``calibrate``/
-``get_calibration`` (ticket 022-003).
+``get_calibration`` (ticket 022-003), plus ``register_tag``/
+``unregister_tag``/``list_tag_parameters`` (ticket 025-004, UC-12 --
+the mobile-tag registry; see ``_camera_geometry_for``'s docstring for
+this ticket's one open, explicitly-flagged design decision), plus
+``find_feature`` (ticket 025-002, UC-08) and ``get_guide`` (ticket
+025-007, UC-27 -- the last method this sprint adds).
 
 **Calibration persistence** (ticket 022-003, UC-01's "calibration is
 file-backed, unlike pushed config"). All vision/homography work is
@@ -29,11 +34,11 @@ handling -- is delegated the same way to ``daemon/detection.py``
 021's module boundary table exactly as sprint 020's did for cameras.
 
 **Only a subset of ``Daemon``'s methods are implemented.** ``daemon.
-interfaces.Daemon`` is a much larger base class (playfields, calibration,
-streams, annotations, tag parameters, guides) -- those belong to later
-sprints per the sprint architecture's Out-of-Scope section, and are
-simply absent from :class:`DaemonService`, inherited as-is from
-``Daemon``. Calling one of them here raises ``NotImplementedError``
+interfaces.Daemon`` is a much larger base class -- ``stream_images``/
+``stream_tags`` are the remaining unimplemented pair as of this sprint,
+belonging to a later sprint per the sprint architecture's Out-of-Scope
+section -- and are simply absent from :class:`DaemonService`, inherited
+as-is from ``Daemon``. Calling one of them here raises ``NotImplementedError``
 naming the missing method (``daemon.interfaces``'s module docstring
 explains why this is a plain base class and not ``abc.ABC``:
 un-instantiable until all 27 methods existed would force 23 hollow
@@ -73,6 +78,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import cv2 as cv
 import numpy as np
 
+from aprilcam import guides
 from aprilcam.calibration.calibration import Calibration, Calibrator
 from aprilcam.calibration.deskew import Deskewer
 from aprilcam.calibration.interfaces import CalibrationResult
@@ -83,23 +89,32 @@ from aprilcam.camera.camera import Camera
 from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import CameraIdentity, resolve_all
 from aprilcam.camera.registry import CameraRecord, CameraRegistry
-from aprilcam.config.interfaces import CameraConfig, Directories
+from aprilcam.config.interfaces import CameraConfig, Directories, Feature
 from aprilcam.config.interfaces import ConfigLoader as ConfigLoaderIface
 from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitionIface
 from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
 from aprilcam.daemon.detection import DetectionEngine
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
-from aprilcam.errors import CameraNotPresent, NotCalibrated, UnknownCamera, UnknownPlayfield
+from aprilcam.errors import (
+    CameraNotPresent,
+    NotCalibrated,
+    UnknownCamera,
+    UnknownGuide,
+    UnknownPlayfield,
+)
 from aprilcam.playfield.playfield import Playfield
+from aprilcam.playfield.query import FeatureQuery
 from aprilcam.types import (
     Annotation,
     AnnotationSet,
     CameraState,
     ImageFrame,
+    MountParameters,
     ProbeReport,
     TagFrame,
     TagId,
     TagRecord,
+    WorldPoint,
 )
 
 __all__ = ["DaemonService"]
@@ -166,12 +181,12 @@ class DaemonService(Daemon):
     """Concrete ``daemon.interfaces.Daemon`` (this sprint's slice only).
 
     Derives from ``Daemon`` (see that class's module docstring for the
-    base-class-vs-``Protocol`` design rule): the 14 methods this sprint
-    does not implement (streams, annotations, tag parameters, guides,
-    ``find_feature``) are inherited as-is, so calling one raises
-    ``NotImplementedError`` naming the missing method rather than an
-    ``AttributeError`` -- ``isinstance(service, Daemon)`` is also simply
-    true now, mechanically, rather than a Protocol structural guess.
+    base-class-vs-``Protocol`` design rule): the methods this sprint
+    does not implement (streams, tag parameters, guides) are inherited
+    as-is, so calling one raises ``NotImplementedError`` naming the
+    missing method rather than an ``AttributeError`` -- ``isinstance(
+    service, Daemon)`` is also simply true now, mechanically, rather
+    than a Protocol structural guess.
 
     Parameters
     ----------
@@ -214,10 +229,12 @@ class DaemonService(Daemon):
         (``daemon/detection.py``, ticket 021-004) that
         :meth:`get_tags`/:meth:`get_tag`/:meth:`get_tag_history`/
         :meth:`get_frame` delegate to. Defaults to a fresh
-        ``DetectionEngine()`` (real pipeline, real detector) when not
-        supplied -- tests that need to pin exactly how many detection
-        bursts ran construct their own ``DetectionEngine`` with a
-        substitutable ``detector_factory`` and pass it here.
+        ``DetectionEngine()`` (real pipeline, real detector) wired with
+        this service's own :meth:`_mount_lookup`/:meth:`_camera_geometry_for`
+        (ticket 025-004, UC-12) when not supplied -- tests that need to
+        pin exactly how many detection bursts ran, or that want a
+        non-default mount/camera-geometry lookup of their own, construct
+        their own ``DetectionEngine`` and pass it here instead.
     calibrator:
         The homography-solving engine (``calibration.calibration.
         Calibrator``, ticket 022-003) that :meth:`calibrate` delegates
@@ -285,6 +302,8 @@ class DaemonService(Daemon):
                 calibration_lookup=self.get_calibration,
                 playfield_lookup=self._playfield_for_calibration,
                 mark_stale=self._mark_stale,
+                mount_lookup=self._mount_lookup,
+                camera_geometry_lookup=self._camera_geometry_for,
             )
         )
         self._playfields: Dict[str, PlayfieldDefinitionIface] = {}
@@ -299,6 +318,15 @@ class DaemonService(Daemon):
         # ``_calibrations`` already are.
         self._annotations: Dict[str, Dict[str, Dict[str, Annotation]]] = {}
         self._annotation_revisions: Dict[str, int] = {}
+        # TagId -> MountParameters (ticket 025-004, UC-12): a fifth
+        # in-memory store, guarded by the same ``self._lock`` -- "one
+        # more dict under the existing lock", exactly the pattern ticket
+        # 024-001 used for ``_annotations`` above. Runtime state, never
+        # written to disk, wiped on restart (UC-12's "re-register every
+        # session" contract) -- there is simply no write-to-disk path
+        # here, the same structural guarantee every other store in this
+        # class already has.
+        self._mount_params: Dict[TagId, MountParameters] = {}
         self._lock = threading.Lock()
         self._calibrator = calibrator if calibrator is not None else Calibrator(
             get_camera_config=self._camera_config_for_calibration,
@@ -620,6 +648,32 @@ class DaemonService(Daemon):
             state_dir=str(self._directories.state_dir),
         )
 
+    def get_guide(self, name: Optional[str] = None) -> str:
+        """See ``daemon.interfaces.Daemon.get_guide`` (ticket 025-007,
+        UC-27).
+
+        A thin wrapper over ``aprilcam.guides.read_guide`` -- the exact
+        same shared leaf module ``client.guides.Guides.get`` reads
+        (ticket 025-006), not a redundant reimplementation of the guide
+        text or its name-to-filename mapping. That shared leaf is what
+        makes this method and ``client.guides.Guides.get`` serve
+        byte-identical text *by construction* (sprint 025's Design
+        Rationale), not merely because both happen to agree today.
+
+        An omitted or ``None`` *name* defaults to ``aprilcam.guides.
+        DEFAULT_GUIDE`` (``"agent"``, UC-27's primary actor). An unknown
+        name raises :class:`~aprilcam.errors.UnknownGuide`, naming the
+        guides that actually exist (UC-27.S-3) -- the identical error
+        shape ``client.guides.Guides.get`` raises for the same input,
+        since both build it from the same ``guides.AVAILABLE_GUIDES``
+        tuple.
+        """
+        chosen = name if name is not None else guides.DEFAULT_GUIDE
+        text = guides.read_guide(chosen)
+        if text is None:
+            raise UnknownGuide(chosen, guides.AVAILABLE_GUIDES)
+        return text
+
     # -- playfields / camera config (ticket 022-001; reset, ticket 023-004) -
     #
     # The minimal config-service slice sprint.md's Architecture Decision 1
@@ -673,6 +727,29 @@ class DaemonService(Daemon):
         return tuple(
             Playfield(name=d.name, definition=d, camera_configs=camera_configs) for d in definitions
         )
+
+    def find_feature(self, playfield: str, query: str) -> Tuple[Feature, ...]:
+        """See ``daemon.interfaces.Daemon.find_feature``. Ticket 025-002.
+
+        Delegates to ticket 025-001's ``playfield.query.FeatureQuery``,
+        built **fresh on every call** against the named playfield's
+        *current* ``PlayfieldDefinition`` -- cheap (a tuple of already-
+        materialized ``Feature``s, no vision, no camera), so there is
+        nothing to cache and no staleness to reason about, the same
+        "derived at serve time" discipline ``Playfield.linked_cameras()``
+        already uses. Raises :class:`~aprilcam.errors.UnknownPlayfield`,
+        naming every playfield this daemon currently holds, for a name
+        it does not recognise -- the same precedent :meth:`get_playfield`
+        established. Ambiguity returns every match (UC-08.S-2); no
+        match returns an empty tuple (UC-08.S-3) -- neither is an error
+        at this layer, matching ``FeatureQuery.find``'s own contract.
+        """
+        with self._lock:
+            definition = self._playfields.get(playfield)
+            available = tuple(sorted(self._playfields.keys()))
+        if definition is None:
+            raise UnknownPlayfield(playfield, available)
+        return FeatureQuery(features=definition.features()).find(query)
 
     def get_camera_config(self, camera: str) -> CameraConfig:
         """See ``daemon.interfaces.Daemon.get_camera_config``.
@@ -970,6 +1047,129 @@ class DaemonService(Daemon):
             else:
                 annotations = tuple(layers.get(layer, {}).values())
         return AnnotationSet(annotations=annotations, revision=revision, timestamp=time.time())
+
+    # -- mobile-tag registry (ticket 025-004, UC-12) -------------------------
+    #
+    # ``self._mount_params`` (``TagId -> MountParameters``), guarded by the
+    # same ``self._lock`` as every other in-memory store this class holds
+    # -- runtime state exactly like the annotation store above: in-memory,
+    # gone on restart, re-registered by clients on reconnect. The actual
+    # correction math lives in ``calibration.geometry``/``daemon.detection``
+    # (this class only holds the registrations and hands two lookups to
+    # ``DetectionEngine`` -- :meth:`_mount_lookup`/:meth:`_camera_geometry_for`
+    # below -- so it never duplicates that math itself).
+
+    def register_tag(self, tag: TagId, params: MountParameters) -> None:
+        """See ``daemon.interfaces.Daemon.register_tag``.
+
+        Upserts by *tag* -- a second registration for the same tag
+        replaces the first outright, no merge, mirroring
+        :meth:`set_camera_config`'s own whole-document-replace
+        precedent.
+
+        UC-12.S-5: a **nonzero** ``params.mount_z`` (there is an
+        elevation for the parallax projection to actually apply) is
+        rejected with :class:`~aprilcam.errors.NotCalibrated` when this
+        daemon holds **no calibration for any camera at all** --
+        ``mount_z`` set with no calibration anywhere the tag could be
+        observed would otherwise be silently stored but permanently
+        inert, never applying to anything (this ticket's own acceptance
+        criterion). Read literally as "any camera," not one specific
+        camera, since a mobile tag is not tied to a single camera the
+        way ``get_calibration``'s query is -- it may be seen by whichever
+        camera happens to be watching. A *zero* ``mount_z`` (the
+        ``MountParameters`` default -- no elevation at all) never
+        triggers this check, calibrated or not, since there is nothing
+        for parallax to project in that case.
+
+        A partial spec (``mount_z`` set, ``mount_x``/``mount_y`` left at
+        their own ``0.0`` default) is accepted without complaint --
+        ``MountParameters``' own fields already default to zero offset,
+        so there is nothing to validate here (UC-12's own "common case"
+        failure mode). A registration for a tag never yet detected is
+        accepted unconditionally -- the tag may appear later (UC-12's
+        own failure-mode table) -- and takes effect the moment
+        ``DetectionEngine.run_burst`` next asks :meth:`_mount_lookup`
+        about it.
+        """
+        with self._lock:
+            if params.mount_z != 0.0 and not self._calibrations:
+                raise NotCalibrated(
+                    f"cannot register mount_z for {tag!r}: this daemon holds no "
+                    "calibration for any camera, so the parallax projection "
+                    "would be meaningless -- calibrate a camera first"
+                )
+            self._mount_params[tag] = params
+
+    def unregister_tag(self, tag: TagId) -> None:
+        """See ``daemon.interfaces.Daemon.unregister_tag``.
+
+        An absent *tag* is a no-op, matching :meth:`clear_annotations`'s
+        established no-op-on-absent convention (sprint 024) -- there is
+        nothing to undo for a tag that was never registered, or already
+        unregistered.
+        """
+        with self._lock:
+            self._mount_params.pop(tag, None)
+
+    def list_tag_parameters(self) -> Dict[TagId, MountParameters]:
+        """See ``daemon.interfaces.Daemon.list_tag_parameters``.
+
+        A snapshot ``dict`` copy, safe for a caller to mutate freely
+        without touching this service's own store -- the same
+        snapshot-not-live-reference discipline every other collection
+        this class hands back (``list_cameras``, ``list_playfields``)
+        already follows.
+        """
+        with self._lock:
+            return dict(self._mount_params)
+
+    def _mount_lookup(self, tag: TagId) -> Optional[MountParameters]:
+        """``DetectionEngine``'s ``mount_lookup`` callable (ticket
+        025-004) -- a locked read of :attr:`_mount_params`, the same
+        lock-guarded-dict-read pattern :meth:`_camera_config_for_calibration`/
+        :meth:`_playfield_for_calibration` already establish."""
+        with self._lock:
+            return self._mount_params.get(tag)
+
+    def _camera_geometry_for(self, slug: str) -> Tuple[WorldPoint, float]:
+        """``DetectionEngine``'s ``camera_geometry_lookup`` callable
+        (ticket 025-004) -- **explicitly provisional, not a settled
+        design.** See below for the full reasoning; this is the one
+        piece of this ticket's Definition of Done most likely to need
+        revisiting.
+
+        ``calibration.geometry.project_tag_to_field_plane`` needs a
+        camera's own ground position and height above the field to
+        perform its parallax projection, but nothing in this codebase
+        currently models that: ``config.interfaces.CameraConfig``
+        carries no position/height field, and no proto/config-loader
+        plumbing exists to set one over RPC or load one from disk.
+        Adding that would be a real expansion of *this* ticket's scope
+        (new ``CameraConfig`` fields, a new proto message field, new
+        client/config-loader marshalling) — a decision about *where an
+        operator records a camera's physical mount* that deserves its
+        own ticket and its own review, not a side effect of wiring the
+        mobile-tag registry. See ``calibration/geometry.py``'s module
+        docstring for the full gap analysis this ticket inherited from
+        ticket 003.
+
+        Until that real source exists, every camera reports ground
+        position ``(0, 0)`` and height ``0.0`` -- ``project_tag_to_field_plane``'s
+        own documented "nothing to correct" sentinel (height not
+        strictly positive short-circuits to the identity). Concretely:
+        a registered ``mount_z`` is fully wired end-to-end and covered
+        by unit tests with hand-picked geometry (``tests/aprilcam/daemon/
+        test_detection.py``), but has **no observable effect against a
+        live camera** today -- only ``mount_x``/``mount_y``/
+        ``mount_yaw_rad``'s offset+yaw composition
+        (``calibration.geometry.apply_mount_offset``, which needs no
+        camera geometry at all) actually moves a real reported position.
+        This is a known, explicitly-flagged gap: a follow-up ticket must
+        add a real per-camera position/height source before ``mount_z``
+        does anything against real hardware.
+        """
+        return WorldPoint(x=0.0, y=0.0), 0.0
 
     # -- calibration (ticket 022-003) --------------------------------------
 

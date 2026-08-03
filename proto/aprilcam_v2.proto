@@ -77,6 +77,55 @@
 // playfield is never an error one level down (a no-op for `remove`/
 // `clear`, empty for `get`).
 //
+// Sprint 025 ticket 002 is the sixth: `FindFeature` (UC-08, "where is
+// the blue dot") -- answered from the named playfield's surveyed
+// definition only, via `aprilcam.playfield.query.FeatureQuery` (ticket
+// 025-001): no camera opened, no calibration required. `FeatureMatch`
+// is a new message, not a reuse of `PlayfieldFeatureEntry` above --
+// that message mirrors `config.loader.PlayfieldDefinition`'s raw
+// per-section storage (an optional numeric `id`, no `kind`), while
+// `FindFeature`'s answer is the more abstract
+// `aprilcam.config.interfaces.Feature` view (`kind` as a string,
+// deliberately no numeric id -- see that class's docstring), which is
+// exactly `PlayfieldFeatureEntry`'s wrong shape for this: calibration
+// (`GetPlayfield`) needs the id, feature lookup needs the kind. Empty
+// `FindFeatureResponse.features` means no match (UC-08.S-3) -- never an
+// error, and unknown playfield -> `NOT_FOUND` naming the playfields
+// held, matching `GetPlayfield`'s own precedent exactly.
+//
+// Sprint 025 ticket 004 is the seventh: the mobile-tag registry
+// (UC-12) -- `RegisterTag` / `UnregisterTag` / `ListTagParameters`.
+// `MountParameters` mirrors `aprilcam.types.MountParameters`
+// field-for-field (`optional double size_cm` for legitimate absence --
+// no daemon-level default this sprint, sprint.md Design Rationale
+// decision 4 -- plus `mount_x`/`mount_y`/`mount_z`/`mount_yaw_rad`,
+// none of which are ever absent since `types.MountParameters` itself
+// defaults each to `0.0`, never `None`). `TagMountEntry` pairs a `TagId`
+// with its `MountParameters`, the wire shape `ListTagParametersResponse`
+// needs to carry a whole registry snapshot (a plain `map<TagId,
+// MountParameters>` is not expressible in proto3 -- message-typed map
+// keys are disallowed -- so a repeated pair message is the standard
+// substitute, the same shape choice `TagMountEntry` makes explicit
+// rather than smuggling through a stringified key). The actual
+// correction math (parallax + offset + yaw) never crosses this wire --
+// it runs inside the daemon (`calibration.geometry`, `daemon.
+// detection`) before a `TagRecord` ever reaches `GetTagsResponse`/
+// `GetTagResponse`/`GetTagHistoryResponse` above, so those messages are
+// unchanged by this addition: a registered tag's `TagRecord.world`/
+// `.yaw_rad` are simply already the robot's pose by the time they are
+// serialized.
+//
+// Sprint 025 ticket 007 is the eighth, and this sprint's last: `GetGuide`
+// (UC-27) -- the packaged agent/robot usage guide, servable over an
+// already-open daemon connection. `aprilcam.guides.read_guide` is the
+// single leaf both this RPC (via `daemon.service.DaemonService.get_guide`)
+// and the client's no-daemon-needed `client.guides.Guides` (ticket
+// 025-006) read, so the two accessors serve byte-identical text by
+// construction. Absent `GetGuideRequest.name` means the default guide
+// (`"agent"`); an unknown name -> `NOT_FOUND`, naming the guides that
+// exist (`"agent"`, `"robot"`), matching `FindFeature`/`GetPlayfield`'s
+// established `UnknownTarget` precedent above.
+//
 // Wire conventions this file follows (docs/design/design.md §6):
 //   - World-cm coordinates cross this boundary only inside `TagRecord`
 //     (`world`, `world_velocity`, `world_corners`), and every camera
@@ -91,10 +140,12 @@
 // Deliberately absent this sprint (Stage 8 territory, not forgotten):
 // OpenCamera/CloseCamera (no explicit open/close verb -- `GetFrame`
 // opens on demand and the daemon holds it, see `daemon/service.py`),
-// calibration trigger, config push/pull, annotation store, mobile-tag
-// registry, stream endpoint allocation (`GetImageStream`/
-// `GetTagStream`), `WhereIs`. None of this sprint's use cases need
-// them.
+// stream endpoint allocation (`GetImageStream`/`GetTagStream`). None of
+// this sprint's use cases need them. (This note is sprint 020's own,
+// scoped to sprint 020's original four-RPC surface -- calibration
+// trigger, config push/pull, the annotation store, `WhereIs`, and now
+// the mobile-tag registry have all since been added by later sprints,
+// above.)
 
 syntax = "proto3";
 
@@ -227,6 +278,37 @@ service AprilCamV2 {
   // without fetching pixels. After a restart this is an empty set at
   // revision 0 (UC-28.S-4): the wipe is the contract, not a fault.
   rpc GetAnnotations (GetAnnotationsRequest) returns (GetAnnotationsResponse);
+
+  // Fuzzy-match a free-text query against a playfield's surveyed
+  // features -- "where is the blue dot" (UC-08, ticket 025-002).
+  // Answered from the surveyed definition only: no camera opened, no
+  // calibration required. Ambiguous queries return every match, never
+  // an arbitrary pick (UC-08.S-2); no match returns an empty list
+  // (UC-08.S-3), never an error. Unknown playfield -> `NOT_FOUND`,
+  // naming the playfields held (matching `GetPlayfield`'s precedent).
+  rpc FindFeature (FindFeatureRequest) returns (FindFeatureResponse);
+
+  // Describe how a tag is mounted on its robot (UC-12, ticket 025-004)
+  // -- upserts by tag id, in memory only. Takes effect on the very next
+  // detection burst for that tag; does not survive a daemon restart.
+  rpc RegisterTag (RegisterTagRequest) returns (RegisterTagResponse);
+
+  // Forget a mount registration -- the tag reports as itself again on
+  // the next detection burst. Removing an absent registration is a
+  // no-op, never an error.
+  rpc UnregisterTag (UnregisterTagRequest) returns (UnregisterTagResponse);
+
+  // Every currently registered tag -> mount parameters, as a snapshot.
+  rpc ListTagParameters (ListTagParametersRequest) returns (ListTagParametersResponse);
+
+  // The packaged agent/robot usage guide (UC-27, ticket 025-007) -- the
+  // RPC face of `client.guides.Guides`, for a caller that already has a
+  // daemon connection. Absent `name` means the default ("agent") guide;
+  // an unknown name -> `NOT_FOUND`, naming the guides that exist
+  // ("agent", "robot"). Serves byte-identical text to the no-daemon
+  // `client.guides.Guides` accessor by construction -- both read
+  // `aprilcam.guides.read_guide`, never a second copy of the text.
+  rpc GetGuide (GetGuideRequest) returns (GetGuideResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -764,4 +846,95 @@ message GetAnnotationsResponse {
   // off" rule as GetFrameResponse.annotations above, applied to this
   // query response too).
   AnnotationSet annotations = 1;
+}
+
+// ---------------------------------------------------------------------------
+// FindFeature (ticket 025-002)
+// ---------------------------------------------------------------------------
+
+// One surveyed feature matched by a free-text query (UC-08). Mirrors
+// aprilcam.config.interfaces.Feature field-for-field -- deliberately
+// not PlayfieldFeatureEntry (see this file's header comment): Feature
+// carries `kind` as a string and no numeric id, which is exactly the
+// shape FindFeature's answer needs and PlayfieldFeatureEntry does not
+// have.
+message FeatureMatch {
+  string slug = 1;
+  string kind = 2;
+  WorldPoint position = 3;
+  optional string colour = 4;
+}
+
+message FindFeatureRequest {
+  string playfield = 1;
+  string query = 2;
+}
+
+message FindFeatureResponse {
+  // Empty means no match (UC-08.S-3) -- never an error and never a
+  // fabricated near-miss.
+  repeated FeatureMatch features = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Mobile-tag registry (ticket 025-004, UC-12). Mirrors
+// aprilcam.types.MountParameters field-for-field. The correction math
+// itself (parallax + offset + yaw) never crosses this wire -- see this
+// file's header comment.
+// ---------------------------------------------------------------------------
+
+message MountParameters {
+  // Physical edge length of the tag, cm. Absent means "no override" --
+  // there is no daemon-level default this sprint (sprint.md Design
+  // Rationale decision 4) -- never a fabricated value.
+  optional double size_cm = 1;
+  // Robot's own frame: +x forward, +y left, rotating with
+  // mount_yaw_rad. Never absent -- aprilcam.types.MountParameters
+  // itself defaults each of these three to 0.0, not None.
+  double mount_x = 2;
+  double mount_y = 3;
+  double mount_z = 4;
+  double mount_yaw_rad = 5;
+}
+
+message RegisterTagRequest {
+  TagId tag = 1;
+  MountParameters params = 2;
+}
+
+message RegisterTagResponse {}
+
+message UnregisterTagRequest {
+  TagId tag = 1;
+}
+
+message UnregisterTagResponse {}
+
+// One entry in a ListTagParameters snapshot -- proto3 disallows
+// message-typed map keys, so a repeated (tag, params) pair message is
+// the standard substitute for a TagId -> MountParameters map (this
+// file's header comment).
+message TagMountEntry {
+  TagId tag = 1;
+  MountParameters params = 2;
+}
+
+message ListTagParametersRequest {}
+
+message ListTagParametersResponse {
+  repeated TagMountEntry entries = 1;
+}
+
+// ---------------------------------------------------------------------------
+// GetGuide (ticket 025-007, UC-27)
+// ---------------------------------------------------------------------------
+
+message GetGuideRequest {
+  // Absent means the default guide ("agent") -- mirrors
+  // Daemon.get_guide(name: Optional[str] = None).
+  optional string name = 1;
+}
+
+message GetGuideResponse {
+  string text = 1;
 }

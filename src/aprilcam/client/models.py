@@ -35,11 +35,11 @@ presence instead, see :func:`image_frame_from_proto`).
 from __future__ import annotations
 
 import json
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from aprilcam.calibration.calibration import Calibration
 from aprilcam.calibration.interfaces import CalibrationResult
-from aprilcam.config.interfaces import CameraConfig
+from aprilcam.config.interfaces import CameraConfig, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import DaemonStatus
 from aprilcam.playfield.playfield import Playfield
@@ -52,6 +52,7 @@ from aprilcam.types import (
     Circle,
     ImageFrame,
     Marker,
+    MountParameters,
     PathShape,
     PixelPoint,
     Polygon,
@@ -75,7 +76,10 @@ __all__ = [
     "camera_state_from_proto",
     "camera_states_from_proto",
     "daemon_status_from_proto",
+    "feature_from_proto",
+    "features_from_proto",
     "image_frame_from_proto",
+    "mount_parameters_from_proto",
     "playfield_definition_from_proto",
     "playfield_from_proto",
     "playfields_from_proto",
@@ -83,6 +87,7 @@ __all__ = [
     "style_from_proto",
     "tag_frame_from_proto",
     "tag_id_from_proto",
+    "tag_parameters_from_proto",
     "tag_record_from_get_tag_response",
     "tag_record_from_proto",
 ]
@@ -327,6 +332,25 @@ def playfields_from_proto(msgs) -> Tuple[Playfield, ...]:
     return tuple(playfield_from_proto(m) for m in msgs)
 
 
+def feature_from_proto(msg: aprilcam_v2_pb2.FeatureMatch) -> Feature:
+    """The client-side mirror of ``daemon/rpc.py``'s
+    ``_feature_match_to_proto`` (ticket 025-002, UC-08) -- field for
+    field, in reverse. Not :func:`_playfield_feature_entry_from_proto`'s
+    ``PlayfieldFeatureEntry`` shape: a ``FindFeature`` match is the more
+    abstract ``config.interfaces.Feature`` view (``kind`` as a string,
+    no numeric id)."""
+    return Feature(
+        slug=msg.slug,
+        kind=msg.kind,
+        position=_world_point_from_proto(msg.position),
+        colour=msg.colour if msg.HasField("colour") else None,
+    )
+
+
+def features_from_proto(msgs) -> Tuple[Feature, ...]:
+    return tuple(feature_from_proto(m) for m in msgs)
+
+
 def camera_config_from_proto(msg: aprilcam_v2_pb2.CameraConfig) -> CameraConfig:
     """The client-side mirror of ``daemon/rpc.py``'s
     ``_camera_config_to_proto``. ``settings`` crosses as JSON text (see
@@ -337,6 +361,38 @@ def camera_config_from_proto(msg: aprilcam_v2_pb2.CameraConfig) -> CameraConfig:
         playfield=msg.playfield if msg.HasField("playfield") else None,
         settings=settings,
     )
+
+
+def mount_parameters_from_proto(msg: aprilcam_v2_pb2.MountParameters) -> MountParameters:
+    """The client-side mirror of ``daemon/rpc.py``'s
+    ``_mount_parameters_to_proto`` (ticket 025-004, UC-12) -- field for
+    field, in reverse. ``mount_x``/``mount_y``/``mount_z``/
+    ``mount_yaw_rad`` are never absent on the wire (``types.
+    MountParameters`` itself defaults each to ``0.0``, never ``None``);
+    only ``size_cm`` round-trips through ``HasField()``."""
+    return MountParameters(
+        size_cm=msg.size_cm if msg.HasField("size_cm") else None,
+        mount_x=msg.mount_x,
+        mount_y=msg.mount_y,
+        mount_z=msg.mount_z,
+        mount_yaw_rad=msg.mount_yaw_rad,
+    )
+
+
+def tag_parameters_from_proto(
+    msg: aprilcam_v2_pb2.ListTagParametersResponse,
+) -> Dict[TagId, MountParameters]:
+    """See ``daemon.interfaces.Daemon.list_tag_parameters``. Each
+    ``TagMountEntry`` pairs a ``TagId`` with its ``MountParameters`` --
+    proto3 disallows message-typed map keys, so the wire carries a
+    repeated pair message instead of a native map (``aprilcam_v2.proto``'s
+    header comment); this rebuilds the same ``Dict[TagId,
+    MountParameters]`` shape :meth:`~aprilcam.daemon.service.
+    DaemonService.list_tag_parameters` returns same-process."""
+    return {
+        tag_id_from_proto(entry.tag): mount_parameters_from_proto(entry.params)
+        for entry in msg.entries
+    }
 
 
 def calibration_result_from_proto(msg: aprilcam_v2_pb2.CalibrationResult) -> CalibrationResult:

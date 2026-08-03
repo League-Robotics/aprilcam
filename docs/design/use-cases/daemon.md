@@ -1338,3 +1338,11 @@ is current-state only. If history is wanted it needs its own use case.
 | Do raw frames embed annotations? | **No.** Annotations are world-only and raw frames carry no world→pixel mapping (UC-16). Deskewed frames embed the current set. |
 | UC-12 — do mount parameters survive a restart? | **No.** v1's persisted `tags.json` is dropped; the registry is in-memory like annotations. A client expecting its tag to have a height or orientation registers the mount at session start, every session. |
 
+### Decisions resolved 2026-08-03
+
+| Question | Resolution |
+|---|---|
+| UC-12 — what is the robot's "reference point"? | **Client-defined, not daemon-mandated.** The daemon cannot inspect a robot's physical geometry, so it applies whatever `mount_x`/`mount_y`/`mount_z`/`mount_yaw` it is given mechanically, with no notion of what physical point they are measured from. The packaged guide (UC-27) recommends centre of rotation as a sensible default, but never enforces it. |
+| UC-12 — is mount X/Y in the robot's frame or the world frame? | **The robot's own frame, `+x` forward, `+y` left, rotating with `mount_yaw`** — carried forward from v1's `x_mm` forward / `y_mm` left convention unchanged, rather than inventing a new one. See `calibration.geometry.apply_mount_offset`'s docstring for the composed math and worked example. |
+| UC-12 — do mount-parameter changes retroactively affect buffered history? | **No.** A registration or un-registration only affects frames detected after the change; buffered `TagFrame`s keep whatever correction (or none) was in effect when they were built. Recomputing history would require storing raw, pre-correction detections, which the ring buffer does not do. |
+

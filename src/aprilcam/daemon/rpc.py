@@ -5,7 +5,9 @@ tag-detection RPCs below are ticket 021-005; ``SetPlayfield``/
 are ticket 022-003; ``ResetCameraConfig`` is ticket 023-004;
 ``PutAnnotation``/``RemoveAnnotation``/``ReplaceLayer``/
 ``ClearAnnotations``/``GetAnnotations`` and the ``GetFrame`` annotation
-embed are ticket 024-001).
+embed are ticket 024-001; ``FindFeature`` is ticket 025-002;
+``RegisterTag``/``UnregisterTag``/``ListTagParameters`` are ticket
+025-004; ``GetGuide`` is ticket 025-007, this sprint's last).
 
 Translates between ``proto/aprilcam_v2.proto``'s service (sprint 020's
 four RPCs -- ``ListCameras``, ``ProbeCameras``, ``GetFrame``,
@@ -13,7 +15,8 @@ four RPCs -- ``ListCameras``, ``ProbeCameras``, ``GetFrame``,
 ``GetTagHistory`` and the ``GetFrame`` tag embed, plus sprint 022's
 playfield/camera-config RPCs and ``Calibrate``/``GetCalibration``, plus
 sprint 023's ``ResetCameraConfig``, plus sprint 024's annotation-store
-RPCs and the ``GetFrame`` annotation embed above) and
+RPCs and the ``GetFrame`` annotation embed above, plus sprint 025's
+``FindFeature``) and
 ``daemon.service.DaemonService`` method calls. Everything here is
 (de)serialization and error-code mapping; no business logic, no camera
 access, no registry/discovery/vision calls -- see the sprint
@@ -64,7 +67,7 @@ import grpc
 
 from aprilcam.calibration.calibration import Calibration
 from aprilcam.calibration.interfaces import CalibrationResult
-from aprilcam.config.interfaces import CameraConfig
+from aprilcam.config.interfaces import CameraConfig, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
 from aprilcam.daemon.lifecycle import ControlPlaneListener
@@ -75,6 +78,7 @@ from aprilcam.errors import (
     NoPlayfieldLinked,
     NotCalibrated,
     UnknownCamera,
+    UnknownGuide,
     UnknownPlayfield,
 )
 from aprilcam.playfield.interfaces import Playfield
@@ -87,6 +91,7 @@ from aprilcam.types import (
     Circle,
     ImageFrame,
     Marker,
+    MountParameters,
     PathShape,
     PixelPoint,
     Polygon,
@@ -113,6 +118,11 @@ _STATUS_CODES = {
     AlreadyRunning: grpc.StatusCode.ALREADY_EXISTS,
     UnknownCamera: grpc.StatusCode.NOT_FOUND,
     UnknownPlayfield: grpc.StatusCode.NOT_FOUND,
+    # An unknown guide name (UC-27.S-3, ticket 025-007) -- same
+    # "requested a name that does not exist" semantics as
+    # UnknownCamera/UnknownPlayfield above, both also UnknownTarget
+    # subtypes.
+    UnknownGuide: grpc.StatusCode.NOT_FOUND,
     NotCalibrated: grpc.StatusCode.FAILED_PRECONDITION,
     # Same "the operation cannot succeed given current state" semantics
     # as NotCalibrated -- the camera is known, just not present right
@@ -370,6 +380,51 @@ def _playfield_entry_to_proto(playfield: Playfield) -> aprilcam_v2_pb2.Playfield
     )
 
 
+def _feature_match_to_proto(feature: Feature) -> aprilcam_v2_pb2.FeatureMatch:
+    """Python -> proto, for a ``FindFeature`` response (ticket 025-002).
+    Mirrors ``config.interfaces.Feature`` field-for-field -- not
+    :func:`_playfield_feature_entry_to_proto`'s ``PlayfieldFeatureEntry``
+    shape, which carries an optional numeric ``id`` and no ``kind``
+    (this file's header comment)."""
+    msg = aprilcam_v2_pb2.FeatureMatch(
+        slug=feature.slug, kind=feature.kind, position=_world_point_to_proto(feature.position)
+    )
+    if feature.colour is not None:
+        msg.colour = feature.colour
+    return msg
+
+
+def _mount_parameters_to_proto(params: MountParameters) -> aprilcam_v2_pb2.MountParameters:
+    """Python -> proto, for a ``ListTagParameters`` response (ticket
+    025-004). Mirrors ``types.MountParameters`` field-for-field --
+    ``mount_x``/``mount_y``/``mount_z``/``mount_yaw_rad`` are never
+    absent (the dataclass itself defaults each to ``0.0``, never
+    ``None``), only ``size_cm`` needs the presence check."""
+    msg = aprilcam_v2_pb2.MountParameters(
+        mount_x=params.mount_x,
+        mount_y=params.mount_y,
+        mount_z=params.mount_z,
+        mount_yaw_rad=params.mount_yaw_rad,
+    )
+    if params.size_cm is not None:
+        msg.size_cm = params.size_cm
+    return msg
+
+
+def _mount_parameters_from_proto(msg: aprilcam_v2_pb2.MountParameters) -> MountParameters:
+    """Proto -> Python, for an incoming ``RegisterTagRequest``. The
+    module docstring's "reading this module's own incoming requests"
+    exception applies here exactly as it already does for
+    :func:`_tag_id_from_proto`."""
+    return MountParameters(
+        size_cm=msg.size_cm if msg.HasField("size_cm") else None,
+        mount_x=msg.mount_x,
+        mount_y=msg.mount_y,
+        mount_z=msg.mount_z,
+        mount_yaw_rad=msg.mount_yaw_rad,
+    )
+
+
 def _camera_config_to_proto(config: CameraConfig) -> aprilcam_v2_pb2.CameraConfig:
     """Python -> proto, for a ``GetCameraConfig`` response. ``settings``
     crosses as JSON text -- see ``aprilcam_v2.proto``'s header comment."""
@@ -574,6 +629,8 @@ def _abort(context: grpc.ServicerContext, exc: Exception) -> None:
     * :class:`~aprilcam.errors.UnknownPlayfield`: same two keys as
       :class:`UnknownCamera` -- both derive from ``UnknownTarget`` and
       share its ``requested``/``available`` shape.
+    * :class:`~aprilcam.errors.UnknownGuide`: same two keys again --
+      also an ``UnknownTarget`` subtype (UC-27.S-3, ticket 025-007).
     * :class:`CameraNotPresent`: + ``aprilcam-slug``.
     * :class:`~aprilcam.errors.NoPlayfieldLinked`: + ``aprilcam-camera``.
     """
@@ -586,7 +643,7 @@ def _abort(context: grpc.ServicerContext, exc: Exception) -> None:
         metadata = [("aprilcam-error-type", type(exc).__name__)]
         if isinstance(exc, AlreadyRunning):
             metadata.append(("aprilcam-holder", exc.holder))
-        elif isinstance(exc, (UnknownCamera, UnknownPlayfield)):
+        elif isinstance(exc, (UnknownCamera, UnknownPlayfield, UnknownGuide)):
             metadata.append(("aprilcam-requested", exc.requested))
             metadata.append(("aprilcam-available", ",".join(exc.available)))
         elif isinstance(exc, CameraNotPresent):
@@ -812,6 +869,65 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
         return aprilcam_v2_pb2.GetAnnotationsResponse(
             annotations=_annotation_set_to_proto(annotations)
         )
+
+    def FindFeature(self, request, context):  # noqa: N802
+        try:
+            features = self._service.find_feature(request.playfield, request.query)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.FindFeatureResponse()
+        return aprilcam_v2_pb2.FindFeatureResponse(
+            features=[_feature_match_to_proto(f) for f in features]
+        )
+
+    def RegisterTag(self, request, context):  # noqa: N802
+        tag = _tag_id_from_proto(request.tag)
+        params = _mount_parameters_from_proto(request.params)
+        try:
+            self._service.register_tag(tag, params)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.RegisterTagResponse()
+        return aprilcam_v2_pb2.RegisterTagResponse()
+
+    def UnregisterTag(self, request, context):  # noqa: N802
+        tag = _tag_id_from_proto(request.tag)
+        try:
+            self._service.unregister_tag(tag)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.UnregisterTagResponse()
+        return aprilcam_v2_pb2.UnregisterTagResponse()
+
+    def ListTagParameters(self, request, context):  # noqa: N802
+        try:
+            registrations = self._service.list_tag_parameters()
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.ListTagParametersResponse()
+        return aprilcam_v2_pb2.ListTagParametersResponse(
+            entries=[
+                aprilcam_v2_pb2.TagMountEntry(
+                    tag=_tag_id_to_proto(tag), params=_mount_parameters_to_proto(params)
+                )
+                for tag, params in registrations.items()
+            ]
+        )
+
+    def GetGuide(self, request, context):  # noqa: N802
+        """See ``daemon.interfaces.Daemon.get_guide`` (ticket 025-007,
+        UC-27). ``request.name`` absent (``HasField`` false) means the
+        default guide -- mirrors ``DaemonService.get_guide(name:
+        Optional[str] = None)`` exactly, the same optional-scalar
+        presence discipline every other optional request field in this
+        module already uses."""
+        name = request.name if request.HasField("name") else None
+        try:
+            text = self._service.get_guide(name)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.GetGuideResponse()
+        return aprilcam_v2_pb2.GetGuideResponse(text=text)
 
 
 class _GrpcListener(ControlPlaneListener):

@@ -5,19 +5,24 @@
 ``calibrate``/``get_calibration`` added by ticket 022-003;
 ``reset_camera_config`` added by ticket 023-004; ``put_annotation``/
 ``remove_annotation``/``replace_layer``/``clear_annotations``/
-``get_annotations`` added by ticket 024-002): a typed
+``get_annotations`` added by ticket 024-002; ``find_feature`` added by
+ticket 025-002; ``register_tag``/``unregister_tag``/
+``list_tag_parameters`` added by ticket 025-004; ``get_guide`` added by
+ticket 025-007, this sprint's last): a typed
 wrapper over the generated gRPC stub for
 ``list_cameras``, ``probe_cameras``, ``get_frame``, ``status``,
 ``get_tags``, ``get_tag``, ``get_tag_history``, ``set_playfield``,
 ``get_playfield``, ``list_playfields``, ``set_camera_config``,
 ``get_camera_config``, ``calibrate``, ``get_calibration``,
 ``reset_camera_config``, ``put_annotation``, ``remove_annotation``,
-``replace_layer``, ``clear_annotations``, ``get_annotations``.
+``replace_layer``, ``clear_annotations``, ``get_annotations``,
+``find_feature``, ``register_tag``, ``unregister_tag``,
+``list_tag_parameters``, ``get_guide``.
 
-**Only these twenty methods are implemented**, mirroring
+**Only these twenty-five methods are implemented**, mirroring
 ``daemon.service.DaemonService``'s own stance: ``daemon.interfaces.
-Daemon`` is a much larger base class (streams, tag parameters, guides,
-``find_feature``), and
+Daemon`` is a much larger base class (``stream_images``/``stream_tags``
+remain the unimplemented pair as of this sprint), and
 those are inherited as-is here rather than overridden -- calling one
 raises ``NotImplementedError`` naming itself instead of failing with a
 bare ``AttributeError``. ``isinstance(client,
@@ -49,7 +54,7 @@ look the same from outside.
 from __future__ import annotations
 
 import json
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import grpc
 
@@ -62,14 +67,16 @@ from aprilcam.client.models import (
     camera_config_from_proto,
     camera_states_from_proto,
     daemon_status_from_proto,
+    features_from_proto,
     image_frame_from_proto,
     playfield_from_proto,
     playfields_from_proto,
     probe_report_from_proto,
     tag_frame_from_proto,
+    tag_parameters_from_proto,
     tag_record_from_get_tag_response,
 )
-from aprilcam.config.interfaces import CameraConfig
+from aprilcam.config.interfaces import CameraConfig, Feature
 from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitionIface
 from aprilcam.config.loader import PlayfieldDefinition
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
@@ -80,6 +87,7 @@ from aprilcam.errors import (
     NoPlayfieldLinked,
     NotCalibrated,
     UnknownCamera,
+    UnknownGuide,
     UnknownPlayfield,
 )
 from aprilcam.playfield.interfaces import Playfield
@@ -91,6 +99,7 @@ from aprilcam.types import (
     Circle,
     ImageFrame,
     Marker,
+    MountParameters,
     PathShape,
     Polygon,
     ProbeReport,
@@ -147,6 +156,23 @@ def _playfield_definition_to_proto(definition: PlayfieldDefinition) -> aprilcam_
         rectangles=[_playfield_feature_entry_to_proto(e) for e in definition.rectangles],
         dots=[_playfield_feature_entry_to_proto(e) for e in definition.dots],
     )
+
+
+def _mount_parameters_to_proto(params: MountParameters) -> aprilcam_v2_pb2.MountParameters:
+    """Request-building direction only (Python -> proto, for an
+    outgoing ``RegisterTagRequest``, ticket 025-004) -- duplicated, not
+    shared, with ``daemon/rpc.py``'s identically-shaped
+    ``_mount_parameters_to_proto``, matching this module's own
+    established pattern above."""
+    msg = aprilcam_v2_pb2.MountParameters(
+        mount_x=params.mount_x,
+        mount_y=params.mount_y,
+        mount_z=params.mount_z,
+        mount_yaw_rad=params.mount_yaw_rad,
+    )
+    if params.size_cm is not None:
+        msg.size_cm = params.size_cm
+    return msg
 
 
 def _camera_config_to_proto(config: CameraConfig) -> aprilcam_v2_pb2.CameraConfig:
@@ -268,6 +294,11 @@ def _reconstruct_error(exc: grpc.RpcError, target: str) -> Exception:
         )
     if error_type == "NoPlayfieldLinked":
         return NoPlayfieldLinked(metadata.get("aprilcam-camera", "unknown"))
+    if error_type == "UnknownGuide":
+        return UnknownGuide(
+            metadata.get("aprilcam-requested", ""),
+            _split_available(metadata.get("aprilcam-available", "")),
+        )
     return ConnectionFailed(target, reason=exc.details() or str(exc.code()))
 
 
@@ -371,6 +402,40 @@ class GrpcDaemon(Daemon):
         response = self._call(self._stub.ListPlayfields, aprilcam_v2_pb2.ListPlayfieldsRequest())
         return playfields_from_proto(response.playfields)
 
+    def find_feature(self, playfield: str, query: str) -> Tuple[Feature, ...]:
+        """See ``daemon.interfaces.Daemon.find_feature`` (ticket
+        025-002, UC-08). No camera opened, no calibration required --
+        answered entirely from the named playfield's surveyed
+        definition. Ambiguous queries return every match (UC-08.S-2);
+        no match returns an empty tuple (UC-08.S-3), not an error."""
+        request = aprilcam_v2_pb2.FindFeatureRequest(playfield=playfield, query=query)
+        response = self._call(self._stub.FindFeature, request)
+        return features_from_proto(response.features)
+
+    def register_tag(self, tag: TagId, params: MountParameters) -> None:
+        """See ``daemon.interfaces.Daemon.register_tag`` (ticket
+        025-004, UC-12). Upserts by *tag* -- takes effect on the next
+        detection burst for that tag; does not survive a daemon
+        restart."""
+        request = aprilcam_v2_pb2.RegisterTagRequest(
+            tag=_tag_id_to_proto(tag), params=_mount_parameters_to_proto(params)
+        )
+        self._call(self._stub.RegisterTag, request)
+
+    def unregister_tag(self, tag: TagId) -> None:
+        """See ``daemon.interfaces.Daemon.unregister_tag``. An absent
+        registration is a no-op, enforced daemon-side."""
+        request = aprilcam_v2_pb2.UnregisterTagRequest(tag=_tag_id_to_proto(tag))
+        self._call(self._stub.UnregisterTag, request)
+
+    def list_tag_parameters(self) -> Dict[TagId, MountParameters]:
+        """See ``daemon.interfaces.Daemon.list_tag_parameters``. A
+        snapshot of every currently registered tag's mount parameters."""
+        response = self._call(
+            self._stub.ListTagParameters, aprilcam_v2_pb2.ListTagParametersRequest()
+        )
+        return tag_parameters_from_proto(response)
+
     def set_camera_config(self, config: CameraConfig) -> None:
         request = aprilcam_v2_pb2.SetCameraConfigRequest(config=_camera_config_to_proto(config))
         self._call(self._stub.SetCameraConfig, request)
@@ -453,6 +518,22 @@ class GrpcDaemon(Daemon):
             request.layer = layer
         response = self._call(self._stub.GetAnnotations, request)
         return annotation_set_from_proto(response.annotations)
+
+    def get_guide(self, name: Optional[str] = None) -> str:
+        """See ``daemon.interfaces.Daemon.get_guide`` (ticket 025-007,
+        UC-27). The RPC path for a caller that already has a daemon
+        connection -- ``client.guides.Guides`` (ticket 025-006) is the
+        primary no-daemon-needed path; this exists so an already-connected
+        caller can fetch the identical text without a second, separate
+        accessor. Serves byte-identical text to that no-daemon path by
+        construction: both ultimately read ``aprilcam.guides.read_guide``,
+        just via ``DaemonService.get_guide`` on this end instead of
+        directly."""
+        request = aprilcam_v2_pb2.GetGuideRequest()
+        if name is not None:
+            request.name = name
+        response = self._call(self._stub.GetGuide, request)
+        return response.text
 
     # -- internals -----------------------------------------------------
 

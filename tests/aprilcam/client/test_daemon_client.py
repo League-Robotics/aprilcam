@@ -34,8 +34,10 @@ from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import CameraIdentity
 from aprilcam.camera.registry import CameraRegistry
 from aprilcam.client.daemon_client import GrpcDaemon
+from aprilcam.client.guides import Guides
 from aprilcam.config.directories import Directories
-from aprilcam.config.interfaces import CameraConfig
+from aprilcam.config.interfaces import CameraConfig, Feature
+from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.rpc import build_server
 from aprilcam.daemon.service import CALIBRATION_FRAME_COUNT, DaemonService
 from aprilcam.errors import (
@@ -43,6 +45,7 @@ from aprilcam.errors import (
     ConnectionFailed,
     NotCalibrated,
     UnknownCamera,
+    UnknownGuide,
     UnknownPlayfield,
 )
 from aprilcam.proto import aprilcam_v2_pb2_grpc
@@ -53,6 +56,7 @@ from aprilcam.types import (
     Circle,
     ImageFrame,
     Marker,
+    MountParameters,
     PathShape,
     Polygon,
     ProbeReport,
@@ -461,6 +465,131 @@ def test_get_frame_tags_is_none_when_no_detection_has_run(tag_client_factory):
 
 
 # ---------------------------------------------------------------------------
+# find_feature -- client wire round trips (ticket 025-002, UC-08).
+# Exercises the full proto boundary both directions: GrpcDaemon builds the
+# FindFeatureRequest, client/models.py's feature_from_proto turns the
+# response back into real config.interfaces.Feature dataclasses.
+# ---------------------------------------------------------------------------
+
+
+def _playfield_definition_with_dots(name: str = "main-playfield") -> PlayfieldDefinition:
+    """A small real definition with dots -- ``find_feature``'s round trip
+    needs findable coloured features, which ``test_service.py``'s
+    ``_playfield_definition()`` (ArUco ids only, reused above) does not
+    carry."""
+    return PlayfieldDefinition(
+        name=name,
+        width_cm=134.3,
+        height_cm=89.3,
+        dots=(
+            PlayfieldFeatureEntry(slug="dot-west-blue", x=-50.0, y=0.0, colour="blue"),
+            PlayfieldFeatureEntry(slug="dot-northwest-orange", x=-50.0, y=30.0, colour="orange"),
+            PlayfieldFeatureEntry(slug="dot-northeast-orange", x=50.0, y=30.0, colour="orange"),
+            PlayfieldFeatureEntry(slug="dot-southeast-orange", x=50.0, y=-30.0, colour="orange"),
+            PlayfieldFeatureEntry(slug="dot-southwest-orange", x=-50.0, y=-30.0, colour="orange"),
+        ),
+    )
+
+
+def test_find_feature_round_trip_returns_feature_dataclasses(client):
+    client.set_playfield(_playfield_definition_with_dots())
+
+    matches = client.find_feature("main-playfield", "the blue dot")
+
+    assert len(matches) == 1
+    match = matches[0]
+    assert isinstance(match, Feature)
+    assert match.slug == "dot-west-blue"
+    assert match.kind == "dot"
+    assert match.colour == "blue"
+    assert match.position == WorldPoint(x=-50.0, y=0.0)
+
+
+def test_find_feature_ambiguous_query_round_trip_returns_all_four_orange_dots(client):
+    client.set_playfield(_playfield_definition_with_dots())
+
+    matches = client.find_feature("main-playfield", "the orange dot")
+
+    assert {m.slug for m in matches} == {
+        "dot-northwest-orange",
+        "dot-northeast-orange",
+        "dot-southeast-orange",
+        "dot-southwest-orange",
+    }
+
+
+def test_find_feature_no_match_round_trip_returns_empty_tuple(client):
+    client.set_playfield(_playfield_definition_with_dots())
+
+    matches = client.find_feature("main-playfield", "the orange triangle")
+
+    assert matches == ()
+
+
+def test_find_feature_unknown_playfield_raises_unknown_playfield_naming_available(client):
+    with pytest.raises(UnknownPlayfield) as excinfo:
+        client.find_feature("no-such-field", "the blue dot")
+
+    assert excinfo.value.requested == "no-such-field"
+    assert excinfo.value.available == ()
+
+
+# ---------------------------------------------------------------------------
+# Mobile-tag registry -- client wire round trips (ticket 025-004, UC-12).
+# Exercises the full proto boundary both directions: GrpcDaemon builds the
+# request (client/daemon_client.py's own _mount_parameters_to_proto),
+# client/models.py's mount_parameters_from_proto/tag_parameters_from_proto
+# turn the response back into real aprilcam.types.MountParameters
+# dataclasses.
+# ---------------------------------------------------------------------------
+
+
+def test_register_tag_then_list_tag_parameters_round_trip_returns_dataclasses(client):
+    tag = TagId(family=TagFamily.APRILTAG, number=7)
+    params = MountParameters(mount_x=8.0, mount_y=3.0, mount_yaw_rad=0.5)
+
+    client.register_tag(tag, params)
+    registrations = client.list_tag_parameters()
+
+    assert registrations == {tag: params}
+    assert isinstance(next(iter(registrations)), TagId)
+    assert isinstance(next(iter(registrations.values())), MountParameters)
+
+
+def test_register_tag_with_size_cm_round_trips_present(client):
+    tag = TagId(family=TagFamily.ARUCO, number=3)
+    params = MountParameters(size_cm=6.5)
+
+    client.register_tag(tag, params)
+
+    assert client.list_tag_parameters() == {tag: params}
+
+
+def test_list_tag_parameters_empty_when_nothing_registered(client):
+    assert client.list_tag_parameters() == {}
+
+
+def test_unregister_tag_round_trip(client):
+    tag = TagId(family=TagFamily.APRILTAG, number=7)
+    client.register_tag(tag, MountParameters(mount_x=1.0))
+
+    client.unregister_tag(tag)
+
+    assert client.list_tag_parameters() == {}
+
+
+def test_unregister_tag_absent_does_not_raise(client):
+    client.unregister_tag(TagId(family=TagFamily.APRILTAG, number=42))  # must not raise
+
+
+def test_register_tag_mount_z_with_no_calibration_raises_not_calibrated(client):
+    with pytest.raises(NotCalibrated):
+        client.register_tag(TagId(family=TagFamily.APRILTAG, number=7), MountParameters(mount_z=20.0))
+
+    assert client.list_tag_parameters() == {}
+
+
+# ---------------------------------------------------------------------------
 # Annotation store -- client wire round trips (ticket 024-002, UC-28).
 # Exercises the full proto boundary both directions: GrpcDaemon builds the
 # request (client/daemon_client.py's own _annotation_to_proto and friends),
@@ -737,3 +866,60 @@ def test_get_frame_deskewed_embeds_the_current_annotation_set_via_client(directo
     assert len(filled.annotations.annotations) == 1
     assert filled.annotations.annotations[0].id == "goal"
     assert filled.annotations.revision == 1
+
+
+# ---------------------------------------------------------------------------
+# get_guide -- client wire round trips (ticket 025-007, UC-27, this
+# sprint's last). Exercises the full proto boundary: GrpcDaemon.get_guide
+# builds the GetGuideRequest, reads GetGuideResponse.text back directly
+# (no client/models.py converter needed -- a bare string has nothing to
+# convert).
+# ---------------------------------------------------------------------------
+
+
+def test_get_guide_no_name_round_trip_returns_agent_guide_text(client):
+    assert client.get_guide() == Guides().get("agent")
+
+
+def test_get_guide_agent_name_round_trip_returns_agent_guide_text(client):
+    assert client.get_guide("agent") == Guides().get("agent")
+
+
+def test_get_guide_robot_name_round_trip_returns_robot_guide_text(client):
+    assert client.get_guide("robot") == Guides().get("robot")
+
+
+def test_get_guide_unknown_name_raises_unknown_guide_naming_available(client):
+    with pytest.raises(UnknownGuide) as excinfo:
+        client.get_guide("nonexistent")
+
+    assert excinfo.value.requested == "nonexistent"
+    assert excinfo.value.available == ("agent", "robot")
+
+
+# ---------------------------------------------------------------------------
+# The single-source-of-truth proof (ticket 025-007's Definition of Done):
+# the RPC path (``client`` below, a real gRPC connection to a live daemon)
+# and the CLI's local, no-daemon path (``aprilcam guide``, which reads
+# ``client.guides.Guides`` directly -- see ``cli/guide.py``) both
+# ultimately read the same ``aprilcam/guides.py`` leaf, so they must serve
+# byte-identical text, not merely similar text. This is the one test in
+# the whole ticket that exercises *both* paths together in the same
+# assertion.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", [None, "agent", "robot"])
+def test_cli_no_daemon_path_and_live_daemon_rpc_serve_byte_identical_guide_text(
+    client, capsys, name
+):
+    from aprilcam.cli import main as cli_main
+
+    rpc_text = client.get_guide(name)
+
+    argv = ["guide"] if name is None else ["guide", name]
+    exit_code = cli_main(argv)
+    cli_text = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert cli_text == rpc_text
