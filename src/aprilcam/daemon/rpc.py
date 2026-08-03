@@ -5,7 +5,9 @@ tag-detection RPCs below are ticket 021-005; ``SetPlayfield``/
 are ticket 022-003; ``ResetCameraConfig`` is ticket 023-004;
 ``PutAnnotation``/``RemoveAnnotation``/``ReplaceLayer``/
 ``ClearAnnotations``/``GetAnnotations`` and the ``GetFrame`` annotation
-embed are ticket 024-001; ``FindFeature`` is ticket 025-002).
+embed are ticket 024-001; ``FindFeature`` is ticket 025-002;
+``RegisterTag``/``UnregisterTag``/``ListTagParameters`` are ticket
+025-004).
 
 Translates between ``proto/aprilcam_v2.proto``'s service (sprint 020's
 four RPCs -- ``ListCameras``, ``ProbeCameras``, ``GetFrame``,
@@ -88,6 +90,7 @@ from aprilcam.types import (
     Circle,
     ImageFrame,
     Marker,
+    MountParameters,
     PathShape,
     PixelPoint,
     Polygon,
@@ -383,6 +386,37 @@ def _feature_match_to_proto(feature: Feature) -> aprilcam_v2_pb2.FeatureMatch:
     if feature.colour is not None:
         msg.colour = feature.colour
     return msg
+
+
+def _mount_parameters_to_proto(params: MountParameters) -> aprilcam_v2_pb2.MountParameters:
+    """Python -> proto, for a ``ListTagParameters`` response (ticket
+    025-004). Mirrors ``types.MountParameters`` field-for-field --
+    ``mount_x``/``mount_y``/``mount_z``/``mount_yaw_rad`` are never
+    absent (the dataclass itself defaults each to ``0.0``, never
+    ``None``), only ``size_cm`` needs the presence check."""
+    msg = aprilcam_v2_pb2.MountParameters(
+        mount_x=params.mount_x,
+        mount_y=params.mount_y,
+        mount_z=params.mount_z,
+        mount_yaw_rad=params.mount_yaw_rad,
+    )
+    if params.size_cm is not None:
+        msg.size_cm = params.size_cm
+    return msg
+
+
+def _mount_parameters_from_proto(msg: aprilcam_v2_pb2.MountParameters) -> MountParameters:
+    """Proto -> Python, for an incoming ``RegisterTagRequest``. The
+    module docstring's "reading this module's own incoming requests"
+    exception applies here exactly as it already does for
+    :func:`_tag_id_from_proto`."""
+    return MountParameters(
+        size_cm=msg.size_cm if msg.HasField("size_cm") else None,
+        mount_x=msg.mount_x,
+        mount_y=msg.mount_y,
+        mount_z=msg.mount_z,
+        mount_yaw_rad=msg.mount_yaw_rad,
+    )
 
 
 def _camera_config_to_proto(config: CameraConfig) -> aprilcam_v2_pb2.CameraConfig:
@@ -836,6 +870,40 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
             return aprilcam_v2_pb2.FindFeatureResponse()
         return aprilcam_v2_pb2.FindFeatureResponse(
             features=[_feature_match_to_proto(f) for f in features]
+        )
+
+    def RegisterTag(self, request, context):  # noqa: N802
+        tag = _tag_id_from_proto(request.tag)
+        params = _mount_parameters_from_proto(request.params)
+        try:
+            self._service.register_tag(tag, params)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.RegisterTagResponse()
+        return aprilcam_v2_pb2.RegisterTagResponse()
+
+    def UnregisterTag(self, request, context):  # noqa: N802
+        tag = _tag_id_from_proto(request.tag)
+        try:
+            self._service.unregister_tag(tag)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.UnregisterTagResponse()
+        return aprilcam_v2_pb2.UnregisterTagResponse()
+
+    def ListTagParameters(self, request, context):  # noqa: N802
+        try:
+            registrations = self._service.list_tag_parameters()
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.ListTagParametersResponse()
+        return aprilcam_v2_pb2.ListTagParametersResponse(
+            entries=[
+                aprilcam_v2_pb2.TagMountEntry(
+                    tag=_tag_id_to_proto(tag), params=_mount_parameters_to_proto(params)
+                )
+                for tag, params in registrations.items()
+            ]
         )
 
 

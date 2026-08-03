@@ -104,6 +104,51 @@ shipping burst detection before streaming (Decision 1), not a defect;
 revisit once a background/streaming producer can genuinely fill the
 buffer at frame rate.
 
+**Mount correction (ticket 025-004, UC-12).** :meth:`DetectionEngine.run_burst`
+also asks its injected ``mount_lookup`` for each confirmed tag's currently
+registered ``types.MountParameters``, immediately after
+:func:`_build_tag_record` has populated ``world``/``world_corners``/
+``yaw_rad`` from calibration and *before* :meth:`_finish_record` derives
+motion from history. When a registration exists, ``world``/``yaw_rad``
+are replaced with ticket 003's ``calibration.geometry.correct_tag_pose``
+result -- the *robot's* pose, not the tag's -- so every consumer of the
+ring buffer (``get_tag``/``get_tags``/``get_tag_history``, and the
+not-yet-built streams) sees the correction for free, with no per-call
+logic duplicated anywhere else. ``world_corners`` is deliberately left
+untouched: per ``types.TagRecord``'s own docstring, corners outline the
+tag as physically seen (for drawing), never the robot. A tag with no
+registration (:meth:`DetectionEngine._apply_mount_correction`'s
+``mount_lookup(tag) is None`` branch) or with no calibrated ``world`` yet
+is returned completely unchanged -- the default ``mount_lookup``
+(:func:`_default_mount_lookup`) returns ``None`` for every tag, so this
+whole mechanism is a true no-op for every existing caller/test that does
+not opt in, exactly mirroring :func:`_default_calibration_lookup`'s own
+regression guarantee.
+
+**Camera-geometry caveat (ticket 025-004's own open decision, explicitly
+provisional).** ``correct_tag_pose``'s parallax half
+(``calibration.geometry.project_tag_to_field_plane``) needs a camera's
+own ground position and height above the field -- nothing in this
+codebase models that yet (see ``calibration/geometry.py``'s module
+docstring for the full gap analysis: ``config.interfaces.CameraConfig``
+carries no position/height field, and adding one would be a real
+expansion of proto/config-loader scope, not a wiring exercise). This
+module therefore also gains ``camera_geometry_lookup``, defaulting to
+:func:`_default_camera_geometry_lookup` -- a **stopgap**, not a settled
+design: it reports ground position ``(0, 0)`` and height ``0.0`` for
+every camera, and height ``0.0`` is ``project_tag_to_field_plane``'s own
+documented "nothing to correct" sentinel, so ``mount_z``'s parallax
+projection is wired end-to-end and fully unit-tested here (hand-picked
+geometry, exactly like ``calibration.geometry``'s own test suite) but
+has **no effect against a live camera** under this default -- only
+``mount_x``/``mount_y``/``mount_yaw_rad``'s offset+yaw composition
+actually moves a real reported position today. ``daemon.service.
+DaemonService`` wires this same stopgap in for a real daemon process
+(see that module's ``_camera_geometry_for`` docstring); a follow-up
+ticket must add a real per-camera position/height source before
+``mount_z`` does anything against real hardware. Flagged here plainly,
+not silently, per this ticket's own honesty requirement.
+
 **Presence-based temporal confirmation (ticket 024-006; streak raised to
 3 by ticket 024-007's real-hardware run).** Before any ``Detection``
 becomes a ``TagRecord``, :meth:`DetectionEngine.run_burst` requires it
@@ -157,11 +202,20 @@ from aprilcam.calibration.calibration import (
     DRIFT_TOLERANCE_CM,
     compute_drift_cm,
 )
+from aprilcam.calibration.geometry import correct_tag_pose
 from aprilcam.calibration.interfaces import Calibration
 from aprilcam.camera.interfaces import Camera
 from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitionIface
 from aprilcam.config.loader import PlayfieldDefinition as _ConcretePlayfieldDefinition
-from aprilcam.types import PixelPoint, TagFamily, TagFrame, TagId, TagRecord, WorldPoint
+from aprilcam.types import (
+    MountParameters,
+    PixelPoint,
+    TagFamily,
+    TagFrame,
+    TagId,
+    TagRecord,
+    WorldPoint,
+)
 from aprilcam.vision.detector import Detection, TagDetector
 from aprilcam.vision.motion import compute_motion
 from aprilcam.vision.pipeline import PipelineConfig, run_pipeline
@@ -239,6 +293,26 @@ CalibrationLookup = Callable[[str], Optional[Calibration]]
 #: see :meth:`DetectionEngine._maybe_check_drift`.
 PlayfieldLookup = Callable[[str], Optional[PlayfieldDefinitionIface]]
 
+#: A callable that resolves a ``TagId`` -> its currently registered
+#: ``types.MountParameters``, or ``None`` if no mount is registered for
+#: that tag right now (ticket 025-004, UC-12). ``daemon.service.
+#: DaemonService._mount_lookup`` in production (module docstring's
+#: "mount correction" section), a plain dict lookup or lambda in tests.
+#: Called once per confirmed detection, every burst -- never cached, so
+#: a registration made between two bursts takes effect on the very next
+#: one.
+MountLookup = Callable[[TagId], Optional[MountParameters]]
+
+#: A callable that resolves a camera slug -> ``(camera_ground_position,
+#: camera_height_cm)``, the two inputs
+#: ``calibration.geometry.project_tag_to_field_plane`` needs to do its
+#: parallax projection (ticket 025-004). **Explicitly provisional** --
+#: see the module docstring's "camera-geometry caveat" section and
+#: :func:`_default_camera_geometry_lookup`'s own docstring for the full
+#: reasoning; this is a stopgap seam for a real source, not a settled
+#: design.
+CameraGeometryLookup = Callable[[str], Tuple[WorldPoint, float]]
+
 #: A callable invoked with a camera slug when the drift check (ticket
 #: 023-007) has decided that camera's calibration should be marked
 #: stale. ``daemon.service.DaemonService._mark_stale`` in production --
@@ -284,6 +358,43 @@ def _default_mark_stale(slug: str) -> None:
     constructor and every pre-ticket-007 test/caller that never passed
     ``mark_stale``."""
     return None
+
+
+def _default_mount_lookup(tag: TagId) -> Optional[MountParameters]:
+    """No mount registry wired in -- every tag reports its raw pose.
+
+    The default for both :class:`DetectionEngine`'s own constructor and
+    every pre-ticket-025-004 test/caller that never passed
+    ``mount_lookup`` at all -- reproduces every earlier ticket's
+    behaviour exactly (module docstring's regression guarantee): a tag
+    with no registration is completely unaffected by this ticket's
+    correction step.
+    """
+    return None
+
+
+def _default_camera_geometry_lookup(slug: str) -> Tuple[WorldPoint, float]:
+    """No real camera-geometry source exists yet -- **an explicitly
+    provisional stopgap**, not a settled design (module docstring's
+    "camera-geometry caveat" section; ``calibration/geometry.py``'s
+    module docstring has the full gap analysis).
+
+    Returns ground position ``(0, 0)`` and height ``0.0`` for every
+    camera. Height ``0.0`` is ``calibration.geometry.
+    project_tag_to_field_plane``'s own documented "nothing to correct"
+    sentinel (that function short-circuits to the identity whenever
+    ``camera_height_cm`` is not strictly positive), so under this
+    default a registered ``mount_z`` has **no effect** against a live
+    camera -- only ``mount_x``/``mount_y``/``mount_yaw_rad``'s
+    offset+yaw composition (:func:`~aprilcam.calibration.geometry.apply_mount_offset`,
+    which needs no camera geometry at all) actually moves a real
+    reported position today. The default for both
+    :class:`DetectionEngine`'s own constructor and ``daemon.service.
+    DaemonService``'s real wiring (see that module's
+    ``_camera_geometry_for``) until a real per-camera position/height
+    source exists -- a follow-up ticket's job, not this one's.
+    """
+    return WorldPoint(x=0.0, y=0.0), 0.0
 
 
 def _pixel_corners(
@@ -458,6 +569,25 @@ class DetectionEngine:
         already establishes -- tests that are not themselves about
         confirmation pass ``confirmation_streak=1`` to keep today's
         single-burst-reports-immediately behaviour.
+    mount_lookup:
+        Resolves a ``TagId`` -> its currently registered
+        ``types.MountParameters`` (ticket 025-004, UC-12), or ``None``
+        if unregistered. Defaults to :func:`_default_mount_lookup`
+        (always ``None``), which reproduces every earlier ticket's
+        output exactly -- every existing caller/test that does not pass
+        this keeps reporting the raw tag pose, unaffected. ``daemon.
+        service.DaemonService`` wires its own ``_mount_lookup`` in here
+        for a real daemon process.
+    camera_geometry_lookup:
+        Resolves a camera slug -> ``(camera_ground_position,
+        camera_height_cm)`` for :func:`~aprilcam.calibration.geometry.
+        project_tag_to_field_plane`'s parallax projection (ticket
+        025-004). Defaults to :func:`_default_camera_geometry_lookup` --
+        an **explicitly provisional stopgap** (see that function's own
+        docstring and the module docstring's "camera-geometry caveat"
+        section): no real per-camera position/height source exists yet
+        anywhere in this codebase, so this parameter is a seam for a
+        future ticket to wire a real one into, not a settled answer.
     """
 
     def __init__(
@@ -472,6 +602,8 @@ class DetectionEngine:
         drift_tolerance_cm: float = DRIFT_TOLERANCE_CM,
         drift_check_interval_s: float = DRIFT_CHECK_INTERVAL_S,
         confirmation_streak: int = CONFIRMATION_STREAK,
+        mount_lookup: MountLookup = _default_mount_lookup,
+        camera_geometry_lookup: CameraGeometryLookup = _default_camera_geometry_lookup,
     ) -> None:
         self._buffer_size = buffer_size
         self._pipeline_config = pipeline_config
@@ -481,6 +613,8 @@ class DetectionEngine:
         self._mark_stale = mark_stale
         self._drift_tolerance_cm = drift_tolerance_cm
         self._drift_check_interval_s = drift_check_interval_s
+        self._mount_lookup = mount_lookup
+        self._camera_geometry_lookup = camera_geometry_lookup
         self._confirmation_streak = confirmation_streak
         self._buffers: Dict[str, Deque[TagFrame]] = {}
         self._detectors: Dict[str, TagDetector] = {}
@@ -568,7 +702,10 @@ class DetectionEngine:
 
         records = tuple(
             self._finish_record(
-                _build_tag_record(detection, timestamp=timestamp, calibration=calibration),
+                self._apply_mount_correction(
+                    _build_tag_record(detection, timestamp=timestamp, calibration=calibration),
+                    slug=slug,
+                ),
                 slug=slug,
             )
             for detection in confirmed
@@ -721,6 +858,48 @@ class DetectionEngine:
             return  # too few matched markers visible -- cannot verify
         if drift_cm > self._drift_tolerance_cm:
             self._mark_stale(slug)
+
+    def _apply_mount_correction(self, record: TagRecord, *, slug: str) -> TagRecord:
+        """Ticket 025-004, UC-12: replace *record*'s ``world``/``yaw_rad``
+        with the *robot's* pose when a mount is registered for its tag,
+        called immediately after :func:`_build_tag_record`, before
+        :meth:`_finish_record` derives motion from history -- so a
+        registered tag's velocity/heading are computed from the robot's
+        own trajectory, not the tag's (module docstring's "mount
+        correction" section).
+
+        A no-op (returns *record* unchanged) in either of two cases,
+        both required by this ticket's acceptance criteria:
+
+        * ``record.world is None`` -- an uncalibrated hit has nothing to
+          correct (mirrors :meth:`_finish_record`'s identical guard).
+        * ``self._mount_lookup(record.tag)`` returns ``None`` -- no
+          registration exists for this tag, so it is **unaffected**, by
+          construction, regardless of any other tag's registration.
+
+        ``record.world_corners`` is never touched here -- per
+        ``types.TagRecord``'s own docstring, corners outline the tag as
+        physically seen (for drawing), never the robot; only
+        ``world``/``yaw_rad`` are mount-corrected.
+        """
+        if record.world is None:
+            return record
+        mount = self._mount_lookup(record.tag)
+        if mount is None:
+            return record
+        assert record.yaw_rad is not None, (
+            "a calibrated TagRecord (record.world is not None) always has "
+            "yaw_rad populated by _build_tag_record -- a DetectionEngine bug otherwise"
+        )
+        camera_ground_position, camera_height_cm = self._camera_geometry_lookup(slug)
+        corrected_world, corrected_yaw = correct_tag_pose(
+            record.world,
+            record.yaw_rad,
+            mount,
+            camera_ground_position=camera_ground_position,
+            camera_height_cm=camera_height_cm,
+        )
+        return replace(record, world=corrected_world, yaw_rad=corrected_yaw)
 
     def _finish_record(self, record: TagRecord, *, slug: str) -> TagRecord:
         """Fill in *record*'s motion fields from its tag's world-position

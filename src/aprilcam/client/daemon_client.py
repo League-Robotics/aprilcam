@@ -6,7 +6,8 @@
 ``reset_camera_config`` added by ticket 023-004; ``put_annotation``/
 ``remove_annotation``/``replace_layer``/``clear_annotations``/
 ``get_annotations`` added by ticket 024-002; ``find_feature`` added by
-ticket 025-002): a typed
+ticket 025-002; ``register_tag``/``unregister_tag``/
+``list_tag_parameters`` added by ticket 025-004): a typed
 wrapper over the generated gRPC stub for
 ``list_cameras``, ``probe_cameras``, ``get_frame``, ``status``,
 ``get_tags``, ``get_tag``, ``get_tag_history``, ``set_playfield``,
@@ -14,12 +15,12 @@ wrapper over the generated gRPC stub for
 ``get_camera_config``, ``calibrate``, ``get_calibration``,
 ``reset_camera_config``, ``put_annotation``, ``remove_annotation``,
 ``replace_layer``, ``clear_annotations``, ``get_annotations``,
-``find_feature``.
+``find_feature``, ``register_tag``, ``unregister_tag``,
+``list_tag_parameters``.
 
-**Only these twenty-one methods are implemented**, mirroring
+**Only these twenty-four methods are implemented**, mirroring
 ``daemon.service.DaemonService``'s own stance: ``daemon.interfaces.
-Daemon`` is a much larger base class (streams, tag parameters, guides),
-and
+Daemon`` is a much larger base class (streams, guides), and
 those are inherited as-is here rather than overridden -- calling one
 raises ``NotImplementedError`` naming itself instead of failing with a
 bare ``AttributeError``. ``isinstance(client,
@@ -51,7 +52,7 @@ look the same from outside.
 from __future__ import annotations
 
 import json
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import grpc
 
@@ -70,6 +71,7 @@ from aprilcam.client.models import (
     playfields_from_proto,
     probe_report_from_proto,
     tag_frame_from_proto,
+    tag_parameters_from_proto,
     tag_record_from_get_tag_response,
 )
 from aprilcam.config.interfaces import CameraConfig, Feature
@@ -94,6 +96,7 @@ from aprilcam.types import (
     Circle,
     ImageFrame,
     Marker,
+    MountParameters,
     PathShape,
     Polygon,
     ProbeReport,
@@ -150,6 +153,23 @@ def _playfield_definition_to_proto(definition: PlayfieldDefinition) -> aprilcam_
         rectangles=[_playfield_feature_entry_to_proto(e) for e in definition.rectangles],
         dots=[_playfield_feature_entry_to_proto(e) for e in definition.dots],
     )
+
+
+def _mount_parameters_to_proto(params: MountParameters) -> aprilcam_v2_pb2.MountParameters:
+    """Request-building direction only (Python -> proto, for an
+    outgoing ``RegisterTagRequest``, ticket 025-004) -- duplicated, not
+    shared, with ``daemon/rpc.py``'s identically-shaped
+    ``_mount_parameters_to_proto``, matching this module's own
+    established pattern above."""
+    msg = aprilcam_v2_pb2.MountParameters(
+        mount_x=params.mount_x,
+        mount_y=params.mount_y,
+        mount_z=params.mount_z,
+        mount_yaw_rad=params.mount_yaw_rad,
+    )
+    if params.size_cm is not None:
+        msg.size_cm = params.size_cm
+    return msg
 
 
 def _camera_config_to_proto(config: CameraConfig) -> aprilcam_v2_pb2.CameraConfig:
@@ -383,6 +403,30 @@ class GrpcDaemon(Daemon):
         request = aprilcam_v2_pb2.FindFeatureRequest(playfield=playfield, query=query)
         response = self._call(self._stub.FindFeature, request)
         return features_from_proto(response.features)
+
+    def register_tag(self, tag: TagId, params: MountParameters) -> None:
+        """See ``daemon.interfaces.Daemon.register_tag`` (ticket
+        025-004, UC-12). Upserts by *tag* -- takes effect on the next
+        detection burst for that tag; does not survive a daemon
+        restart."""
+        request = aprilcam_v2_pb2.RegisterTagRequest(
+            tag=_tag_id_to_proto(tag), params=_mount_parameters_to_proto(params)
+        )
+        self._call(self._stub.RegisterTag, request)
+
+    def unregister_tag(self, tag: TagId) -> None:
+        """See ``daemon.interfaces.Daemon.unregister_tag``. An absent
+        registration is a no-op, enforced daemon-side."""
+        request = aprilcam_v2_pb2.UnregisterTagRequest(tag=_tag_id_to_proto(tag))
+        self._call(self._stub.UnregisterTag, request)
+
+    def list_tag_parameters(self) -> Dict[TagId, MountParameters]:
+        """See ``daemon.interfaces.Daemon.list_tag_parameters``. A
+        snapshot of every currently registered tag's mount parameters."""
+        response = self._call(
+            self._stub.ListTagParameters, aprilcam_v2_pb2.ListTagParametersRequest()
+        )
+        return tag_parameters_from_proto(response)
 
     def set_camera_config(self, config: CameraConfig) -> None:
         request = aprilcam_v2_pb2.SetCameraConfigRequest(config=_camera_config_to_proto(config))
