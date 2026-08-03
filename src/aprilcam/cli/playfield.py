@@ -93,7 +93,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from aprilcam.cli._common import (
     EXIT_ERROR,
@@ -110,6 +110,7 @@ from aprilcam.config.interfaces import ConfigLoader
 from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
 from aprilcam.daemon.interfaces import Daemon
 from aprilcam.errors import AprilCamError, NotCalibrated
+from aprilcam.playfield.interfaces import Playfield
 from aprilcam.types import (
     Annotation,
     AnnotationSet,
@@ -123,6 +124,7 @@ from aprilcam.view import viewer
 
 __all__ = [
     "add_subparser",
+    "cmd_list",
     "cmd_config",
     "cmd_image",
     "cmd_view",
@@ -377,6 +379,66 @@ def _print_annotations(annotation_set: AnnotationSet) -> None:
             print(f"    {annotation.id:<12} {kind:<10} {_format_shape(annotation.shape)}")
 
 
+def _format_playfield_row(playfield: Playfield) -> str:
+    """One line per playfield: name, field size, and what is linked.
+
+    Deliberately shows ``linked_cameras()`` -- that link is **derived at
+    serve time** from the daemon's held camera configs, never stored in
+    the definition (see ``playfield/playfield.py``), so it is the one
+    fact here a developer cannot get by reading the JSON on disk. It is
+    also the exact thing that has to be true before ``playfield image``
+    or ``playfield view`` can resolve a camera at all.
+    """
+    definition = playfield.definition
+    cameras = playfield.linked_cameras()
+    linked = ", ".join(cameras) if cameras else "-"
+    return (
+        f"  {playfield.name:<28} "
+        f"{definition.width_cm:g} x {definition.height_cm:g} cm   "
+        f"aruco={len(definition.required_aruco_ids())}  "
+        f"features={len(definition.features())}  "
+        f"cameras={linked}"
+    )
+
+
+def _print_playfields(playfields: Tuple[Playfield, ...]) -> None:
+    if not playfields:
+        print("  (no playfields)")
+        return
+    for playfield in playfields:
+        print(_format_playfield_row(playfield))
+
+
+def cmd_list(
+    args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
+) -> int:
+    """``aprilcam playfield list [-d HOST] [--all]``.
+
+    The playfield counterpart to ``camera list``: what definitions does
+    this daemon actually hold right now? Finding none is an **empty
+    result, not an error** -- a daemon started before any playfield was
+    pushed or installed is a normal state (UC-01), and the same
+    reasoning that makes an empty camera list normal applies here.
+
+    Read-only, so it fans out (``cli.md``'s fan-out table: nothing that
+    changes state or streams interactively fans out; a listing does).
+    """
+    discovery = discovery_factory()
+    if args.all:
+        def render(label: str, playfields) -> None:
+            print(f"{label}:")
+            _print_playfields(playfields)
+
+        return fan_out(discovery, lambda daemon: daemon.list_playfields(), render)
+
+    try:
+        playfields = discovery.connect(args.daemon).list_playfields()
+    except AprilCamError as exc:
+        return report_error(exc)
+    _print_playfields(playfields)
+    return EXIT_OK
+
+
 def cmd_annotations(
     args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
 ) -> int:
@@ -441,11 +503,18 @@ def cmd_annotations(
 
 
 def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
-    """Wire ``playfield config``/``image``/``view``/``annotations`` into
-    the top-level parser."""
+    """Wire ``playfield list``/``config``/``image``/``view``/
+    ``annotations`` into the top-level parser."""
     parser = subparsers.add_parser("playfield", help="playfield definitions")
     parser.set_defaults(func=incomplete_command(parser))
     sub = parser.add_subparsers(dest="playfield_command", metavar="<command>")
+
+    p_list = sub.add_parser(
+        "list", help="list the playfield definitions this daemon holds"
+    )
+    add_daemon_option(p_list)
+    add_all_option(p_list)
+    p_list.set_defaults(func=cmd_list)
 
     p_config = sub.add_parser(
         "config", help="push a playfield definition document, or --dump the live one"
