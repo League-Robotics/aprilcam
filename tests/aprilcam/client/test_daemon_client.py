@@ -54,6 +54,7 @@ from aprilcam.types import (
     Circle,
     ImageFrame,
     Marker,
+    MountParameters,
     PathShape,
     Polygon,
     ProbeReport,
@@ -529,6 +530,61 @@ def test_find_feature_unknown_playfield_raises_unknown_playfield_naming_availabl
 
     assert excinfo.value.requested == "no-such-field"
     assert excinfo.value.available == ()
+
+
+# ---------------------------------------------------------------------------
+# Mobile-tag registry -- client wire round trips (ticket 025-004, UC-12).
+# Exercises the full proto boundary both directions: GrpcDaemon builds the
+# request (client/daemon_client.py's own _mount_parameters_to_proto),
+# client/models.py's mount_parameters_from_proto/tag_parameters_from_proto
+# turn the response back into real aprilcam.types.MountParameters
+# dataclasses.
+# ---------------------------------------------------------------------------
+
+
+def test_register_tag_then_list_tag_parameters_round_trip_returns_dataclasses(client):
+    tag = TagId(family=TagFamily.APRILTAG, number=7)
+    params = MountParameters(mount_x=8.0, mount_y=3.0, mount_yaw_rad=0.5)
+
+    client.register_tag(tag, params)
+    registrations = client.list_tag_parameters()
+
+    assert registrations == {tag: params}
+    assert isinstance(next(iter(registrations)), TagId)
+    assert isinstance(next(iter(registrations.values())), MountParameters)
+
+
+def test_register_tag_with_size_cm_round_trips_present(client):
+    tag = TagId(family=TagFamily.ARUCO, number=3)
+    params = MountParameters(size_cm=6.5)
+
+    client.register_tag(tag, params)
+
+    assert client.list_tag_parameters() == {tag: params}
+
+
+def test_list_tag_parameters_empty_when_nothing_registered(client):
+    assert client.list_tag_parameters() == {}
+
+
+def test_unregister_tag_round_trip(client):
+    tag = TagId(family=TagFamily.APRILTAG, number=7)
+    client.register_tag(tag, MountParameters(mount_x=1.0))
+
+    client.unregister_tag(tag)
+
+    assert client.list_tag_parameters() == {}
+
+
+def test_unregister_tag_absent_does_not_raise(client):
+    client.unregister_tag(TagId(family=TagFamily.APRILTAG, number=42))  # must not raise
+
+
+def test_register_tag_mount_z_with_no_calibration_raises_not_calibrated(client):
+    with pytest.raises(NotCalibrated):
+        client.register_tag(TagId(family=TagFamily.APRILTAG, number=7), MountParameters(mount_z=20.0))
+
+    assert client.list_tag_parameters() == {}
 
 
 # ---------------------------------------------------------------------------

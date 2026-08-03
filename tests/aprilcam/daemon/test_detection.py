@@ -44,10 +44,11 @@ from aprilcam.calibration.calibration import (
     Calibration,
     Calibrator,
 )
+from aprilcam.calibration.geometry import apply_mount_offset, correct_tag_pose
 from aprilcam.camera.camera import Camera
 from aprilcam.config.interfaces import CameraConfig
 from aprilcam.daemon.detection import CONFIRMATION_STREAK, RING_BUFFER_SIZE, DetectionEngine
-from aprilcam.types import PixelPoint, TagFamily, TagId
+from aprilcam.types import MountParameters, PixelPoint, TagFamily, TagId, WorldPoint
 from aprilcam.vision.detector import Detection, TagDetector
 
 from tests.aprilcam.calibration.test_calibration import (
@@ -1233,3 +1234,265 @@ def test_confirmation_streak_is_genuinely_overridable_to_three_requires_three_bu
     assert second.tags == ()  # only 2 consecutive so far -- below the raised threshold
     assert len(third.tags) == 1
     assert third.tags[0].tag == TagId(family=TagFamily.APRILTAG, number=8)
+
+
+# ---------------------------------------------------------------------------
+# Mount correction (ticket 025-004, UC-12) -- mount_lookup/
+# camera_geometry_lookup injection, applied immediately after
+# _build_tag_record and before _finish_record's motion derivation.
+# ``confirmation_streak=1`` throughout: these tests are about the
+# correction math and its wiring, not confirmation timing (the same
+# "genuinely about something else entirely" carve-out
+# test_moving_east_across_bursts_reports_strictly_increasing_world_x's
+# docstring documents).
+# ---------------------------------------------------------------------------
+
+
+def test_default_mount_lookup_is_always_none():
+    """The constructor default -- pinned directly, the same way
+    :func:`test_default_calibration_lookup_is_always_none` pins
+    ``_default_calibration_lookup``."""
+    from aprilcam.daemon.detection import _default_mount_lookup
+
+    assert _default_mount_lookup(TagId(family=TagFamily.APRILTAG, number=1)) is None
+    assert _default_mount_lookup(TagId(family=TagFamily.ARUCO, number=5)) is None
+
+
+def test_default_camera_geometry_lookup_is_the_explicitly_provisional_stopgap():
+    """Pins the stopgap's exact return value (module docstring's
+    "camera-geometry caveat"): ground position (0, 0), height 0.0 --
+    the latter being ``project_tag_to_field_plane``'s own "nothing to
+    correct" sentinel."""
+    from aprilcam.daemon.detection import _default_camera_geometry_lookup
+
+    position, height_cm = _default_camera_geometry_lookup("any-slug")
+
+    assert position == WorldPoint(x=0.0, y=0.0)
+    assert height_cm == 0.0
+
+
+def test_registered_mount_offset_and_yaw_corrects_the_reported_pose():
+    """Ticket 025-004's core mechanism, cross-checked directly against
+    ``calibration.geometry.apply_mount_offset``: a registered mount
+    (``mount_x``/``mount_y``/``mount_yaw_rad``; ``mount_z`` left at its
+    ``0.0`` default so parallax is a no-op regardless of camera
+    geometry) replaces ``world``/``yaw_rad`` with exactly what that pure
+    function computes from the tag's *actually reported* raw pose --
+    not a hand-picked input, so any homography solve residual cancels
+    out of the comparison rather than needing a loose tolerance."""
+    calibration = _fixture_calibration()
+    tag = TagId(family=TagFamily.APRILTAG, number=12)
+    hit = _detection_at(TagFamily.APRILTAG, 12, center_world=(50.0, 37.5), yaw_rad=math.radians(90.0))
+    mount = MountParameters(mount_x=8.0, mount_y=3.0, mount_yaw_rad=math.radians(15.0))
+
+    raw_engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        calibration_lookup=lambda slug: calibration,
+        confirmation_streak=1,
+    )
+    raw_frame = raw_engine.run_burst("raw-offset-cam", _camera("raw-offset-cam", frames=[_blank_frame()]))
+    raw_record = raw_frame.tags[0]
+    assert raw_record.world is not None
+    assert raw_record.yaw_rad is not None
+
+    corrected_engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        calibration_lookup=lambda slug: calibration,
+        mount_lookup=lambda t: mount if t == tag else None,
+        confirmation_streak=1,
+    )
+    corrected_frame = corrected_engine.run_burst(
+        "corrected-offset-cam", _camera("corrected-offset-cam", frames=[_blank_frame()])
+    )
+    corrected_record = corrected_frame.tags[0]
+    assert corrected_record.world is not None
+
+    expected_position, expected_yaw = apply_mount_offset(raw_record.world, raw_record.yaw_rad, mount)
+
+    assert corrected_record.world.x == pytest.approx(expected_position.x, abs=1e-9)
+    assert corrected_record.world.y == pytest.approx(expected_position.y, abs=1e-9)
+    assert corrected_record.yaw_rad == pytest.approx(expected_yaw, abs=1e-9)
+    # Sanity: the correction genuinely moved something (not accidentally
+    # a no-op that would pass the approx checks above vacuously).
+    assert corrected_record.world.x != pytest.approx(raw_record.world.x)
+
+
+def test_registered_mount_z_uses_the_injected_camera_geometry_lookup_for_parallax():
+    """The camera-geometry seam (ticket 025-004's own open decision,
+    module docstring's "camera-geometry caveat"): with ``mount_z``
+    nonzero and a non-default ``camera_geometry_lookup`` injected,
+    ``run_burst``'s correction includes the parallax half too --
+    cross-checked against ``calibration.geometry.correct_tag_pose``
+    called directly with the same raw pose and camera geometry."""
+    calibration = _fixture_calibration()
+    tag = TagId(family=TagFamily.APRILTAG, number=7)
+    hit = _detection_at(TagFamily.APRILTAG, 7, center_world=(50.0, 37.5), yaw_rad=0.0)
+    mount = MountParameters(mount_z=20.0)
+    camera_ground_position = WorldPoint(x=0.0, y=0.0)
+    camera_height_cm = 100.0
+
+    raw_engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        calibration_lookup=lambda slug: calibration,
+        confirmation_streak=1,
+    )
+    raw_frame = raw_engine.run_burst("raw-parallax-cam", _camera("raw-parallax-cam", frames=[_blank_frame()]))
+    raw_record = raw_frame.tags[0]
+    assert raw_record.world is not None
+    assert raw_record.yaw_rad is not None
+
+    corrected_engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        calibration_lookup=lambda slug: calibration,
+        mount_lookup=lambda t: mount if t == tag else None,
+        camera_geometry_lookup=lambda slug: (camera_ground_position, camera_height_cm),
+        confirmation_streak=1,
+    )
+    corrected_frame = corrected_engine.run_burst(
+        "corrected-parallax-cam", _camera("corrected-parallax-cam", frames=[_blank_frame()])
+    )
+    corrected_record = corrected_frame.tags[0]
+    assert corrected_record.world is not None
+
+    expected_position, expected_yaw = correct_tag_pose(
+        raw_record.world,
+        raw_record.yaw_rad,
+        mount,
+        camera_ground_position=camera_ground_position,
+        camera_height_cm=camera_height_cm,
+    )
+
+    assert corrected_record.world.x == pytest.approx(expected_position.x, abs=1e-9)
+    assert corrected_record.world.y == pytest.approx(expected_position.y, abs=1e-9)
+    assert corrected_record.yaw_rad == pytest.approx(expected_yaw, abs=1e-9)
+    # Sanity: parallax actually did something here (distinguishing this
+    # test from the stopgap-default test below).
+    assert corrected_record.world.x != pytest.approx(raw_record.world.x)
+
+
+def test_default_camera_geometry_lookup_makes_mount_z_inert_against_a_live_camera():
+    """The explicitly-provisional stopgap in effect (no
+    ``camera_geometry_lookup`` injected): a registered ``mount_z`` has
+    **no effect** -- height 0.0 is ``project_tag_to_field_plane``'s own
+    "nothing to correct" sentinel, so the corrected pose equals the raw
+    one exactly. This is the honest, documented gap this ticket flags,
+    not an oversight -- see ``daemon.service.DaemonService.
+    _camera_geometry_for``'s docstring."""
+    calibration = _fixture_calibration()
+    tag = TagId(family=TagFamily.APRILTAG, number=9)
+    hit = _detection_at(TagFamily.APRILTAG, 9, center_world=(50.0, 37.5), yaw_rad=0.0)
+    mount = MountParameters(mount_z=20.0)
+
+    raw_engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        calibration_lookup=lambda slug: calibration,
+        confirmation_streak=1,
+    )
+    raw_frame = raw_engine.run_burst("raw-stopgap-cam", _camera("raw-stopgap-cam", frames=[_blank_frame()]))
+    raw_record = raw_frame.tags[0]
+
+    stopgap_engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        calibration_lookup=lambda slug: calibration,
+        mount_lookup=lambda t: mount if t == tag else None,
+        confirmation_streak=1,
+    )
+    stopgap_frame = stopgap_engine.run_burst(
+        "stopgap-cam", _camera("stopgap-cam", frames=[_blank_frame()])
+    )
+    stopgap_record = stopgap_frame.tags[0]
+
+    assert stopgap_record.world is not None
+    assert raw_record.world is not None
+    assert stopgap_record.world.x == pytest.approx(raw_record.world.x, abs=1e-9)
+    assert stopgap_record.world.y == pytest.approx(raw_record.world.y, abs=1e-9)
+    assert stopgap_record.yaw_rad == pytest.approx(raw_record.yaw_rad, abs=1e-9)
+
+
+def test_unregistered_tag_is_unaffected_by_another_tags_mount_registration():
+    """Acceptance criterion: unregistered tags are unaffected. A mount
+    registered for a *different* tag id must never leak onto this one."""
+    calibration = _fixture_calibration()
+    other_tag = TagId(family=TagFamily.APRILTAG, number=99)
+    hit = _detection_at(TagFamily.APRILTAG, 1, center_world=(10.0, 20.0))
+    mount = MountParameters(mount_x=8.0, mount_y=3.0)
+
+    raw_engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        calibration_lookup=lambda slug: calibration,
+        confirmation_streak=1,
+    )
+    raw_frame = raw_engine.run_burst("raw-other-cam", _camera("raw-other-cam", frames=[_blank_frame()]))
+    raw_record = raw_frame.tags[0]
+
+    engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        calibration_lookup=lambda slug: calibration,
+        mount_lookup=lambda t: mount if t == other_tag else None,
+        confirmation_streak=1,
+    )
+    frame = engine.run_burst("other-cam", _camera("other-cam", frames=[_blank_frame()]))
+    record = frame.tags[0]
+
+    assert record.world is not None and raw_record.world is not None
+    assert record.world.x == pytest.approx(raw_record.world.x, abs=1e-9)
+    assert record.world.y == pytest.approx(raw_record.world.y, abs=1e-9)
+    assert record.yaw_rad == pytest.approx(raw_record.yaw_rad, abs=1e-9)
+
+
+def test_mount_correction_leaves_world_corners_and_pixel_corners_unchanged():
+    """``types.TagRecord``'s own docstring: corners outline the tag as
+    physically seen (for drawing), never the robot -- only
+    ``world``/``yaw_rad`` are mount-corrected."""
+    calibration = _fixture_calibration()
+    tag = TagId(family=TagFamily.APRILTAG, number=3)
+    hit = _detection_at(TagFamily.APRILTAG, 3, center_world=(10.0, 20.0), yaw_rad=math.radians(20.0))
+    mount = MountParameters(mount_x=8.0, mount_y=3.0, mount_yaw_rad=math.radians(15.0))
+
+    raw_engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        calibration_lookup=lambda slug: calibration,
+        confirmation_streak=1,
+    )
+    raw_frame = raw_engine.run_burst(
+        "raw-corners-cam", _camera("raw-corners-cam", frames=[_blank_frame()])
+    )
+    raw_record = raw_frame.tags[0]
+
+    engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        calibration_lookup=lambda slug: calibration,
+        mount_lookup=lambda t: mount if t == tag else None,
+        confirmation_streak=1,
+    )
+    frame = engine.run_burst("corners-cam", _camera("corners-cam", frames=[_blank_frame()]))
+    record = frame.tags[0]
+
+    assert record.world_corners == raw_record.world_corners
+    assert record.pixel_corners == raw_record.pixel_corners
+    assert record.pixel == raw_record.pixel
+    # But world/yaw_rad DID change -- the correction actually applied,
+    # this is not a vacuous pass because nothing moved.
+    assert record.world != raw_record.world
+
+
+def test_mount_correction_is_a_no_op_on_an_uncalibrated_camera():
+    """A registered mount for an uncalibrated tag changes nothing --
+    there is no calibrated ``world``/``yaw_rad`` yet to correct
+    (mirrors ``_finish_record``'s identical ``record.world is None``
+    guard)."""
+    tag = TagId(family=TagFamily.APRILTAG, number=4)
+    hit = _detection_at(TagFamily.APRILTAG, 4, center_world=(10.0, 20.0))
+    mount = MountParameters(mount_x=8.0, mount_y=3.0)
+
+    engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        mount_lookup=lambda t: mount if t == tag else None,
+        confirmation_streak=1,
+    )
+    frame = engine.run_burst("uncal-mount-cam", _camera("uncal-mount-cam", frames=[_blank_frame()]))
+    record = frame.tags[0]
+
+    assert record.calibrated is False
+    assert record.world is None
+    assert record.yaw_rad is None

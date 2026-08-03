@@ -24,6 +24,7 @@ detection instead).
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -40,6 +41,7 @@ import numpy as np
 import pytest
 
 from aprilcam.calibration.calibration import Calibration
+from aprilcam.calibration.geometry import apply_mount_offset
 from aprilcam.camera import identity as identity_module
 from aprilcam.camera.camera import FAILURE_THRESHOLD, Camera
 from aprilcam.camera.discovery import CameraDiscovery
@@ -68,6 +70,7 @@ from aprilcam.types import (
     Annotation,
     Circle,
     Marker,
+    MountParameters,
     PathShape,
     PixelPoint,
     Polygon,
@@ -2597,6 +2600,310 @@ def test_get_tags_on_a_calibrated_camera_reports_real_world_coordinates(director
     assert aruco_1.world.y == pytest.approx(expected_y, abs=0.5)
     assert aruco_1.world_corners is not None
     assert aruco_1.yaw_rad is not None
+
+
+# ---------------------------------------------------------------------------
+# Mobile-tag registry (ticket 025-004, UC-12): register_tag/unregister_tag/
+# list_tag_parameters against the lightweight `service` fixture (held
+# camera, no calibration held) -- pure registry behaviour, no detection
+# burst involved.
+# ---------------------------------------------------------------------------
+
+
+def test_register_tag_then_list_tag_parameters_round_trips(service):
+    tag = TagId(family=TagFamily.APRILTAG, number=7)
+    params = MountParameters(mount_x=8.0, mount_y=3.0, mount_yaw_rad=0.5)
+
+    service.register_tag(tag, params)
+
+    assert service.list_tag_parameters() == {tag: params}
+
+
+def test_register_tag_upserts_replacing_a_prior_registration_outright(service):
+    tag = TagId(family=TagFamily.APRILTAG, number=7)
+    service.register_tag(tag, MountParameters(mount_x=1.0))
+
+    service.register_tag(tag, MountParameters(mount_x=2.0))
+
+    assert service.list_tag_parameters() == {tag: MountParameters(mount_x=2.0)}
+
+
+def test_unregister_tag_removes_the_registration(service):
+    tag = TagId(family=TagFamily.APRILTAG, number=7)
+    service.register_tag(tag, MountParameters(mount_x=1.0))
+
+    service.unregister_tag(tag)
+
+    assert service.list_tag_parameters() == {}
+
+
+def test_unregister_tag_absent_is_a_no_op(service):
+    """Matches ``clear_annotations``'s established no-op-on-absent
+    convention (sprint 024) -- must not raise."""
+    tag = TagId(family=TagFamily.APRILTAG, number=7)
+
+    service.unregister_tag(tag)
+
+    assert service.list_tag_parameters() == {}
+
+
+def test_list_tag_parameters_returns_a_snapshot_not_a_live_reference(service):
+    tag = TagId(family=TagFamily.APRILTAG, number=7)
+    service.register_tag(tag, MountParameters(mount_x=1.0))
+
+    snapshot = service.list_tag_parameters()
+    snapshot[TagId(family=TagFamily.ARUCO, number=1)] = MountParameters()
+
+    assert service.list_tag_parameters() == {tag: MountParameters(mount_x=1.0)}
+
+
+def test_register_tag_mount_z_with_no_calibration_anywhere_is_rejected(service):
+    """UC-12.S-5: mount_z set with no calibration present anywhere the
+    tag could be observed -> reject (NotCalibrated), never silently
+    stored-but-inert."""
+    tag = TagId(family=TagFamily.APRILTAG, number=7)
+
+    with pytest.raises(NotCalibrated):
+        service.register_tag(tag, MountParameters(mount_z=20.0))
+
+    assert service.list_tag_parameters() == {}
+
+
+def test_register_tag_zero_mount_z_is_accepted_even_uncalibrated(service):
+    """A *zero* mount_z (``MountParameters``' own default) never
+    triggers the uncalibrated-rejection -- there is nothing for
+    parallax to project in that case."""
+    tag = TagId(family=TagFamily.APRILTAG, number=7)
+    params = MountParameters(mount_x=8.0, mount_y=3.0, mount_z=0.0)
+
+    service.register_tag(tag, params)
+
+    assert service.list_tag_parameters() == {tag: params}
+
+
+def test_register_tag_partial_spec_mount_z_set_xy_unset_is_accepted_as_zero_offset(
+    directories, registry
+):
+    """Partial mount spec (``mount_z`` set, ``mount_x``/``mount_y``
+    unset) is accepted, treated as zero offset, not an error -- once a
+    calibration exists to make ``mount_z`` meaningful in the first
+    place (UC-12.S-5 is the only thing that can reject this spec)."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    calibrated_service = _service_with_camera(directories, registry, identity, slug, cam)
+    calibrated_service.set_playfield(main_playfield_definition())
+    calibrated_service.set_camera_config(
+        CameraConfig(name=slug, playfield="main-playfield", settings={})
+    )
+    result = calibrated_service.calibrate(slug)
+    assert result.succeeded is True
+
+    tag = TagId(family=TagFamily.APRILTAG, number=7)
+    params = MountParameters(mount_z=15.0)  # mount_x/mount_y left at their own 0.0 default
+
+    calibrated_service.register_tag(tag, params)  # must not raise
+
+    assert calibrated_service.list_tag_parameters() == {tag: params}
+
+
+def test_register_tag_for_a_tag_not_currently_visible_is_accepted(service):
+    """A registration for a tag never yet detected is accepted -- the
+    tag may appear later (UC-12's own failure-mode table)."""
+    tag = TagId(family=TagFamily.APRILTAG, number=250)  # never detected by this service
+
+    service.register_tag(tag, MountParameters(mount_x=1.0))
+
+    assert tag in service.list_tag_parameters()
+
+
+# ---------------------------------------------------------------------------
+# Mobile-tag registry -- correction wired through the real DaemonService
+# DetectionEngine (ticket 025-004, UC-12). test_detection.py covers the
+# correction math itself, with an injected mount_lookup/
+# camera_geometry_lookup, in isolation; these are the only two places the
+# actual DaemonService wiring (mount_lookup=self._mount_lookup,
+# camera_geometry_lookup=self._camera_geometry_for) is exercised end to
+# end, using the real (default, no detection= override) DetectionEngine a
+# production daemon process constructs.
+# ---------------------------------------------------------------------------
+
+
+def test_register_tag_corrects_get_tags_get_tag_and_history_then_unregister_reverts(
+    directories, registry
+):
+    """Definition of Done: register a mount, confirm get_tags/get_tag/
+    get_tag_history all report the corrected robot pose (not the raw
+    tag pose), cross-checked against ``calibration.geometry.
+    apply_mount_offset`` computed from the actually-reported raw pose;
+    unregister and confirm reversion to raw. ``mount_z`` is left at its
+    ``0.0`` default -- only the offset/yaw half is checkable end to end
+    against a live (fake) camera today, since ``DaemonService``'s real
+    ``_camera_geometry_for`` is an explicitly provisional stopgap that
+    makes ``mount_z`` inert (see that method's own docstring;
+    ``test_detection.py`` proves the parallax half of the math with an
+    injected camera-geometry lookup instead)."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(
+        registry, [frame] * (CALIBRATION_FRAME_COUNT + CONFIRMATION_STREAK + 3)
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    result = service.calibrate(slug)
+    assert result.succeeded is True
+
+    tag = TagId(family=TagFamily.ARUCO, number=1)
+    for _ in range(CONFIRMATION_STREAK - 1):
+        service.get_tags(slug)
+    raw_frame = service.get_tags(slug)
+    raw_record = next(r for r in raw_frame.tags if r.tag == tag)
+    assert raw_record.world is not None
+    assert raw_record.yaw_rad is not None
+
+    mount = MountParameters(mount_x=8.0, mount_y=3.0, mount_yaw_rad=math.radians(30.0))
+    service.register_tag(tag, mount)
+    expected_position, expected_yaw = apply_mount_offset(raw_record.world, raw_record.yaw_rad, mount)
+
+    tag_frame = service.get_tags(slug)
+    record = next(r for r in tag_frame.tags if r.tag == tag)
+    assert record.world is not None
+    assert record.world.x == pytest.approx(expected_position.x, abs=1e-6)
+    assert record.world.y == pytest.approx(expected_position.y, abs=1e-6)
+    assert record.yaw_rad == pytest.approx(expected_yaw, abs=1e-6)
+
+    single = service.get_tag(slug, tag)
+    assert single is not None
+    assert single.world is not None
+    assert single.world.x == pytest.approx(expected_position.x, abs=1e-6)
+    assert single.world.y == pytest.approx(expected_position.y, abs=1e-6)
+
+    history = service.get_tag_history(slug, tag)
+    latest_record = next(r for r in history[-1].tags if r.tag == tag)
+    assert latest_record.world is not None
+    assert latest_record.world.x == pytest.approx(expected_position.x, abs=1e-6)
+
+    service.unregister_tag(tag)
+    reverted_frame = service.get_tags(slug)
+    reverted_record = next(r for r in reverted_frame.tags if r.tag == tag)
+    assert reverted_record.world is not None
+    assert reverted_record.world.x == pytest.approx(raw_record.world.x, abs=1e-6)
+    assert reverted_record.world.y == pytest.approx(raw_record.world.y, abs=1e-6)
+    assert reverted_record.yaw_rad == pytest.approx(raw_record.yaw_rad, abs=1e-6)
+
+
+def test_register_tag_is_not_retroactive_buffered_history_keeps_raw_values(
+    directories, registry
+):
+    """Resolved 2026-08-03 (sprint.md, ticket 003): mount-parameter
+    changes are not retroactive. Every ``TagFrame`` already buffered
+    before a registration is byte-identical afterward; only frames
+    detected *after* the registration are corrected."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(
+        registry, [frame] * (CALIBRATION_FRAME_COUNT + CONFIRMATION_STREAK + 2)
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    result = service.calibrate(slug)
+    assert result.succeeded is True
+
+    tag = TagId(family=TagFamily.ARUCO, number=1)
+    for _ in range(CONFIRMATION_STREAK - 1):
+        service.get_tags(slug)
+    service.get_tags(slug)  # first confirmed, buffered burst -- raw (unregistered)
+
+    history_before = service.get_tag_history(slug, tag)
+    raw_record = next(r for r in history_before[-1].tags if r.tag == tag)
+    assert raw_record.world is not None
+
+    service.register_tag(tag, MountParameters(mount_x=8.0, mount_y=3.0))
+    service.get_tags(slug)  # a new, corrected burst, appended after the registration
+
+    history_after = service.get_tag_history(slug, tag)
+
+    # Every frame buffered *before* the registration is byte-identical
+    # afterward -- not corrected retroactively.
+    assert history_after[: len(history_before)] == history_before
+    # The newest frame (buffered after registration) really is corrected
+    # -- proving the prefix-equality check above is not vacuously true
+    # because nothing here ever actually changes.
+    corrected_record = next(r for r in history_after[-1].tags if r.tag == tag)
+    assert corrected_record.world != raw_record.world
+
+
+# ---------------------------------------------------------------------------
+# Mobile-tag registry -- real gRPC round trip (ticket 025-004, UC-12).
+# ---------------------------------------------------------------------------
+
+
+def test_rpc_register_tag_then_list_tag_parameters_round_trips(stub):
+    tag_msg = aprilcam_v2_pb2.TagId(family=aprilcam_v2_pb2.APRILTAG, number=7)
+    params_msg = aprilcam_v2_pb2.MountParameters(
+        mount_x=8.0, mount_y=3.0, mount_z=0.0, mount_yaw_rad=0.5
+    )
+
+    stub.RegisterTag(aprilcam_v2_pb2.RegisterTagRequest(tag=tag_msg, params=params_msg))
+    response = stub.ListTagParameters(aprilcam_v2_pb2.ListTagParametersRequest())
+
+    assert len(response.entries) == 1
+    entry = response.entries[0]
+    assert entry.tag.family == aprilcam_v2_pb2.APRILTAG
+    assert entry.tag.number == 7
+    assert entry.params.mount_x == pytest.approx(8.0)
+    assert entry.params.mount_y == pytest.approx(3.0)
+    assert entry.params.mount_yaw_rad == pytest.approx(0.5)
+    assert not entry.params.HasField("size_cm")
+
+
+def test_rpc_register_tag_with_size_cm_round_trips_present(stub):
+    tag_msg = aprilcam_v2_pb2.TagId(family=aprilcam_v2_pb2.ARUCO, number=3)
+    params_msg = aprilcam_v2_pb2.MountParameters(size_cm=6.5)
+
+    stub.RegisterTag(aprilcam_v2_pb2.RegisterTagRequest(tag=tag_msg, params=params_msg))
+    response = stub.ListTagParameters(aprilcam_v2_pb2.ListTagParametersRequest())
+
+    entry = response.entries[0]
+    assert entry.params.HasField("size_cm")
+    assert entry.params.size_cm == pytest.approx(6.5)
+
+
+def test_rpc_unregister_tag_round_trip(stub):
+    tag_msg = aprilcam_v2_pb2.TagId(family=aprilcam_v2_pb2.APRILTAG, number=7)
+    stub.RegisterTag(
+        aprilcam_v2_pb2.RegisterTagRequest(
+            tag=tag_msg, params=aprilcam_v2_pb2.MountParameters(mount_x=1.0)
+        )
+    )
+
+    stub.UnregisterTag(aprilcam_v2_pb2.UnregisterTagRequest(tag=tag_msg))
+
+    response = stub.ListTagParameters(aprilcam_v2_pb2.ListTagParametersRequest())
+    assert list(response.entries) == []
+
+
+def test_rpc_unregister_tag_absent_does_not_raise(stub):
+    tag_msg = aprilcam_v2_pb2.TagId(family=aprilcam_v2_pb2.APRILTAG, number=42)
+
+    stub.UnregisterTag(aprilcam_v2_pb2.UnregisterTagRequest(tag=tag_msg))  # must not raise
+
+
+def test_rpc_list_tag_parameters_empty_when_nothing_registered(stub):
+    response = stub.ListTagParameters(aprilcam_v2_pb2.ListTagParametersRequest())
+
+    assert list(response.entries) == []
+
+
+def test_rpc_register_tag_mount_z_with_no_calibration_maps_to_failed_precondition(stub):
+    tag_msg = aprilcam_v2_pb2.TagId(family=aprilcam_v2_pb2.APRILTAG, number=7)
+    params_msg = aprilcam_v2_pb2.MountParameters(mount_z=20.0)
+
+    with pytest.raises(grpc.RpcError) as excinfo:
+        stub.RegisterTag(aprilcam_v2_pb2.RegisterTagRequest(tag=tag_msg, params=params_msg))
+
+    assert excinfo.value.code() == grpc.StatusCode.FAILED_PRECONDITION
+    metadata = dict(excinfo.value.trailing_metadata())
+    assert metadata["aprilcam-error-type"] == "NotCalibrated"
 
 
 # ---------------------------------------------------------------------------

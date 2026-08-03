@@ -4,7 +4,10 @@ implementation for ``list_cameras``, ``probe_cameras``, ``get_frame``,
 ``get_tag_history`` (ticket 021-004), plus ``set_playfield``/
 ``get_playfield``/``list_playfields``/``set_camera_config``/
 ``get_camera_config`` (ticket 022-001), plus ``calibrate``/
-``get_calibration`` (ticket 022-003).
+``get_calibration`` (ticket 022-003), plus ``register_tag``/
+``unregister_tag``/``list_tag_parameters`` (ticket 025-004, UC-12 --
+the mobile-tag registry; see ``_camera_geometry_for``'s docstring for
+this ticket's one open, explicitly-flagged design decision).
 
 **Calibration persistence** (ticket 022-003, UC-01's "calibration is
 file-backed, unlike pushed config"). All vision/homography work is
@@ -97,10 +100,12 @@ from aprilcam.types import (
     AnnotationSet,
     CameraState,
     ImageFrame,
+    MountParameters,
     ProbeReport,
     TagFrame,
     TagId,
     TagRecord,
+    WorldPoint,
 )
 
 __all__ = ["DaemonService"]
@@ -215,10 +220,12 @@ class DaemonService(Daemon):
         (``daemon/detection.py``, ticket 021-004) that
         :meth:`get_tags`/:meth:`get_tag`/:meth:`get_tag_history`/
         :meth:`get_frame` delegate to. Defaults to a fresh
-        ``DetectionEngine()`` (real pipeline, real detector) when not
-        supplied -- tests that need to pin exactly how many detection
-        bursts ran construct their own ``DetectionEngine`` with a
-        substitutable ``detector_factory`` and pass it here.
+        ``DetectionEngine()`` (real pipeline, real detector) wired with
+        this service's own :meth:`_mount_lookup`/:meth:`_camera_geometry_for`
+        (ticket 025-004, UC-12) when not supplied -- tests that need to
+        pin exactly how many detection bursts ran, or that want a
+        non-default mount/camera-geometry lookup of their own, construct
+        their own ``DetectionEngine`` and pass it here instead.
     calibrator:
         The homography-solving engine (``calibration.calibration.
         Calibrator``, ticket 022-003) that :meth:`calibrate` delegates
@@ -286,6 +293,8 @@ class DaemonService(Daemon):
                 calibration_lookup=self.get_calibration,
                 playfield_lookup=self._playfield_for_calibration,
                 mark_stale=self._mark_stale,
+                mount_lookup=self._mount_lookup,
+                camera_geometry_lookup=self._camera_geometry_for,
             )
         )
         self._playfields: Dict[str, PlayfieldDefinitionIface] = {}
@@ -300,6 +309,15 @@ class DaemonService(Daemon):
         # ``_calibrations`` already are.
         self._annotations: Dict[str, Dict[str, Dict[str, Annotation]]] = {}
         self._annotation_revisions: Dict[str, int] = {}
+        # TagId -> MountParameters (ticket 025-004, UC-12): a fifth
+        # in-memory store, guarded by the same ``self._lock`` -- "one
+        # more dict under the existing lock", exactly the pattern ticket
+        # 024-001 used for ``_annotations`` above. Runtime state, never
+        # written to disk, wiped on restart (UC-12's "re-register every
+        # session" contract) -- there is simply no write-to-disk path
+        # here, the same structural guarantee every other store in this
+        # class already has.
+        self._mount_params: Dict[TagId, MountParameters] = {}
         self._lock = threading.Lock()
         self._calibrator = calibrator if calibrator is not None else Calibrator(
             get_camera_config=self._camera_config_for_calibration,
@@ -994,6 +1012,129 @@ class DaemonService(Daemon):
             else:
                 annotations = tuple(layers.get(layer, {}).values())
         return AnnotationSet(annotations=annotations, revision=revision, timestamp=time.time())
+
+    # -- mobile-tag registry (ticket 025-004, UC-12) -------------------------
+    #
+    # ``self._mount_params`` (``TagId -> MountParameters``), guarded by the
+    # same ``self._lock`` as every other in-memory store this class holds
+    # -- runtime state exactly like the annotation store above: in-memory,
+    # gone on restart, re-registered by clients on reconnect. The actual
+    # correction math lives in ``calibration.geometry``/``daemon.detection``
+    # (this class only holds the registrations and hands two lookups to
+    # ``DetectionEngine`` -- :meth:`_mount_lookup`/:meth:`_camera_geometry_for`
+    # below -- so it never duplicates that math itself).
+
+    def register_tag(self, tag: TagId, params: MountParameters) -> None:
+        """See ``daemon.interfaces.Daemon.register_tag``.
+
+        Upserts by *tag* -- a second registration for the same tag
+        replaces the first outright, no merge, mirroring
+        :meth:`set_camera_config`'s own whole-document-replace
+        precedent.
+
+        UC-12.S-5: a **nonzero** ``params.mount_z`` (there is an
+        elevation for the parallax projection to actually apply) is
+        rejected with :class:`~aprilcam.errors.NotCalibrated` when this
+        daemon holds **no calibration for any camera at all** --
+        ``mount_z`` set with no calibration anywhere the tag could be
+        observed would otherwise be silently stored but permanently
+        inert, never applying to anything (this ticket's own acceptance
+        criterion). Read literally as "any camera," not one specific
+        camera, since a mobile tag is not tied to a single camera the
+        way ``get_calibration``'s query is -- it may be seen by whichever
+        camera happens to be watching. A *zero* ``mount_z`` (the
+        ``MountParameters`` default -- no elevation at all) never
+        triggers this check, calibrated or not, since there is nothing
+        for parallax to project in that case.
+
+        A partial spec (``mount_z`` set, ``mount_x``/``mount_y`` left at
+        their own ``0.0`` default) is accepted without complaint --
+        ``MountParameters``' own fields already default to zero offset,
+        so there is nothing to validate here (UC-12's own "common case"
+        failure mode). A registration for a tag never yet detected is
+        accepted unconditionally -- the tag may appear later (UC-12's
+        own failure-mode table) -- and takes effect the moment
+        ``DetectionEngine.run_burst`` next asks :meth:`_mount_lookup`
+        about it.
+        """
+        with self._lock:
+            if params.mount_z != 0.0 and not self._calibrations:
+                raise NotCalibrated(
+                    f"cannot register mount_z for {tag!r}: this daemon holds no "
+                    "calibration for any camera, so the parallax projection "
+                    "would be meaningless -- calibrate a camera first"
+                )
+            self._mount_params[tag] = params
+
+    def unregister_tag(self, tag: TagId) -> None:
+        """See ``daemon.interfaces.Daemon.unregister_tag``.
+
+        An absent *tag* is a no-op, matching :meth:`clear_annotations`'s
+        established no-op-on-absent convention (sprint 024) -- there is
+        nothing to undo for a tag that was never registered, or already
+        unregistered.
+        """
+        with self._lock:
+            self._mount_params.pop(tag, None)
+
+    def list_tag_parameters(self) -> Dict[TagId, MountParameters]:
+        """See ``daemon.interfaces.Daemon.list_tag_parameters``.
+
+        A snapshot ``dict`` copy, safe for a caller to mutate freely
+        without touching this service's own store -- the same
+        snapshot-not-live-reference discipline every other collection
+        this class hands back (``list_cameras``, ``list_playfields``)
+        already follows.
+        """
+        with self._lock:
+            return dict(self._mount_params)
+
+    def _mount_lookup(self, tag: TagId) -> Optional[MountParameters]:
+        """``DetectionEngine``'s ``mount_lookup`` callable (ticket
+        025-004) -- a locked read of :attr:`_mount_params`, the same
+        lock-guarded-dict-read pattern :meth:`_camera_config_for_calibration`/
+        :meth:`_playfield_for_calibration` already establish."""
+        with self._lock:
+            return self._mount_params.get(tag)
+
+    def _camera_geometry_for(self, slug: str) -> Tuple[WorldPoint, float]:
+        """``DetectionEngine``'s ``camera_geometry_lookup`` callable
+        (ticket 025-004) -- **explicitly provisional, not a settled
+        design.** See below for the full reasoning; this is the one
+        piece of this ticket's Definition of Done most likely to need
+        revisiting.
+
+        ``calibration.geometry.project_tag_to_field_plane`` needs a
+        camera's own ground position and height above the field to
+        perform its parallax projection, but nothing in this codebase
+        currently models that: ``config.interfaces.CameraConfig``
+        carries no position/height field, and no proto/config-loader
+        plumbing exists to set one over RPC or load one from disk.
+        Adding that would be a real expansion of *this* ticket's scope
+        (new ``CameraConfig`` fields, a new proto message field, new
+        client/config-loader marshalling) — a decision about *where an
+        operator records a camera's physical mount* that deserves its
+        own ticket and its own review, not a side effect of wiring the
+        mobile-tag registry. See ``calibration/geometry.py``'s module
+        docstring for the full gap analysis this ticket inherited from
+        ticket 003.
+
+        Until that real source exists, every camera reports ground
+        position ``(0, 0)`` and height ``0.0`` -- ``project_tag_to_field_plane``'s
+        own documented "nothing to correct" sentinel (height not
+        strictly positive short-circuits to the identity). Concretely:
+        a registered ``mount_z`` is fully wired end-to-end and covered
+        by unit tests with hand-picked geometry (``tests/aprilcam/daemon/
+        test_detection.py``), but has **no observable effect against a
+        live camera** today -- only ``mount_x``/``mount_y``/
+        ``mount_yaw_rad``'s offset+yaw composition
+        (``calibration.geometry.apply_mount_offset``, which needs no
+        camera geometry at all) actually moves a real reported position.
+        This is a known, explicitly-flagged gap: a follow-up ticket must
+        add a real per-camera position/height source before ``mount_z``
+        does anything against real hardware.
+        """
+        return WorldPoint(x=0.0, y=0.0), 0.0
 
     # -- calibration (ticket 022-003) --------------------------------------
 
