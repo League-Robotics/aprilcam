@@ -39,6 +39,16 @@ from aprilcam.mcp.errors import handle_tool_errors
 from aprilcam.mcp.images import create_temp_dir
 from aprilcam.mcp.tools import configuration, mobile_tags, perception
 
+# Aliased, not `from aprilcam.mcp.tools import annotations` alongside the
+# rest -- this module's own (mandatory, must-be-first-statement) `from
+# __future__ import annotations` above already binds the local name
+# `annotations` to `__future__`'s `_Feature` object; unaliased, the
+# second binding would still work at runtime (last assignment wins) but
+# mypy correctly flags the two incompatible types for the same name
+# (see `mcp/tools/__init__.py`'s docstring for the fuller story of this
+# collision, first hit by ticket 026-005).
+from aprilcam.mcp.tools import annotations as annotation_tools
+
 __all__ = ["build_server"]
 
 #: Orientation instructions surfaced to the agent as the server's own
@@ -152,5 +162,14 @@ def build_server(
     # mobile_tags.py`'s module docstring. Same `register(mcp,
     # connection, temp_dir)` shape; independent of tickets 002/003/005.
     mobile_tags.register(mcp, connection, temp_dir)
+
+    # Ticket 005: the annotation/drawing surface -- see `mcp/tools/
+    # annotations.py`'s module docstring. Same `register(mcp,
+    # connection, temp_dir)` shape; independent of tickets 002/003/004 --
+    # the last tool-group registration this function gains (ticket 006
+    # is integration/acceptance only, no new tool group). Imported as
+    # `annotation_tools` above, not `annotations` -- see that import's
+    # own comment for why.
+    annotation_tools.register(mcp, connection, temp_dir)
 
     return mcp

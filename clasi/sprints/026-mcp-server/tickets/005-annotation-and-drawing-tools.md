@@ -1,7 +1,7 @@
 ---
 id: '005'
 title: Annotation and drawing tools
-status: open
+status: done
 use-cases:
 - SUC-004
 depends-on:
@@ -33,31 +33,31 @@ before 001 merges. Independent of tickets 002/003/004.
 
 ## Acceptance Criteria
 
-- [ ] `draw_marker(playfield, layer, id, x, y, label=None, color=None,
+- [x] `draw_marker(playfield, layer, id, x, y, label=None, color=None,
       line_width=None, ttl_seconds=None)` -> builds a `Marker` +
       `Style`, wraps it in an `Annotation`, calls `put_annotation`.
-- [ ] `draw_path(playfield, layer, id, points, ...)` -> `PathShape`
+- [x] `draw_path(playfield, layer, id, points, ...)` -> `PathShape`
       from a list of `[x, y]` pairs.
-- [ ] `draw_polygon(playfield, layer, id, points, ...)` -> `Polygon`.
-- [ ] `draw_circle(playfield, layer, id, center_x, center_y,
+- [x] `draw_polygon(playfield, layer, id, points, ...)` -> `Polygon`.
+- [x] `draw_circle(playfield, layer, id, center_x, center_y,
       radius_cm, ...)` -> `Circle`.
-- [ ] `draw_text(playfield, layer, id, x, y, text, ...)` -> `Text`.
-- [ ] `remove_annotation(playfield, layer, id)` -> calls
+- [x] `draw_text(playfield, layer, id, x, y, text, ...)` -> `Text`.
+- [x] `remove_annotation(playfield, layer, id)` -> calls
       `Daemon.remove_annotation`; an absent key is a no-op, not an
       error.
-- [ ] `clear_layer(playfield, layer=None)` -> calls
+- [x] `clear_layer(playfield, layer=None)` -> calls
       `Daemon.clear_annotations`; clearing an already-empty or
       nonexistent layer is a no-op.
-- [ ] `list_annotations(playfield, layer=None)` -> the current
+- [x] `list_annotations(playfield, layer=None)` -> the current
       `AnnotationSet` (`annotations`, `revision`, `timestamp`) via
       `get_annotations`.
-- [ ] An unknown playfield on any write is rejected, naming the
+- [x] An unknown playfield on any write is rejected, naming the
       playfields the daemon holds (per `Daemon.put_annotation`'s
       documented contract) — verified against a fake `Daemon` that
       raises `UnknownPlayfield`.
-- [ ] Every tool wrapped with ticket 001's error-mapping decorator.
-- [ ] `uv run mypy` clean; zero `typing.Protocol`.
-- [ ] Full suite green.
+- [x] Every tool wrapped with ticket 001's error-mapping decorator.
+- [x] `uv run mypy` clean; zero `typing.Protocol`.
+- [x] Full suite green.
 
 ## Testing
 
