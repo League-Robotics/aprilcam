@@ -18,11 +18,15 @@ happens to exercise, and needs no daemon, camera, or display.
 
 Scope is exactly the client-side packages named in ``adapters.md``/
 ``specification.md`` as needing to stay ``cv2``-free: ``client/`` (the
-substrate every adapter sits on) and ``view/`` (this ticket's new
-subsystem, built entirely on ``client/``). ``camera/``, ``vision/``,
-and ``daemon/`` are the vision authority and legitimately import
-``cv2`` -- scanning them would make this test fail by design, not
-catch a real regression.
+substrate every adapter sits on), ``view/`` (built entirely on
+``client/``), and ``mcp/`` (ticket 026-001: the MCP server, a pure
+``client/`` consumer -- ``adapters.md`` rule 2 applies to it exactly as
+it does to the other two, and this gate is extended to cover it *before*
+any of this sprint's later tickets add tool modules under ``mcp/``, so
+every one of them lands already covered). ``camera/``, ``vision/``, and
+``daemon/`` are the vision authority and legitimately import ``cv2`` --
+scanning them would make this test fail by design, not catch a real
+regression.
 """
 
 from __future__ import annotations
@@ -37,8 +41,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = REPO_ROOT / "src" / "aprilcam"
 
 #: Packages this test asserts are cv2-free. See the module docstring
-#: for why exactly these two and not the whole tree.
-_CV2_FREE_PACKAGES = ("client", "view")
+#: for why exactly these three and not the whole tree.
+_CV2_FREE_PACKAGES = ("client", "view", "mcp")
 
 
 def _python_files(package: str) -> Iterator[Path]:

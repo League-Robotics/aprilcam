@@ -8,9 +8,11 @@ command.
 Wires the ``daemon`` and ``camera`` subcommands (ticket 020-006,
 ``cli/daemon.py`` / ``cli/camera.py``) into the ``-h``/``--help``-only
 stub ticket 001 left here, plus ``playfield`` (ticket 022-001,
-``cli/playfield.py``), ``tags`` (ticket 025-005, ``cli/tags.py``), and
+``cli/playfield.py``), ``tags`` (ticket 025-005, ``cli/tags.py``),
 ``guide`` (ticket 025-007, ``cli/guide.py`` -- the one subcommand that
-deliberately never talks to a daemon; see that module's docstring).
+deliberately never talks to a daemon; see that module's docstring), and
+``mcp`` (ticket 026-001, ``cli/mcp.py`` -- starts the MCP stdio server,
+UC-22).
 Each subcommand module owns its own argparse shape and dispatch
 functions; this module only assembles them and routes ``argv`` to
 whichever ``func`` argparse resolved — itself zero business logic, per
@@ -23,13 +25,13 @@ import argparse
 import sys
 from typing import Optional, Sequence
 
-from aprilcam.cli import camera, daemon, guide, playfield, tags
+from aprilcam.cli import camera, daemon, guide, mcp, playfield, tags
 
 
 def _build_parser() -> argparse.ArgumentParser:
     """The top-level ``argparse`` parser: ``-h``/``--help`` plus the
-    ``daemon``, ``camera``, ``playfield``, ``tags``, and ``guide``
-    subcommand trees."""
+    ``daemon``, ``camera``, ``playfield``, ``tags``, ``guide``, and
+    ``mcp`` subcommand trees."""
     parser = argparse.ArgumentParser(
         prog="aprilcam",
         description=(
@@ -44,6 +46,7 @@ def _build_parser() -> argparse.ArgumentParser:
     playfield.add_subparser(subparsers)
     tags.add_subparser(subparsers)
     guide.add_subparser(subparsers)
+    mcp.add_subparser(subparsers)
     return parser
 
 
