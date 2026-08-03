@@ -7,7 +7,9 @@ implementation for ``list_cameras``, ``probe_cameras``, ``get_frame``,
 ``get_calibration`` (ticket 022-003), plus ``register_tag``/
 ``unregister_tag``/``list_tag_parameters`` (ticket 025-004, UC-12 --
 the mobile-tag registry; see ``_camera_geometry_for``'s docstring for
-this ticket's one open, explicitly-flagged design decision).
+this ticket's one open, explicitly-flagged design decision), plus
+``find_feature`` (ticket 025-002, UC-08) and ``get_guide`` (ticket
+025-007, UC-27 -- the last method this sprint adds).
 
 **Calibration persistence** (ticket 022-003, UC-01's "calibration is
 file-backed, unlike pushed config"). All vision/homography work is
@@ -32,11 +34,11 @@ handling -- is delegated the same way to ``daemon/detection.py``
 021's module boundary table exactly as sprint 020's did for cameras.
 
 **Only a subset of ``Daemon``'s methods are implemented.** ``daemon.
-interfaces.Daemon`` is a much larger base class (playfields, calibration,
-streams, annotations, tag parameters, guides) -- those belong to later
-sprints per the sprint architecture's Out-of-Scope section, and are
-simply absent from :class:`DaemonService`, inherited as-is from
-``Daemon``. Calling one of them here raises ``NotImplementedError``
+interfaces.Daemon`` is a much larger base class -- ``stream_images``/
+``stream_tags`` are the remaining unimplemented pair as of this sprint,
+belonging to a later sprint per the sprint architecture's Out-of-Scope
+section -- and are simply absent from :class:`DaemonService`, inherited
+as-is from ``Daemon``. Calling one of them here raises ``NotImplementedError``
 naming the missing method (``daemon.interfaces``'s module docstring
 explains why this is a plain base class and not ``abc.ABC``:
 un-instantiable until all 27 methods existed would force 23 hollow
@@ -76,6 +78,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import cv2 as cv
 import numpy as np
 
+from aprilcam import guides
 from aprilcam.calibration.calibration import Calibration, Calibrator
 from aprilcam.calibration.deskew import Deskewer
 from aprilcam.calibration.interfaces import CalibrationResult
@@ -92,7 +95,13 @@ from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitio
 from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
 from aprilcam.daemon.detection import DetectionEngine
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
-from aprilcam.errors import CameraNotPresent, NotCalibrated, UnknownCamera, UnknownPlayfield
+from aprilcam.errors import (
+    CameraNotPresent,
+    NotCalibrated,
+    UnknownCamera,
+    UnknownGuide,
+    UnknownPlayfield,
+)
 from aprilcam.playfield.playfield import Playfield
 from aprilcam.playfield.query import FeatureQuery
 from aprilcam.types import (
@@ -638,6 +647,32 @@ class DaemonService(Daemon):
             config_dir=str(self._directories.config_dir),
             state_dir=str(self._directories.state_dir),
         )
+
+    def get_guide(self, name: Optional[str] = None) -> str:
+        """See ``daemon.interfaces.Daemon.get_guide`` (ticket 025-007,
+        UC-27).
+
+        A thin wrapper over ``aprilcam.guides.read_guide`` -- the exact
+        same shared leaf module ``client.guides.Guides.get`` reads
+        (ticket 025-006), not a redundant reimplementation of the guide
+        text or its name-to-filename mapping. That shared leaf is what
+        makes this method and ``client.guides.Guides.get`` serve
+        byte-identical text *by construction* (sprint 025's Design
+        Rationale), not merely because both happen to agree today.
+
+        An omitted or ``None`` *name* defaults to ``aprilcam.guides.
+        DEFAULT_GUIDE`` (``"agent"``, UC-27's primary actor). An unknown
+        name raises :class:`~aprilcam.errors.UnknownGuide`, naming the
+        guides that actually exist (UC-27.S-3) -- the identical error
+        shape ``client.guides.Guides.get`` raises for the same input,
+        since both build it from the same ``guides.AVAILABLE_GUIDES``
+        tuple.
+        """
+        chosen = name if name is not None else guides.DEFAULT_GUIDE
+        text = guides.read_guide(chosen)
+        if text is None:
+            raise UnknownGuide(chosen, guides.AVAILABLE_GUIDES)
+        return text
 
     # -- playfields / camera config (ticket 022-001; reset, ticket 023-004) -
     #

@@ -115,6 +115,17 @@
 // `.yaw_rad` are simply already the robot's pose by the time they are
 // serialized.
 //
+// Sprint 025 ticket 007 is the eighth, and this sprint's last: `GetGuide`
+// (UC-27) -- the packaged agent/robot usage guide, servable over an
+// already-open daemon connection. `aprilcam.guides.read_guide` is the
+// single leaf both this RPC (via `daemon.service.DaemonService.get_guide`)
+// and the client's no-daemon-needed `client.guides.Guides` (ticket
+// 025-006) read, so the two accessors serve byte-identical text by
+// construction. Absent `GetGuideRequest.name` means the default guide
+// (`"agent"`); an unknown name -> `NOT_FOUND`, naming the guides that
+// exist (`"agent"`, `"robot"`), matching `FindFeature`/`GetPlayfield`'s
+// established `UnknownTarget` precedent above.
+//
 // Wire conventions this file follows (docs/design/design.md §6):
 //   - World-cm coordinates cross this boundary only inside `TagRecord`
 //     (`world`, `world_velocity`, `world_corners`), and every camera
@@ -289,6 +300,15 @@ service AprilCamV2 {
 
   // Every currently registered tag -> mount parameters, as a snapshot.
   rpc ListTagParameters (ListTagParametersRequest) returns (ListTagParametersResponse);
+
+  // The packaged agent/robot usage guide (UC-27, ticket 025-007) -- the
+  // RPC face of `client.guides.Guides`, for a caller that already has a
+  // daemon connection. Absent `name` means the default ("agent") guide;
+  // an unknown name -> `NOT_FOUND`, naming the guides that exist
+  // ("agent", "robot"). Serves byte-identical text to the no-daemon
+  // `client.guides.Guides` accessor by construction -- both read
+  // `aprilcam.guides.read_guide`, never a second copy of the text.
+  rpc GetGuide (GetGuideRequest) returns (GetGuideResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -903,4 +923,18 @@ message ListTagParametersRequest {}
 
 message ListTagParametersResponse {
   repeated TagMountEntry entries = 1;
+}
+
+// ---------------------------------------------------------------------------
+// GetGuide (ticket 025-007, UC-27)
+// ---------------------------------------------------------------------------
+
+message GetGuideRequest {
+  // Absent means the default guide ("agent") -- mirrors
+  // Daemon.get_guide(name: Optional[str] = None).
+  optional string name = 1;
+}
+
+message GetGuideResponse {
+  string text = 1;
 }

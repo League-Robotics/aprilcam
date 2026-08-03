@@ -7,7 +7,8 @@
 ``remove_annotation``/``replace_layer``/``clear_annotations``/
 ``get_annotations`` added by ticket 024-002; ``find_feature`` added by
 ticket 025-002; ``register_tag``/``unregister_tag``/
-``list_tag_parameters`` added by ticket 025-004): a typed
+``list_tag_parameters`` added by ticket 025-004; ``get_guide`` added by
+ticket 025-007, this sprint's last): a typed
 wrapper over the generated gRPC stub for
 ``list_cameras``, ``probe_cameras``, ``get_frame``, ``status``,
 ``get_tags``, ``get_tag``, ``get_tag_history``, ``set_playfield``,
@@ -16,11 +17,12 @@ wrapper over the generated gRPC stub for
 ``reset_camera_config``, ``put_annotation``, ``remove_annotation``,
 ``replace_layer``, ``clear_annotations``, ``get_annotations``,
 ``find_feature``, ``register_tag``, ``unregister_tag``,
-``list_tag_parameters``.
+``list_tag_parameters``, ``get_guide``.
 
-**Only these twenty-four methods are implemented**, mirroring
+**Only these twenty-five methods are implemented**, mirroring
 ``daemon.service.DaemonService``'s own stance: ``daemon.interfaces.
-Daemon`` is a much larger base class (streams, guides), and
+Daemon`` is a much larger base class (``stream_images``/``stream_tags``
+remain the unimplemented pair as of this sprint), and
 those are inherited as-is here rather than overridden -- calling one
 raises ``NotImplementedError`` naming itself instead of failing with a
 bare ``AttributeError``. ``isinstance(client,
@@ -85,6 +87,7 @@ from aprilcam.errors import (
     NoPlayfieldLinked,
     NotCalibrated,
     UnknownCamera,
+    UnknownGuide,
     UnknownPlayfield,
 )
 from aprilcam.playfield.interfaces import Playfield
@@ -291,6 +294,11 @@ def _reconstruct_error(exc: grpc.RpcError, target: str) -> Exception:
         )
     if error_type == "NoPlayfieldLinked":
         return NoPlayfieldLinked(metadata.get("aprilcam-camera", "unknown"))
+    if error_type == "UnknownGuide":
+        return UnknownGuide(
+            metadata.get("aprilcam-requested", ""),
+            _split_available(metadata.get("aprilcam-available", "")),
+        )
     return ConnectionFailed(target, reason=exc.details() or str(exc.code()))
 
 
@@ -510,6 +518,22 @@ class GrpcDaemon(Daemon):
             request.layer = layer
         response = self._call(self._stub.GetAnnotations, request)
         return annotation_set_from_proto(response.annotations)
+
+    def get_guide(self, name: Optional[str] = None) -> str:
+        """See ``daemon.interfaces.Daemon.get_guide`` (ticket 025-007,
+        UC-27). The RPC path for a caller that already has a daemon
+        connection -- ``client.guides.Guides`` (ticket 025-006) is the
+        primary no-daemon-needed path; this exists so an already-connected
+        caller can fetch the identical text without a second, separate
+        accessor. Serves byte-identical text to that no-daemon path by
+        construction: both ultimately read ``aprilcam.guides.read_guide``,
+        just via ``DaemonService.get_guide`` on this end instead of
+        directly."""
+        request = aprilcam_v2_pb2.GetGuideRequest()
+        if name is not None:
+            request.name = name
+        response = self._call(self._stub.GetGuide, request)
+        return response.text
 
     # -- internals -----------------------------------------------------
 
