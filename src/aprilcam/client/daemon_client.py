@@ -58,8 +58,7 @@ from typing import Dict, Optional, Tuple
 
 import grpc
 
-from aprilcam.calibration.calibration import Calibration
-from aprilcam.calibration.interfaces import CalibrationResult
+from aprilcam.calibration.interfaces import Calibration, CalibrationResult
 from aprilcam.client.models import (
     annotation_set_from_proto,
     calibration_from_proto,

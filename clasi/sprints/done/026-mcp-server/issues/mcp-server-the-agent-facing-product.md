@@ -1,5 +1,13 @@
 ---
-status: pending
+status: in-progress
+sprint: '026'
+tickets:
+- 026-001
+- 026-002
+- 026-003
+- 026-004
+- 026-005
+- 026-006
 ---
 
 # MCP server — the agent-facing product
