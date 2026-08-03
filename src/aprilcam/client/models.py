@@ -37,8 +37,7 @@ from __future__ import annotations
 import json
 from typing import Dict, Optional, Tuple
 
-from aprilcam.calibration.calibration import Calibration
-from aprilcam.calibration.interfaces import CalibrationResult
+from aprilcam.calibration.interfaces import Calibration, CalibrationResult
 from aprilcam.config.interfaces import CameraConfig, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import DaemonStatus
@@ -413,26 +412,26 @@ def calibration_result_from_proto(msg: aprilcam_v2_pb2.CalibrationResult) -> Cal
 
 def calibration_from_proto(msg: aprilcam_v2_pb2.Calibration) -> Calibration:
     """The client-side mirror of ``daemon/rpc.py``'s
-    ``_calibration_to_proto`` -- field for field, in reverse.
-    ``homography`` un-flattens the wire's 9 row-major doubles back into
-    :class:`~aprilcam.calibration.calibration.Calibration`'s
-    ``Tuple[Tuple[float, float, float], ...]`` shape."""
-    h = list(msg.homography)
-    homography = (
-        (h[0], h[1], h[2]),
-        (h[3], h[4], h[5]),
-        (h[6], h[7], h[8]),
-    )
-    return Calibration(
-        stale=msg.stale,
-        calibrated_at=msg.calibrated_at,
-        playfield=msg.playfield,
-        homography=homography,
-        matched_ids=tuple(msg.matched_ids),
-        reprojection_error_cm=(
-            msg.reprojection_error_cm if msg.HasField("reprojection_error_cm") else None
-        ),
-    )
+    ``_calibration_to_proto`` -- but deliberately a narrowing mirror, not
+    a field-for-field one. The wire message also carries ``homography``/
+    ``matched_ids``/``reprojection_error_cm`` (the daemon-internal solve
+    detail persisted alongside a calibration), but nothing on this side
+    of the wire ever reads them -- every ``client``/``mcp`` consumer of
+    ``get_calibration`` only ever needs ``stale``/``calibrated_at``/
+    ``playfield``, "the ones an agent actually needs to reason about
+    whether a calibration is trustworthy, not the internal homography
+    matrix" (``mcp/tools/configuration.py``'s own docstring). Building
+    the *interface* :class:`~aprilcam.calibration.interfaces.Calibration`
+    directly here, rather than the concrete ``calibration.calibration.
+    Calibration`` those extra fields belong to, is what keeps this
+    module -- and everything that transitively imports it, including
+    ``client/daemon_client.py`` and every ``mcp/`` module via
+    ``mcp/connection.py`` -- ``cv2``-free (``calibration.calibration``
+    imports ``cv2`` at module scope; ``calibration.interfaces`` does
+    not). See ``tests/aprilcam/mcp/test_integration.py``'s no-cv2 sweep
+    for the mechanical check this fixes.
+    """
+    return Calibration(stale=msg.stale, calibrated_at=msg.calibrated_at, playfield=msg.playfield)
 
 
 #: Annotations (ticket 024-002, UC-28, specification.md section 9
