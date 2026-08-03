@@ -9,10 +9,13 @@ ticket extends — tickets 002-005 add their own ``mcp.tools.*.register``
 calls to this function's body, each handed the same ``connection``
 (:class:`~aprilcam.mcp.connection.ConnectionManager`) and *temp_dir*
 (:func:`~aprilcam.mcp.images.create_temp_dir`'s result) constructed
-once, here, per server process. This ticket registers exactly one tool,
+once, here, per server process. Ticket 001 registered exactly one tool,
 ``get_guide`` — the pattern-setter proving the whole stack end to end
-with no daemon anywhere (UC-27.S-1) — plus the two locals future
-tickets' tool groups need.
+with no daemon anywhere (UC-27.S-1). Ticket 002 adds the first
+daemon-backed tool group, ``mcp.tools.perception`` — cameras, frames,
+tags, ``where`` — via the exact
+``mcp.tools.*.register(mcp, connection, temp_dir)`` shape ticket 001
+left this function ready for; tickets 003-005 follow the same shape.
 
 **Zero daemon RPCs during construction.** Neither
 ``ConnectionManager.__init__`` (see its module docstring) nor
@@ -34,6 +37,7 @@ from aprilcam.client.interfaces import Guides as GuidesBase
 from aprilcam.mcp.connection import ConnectionManager
 from aprilcam.mcp.errors import handle_tool_errors
 from aprilcam.mcp.images import create_temp_dir
+from aprilcam.mcp.tools import perception
 
 __all__ = ["build_server"]
 
@@ -98,23 +102,14 @@ def build_server(
         inject a stub to avoid touching the real filesystem for tests
         that never exercise an image tool.
     """
-    # Constructed once per server process, ready for tickets 002-005's
-    # tool groups to use via `connection`/`temp_dir` -- see the module
-    # docstring. Neither call performs a daemon RPC or requires one to
-    # exist (UC-22.S-2): `ConnectionManager.__init__` only stores its
-    # arguments (its own module docstring), and `temp_dir_factory`'s
-    # default is a local `tempfile.mkdtemp` call.
-    connection = connection_factory(default_host=default_daemon_host)  # noqa: F841
-    temp_dir = temp_dir_factory()  # noqa: F841
-    # Neither `connection` nor `temp_dir` is referenced by any tool in
-    # *this* ticket -- `get_guide` below is the one deliberate
-    # exception that needs neither (see its docstring). They are built
-    # here, unconditionally, so that (a) this function proves
-    # construction alone never touches a daemon, independent of which
-    # tools happen to be registered, and (b) tickets 002-005 extend
-    # this function's body with their own
-    # `mcp.tools.*.register(mcp, connection, temp_dir)` calls against
-    # these exact locals, rather than re-deriving them.
+    # Constructed once per server process, shared by every tool group
+    # registered below -- see the module docstring. Neither call
+    # performs a daemon RPC or requires one to exist (UC-22.S-2):
+    # `ConnectionManager.__init__` only stores its arguments (its own
+    # module docstring), and `temp_dir_factory`'s default is a local
+    # `tempfile.mkdtemp` call.
+    connection = connection_factory(default_host=default_daemon_host)
+    temp_dir = temp_dir_factory()
 
     mcp = FastMCP("aprilcam", instructions=_SERVER_INSTRUCTIONS)
 
@@ -130,8 +125,8 @@ def build_server(
         a daemon connection at all, so it is always safe to call first,
         even before ``aprilcam daemon start``.
         """
-        # Deliberate exception to every other tool this package will
-        # register (tickets 002-005): reads `client.guides.Guides`
+        # Deliberate exception to every other tool this package
+        # registers (tickets 002-005): reads `client.guides.Guides`
         # directly, with no `ConnectionManager`, no `Discovery`, no
         # `Daemon` call of any kind -- mirroring `cli/guide.py`'s
         # identical, equally deliberate exception (UC-27.S-1: must work
@@ -139,5 +134,13 @@ def build_server(
         # `connection`/`Discovery` like a normal tool; that would defeat
         # the entire point of a guide that needs no daemon.
         return guides_factory().get(name)
+
+    # Ticket 002: the read-only perception surface (cameras, frames,
+    # tags, `where`) -- see `mcp/tools/perception.py`'s module
+    # docstring. Every later ticket's tool group (003-005) extends this
+    # function's body with its own
+    # `mcp.tools.*.register(mcp, connection, temp_dir)` call against
+    # these exact locals, matching this one.
+    perception.register(mcp, connection, temp_dir)
 
     return mcp

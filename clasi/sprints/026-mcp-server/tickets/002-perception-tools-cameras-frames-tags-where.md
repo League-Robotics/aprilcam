@@ -1,7 +1,7 @@
 ---
 id: '002'
 title: Perception tools (cameras, frames, tags, where)
-status: open
+status: done
 use-cases:
 - SUC-001
 depends-on:
@@ -31,30 +31,30 @@ before 001 merges.
 
 ## Acceptance Criteria
 
-- [ ] `list_cameras()` -> every `CameraState` (name, present, usable,
+- [x] `list_cameras()` -> every `CameraState` (name, present, usable,
       playfield link, calibrated, calibration_stale, frame_dark,
       number) as structured tool output — an absent-but-registered
       camera is listed and flagged, never omitted (UC-25).
-- [ ] `probe_cameras()` -> the full `ProbeReport` (refreshed cameras
+- [x] `probe_cameras()` -> the full `ProbeReport` (refreshed cameras
       plus any skipped backends, named) — a partial probe never reads
       as a complete one (UC-25.S-7).
-- [ ] `get_frame(camera, deskewed=False, encoding="jpeg", format="base64")`
+- [x] `get_frame(camera, deskewed=False, encoding="jpeg", format="base64")`
       -> uses `mcp/images.py` for output shaping; a `deskewed=True`
       request on an uncalibrated camera surfaces the daemon's
       `NotCalibrated` error as a tool error, **never** a silently
       substituted raw frame.
-- [ ] `get_tags(camera)` / `get_tag(camera, family, number)` /
+- [x] `get_tags(camera)` / `get_tag(camera, family, number)` /
       `get_tag_history(camera, family=None, number=None, frames=None)`
       -> world-first `TagRecord`/`TagFrame` shapes; `get_tag` returns
       null for "not detected", never a fabricated `(0, 0)` position.
-- [ ] `where(playfield, query)` -> wraps `Daemon.find_feature`.
+- [x] `where(playfield, query)` -> wraps `Daemon.find_feature`.
       Ambiguous queries return **every** match, never an arbitrary pick
       (UC-08.S-2); no match returns an empty list, not an error
       (UC-08.S-3).
-- [ ] Every tool above wrapped with ticket 001's error-mapping
+- [x] Every tool above wrapped with ticket 001's error-mapping
       decorator; no per-tool try/except duplicating it.
-- [ ] `uv run mypy` clean; zero `typing.Protocol` in this module.
-- [ ] Full suite green (no regressions to the 976-test baseline plus
+- [x] `uv run mypy` clean; zero `typing.Protocol` in this module.
+- [x] Full suite green (no regressions to the 976-test baseline plus
       ticket 001's additions).
 
 ## Testing
