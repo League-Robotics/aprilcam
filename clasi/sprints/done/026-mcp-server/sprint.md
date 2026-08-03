@@ -1,10 +1,24 @@
 ---
 id: '026'
 title: MCP server
-status: planning-docs
+status: closed
 branch: sprint/026-mcp-server
 worktree: false
-use-cases: [UC-22, UC-06, UC-08, UC-09, UC-10, UC-12, UC-17, UC-19, UC-20, UC-23, UC-24, UC-26, UC-27, UC-28]
+use-cases:
+- UC-22
+- UC-06
+- UC-08
+- UC-09
+- UC-10
+- UC-12
+- UC-17
+- UC-19
+- UC-20
+- UC-23
+- UC-24
+- UC-26
+- UC-27
+- UC-28
 issues:
 - mcp-server-the-agent-facing-product.md
 ---
