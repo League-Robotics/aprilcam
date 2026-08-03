@@ -158,6 +158,11 @@ class AprilCamV2Stub(object):
                 request_serializer=aprilcam__v2__pb2.ListTagParametersRequest.SerializeToString,
                 response_deserializer=aprilcam__v2__pb2.ListTagParametersResponse.FromString,
                 _registered_method=True)
+        self.GetGuide = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/GetGuide',
+                request_serializer=aprilcam__v2__pb2.GetGuideRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.GetGuideResponse.FromString,
+                _registered_method=True)
 
 
 class AprilCamV2Servicer(object):
@@ -408,6 +413,19 @@ class AprilCamV2Servicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetGuide(self, request, context):
+        """The packaged agent/robot usage guide (UC-27, ticket 025-007) -- the
+        RPC face of `client.guides.Guides`, for a caller that already has a
+        daemon connection. Absent `name` means the default ("agent") guide;
+        an unknown name -> `NOT_FOUND`, naming the guides that exist
+        ("agent", "robot"). Serves byte-identical text to the no-daemon
+        `client.guides.Guides` accessor by construction -- both read
+        `aprilcam.guides.read_guide`, never a second copy of the text.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_AprilCamV2Servicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -530,6 +548,11 @@ def add_AprilCamV2Servicer_to_server(servicer, server):
                     servicer.ListTagParameters,
                     request_deserializer=aprilcam__v2__pb2.ListTagParametersRequest.FromString,
                     response_serializer=aprilcam__v2__pb2.ListTagParametersResponse.SerializeToString,
+            ),
+            'GetGuide': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetGuide,
+                    request_deserializer=aprilcam__v2__pb2.GetGuideRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.GetGuideResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1184,6 +1207,33 @@ class AprilCamV2(object):
             '/aprilcam.v2.AprilCamV2/ListTagParameters',
             aprilcam__v2__pb2.ListTagParametersRequest.SerializeToString,
             aprilcam__v2__pb2.ListTagParametersResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetGuide(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/GetGuide',
+            aprilcam__v2__pb2.GetGuideRequest.SerializeToString,
+            aprilcam__v2__pb2.GetGuideResponse.FromString,
             options,
             channel_credentials,
             insecure,

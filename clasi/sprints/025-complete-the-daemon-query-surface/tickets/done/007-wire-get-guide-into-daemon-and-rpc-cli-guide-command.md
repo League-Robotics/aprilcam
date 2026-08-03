@@ -1,7 +1,7 @@
 ---
 id: '007'
 title: Wire get_guide into daemon and RPC, CLI guide command
-status: open
+status: done
 use-cases:
 - SUC-003
 depends-on:
@@ -54,25 +54,25 @@ fetch the guide via the CLI (no daemon), fetch it via a live daemon's
 
 ## Acceptance Criteria
 
-- [ ] `Daemon.get_guide` implemented on `DaemonService`, reading from
+- [x] `Daemon.get_guide` implemented on `DaemonService`, reading from
       ticket 006's shared module.
-- [ ] `GetGuide` RPC round-trips correctly through a real gRPC
+- [x] `GetGuide` RPC round-trips correctly through a real gRPC
       channel.
-- [ ] `aprilcam guide` and `aprilcam guide robot` both work with **no
+- [x] `aprilcam guide` and `aprilcam guide robot` both work with **no
       daemon started anywhere** (CLI reads locally).
-- [ ] `aprilcam guide nonexistent` reports the guides that do exist
+- [x] `aprilcam guide nonexistent` reports the guides that do exist
       (`agent`, `robot`), matching UC-27.S-3.
-- [ ] Test proves `Daemon.get_guide(name)` and
+- [x] Test proves `Daemon.get_guide(name)` and
       `client.guides.Guides().get(name)` return byte-identical text
       for every valid name — not merely similar.
-- [ ] This ticket's acceptance criteria, combined with tickets 002 and
+- [x] This ticket's acceptance criteria, combined with tickets 002 and
       005, jointly satisfy the issue's full Verification section
       (`playfield where` returns all matches with no camera opened; a
       registered mount changes the reported position and unregistering
       reverts it; the guide is fetchable with no daemon running) — the
       point at which this sprint's issue is fully addressed.
-- [ ] `uv run mypy` clean.
-- [ ] Full suite green, headless and with hardware attached (baseline
+- [x] `uv run mypy` clean.
+- [x] Full suite green, headless and with hardware attached (baseline
       832 tests passing: 795 headless + 37 hardware, plus everything
       this sprint adds).
 

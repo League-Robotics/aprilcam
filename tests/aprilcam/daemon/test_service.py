@@ -47,6 +47,7 @@ from aprilcam.camera.camera import FAILURE_THRESHOLD, Camera
 from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import CameraIdentity
 from aprilcam.camera.registry import CameraRegistry
+from aprilcam.client.guides import Guides
 from aprilcam.config.directories import Directories
 from aprilcam.config.interfaces import CameraConfig
 from aprilcam.config.loader import ConfigLoader, PlayfieldDefinition, PlayfieldFeatureEntry
@@ -62,9 +63,11 @@ from aprilcam.errors import (
     NoPlayfieldLinked,
     NotCalibrated,
     UnknownCamera,
+    UnknownGuide,
     UnknownPlayfield,
     UnsupportedSetting,
 )
+from aprilcam.guides import AVAILABLE_GUIDES
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
 from aprilcam.types import (
     Annotation,
@@ -3907,6 +3910,68 @@ def test_rpc_get_frame_deskewed_embeds_annotations_round_trip(directories, regis
     assert len(filled_response.annotations.annotations) == 1
     assert filled_response.annotations.annotations[0].id == "goal"
     assert filled_response.annotations.revision == 1
+
+
+# ---------------------------------------------------------------------------
+# get_guide (ticket 025-007, UC-27) -- DaemonService.get_guide, direct
+# ---------------------------------------------------------------------------
+
+
+def test_get_guide_no_name_defaults_to_agent(service):
+    assert service.get_guide() == service.get_guide("agent")
+
+
+def test_get_guide_matches_client_guides_byte_identical_for_every_name(service):
+    """The single-source-of-truth guarantee this ticket exists to prove
+    (sprint 025's Design Rationale): ``DaemonService.get_guide`` and
+    ``client.guides.Guides.get`` both read ``aprilcam.guides.read_guide``
+    directly, so for every guide name -- not just the default -- the two
+    accessors return the exact same text, not merely similar text."""
+    client_guides = Guides()
+    for name in AVAILABLE_GUIDES:
+        assert service.get_guide(name) == client_guides.get(name)
+
+
+def test_get_guide_unknown_name_raises_unknown_guide_naming_available(service):
+    with pytest.raises(UnknownGuide) as excinfo:
+        service.get_guide("nonexistent")
+
+    assert excinfo.value.requested == "nonexistent"
+    assert excinfo.value.available == ("agent", "robot")
+
+
+# ---------------------------------------------------------------------------
+# GetGuide -- RPC round trips (ticket 025-007, UC-27, this sprint's last)
+# ---------------------------------------------------------------------------
+
+
+def test_rpc_get_guide_no_name_round_trips_agent_guide_text(stub):
+    response = stub.GetGuide(aprilcam_v2_pb2.GetGuideRequest())
+
+    assert response.text == Guides().get("agent")
+
+
+def test_rpc_get_guide_agent_name_round_trips_agent_guide_text(stub):
+    response = stub.GetGuide(aprilcam_v2_pb2.GetGuideRequest(name="agent"))
+
+    assert response.text == Guides().get("agent")
+
+
+def test_rpc_get_guide_robot_name_round_trips_robot_guide_text(stub):
+    response = stub.GetGuide(aprilcam_v2_pb2.GetGuideRequest(name="robot"))
+
+    assert response.text == Guides().get("robot")
+
+
+def test_rpc_get_guide_unknown_name_maps_to_not_found(stub):
+    with pytest.raises(grpc.RpcError) as excinfo:
+        stub.GetGuide(aprilcam_v2_pb2.GetGuideRequest(name="nonexistent"))
+
+    assert excinfo.value.code() == grpc.StatusCode.NOT_FOUND
+    metadata = dict(excinfo.value.trailing_metadata())
+    assert metadata["aprilcam-error-type"] == "UnknownGuide"
+    assert metadata["aprilcam-requested"] == "nonexistent"
+    assert metadata["aprilcam-available"] == "agent,robot"
 
 
 # ---------------------------------------------------------------------------

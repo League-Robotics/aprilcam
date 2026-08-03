@@ -34,6 +34,7 @@ from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import CameraIdentity
 from aprilcam.camera.registry import CameraRegistry
 from aprilcam.client.daemon_client import GrpcDaemon
+from aprilcam.client.guides import Guides
 from aprilcam.config.directories import Directories
 from aprilcam.config.interfaces import CameraConfig, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
@@ -44,6 +45,7 @@ from aprilcam.errors import (
     ConnectionFailed,
     NotCalibrated,
     UnknownCamera,
+    UnknownGuide,
     UnknownPlayfield,
 )
 from aprilcam.proto import aprilcam_v2_pb2_grpc
@@ -864,3 +866,60 @@ def test_get_frame_deskewed_embeds_the_current_annotation_set_via_client(directo
     assert len(filled.annotations.annotations) == 1
     assert filled.annotations.annotations[0].id == "goal"
     assert filled.annotations.revision == 1
+
+
+# ---------------------------------------------------------------------------
+# get_guide -- client wire round trips (ticket 025-007, UC-27, this
+# sprint's last). Exercises the full proto boundary: GrpcDaemon.get_guide
+# builds the GetGuideRequest, reads GetGuideResponse.text back directly
+# (no client/models.py converter needed -- a bare string has nothing to
+# convert).
+# ---------------------------------------------------------------------------
+
+
+def test_get_guide_no_name_round_trip_returns_agent_guide_text(client):
+    assert client.get_guide() == Guides().get("agent")
+
+
+def test_get_guide_agent_name_round_trip_returns_agent_guide_text(client):
+    assert client.get_guide("agent") == Guides().get("agent")
+
+
+def test_get_guide_robot_name_round_trip_returns_robot_guide_text(client):
+    assert client.get_guide("robot") == Guides().get("robot")
+
+
+def test_get_guide_unknown_name_raises_unknown_guide_naming_available(client):
+    with pytest.raises(UnknownGuide) as excinfo:
+        client.get_guide("nonexistent")
+
+    assert excinfo.value.requested == "nonexistent"
+    assert excinfo.value.available == ("agent", "robot")
+
+
+# ---------------------------------------------------------------------------
+# The single-source-of-truth proof (ticket 025-007's Definition of Done):
+# the RPC path (``client`` below, a real gRPC connection to a live daemon)
+# and the CLI's local, no-daemon path (``aprilcam guide``, which reads
+# ``client.guides.Guides`` directly -- see ``cli/guide.py``) both
+# ultimately read the same ``aprilcam/guides.py`` leaf, so they must serve
+# byte-identical text, not merely similar text. This is the one test in
+# the whole ticket that exercises *both* paths together in the same
+# assertion.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", [None, "agent", "robot"])
+def test_cli_no_daemon_path_and_live_daemon_rpc_serve_byte_identical_guide_text(
+    client, capsys, name
+):
+    from aprilcam.cli import main as cli_main
+
+    rpc_text = client.get_guide(name)
+
+    argv = ["guide"] if name is None else ["guide", name]
+    exit_code = cli_main(argv)
+    cli_text = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert cli_text == rpc_text

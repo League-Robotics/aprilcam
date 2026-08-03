@@ -7,7 +7,7 @@ are ticket 022-003; ``ResetCameraConfig`` is ticket 023-004;
 ``ClearAnnotations``/``GetAnnotations`` and the ``GetFrame`` annotation
 embed are ticket 024-001; ``FindFeature`` is ticket 025-002;
 ``RegisterTag``/``UnregisterTag``/``ListTagParameters`` are ticket
-025-004).
+025-004; ``GetGuide`` is ticket 025-007, this sprint's last).
 
 Translates between ``proto/aprilcam_v2.proto``'s service (sprint 020's
 four RPCs -- ``ListCameras``, ``ProbeCameras``, ``GetFrame``,
@@ -78,6 +78,7 @@ from aprilcam.errors import (
     NoPlayfieldLinked,
     NotCalibrated,
     UnknownCamera,
+    UnknownGuide,
     UnknownPlayfield,
 )
 from aprilcam.playfield.interfaces import Playfield
@@ -117,6 +118,11 @@ _STATUS_CODES = {
     AlreadyRunning: grpc.StatusCode.ALREADY_EXISTS,
     UnknownCamera: grpc.StatusCode.NOT_FOUND,
     UnknownPlayfield: grpc.StatusCode.NOT_FOUND,
+    # An unknown guide name (UC-27.S-3, ticket 025-007) -- same
+    # "requested a name that does not exist" semantics as
+    # UnknownCamera/UnknownPlayfield above, both also UnknownTarget
+    # subtypes.
+    UnknownGuide: grpc.StatusCode.NOT_FOUND,
     NotCalibrated: grpc.StatusCode.FAILED_PRECONDITION,
     # Same "the operation cannot succeed given current state" semantics
     # as NotCalibrated -- the camera is known, just not present right
@@ -623,6 +629,8 @@ def _abort(context: grpc.ServicerContext, exc: Exception) -> None:
     * :class:`~aprilcam.errors.UnknownPlayfield`: same two keys as
       :class:`UnknownCamera` -- both derive from ``UnknownTarget`` and
       share its ``requested``/``available`` shape.
+    * :class:`~aprilcam.errors.UnknownGuide`: same two keys again --
+      also an ``UnknownTarget`` subtype (UC-27.S-3, ticket 025-007).
     * :class:`CameraNotPresent`: + ``aprilcam-slug``.
     * :class:`~aprilcam.errors.NoPlayfieldLinked`: + ``aprilcam-camera``.
     """
@@ -635,7 +643,7 @@ def _abort(context: grpc.ServicerContext, exc: Exception) -> None:
         metadata = [("aprilcam-error-type", type(exc).__name__)]
         if isinstance(exc, AlreadyRunning):
             metadata.append(("aprilcam-holder", exc.holder))
-        elif isinstance(exc, (UnknownCamera, UnknownPlayfield)):
+        elif isinstance(exc, (UnknownCamera, UnknownPlayfield, UnknownGuide)):
             metadata.append(("aprilcam-requested", exc.requested))
             metadata.append(("aprilcam-available", ",".join(exc.available)))
         elif isinstance(exc, CameraNotPresent):
@@ -905,6 +913,21 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
                 for tag, params in registrations.items()
             ]
         )
+
+    def GetGuide(self, request, context):  # noqa: N802
+        """See ``daemon.interfaces.Daemon.get_guide`` (ticket 025-007,
+        UC-27). ``request.name`` absent (``HasField`` false) means the
+        default guide -- mirrors ``DaemonService.get_guide(name:
+        Optional[str] = None)`` exactly, the same optional-scalar
+        presence discipline every other optional request field in this
+        module already uses."""
+        name = request.name if request.HasField("name") else None
+        try:
+            text = self._service.get_guide(name)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.GetGuideResponse()
+        return aprilcam_v2_pb2.GetGuideResponse(text=text)
 
 
 class _GrpcListener(ControlPlaneListener):
