@@ -37,7 +37,7 @@ from aprilcam.client.interfaces import Guides as GuidesBase
 from aprilcam.mcp.connection import ConnectionManager
 from aprilcam.mcp.errors import handle_tool_errors
 from aprilcam.mcp.images import create_temp_dir
-from aprilcam.mcp.tools import configuration, perception
+from aprilcam.mcp.tools import configuration, mobile_tags, perception
 
 __all__ = ["build_server"]
 
@@ -147,5 +147,10 @@ def build_server(
     # calibration -- see `mcp/tools/configuration.py`'s module
     # docstring. Same `register(mcp, connection, temp_dir)` shape.
     configuration.register(mcp, connection, temp_dir)
+
+    # Ticket 004: the mobile-tag mount registry -- see `mcp/tools/
+    # mobile_tags.py`'s module docstring. Same `register(mcp,
+    # connection, temp_dir)` shape; independent of tickets 002/003/005.
+    mobile_tags.register(mcp, connection, temp_dir)
 
     return mcp
