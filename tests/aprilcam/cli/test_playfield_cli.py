@@ -109,6 +109,8 @@ class _FakeDaemon:
     get_playfield_returns: object = None
     get_playfield_raises: Optional[Exception] = None
     get_playfield_requested: Optional[str] = None
+    list_playfields_returns: Tuple[object, ...] = ()
+    list_playfields_raises: Optional[Exception] = None
     annotation_set_returns: object = None
     get_annotations_raises: Optional[Exception] = None
     get_annotations_requested: Optional[Tuple[str, Optional[str]]] = None
@@ -122,6 +124,11 @@ class _FakeDaemon:
 
     def list_cameras(self) -> Tuple[CameraState, ...]:
         return self.cameras
+
+    def list_playfields(self) -> Tuple[object, ...]:
+        if self.list_playfields_raises is not None:
+            raise self.list_playfields_raises
+        return self.list_playfields_returns
 
     def get_frame(self, camera: str, *, deskewed: bool = False, encoding: str = "jpeg") -> ImageFrame:
         self.requested_camera = camera
@@ -1078,4 +1085,112 @@ def test_annotations_h_prints_help_not_a_missing_hostname_error():
     parser = _build_parser()
     with pytest.raises(SystemExit) as excinfo:
         parser.parse_args(["playfield", "annotations", "main-playfield", "-h"])
+    assert excinfo.value.code == 0
+
+
+# ---------------------------------------------------------------------------
+# list -- the playfield counterpart to `camera list`
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _FakeDefinition:
+    width_cm: float = 134.3
+    height_cm: float = 89.3
+    _aruco: Tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+    _features: Tuple[object, ...] = tuple(range(25))
+
+    def required_aruco_ids(self) -> Tuple[int, ...]:
+        return self._aruco
+
+    def features(self) -> Tuple[object, ...]:
+        return self._features
+
+
+@dataclass
+class _FakePlayfield:
+    name: str = "main-playfield"
+    definition: _FakeDefinition = field(default_factory=_FakeDefinition)
+    _cameras: Tuple[str, ...] = ("arducam-ov9782-usb-camera",)
+
+    def linked_cameras(self) -> Tuple[str, ...]:
+        return self._cameras
+
+
+def test_list_prints_each_playfield_with_size_and_derived_camera_links(capsys):
+    daemon = _FakeDaemon(list_playfields_returns=(_FakePlayfield(),))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = playfield_cli.cmd_list(_args(), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "main-playfield" in out
+    assert "134.3 x 89.3 cm" in out
+    assert "aruco=10" in out
+    assert "features=25" in out
+    # the derived link is the one fact not readable from the JSON on disk
+    assert "arducam-ov9782-usb-camera" in out
+
+
+def test_list_with_no_playfields_is_an_empty_result_not_an_error(capsys):
+    """A daemon started before any playfield was pushed or installed is
+    a normal state (UC-01), exactly as an empty camera list is."""
+    discovery = _FakeDiscovery(daemon=_FakeDaemon(list_playfields_returns=()))
+
+    code = playfield_cli.cmd_list(_args(), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    assert "(no playfields)" in capsys.readouterr().out
+
+
+def test_list_shows_a_dash_when_no_camera_is_linked(capsys):
+    daemon = _FakeDaemon(
+        list_playfields_returns=(_FakePlayfield(_cameras=()),)
+    )
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = playfield_cli.cmd_list(_args(), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    assert "cameras=-" in capsys.readouterr().out
+
+
+def test_list_passes_the_daemon_flag_through(capsys):
+    discovery = _FakeDiscovery(daemon=_FakeDaemon(list_playfields_returns=()))
+
+    playfield_cli.cmd_list(
+        _args(daemon="pi-field.local"), discovery_factory=lambda: discovery
+    )
+
+    assert discovery.connected_with == "pi-field.local"
+
+
+def test_list_surfaces_a_connection_failure_as_a_typed_error(capsys):
+    discovery = _FakeDiscovery(connect_raises=ConnectionFailed("localhost"))
+
+    code = playfield_cli.cmd_list(_args(), discovery_factory=lambda: discovery)
+
+    assert code != 0
+    assert "localhost" in capsys.readouterr().err
+
+
+def test_list_fans_out_labelling_each_daemon(capsys):
+    daemon = _FakeDaemon(list_playfields_returns=(_FakePlayfield(),))
+    discovery = _FakeDiscovery(
+        daemon=daemon, infos=(_Info("localhost", is_local=True),)
+    )
+
+    code = playfield_cli.cmd_list(_args(all=True), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "localhost" in out
+    assert "main-playfield" in out
+
+
+def test_playfield_list_h_prints_help_not_a_missing_hostname_error():
+    parser = _build_parser()
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["playfield", "list", "-h"])
     assert excinfo.value.code == 0
