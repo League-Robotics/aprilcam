@@ -175,6 +175,71 @@ def test_stop_reports_not_running_when_nothing_was_running(capsys):
 
 
 # ---------------------------------------------------------------------------
+# restart -- stop-then-start, local-only for the same reason as its parts
+# ---------------------------------------------------------------------------
+
+
+def test_restart_refuses_a_remote_daemon_flag_without_touching_lifecycle(capsys):
+    lifecycle = _FakeLifecycle(_running=True)
+
+    code = daemon_cli.cmd_restart(
+        _args(daemon="pi-field.local"), lifecycle_factory=lambda: lifecycle
+    )
+
+    assert code == 1
+    assert lifecycle.stop_calls == 0
+    assert lifecycle.start_calls == 0
+    err = capsys.readouterr().err
+    assert "pi-field.local" in err
+    assert "SSH" in err
+
+
+def test_restart_stops_then_starts_a_running_daemon(capsys):
+    lifecycle = _FakeLifecycle(_running=True, _cameras=(_camera(),))
+
+    code = daemon_cli.cmd_restart(_args(), lifecycle_factory=lambda: lifecycle)
+
+    assert code == 0
+    assert (lifecycle.stop_calls, lifecycle.start_calls) == (1, 1)
+    out = capsys.readouterr().out
+    assert "daemon restarted" in out
+    assert "1 camera(s)" in out
+
+
+def test_restart_on_a_stopped_daemon_still_starts_it(capsys):
+    """``stop()`` is a quiet no-op when nothing is running (UC-13), so
+    ``restart`` doubles as "start it, whatever state it was in" -- but
+    it says *started*, not *restarted*, so the operator is not told a
+    process was replaced when none existed."""
+    lifecycle = _FakeLifecycle(_running=False, _cameras=(_camera(),))
+
+    code = daemon_cli.cmd_restart(_args(), lifecycle_factory=lambda: lifecycle)
+
+    assert code == 0
+    assert (lifecycle.stop_calls, lifecycle.start_calls) == (1, 1)
+    out = capsys.readouterr().out
+    assert "daemon started" in out
+    assert "restarted" not in out
+
+
+def test_restart_reports_a_failed_start_without_claiming_success(capsys):
+    """A restart whose start leg fails must surface the typed error --
+    reporting "restarted" after the daemon failed to come back up is
+    exactly the blind success reporting UC-03's sibling rule exists to
+    kill."""
+    lifecycle = _FakeLifecycle(
+        _running=True, start_raises=AlreadyRunning("pid 4242")
+    )
+
+    code = daemon_cli.cmd_restart(_args(), lifecycle_factory=lambda: lifecycle)
+
+    assert code != 0
+    captured = capsys.readouterr()
+    assert "restarted" not in captured.out
+    assert "4242" in captured.err
+
+
+# ---------------------------------------------------------------------------
 # status -- AC: local view vs. -d remote RPC view (UC-13's drafted answer)
 # ---------------------------------------------------------------------------
 

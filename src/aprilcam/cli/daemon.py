@@ -1,4 +1,4 @@
-"""``aprilcam daemon start|stop|status`` (ticket 020-006).
+"""``aprilcam daemon start|stop|restart|status`` (ticket 020-006).
 
 Thin argv-to-client-call shells, per ``adapters.md``'s "adapters hold
 no authoritative state" rule -- every line here either shapes argv,
@@ -56,7 +56,13 @@ from aprilcam.client.lifecycle import DaemonLifecycle
 from aprilcam.daemon.interfaces import DaemonStatus
 from aprilcam.errors import AprilCamError
 
-__all__ = ["add_subparser", "cmd_start", "cmd_stop", "cmd_status"]
+__all__ = [
+    "add_subparser",
+    "cmd_start",
+    "cmd_stop",
+    "cmd_restart",
+    "cmd_status",
+]
 
 
 def _refuse_remote(command: str, host: str) -> int:
@@ -119,6 +125,42 @@ def cmd_stop(
     return EXIT_OK
 
 
+def cmd_restart(
+    args: argparse.Namespace,
+    *,
+    lifecycle_factory: Callable[[], DaemonLifecycle] = DaemonLifecycle,
+) -> int:
+    """``aprilcam daemon restart`` -- stop (if running), then start.
+
+    Local-only for the same structural reason as ``start``/``stop``: it
+    is those two operations, so it inherits their refusal of ``-d``.
+
+    Stopping a daemon that is not running is a quiet no-op (UC-13), so
+    ``restart`` doubles as "start it, whatever state it was in" -- the
+    common case after a rebuild, where the running process predates the
+    current code and answers ``Method not found!`` for new RPCs.
+
+    Configuration is reloaded from disk on the way back up (UC-01), so
+    a restart re-reads ``config_dir``: an installed playfield and camera
+    link survive, while anything only ever pushed over RPC does not.
+    """
+    if args.daemon is not None:
+        return _refuse_remote("restart", args.daemon)
+    lifecycle = lifecycle_factory()
+    was_running = lifecycle.status().running
+    try:
+        lifecycle.stop()
+        lifecycle.start()
+    except AprilCamError as exc:
+        return report_error(exc)
+    status = lifecycle.status()
+    print(
+        f"daemon {'restarted' if was_running else 'started'} "
+        f"({len(status.cameras)} camera(s))"
+    )
+    return EXIT_OK
+
+
 def cmd_status(
     args: argparse.Namespace,
     *,
@@ -141,7 +183,7 @@ def cmd_status(
 
 
 def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
-    """Wire ``daemon start|stop|status`` into the top-level parser."""
+    """Wire ``daemon start|stop|restart|status`` into the top-level parser."""
     parser = subparsers.add_parser(
         "daemon", help="manage the local daemon process"
     )
@@ -155,6 +197,12 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     p_stop = sub.add_parser("stop", help="stop the local daemon")
     add_daemon_option(p_stop)
     p_stop.set_defaults(func=cmd_stop)
+
+    p_restart = sub.add_parser(
+        "restart", help="stop then start the local daemon"
+    )
+    add_daemon_option(p_restart)
+    p_restart.set_defaults(func=cmd_restart)
 
     p_status = sub.add_parser("status", help="report daemon readiness")
     add_daemon_option(p_status)
