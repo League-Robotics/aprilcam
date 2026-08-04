@@ -116,6 +116,89 @@ wall-clock cadence, not only when something happens to poll
 is completely unaffected: its buffer stays exactly as query-driven as
 sprint 021 left it (``daemon/detection.py``'s own updated docstring
 note).
+
+----------------------------------------------------------------------
+
+``ImageStreamProducer`` -- idle-gated background capture(+warp)+encode
+for one (camera, deskewed) pair's image stream (sprint 027 ticket 004,
+UC-07/SUC-002/SUC-004).
+
+**Thin scheduler around the same routines ``DaemonService.get_frame``/
+``_get_deskewed_frame`` already call, not a second implementation of
+them.** The raw branch is ``camera.read()`` + ``cv2.imencode`` exactly
+as ``get_frame(deskewed=False)`` does; the deskewed branch reuses
+``calibration.deskew.Deskewer`` -- the *exact same class*
+``_get_deskewed_frame`` constructs -- for the warp itself. Nothing here
+reimplements the homography or the JPEG encode.
+
+**One producer per (camera, deskewed) key is what makes "two
+subscribers, one warp" true -- structurally, not by a dedup check.**
+``daemon.service.DaemonService.stream_images`` keys its producer cache
+by ``(slug, deskewed)`` (mirroring ticket 003's per-slug
+``_tag_stream_producers`` cache, one dimension wider): two calls for
+the *same* pair reuse the *same* :class:`ImageStreamProducer`, so N
+subscribers to it share one background loop calling
+``Deskewer.deskew`` once per tick and one :class:`~aprilcam.daemon.
+broadcast.Broadcaster` fanning the *same* published ``ImageFrame``
+object out to every subscriber's queue -- there is only ever one thing
+to compute per tick, the same structural argument
+``daemon/broadcast.py``'s own module docstring makes. Raw and deskewed
+are independent producers (different key), so subscribing to one never
+starts or affects the other.
+
+**Streams are always JPEG** (``daemon.interfaces.Daemon.get_frame``'s
+own docstring: "streams are JPEG, where per-frame loss is the accepted
+trade") -- unlike ``get_frame``'s one-shot ``encoding`` parameter,
+:class:`ImageStreamProducer` has no encoding choice to make.
+
+**No change-detection, no heartbeat, no rate cap -- unlike
+:class:`TagStreamProducer`.** ``sprint.md``'s SUC-002 main flow says
+plainly: capture, (warp,) encode, publish, "at a steady cadence" --
+every tick publishes unconditionally. Tag streams need change-driven
+publish because a robot control loop cares about *positions*, where
+"nothing changed" is real signal; an image stream is frames, where the
+steady cadence itself is the contract (a viewer wants the next frame,
+not a decision about whether this one was interesting).
+
+**Frame geometry is snapshotted once per stream life, not
+recomputed per tick (UC-07's "frame geometry stable for the life of a
+stream" contract, this ticket's AC4).** ``Deskewer`` itself already
+computes ``output_size``/``px_per_cm``/``world_extent`` once, at
+*its own* construction, and never recomputes them
+(``calibration/deskew.py``'s own docstring) -- this class's
+contribution is constructing exactly **one** ``Deskewer`` per
+:meth:`start` (the 0->1 subscriber transition that begins a stream's
+life) and reusing that same instance for every tick until :meth:`stop`,
+rather than building a fresh one from whatever the calibration/
+playfield stores currently say. Concretely: a ``set_playfield`` push
+that replaces the linked playfield's definition (different
+``width_cm``/``height_cm``) mid-stream has **zero** effect on an
+already-running stream's ``px_per_cm``/``world_extent`` -- the new
+dimensions only take effect on the *next* stream (a fresh
+:meth:`start` after the last subscriber left and a new one arrived),
+exactly mirroring one-shot ``get_frame``'s own "one call, one
+snapshot" behaviour extended across a whole stream's life instead of
+one call. ``calibration_stale`` is deliberately **not** part of this
+snapshot -- it is read fresh from ``calibration_lookup`` on every tick,
+so a mid-stream staleness flip still reaches the very next published
+frame (this ticket's own acceptance criterion) without disturbing the
+frozen geometry.
+
+**Preconditions are checked before a producer is ever created, never
+inside the background thread.** ``daemon.service.DaemonService.
+stream_images`` raises ``NotCalibrated`` for a deskewed request against
+an uncalibrated camera (or one whose calibrated-against playfield is no
+longer held) *before* constructing or reusing an
+:class:`ImageStreamProducer` -- the same "checked before any hardware
+access, never a raw frame silently substituted" discipline
+``_get_deskewed_frame`` already established for the one-shot path
+(module docstring of ``daemon/service.py``). A deskewed stream request
+therefore either raises synchronously, in the caller's own thread, or
+succeeds with a calibration that stays valid for the rest of the
+process's life (calibration is never un-set, only marked stale) -- the
+background thread's own calibration/playfield lookup at :meth:`start`
+is consequently a should-not-fail path, guarded defensively (logged and
+retried next tick) rather than left to crash the thread.
 """
 
 from __future__ import annotations
@@ -124,15 +207,20 @@ import logging
 import math
 import threading
 import time
+from dataclasses import dataclass
 from typing import Callable, Dict, Iterator, Optional, Tuple
 
+import cv2 as cv
 import queue
 
+from aprilcam.calibration.calibration import Calibration
+from aprilcam.calibration.deskew import Deskewer
 from aprilcam.camera.interfaces import Camera
+from aprilcam.config.interfaces import PlayfieldDefinition
 from aprilcam.daemon.broadcast import DEFAULT_SUBSCRIBER_QUEUE_DEPTH, Broadcaster
 from aprilcam.daemon.detection import DetectionEngine
-from aprilcam.daemon.interfaces import TagStream
-from aprilcam.types import TagFrame, TagId
+from aprilcam.daemon.interfaces import ImageStream, TagStream
+from aprilcam.types import AnnotationSet, ImageFrame, TagFrame, TagId
 from aprilcam.vision.motion import MIN_RELIABLE_DISPLACEMENT_CM
 
 __all__ = [
@@ -143,6 +231,9 @@ __all__ = [
     "TAG_STREAM_MAX_PUBLISH_HZ",
     "TAG_STREAM_CHANGE_THRESHOLD_CM",
     "TAG_STREAM_CHANGE_THRESHOLD_PX",
+    "ImageStreamProducer",
+    "BroadcasterImageStream",
+    "IMAGE_STREAM_INTERVAL_S",
 ]
 
 logger = logging.getLogger(__name__)
@@ -178,6 +269,20 @@ TAG_STREAM_CHANGE_THRESHOLD_CM = MIN_RELIABLE_DISPLACEMENT_CM
 #: position (camera uncalibrated) -- carried forward unchanged from
 #: v1's ``TagStreamProducer.change_threshold_px`` default (8.0 px).
 TAG_STREAM_CHANGE_THRESHOLD_PX = 8.0
+
+#: How often :class:`ImageStreamProducer` captures(+warps)+encodes a
+#: fresh frame while at least one subscriber exists -- an honestly
+#: provisional constant (sprint.md Open Question 1's "detection
+#: cadence, image cadence... are provisional constants", same status
+#: :data:`TAG_STREAM_INTERVAL_S` has), not tuned against real hardware
+#: (blocked this sprint, dark/obstructed field). Set lower than
+#: :data:`TAG_STREAM_INTERVAL_S` deliberately -- a JPEG encode, plus a
+#: perspective warp for the deskewed case, is real per-tick CPU cost
+#: `run_burst` does not pay in the same way, so this starts at a more
+#: conservative 15 Hz rather than reusing the tag cadence's ~30 Hz
+#: unexamined. Overridable per instance
+#: (``ImageStreamProducer(..., interval_s=...)``).
+IMAGE_STREAM_INTERVAL_S = 1.0 / 15.0
 
 #: One tag's last-published position, tagged with which space it was
 #: measured in (``True`` = world cm, ``False`` = pixel) so a record that
@@ -487,6 +592,373 @@ class BroadcasterTagStream(TagStream):
         """Idempotent: a second ``close()`` is a safe no-op, matching
         ``Broadcaster.unsubscribe``'s own no-op-on-unknown-queue
         guarantee."""
+        if self._closed.is_set():
+            return
+        self._closed.set()
+        self._broadcaster.unsubscribe(self._queue)
+
+
+def _default_deskewer_factory(calibration: Calibration, definition: PlayfieldDefinition) -> Deskewer:
+    """The real warp routine :class:`ImageStreamProducer` uses by
+    default -- *exactly* the ``calibration.deskew.Deskewer`` class
+    ``DaemonService._get_deskewed_frame`` constructs for a one-shot
+    request, not a second implementation. Overridable
+    (``ImageStreamProducer(..., deskewer_factory=...)``) so a test can
+    substitute a call-counting wrapper around this same class to prove
+    "one warp per tick, not two" (this ticket's own acceptance
+    criterion) without monkeypatching this module."""
+    return Deskewer(calibration=calibration, width_cm=definition.width_cm, height_cm=definition.height_cm)
+
+
+@dataclass
+class _DeskewContext:
+    """What :meth:`ImageStreamProducer.start` snapshots exactly once
+    per stream life (module docstring's "Frame geometry" section):
+    the ``Deskewer`` instance whose ``px_per_cm``/``world_extent`` stay
+    fixed for every tick until :meth:`ImageStreamProducer.stop`, and the
+    playfield name (from ``calibration.playfield``) that
+    ``annotations_lookup`` is called against every tick -- annotations
+    themselves are *not* frozen, only the geometry is."""
+
+    deskewer: Deskewer
+    playfield_name: str
+
+
+class ImageStreamProducer:
+    """Captures(+warps if deskewed)+JPEG-encodes at a steady cadence for
+    one (camera, deskewed) pair, publishing ``ImageFrame``\\ s through a
+    :class:`~aprilcam.daemon.broadcast.Broadcaster`.
+
+    See the module docstring (the section beginning "``ImageStreamProducer``")
+    for the idle-gating, shared-computation, geometry-stability, and
+    precondition-checking design -- all identical in spirit to
+    :class:`TagStreamProducer`, adapted for images.
+
+    Parameters
+    ----------
+    slug:
+        The camera slug this producer captures from -- passed straight
+        through to *camera*/*detection* exactly as
+        :class:`TagStreamProducer` does.
+    camera:
+        The already-open ``Camera`` this producer reads from. Same
+        ownership contract as :class:`TagStreamProducer`'s *camera*:
+        never opened or closed by this class.
+    detection:
+        The shared ``DetectionEngine`` this producer reads
+        :meth:`~aprilcam.daemon.detection.DetectionEngine.latest` from
+        to embed each published frame's ``tags`` -- the same instance
+        ``DaemonService.get_frame`` already reads for its own tag embed
+        (module docstring: "matching ``get_frame``'s existing embed
+        contract exactly"). This producer never calls
+        ``run_burst`` itself -- it only reads whatever the camera's tag
+        stream (or one-shot queries) have already put in the buffer.
+    broadcaster:
+        The ``Broadcaster[ImageFrame]`` this producer publishes into.
+        Same default-construct-or-accept-a-pre-wired-one contract as
+        :class:`TagStreamProducer`'s *broadcaster*.
+    deskewed:
+        ``False`` (the default) for the raw product: capture + encode
+        only, ``tags`` embedded, ``annotations`` always ``None``,
+        ``px_per_cm``/``world_extent`` always ``None`` -- matching
+        ``get_frame(deskewed=False)`` exactly. ``True`` for the
+        deskewed product: also warps via *deskewer_factory* and embeds
+        the linked playfield's current ``AnnotationSet`` -- matching
+        ``get_frame(deskewed=True)``/``_get_deskewed_frame`` exactly.
+        Requires *calibration_lookup*, *playfield_lookup*, and
+        *annotations_lookup* to all be given (``ValueError`` otherwise).
+    calibration_lookup:
+        Called as ``calibration_lookup(slug)``, returning the camera's
+        current ``Calibration`` or ``None`` -- the same shape as
+        ``DetectionEngine``'s own ``calibration_lookup`` (and, in
+        practice, the identical bound method,
+        ``DaemonService.get_calibration``). Used every tick (both raw
+        and deskewed) to overlay ``calibration_stale``; used once, at
+        :meth:`start`, to build the deskewed geometry snapshot.
+    playfield_lookup:
+        Called as ``playfield_lookup(calibration.playfield)``, returning
+        the linked ``PlayfieldDefinition`` or ``None`` -- only used
+        (once, at :meth:`start`) when *deskewed* is ``True``, to build
+        *deskewer_factory*'s input.
+    annotations_lookup:
+        Called as ``annotations_lookup(playfield_name)`` **every tick**
+        (deliberately not snapshotted -- see the module docstring) to
+        embed the playfield's *current* ``AnnotationSet``. Only used
+        when *deskewed* is ``True``.
+    deskewer_factory:
+        Builds the one ``Deskewer`` :meth:`start` snapshots for the
+        stream's life. Defaults to :func:`_default_deskewer_factory`
+        (the real warp); a test overrides this to inject a
+        call-counting double around the same real ``Deskewer``.
+    interval_s:
+        See :data:`IMAGE_STREAM_INTERVAL_S` for the default and its
+        provenance. Overridable per instance.
+    queue_depth / clock / wait / stop_timeout_s:
+        Identical meaning to :class:`TagStreamProducer`'s parameters of
+        the same name -- see that class's docstring.
+    """
+
+    def __init__(
+        self,
+        slug: str,
+        camera: Camera,
+        detection: DetectionEngine,
+        broadcaster: "Optional[Broadcaster[ImageFrame]]" = None,
+        *,
+        deskewed: bool = False,
+        calibration_lookup: Optional[Callable[[str], Optional[Calibration]]] = None,
+        playfield_lookup: Optional[Callable[[str], Optional[PlayfieldDefinition]]] = None,
+        annotations_lookup: Optional[Callable[[str], AnnotationSet]] = None,
+        deskewer_factory: Callable[[Calibration, PlayfieldDefinition], Deskewer] = (
+            _default_deskewer_factory
+        ),
+        interval_s: float = IMAGE_STREAM_INTERVAL_S,
+        queue_depth: int = DEFAULT_SUBSCRIBER_QUEUE_DEPTH,
+        clock: Callable[[], float] = time.monotonic,
+        wait: Callable[[threading.Event, float], bool] = _default_wait,
+        stop_timeout_s: float = 2.0,
+    ) -> None:
+        if deskewed and (
+            calibration_lookup is None or playfield_lookup is None or annotations_lookup is None
+        ):
+            raise ValueError(
+                "ImageStreamProducer(deskewed=True) requires calibration_lookup, "
+                "playfield_lookup, and annotations_lookup"
+            )
+        self._slug = slug
+        self._camera = camera
+        self._detection = detection
+        self._deskewed = deskewed
+        self._calibration_lookup = calibration_lookup
+        self._playfield_lookup = playfield_lookup
+        self._annotations_lookup = annotations_lookup
+        self._deskewer_factory = deskewer_factory
+        self._interval_s = interval_s
+        self._clock = clock
+        self._wait = wait
+        self._stop_timeout_s = stop_timeout_s
+
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._start_stop_lock = threading.Lock()
+
+        #: The stream-life geometry snapshot (module docstring) -- built
+        #: lazily, on the first tick after :meth:`start`, and reset to
+        #: ``None`` again by every :meth:`start` so a resubscribe after
+        #: a full stop genuinely starts fresh (this ticket's own
+        #: acceptance criterion). ``None`` for a raw producer for its
+        #: entire life -- never consulted on that path.
+        self._deskew_ctx: Optional[_DeskewContext] = None
+
+        self.broadcaster: "Broadcaster[ImageFrame]" = (
+            broadcaster
+            if broadcaster is not None
+            else Broadcaster(queue_depth=queue_depth, on_active=self.start, on_idle=self.stop)
+        )
+
+    @property
+    def slug(self) -> str:
+        return self._slug
+
+    @property
+    def deskewed(self) -> bool:
+        return self._deskewed
+
+    @property
+    def running(self) -> bool:
+        """Whether the background thread currently exists -- a direct
+        internal-state observable, identical in spirit to
+        :attr:`TagStreamProducer.running`."""
+        return self._thread is not None
+
+    # -- lifecycle: Broadcaster's on_active/on_idle hooks -----------------
+
+    def start(self) -> None:
+        """Begin the background production loop. Idempotent; intended
+        as ``Broadcaster``'s ``on_active`` callback (the 0->1 subscriber
+        transition). Resets the geometry snapshot (module docstring) so
+        a fresh stream life always rebuilds it from whatever calibration
+        currently says, rather than reusing a snapshot from a previous
+        stream's life."""
+        with self._start_stop_lock:
+            if self._thread is not None:
+                return
+            self._stop.clear()
+            self._deskew_ctx = None
+            thread = threading.Thread(
+                target=self._run,
+                name=f"image-stream-{self._slug}-{'deskewed' if self._deskewed else 'raw'}",
+                daemon=True,
+            )
+            self._thread = thread
+            thread.start()
+
+    def stop(self) -> None:
+        """Stop and **join** the background thread -- identical
+        contract to :meth:`TagStreamProducer.stop`, including the
+        bounded-timeout-then-log-and-continue behaviour for a wedged
+        thread."""
+        with self._start_stop_lock:
+            thread = self._thread
+            if thread is None:
+                return
+            self._stop.set()
+            thread.join(timeout=self._stop_timeout_s)
+            if thread.is_alive():
+                logger.warning(
+                    "image stream producer %s (deskewed=%s): background thread did not "
+                    "stop within %.1fs",
+                    self._slug,
+                    self._deskewed,
+                    self._stop_timeout_s,
+                )
+            self._thread = None
+
+    # -- the production loop ----------------------------------------------
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            tick_start = self._clock()
+            try:
+                self._tick()
+            except Exception:  # pragma: no cover - defensive
+                logger.exception(
+                    "image stream producer %s (deskewed=%s): unhandled error in "
+                    "production tick",
+                    self._slug,
+                    self._deskewed,
+                )
+            elapsed = self._clock() - tick_start
+            remaining = self._interval_s - elapsed
+            if remaining > 0:
+                self._wait(self._stop, remaining)
+
+    def _tick(self) -> None:
+        deskew_ctx: Optional[_DeskewContext] = None
+        if self._deskewed:
+            if self._deskew_ctx is None:
+                self._deskew_ctx = self._build_deskew_context()
+            deskew_ctx = self._deskew_ctx
+            if deskew_ctx is None:
+                # Should not happen in practice -- DaemonService.stream_images
+                # checks calibration before ever constructing/reusing this
+                # producer (module docstring's "Preconditions" section).
+                # Guarded here regardless, rather than crashing the loop, so
+                # a genuinely-impossible-today race is a silent skipped tick,
+                # not a dead background thread.
+                logger.debug(
+                    "image stream producer %s: calibration/playfield not yet "
+                    "available -- skipping tick",
+                    self._slug,
+                )
+                return
+
+        frame = self._camera.read()
+        if frame is None:
+            logger.debug("image stream producer %s: no frame available this tick", self._slug)
+            return
+
+        calibration = self._calibration_lookup(self._slug) if self._calibration_lookup else None
+        calibration_stale = calibration.stale if calibration is not None else False
+
+        if deskew_ctx is not None:
+            image = deskew_ctx.deskewer.deskew(frame)
+            px_per_cm: Optional[float] = deskew_ctx.deskewer.px_per_cm
+            world_extent: Optional[Tuple[float, float]] = deskew_ctx.deskewer.world_extent
+            assert self._annotations_lookup is not None  # guaranteed by __init__'s guard
+            annotations: Optional[AnnotationSet] = self._annotations_lookup(
+                deskew_ctx.playfield_name
+            )
+        else:
+            image = frame
+            px_per_cm = None
+            world_extent = None
+            annotations = None
+
+        ok, buf = cv.imencode(".jpg", image)
+        if not ok:
+            logger.warning(
+                "image stream producer %s: failed to encode frame as jpeg", self._slug
+            )
+            return
+
+        height, width = image.shape[:2]
+        image_frame = ImageFrame(
+            data=buf.tobytes(),
+            width=width,
+            height=height,
+            encoding="jpeg",
+            timestamp=time.time(),
+            deskewed=self._deskewed,
+            px_per_cm=px_per_cm,
+            world_extent=world_extent,
+            tags=self._detection.latest(self._slug),
+            annotations=annotations,
+            calibration_stale=calibration_stale,
+        )
+        self.broadcaster.publish(image_frame)
+
+    def _build_deskew_context(self) -> Optional[_DeskewContext]:
+        """The one-time (per stream life) geometry snapshot -- see the
+        module docstring's "Frame geometry" section. Returns ``None``
+        (never raises) when calibration or its linked playfield is
+        momentarily unavailable, so a should-not-happen race degrades to
+        a skipped tick rather than a dead thread."""
+        assert self._calibration_lookup is not None and self._playfield_lookup is not None
+        calibration = self._calibration_lookup(self._slug)
+        if calibration is None:
+            logger.warning(
+                "image stream producer %s: no calibration available at stream start",
+                self._slug,
+            )
+            return None
+        definition = self._playfield_lookup(calibration.playfield)
+        if definition is None:
+            logger.warning(
+                "image stream producer %s: calibrated playfield %r is no longer held",
+                self._slug,
+                calibration.playfield,
+            )
+            return None
+        deskewer = self._deskewer_factory(calibration, definition)
+        return _DeskewContext(deskewer=deskewer, playfield_name=calibration.playfield)
+
+
+class BroadcasterImageStream(ImageStream):
+    """The concrete ``daemon.interfaces.ImageStream`` a subscription to
+    an :class:`ImageStreamProducer`'s ``Broadcaster`` returns
+    (``daemon.service.DaemonService.stream_images``).
+
+    Derives from ``daemon.interfaces.ImageStream`` -- mechanical
+    inheritance, not structural, mirroring :class:`BroadcasterTagStream`
+    exactly (module design rule, zero ``typing.Protocol``).
+    """
+
+    def __init__(
+        self,
+        broadcaster: "Broadcaster[ImageFrame]",
+        subscriber_queue: "queue.Queue[ImageFrame]",
+        *,
+        poll_interval_s: float = 0.5,
+    ) -> None:
+        self._broadcaster = broadcaster
+        self._queue = subscriber_queue
+        self._poll_interval_s = poll_interval_s
+        self._closed = threading.Event()
+
+    def __iter__(self) -> Iterator[ImageFrame]:
+        """Yield published ``ImageFrame``\\ s until :meth:`close` is
+        called -- identical bounded-poll pattern to
+        :meth:`BroadcasterTagStream.__iter__`."""
+        while not self._closed.is_set():
+            try:
+                yield self._queue.get(timeout=self._poll_interval_s)
+            except queue.Empty:
+                continue
+
+    def close(self) -> None:
+        """Idempotent, identical contract to
+        :meth:`BroadcasterTagStream.close`."""
         if self._closed.is_set():
             return
         self._closed.set()

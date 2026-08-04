@@ -34,19 +34,22 @@ handling -- is delegated the same way to ``daemon/detection.py``
 021's module boundary table exactly as sprint 020's did for cameras.
 
 **Only a subset of ``Daemon``'s methods are implemented.** ``daemon.
-interfaces.Daemon`` is a much larger base class -- ``stream_images``/
-``stream_tags`` are the remaining unimplemented pair as of this sprint,
-belonging to a later sprint per the sprint architecture's Out-of-Scope
-section -- and are simply absent from :class:`DaemonService`, inherited
-as-is from ``Daemon``. Calling one of them here raises ``NotImplementedError``
-naming the missing method (``daemon.interfaces``'s module docstring
-explains why this is a plain base class and not ``abc.ABC``:
-un-instantiable until all 27 methods existed would force 23 hollow
-stubs, which is worse than an honest partial implementation).
-``isinstance(service, Daemon)`` is ``True`` -- :class:`DaemonService`
-really is a ``Daemon``, just an incomplete one; the per-method
-``NotImplementedError`` is what keeps that honest rather than
-pretending full conformance.
+interfaces.Daemon`` is a much larger base class -- as of sprint 027
+``stream_tags`` (ticket 003) and ``stream_images`` (ticket 004) both
+have real, in-process implementations (see their own docstrings below
+for the ``daemon/streaming.py`` producers each wires up); the RPC/socket
+transport that exposes them to a remote client is ticket 005's job, not
+this class's. Whatever of ``Daemon``'s surface remains unbuilt at any
+given point is simply absent from :class:`DaemonService`, inherited
+as-is from ``Daemon``. Calling one of *those* here raises
+``NotImplementedError`` naming the missing method (``daemon.interfaces``'s
+module docstring explains why this is a plain base class and not
+``abc.ABC``: un-instantiable until all 27 methods existed would force
+hollow stubs onto every partial implementation, which is worse than an
+honest partial one). ``isinstance(service, Daemon)`` is ``True`` --
+:class:`DaemonService` really is a ``Daemon``, just an incomplete one;
+the per-method ``NotImplementedError`` is what keeps that honest rather
+than pretending full conformance.
 
 **Long-lived ``Camera`` instances, held open.** ``get_frame`` opens a
 camera *at most once*: the first successful open is cached in
@@ -94,8 +97,13 @@ from aprilcam.config.interfaces import ConfigLoader as ConfigLoaderIface
 from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitionIface
 from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
 from aprilcam.daemon.detection import DetectionEngine
-from aprilcam.daemon.interfaces import Daemon, DaemonStatus, TagStream
-from aprilcam.daemon.streaming import BroadcasterTagStream, TagStreamProducer
+from aprilcam.daemon.interfaces import Daemon, DaemonStatus, ImageStream, TagStream
+from aprilcam.daemon.streaming import (
+    BroadcasterImageStream,
+    BroadcasterTagStream,
+    ImageStreamProducer,
+    TagStreamProducer,
+)
 from aprilcam.errors import (
     CameraNotPresent,
     NotCalibrated,
@@ -340,6 +348,17 @@ class DaemonService(Daemon):
         # ``stream_tags`` call for the same camera reuses the same
         # producer object rather than constructing a second one.
         self._tag_stream_producers: Dict[str, TagStreamProducer] = {}
+        # (slug, deskewed) -> its live ImageStreamProducer (ticket 027-004,
+        # UC-07). Keyed one dimension wider than ``_tag_stream_producers``
+        # above -- raw and deskewed are independent producers/streams for
+        # the same camera (sprint.md's per-(camera, product) idle gating) --
+        # but otherwise populated/reused/torn-down identically: lazily on
+        # :meth:`stream_images`'s first call for a given key, reused for
+        # every subsequent call against the same key, never removed on
+        # idle (a producer with zero subscribers is just a stopped thread;
+        # :meth:`close` still finds and stops it, harmlessly, if it was
+        # never restarted).
+        self._image_stream_producers: Dict[Tuple[str, bool], ImageStreamProducer] = {}
         self._lock = threading.Lock()
         self._calibrator = calibrator if calibrator is not None else Calibrator(
             get_camera_config=self._camera_config_for_calibration,
@@ -683,6 +702,73 @@ class DaemonService(Daemon):
                 self._tag_stream_producers[cam.slug] = producer
         subscriber_queue = producer.broadcaster.subscribe()
         return BroadcasterTagStream(producer.broadcaster, subscriber_queue)
+
+    # -- streams: images (ticket 027-004, UC-07/SUC-002) ---------------------
+
+    def stream_images(self, camera: str, *, deskewed: bool = False) -> ImageStream:
+        """See ``daemon.interfaces.Daemon.stream_images``.
+
+        **In-process only, this ticket** -- same split as
+        :meth:`stream_tags`: ``daemon/rpc.py``'s ``GetImageStream`` RPC
+        and the raw-socket bridge are ticket 005's job (see that
+        ticket's Completion Notes reconciliation for the full
+        three-way corroboration this reading rests on, restated here
+        for this method).
+
+        **Calibration is checked, and this raises, before any producer
+        is constructed or reused** -- exactly the same two-step
+        precondition :meth:`_get_deskewed_frame` already applies to the
+        one-shot path (that method's own docstring), so a deskewed
+        stream request on an uncalibrated camera -- or one calibrated
+        against a playfield this daemon no longer holds -- fails
+        synchronously in the caller's own thread with
+        :class:`~aprilcam.errors.NotCalibrated`, never by silently
+        substituting a raw stream (UC-06.S-3's rule, extended here to
+        streams). A raw stream (``deskewed=False``) needs no
+        calibration, exactly like ``get_frame(deskewed=False)``.
+
+        Lazily builds (and this service tracks, keyed by ``(slug,
+        deskewed)``) one ``daemon.streaming.ImageStreamProducer`` per
+        pair the first time it is asked for, reusing it on every
+        subsequent call for the same pair -- the same reuse discipline
+        :meth:`stream_tags` already established, one key dimension
+        wider (sprint.md Open Question 3's recommended reuse default).
+        Raw and deskewed are independent producers: subscribing to one
+        never starts, or is affected by, the other. The producer's own
+        idle-gating (ticket 004, mirroring ticket 003) starts/stops its
+        background thread on *this* (camera, deskewed) pair's
+        ``Broadcaster``'s first-subscriber/last-unsubscriber transition
+        -- this method does no lifecycle management of its own beyond
+        constructing the producer once and subscribing to it.
+        """
+        cam = self._camera_for(camera)
+        if deskewed:
+            calibration = self.get_calibration(cam.slug)
+            if calibration is None:
+                raise NotCalibrated(f"{camera!r} is not calibrated")
+            definition = self._playfield_for_calibration(calibration.playfield)
+            if definition is None:
+                raise NotCalibrated(
+                    f"{camera!r} was calibrated against playfield "
+                    f"{calibration.playfield!r}, which this daemon no longer holds"
+                )
+
+        key = (cam.slug, deskewed)
+        with self._lock:
+            producer = self._image_stream_producers.get(key)
+            if producer is None:
+                producer = ImageStreamProducer(
+                    cam.slug,
+                    cam,
+                    self._detection,
+                    deskewed=deskewed,
+                    calibration_lookup=self.get_calibration,
+                    playfield_lookup=self._playfield_for_calibration,
+                    annotations_lookup=self.get_annotations,
+                )
+                self._image_stream_producers[key] = producer
+        subscriber_queue = producer.broadcaster.subscribe()
+        return BroadcasterImageStream(producer.broadcaster, subscriber_queue)
 
     def status(self) -> DaemonStatus:
         """See ``daemon.interfaces.Daemon.status``.
@@ -1452,35 +1538,47 @@ class DaemonService(Daemon):
     # -- beyond the interface: shutdown cleanup ----------------------------
 
     def close(self) -> None:
-        """Stop every tracked ``TagStreamProducer``, then close every
-        held-open camera. Not part of the ``Daemon`` base class --
-        ``daemon/lifecycle.py``'s ``on_stop`` hook calls this during a
-        clean shutdown so no backend handle, and no background stream
-        thread, outlives the process that opened it (sprint.md
-        Migration Concerns, "Clean daemon shutdown" -- ticket 027-003's
-        own acceptance criterion).
+        """Stop every tracked ``TagStreamProducer``/``ImageStreamProducer``,
+        then close every held-open camera. Not part of the ``Daemon``
+        base class -- ``daemon/lifecycle.py``'s ``on_stop`` hook calls
+        this during a clean shutdown so no backend handle, and no
+        background stream thread, outlives the process that opened it
+        (sprint.md Migration Concerns, "Clean daemon shutdown" -- ticket
+        027-003's own acceptance criterion, extended to image producers
+        by ticket 027-004's identical one).
 
         **Producers stop first, cameras close second, deliberately.**
-        ``TagStreamProducer.stop()`` joins its background thread with a
-        bounded timeout before returning -- stopping every producer
-        before any camera is closed guarantees no producer thread is
-        still mid-``Camera.read()`` when that camera's backend handle
-        is torn down. ``TagStreamProducer.stop()`` is already a safe,
-        idempotent no-op for a producer with no live thread (an idle
-        one), so this loop does not need to distinguish active from
-        idle producers first.
+        Both producer classes' ``stop()`` join their background thread
+        with a bounded timeout before returning -- stopping every
+        producer before any camera is closed guarantees no producer
+        thread is still mid-``Camera.read()`` when that camera's
+        backend handle is torn down. Both are already safe, idempotent
+        no-ops for a producer with no live thread (an idle one), so this
+        loop does not need to distinguish active from idle producers
+        first.
         """
         with self._lock:
-            producers = list(self._tag_stream_producers.values())
+            tag_producers = list(self._tag_stream_producers.values())
             self._tag_stream_producers.clear()
+            image_producers = list(self._image_stream_producers.values())
+            self._image_stream_producers.clear()
             held = list(self._cameras.values())
             self._cameras.clear()
-        for producer in producers:
+        for producer in tag_producers:
             try:
                 producer.stop()
             except Exception:  # pragma: no cover - defensive
                 logger.exception(
                     "error stopping tag stream producer %s during shutdown", producer.slug
+                )
+        for image_producer in image_producers:
+            try:
+                image_producer.stop()
+            except Exception:  # pragma: no cover - defensive
+                logger.exception(
+                    "error stopping image stream producer %s (deskewed=%s) during shutdown",
+                    image_producer.slug,
+                    image_producer.deskewed,
                 )
         for cam in held:
             try:
