@@ -34,7 +34,7 @@ from aprilcam.camera.registry import CameraRegistry
 from aprilcam.config.directories import Directories
 from aprilcam.config.loader import ConfigLoader
 from aprilcam.daemon.lifecycle import SOCKET_FILENAME, DaemonLifecycle
-from aprilcam.daemon.rpc import build_server
+from aprilcam.daemon.rpc import build_server, build_stream_transport
 from aprilcam.daemon.service import DaemonService
 
 __all__ = ["build", "main"]
@@ -108,6 +108,25 @@ def build(
         Path(socket_path) if socket_path is not None else directories.socket_dir / SOCKET_FILENAME
     )
 
+    # Ticket 027-005: the raw-socket stream transport (GetImageStream/
+    # GetTagStream's endpoint allocation, plus the accept loops/sender
+    # threads those endpoints point at). Constructing this touches no
+    # socket, thread, or camera at all -- see StreamTransportManager's
+    # own docstring -- it only starts binding listeners once a real
+    # GetImageStream/GetTagStream RPC asks for one, matching every other
+    # idle-gating guarantee this daemon makes.
+    transport = build_stream_transport(service, directories.socket_dir)
+
+    def _stop_service() -> None:
+        """DaemonLifecycle's on_stop hook: tear down the stream
+        transport (every listener, every accepted connection, every
+        accept/sender thread) before the service itself closes its
+        held cameras -- so no socket-driven subscriber outlives a clean
+        shutdown (sprint.md Migration Concerns' "Clean daemon shutdown",
+        extended through this transport layer by ticket 005)."""
+        transport.stop()
+        service.close()
+
     def enumerate_then_watch() -> None:
         """UC-01 main flow steps 3-4, in order: an initial **active**
         probe ("enumeration is an active interrogation of every
@@ -125,11 +144,13 @@ def build(
 
     return DaemonLifecycle(
         directories=directories,
-        build_listener=functools.partial(build_server, service, resolved_socket_path),
+        build_listener=functools.partial(
+            build_server, service, resolved_socket_path, transport=transport
+        ),
         status_source=service.status,
         watch=enumerate_then_watch if start_watch else None,
         stop_watch=discovery.stop_watch if start_watch else None,
-        on_stop=service.close,
+        on_stop=_stop_service,
         lock_path=lock_path,
         socket_path=socket_path,
     )
