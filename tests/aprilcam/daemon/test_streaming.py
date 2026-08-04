@@ -44,19 +44,24 @@ import cv2 as cv
 import numpy as np
 import pytest
 
+from aprilcam.calibration.deskew import Deskewer
 from aprilcam.calibration.interfaces import Calibration
 from aprilcam.camera.camera import Camera
+from aprilcam.config.loader import PlayfieldDefinition
 from aprilcam.daemon.broadcast import DEFAULT_SUBSCRIBER_QUEUE_DEPTH
 from aprilcam.daemon.detection import CONFIRMATION_STREAK, DetectionEngine
 from aprilcam.daemon.streaming import (
     TAG_STREAM_CHANGE_THRESHOLD_CM,
     TAG_STREAM_CHANGE_THRESHOLD_PX,
+    BroadcasterImageStream,
     BroadcasterTagStream,
+    ImageStreamProducer,
     TagStreamProducer,
 )
-from aprilcam.types import PixelPoint, TagFamily, TagFrame, TagId
+from aprilcam.types import AnnotationSet, ImageFrame, PixelPoint, TagFamily, TagFrame, TagId
 from aprilcam.vision.detector import Detection
 
+from tests.aprilcam.calibration.test_calibration import main_playfield_definition
 from tests.aprilcam.camera.test_camera import FakeBackend
 from tests.aprilcam.daemon.test_detection import _detection_at, _fixture_calibration
 from tests.aprilcam.vision._tag_fixtures import synthetic_tag_image
@@ -636,3 +641,492 @@ def test_real_detection_over_the_looping_backend_publishes_the_real_tag():
         producer.broadcaster.unsubscribe(q)
 
     assert producer.running is False
+
+
+# ===========================================================================
+# ImageStreamProducer (sprint 027 ticket 004, UC-07/SUC-002/SUC-004)
+# ===========================================================================
+#
+# A real ``Deskewer`` needs a real, solved ``Calibration`` -- reuses
+# ``test_detection.py``'s own ``_fixture_calibration`` (a real homography
+# solved by ``calibration.calibration.Calibrator`` against
+# ``main-playfield``'s real surveyed geometry) exactly as this module's
+# tag-producer tests already do for the world-cm tests above, plus
+# ``main_playfield_definition()`` (``test_calibration.py``) for the
+# matching playfield dimensions ``_fixture_calibration`` was solved
+# against.
+
+
+class _CountingDeskewer(Deskewer):
+    """The real ``Deskewer`` (module boundary: no second warp
+    implementation), wrapped with a call counter on :meth:`deskew` --
+    the "call-counting double around the deskew/warp step" this
+    ticket's own acceptance criterion asks for, injected via
+    ``ImageStreamProducer(..., deskewer_factory=...)`` rather than
+    monkeypatching."""
+
+    def __init__(self, *, calibration: Calibration, width_cm: float, height_cm: float) -> None:
+        super().__init__(calibration=calibration, width_cm=width_cm, height_cm=height_cm)
+        self.calls = 0
+
+    def deskew(self, frame: np.ndarray) -> np.ndarray:
+        self.calls += 1
+        return super().deskew(frame)
+
+
+def _empty_annotations() -> AnnotationSet:
+    return AnnotationSet(annotations=(), revision=0, timestamp=0.0)
+
+
+# ---------------------------------------------------------------------------
+# Idle gating: no thread, zero capture/warp/encode calls, zero subscribers
+# ---------------------------------------------------------------------------
+
+
+def test_image_producer_thread_does_not_exist_with_zero_subscribers():
+    backend = FakeBackend(read_queue=[_blank_frame()], loop=True)
+    cam = Camera("cam-image-idle", backend)
+    cam.open()
+    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    producer = ImageStreamProducer("cam-image-idle", cam, engine)
+
+    assert producer.running is False
+    time.sleep(0.05)  # a real, short wall-clock window -- nothing should run
+    assert producer.running is False
+    assert backend.read_calls == 0
+
+
+def test_image_subscribe_starts_the_thread_and_unsubscribe_stops_and_joins_it():
+    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    cam = _camera("cam-image-lifecycle")
+    producer = ImageStreamProducer("cam-image-lifecycle", cam, engine, interval_s=0.01)
+
+    q = producer.broadcaster.subscribe()
+    _wait_until(lambda: producer.running)
+    thread_ref = producer._thread  # noqa: SLF001 - internal, proving a real join below
+    assert thread_ref is not None
+    assert thread_ref.is_alive() is True
+
+    producer.broadcaster.unsubscribe(q)
+
+    assert producer.running is False
+    assert thread_ref.is_alive() is False  # actually joined, not merely signalled
+
+
+def test_image_start_and_stop_are_idempotent():
+    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    cam = _camera("cam-image-idempotent")
+    producer = ImageStreamProducer("cam-image-idempotent", cam, engine, interval_s=0.01)
+
+    producer.start()
+    producer.start()  # second call: no-op, no second thread
+    _wait_until(lambda: producer.running)
+    producer.stop()
+    producer.stop()  # second call: no-op, no error
+    assert producer.running is False
+
+
+def test_raw_and_deskewed_producers_for_the_same_camera_are_independent():
+    """Raw and deskewed are different keys entirely -- subscribing to
+    one must never start, or be affected by, the other (module
+    docstring: "Raw and deskewed are independent producers")."""
+    calibration = _fixture_calibration("cam-independent")
+    definition = main_playfield_definition()
+    playfields = {"main-playfield": definition}
+    calibrations = {"cam-independent": calibration}
+    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    cam = _camera("cam-independent")
+
+    raw_producer = ImageStreamProducer("cam-independent", cam, engine, interval_s=0.01)
+    deskewed_producer = ImageStreamProducer(
+        "cam-independent",
+        cam,
+        engine,
+        deskewed=True,
+        calibration_lookup=calibrations.get,
+        playfield_lookup=playfields.get,
+        annotations_lookup=lambda name: _empty_annotations(),
+        interval_s=0.01,
+    )
+
+    q_raw = raw_producer.broadcaster.subscribe()
+    _wait_until(lambda: raw_producer.running)
+    assert deskewed_producer.running is False
+
+    raw_producer.broadcaster.unsubscribe(q_raw)
+    assert raw_producer.running is False
+    assert deskewed_producer.running is False
+
+
+def test_deskewed_image_stream_producer_requires_the_calibration_playfield_annotation_lookups():
+    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    cam = _camera("cam-missing-lookups")
+    with pytest.raises(ValueError):
+        ImageStreamProducer("cam-missing-lookups", cam, engine, deskewed=True)
+
+
+# ---------------------------------------------------------------------------
+# Shared computation: two subscribers, one warp per tick (UC-07.S-1)
+# ---------------------------------------------------------------------------
+
+
+def test_deskewed_producer_warps_once_per_tick_shared_by_two_subscribers():
+    calibration = _fixture_calibration("cam-shared-warp")
+    definition = main_playfield_definition()
+    playfields = {"main-playfield": definition}
+    calibrations = {"cam-shared-warp": calibration}
+
+    created: List[_CountingDeskewer] = []
+
+    def deskewer_factory(calibration_: Calibration, definition_: PlayfieldDefinition) -> Deskewer:
+        d = _CountingDeskewer(
+            calibration=calibration_, width_cm=definition_.width_cm, height_cm=definition_.height_cm
+        )
+        created.append(d)
+        return d
+
+    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    cam = _camera("cam-shared-warp")
+    n_ticks = 15
+    clock, wait, reached = _clock_and_wait_stopping_after(n_ticks)
+    producer = ImageStreamProducer(
+        "cam-shared-warp",
+        cam,
+        engine,
+        deskewed=True,
+        calibration_lookup=calibrations.get,
+        playfield_lookup=playfields.get,
+        annotations_lookup=lambda name: _empty_annotations(),
+        deskewer_factory=deskewer_factory,
+        interval_s=0.001,
+        queue_depth=1000,  # nothing drains until after stop() -- must not silently drop
+        clock=clock.clock,
+        wait=wait,
+    )
+
+    q1 = producer.broadcaster.subscribe()
+    q2 = producer.broadcaster.subscribe()
+    assert reached.wait(timeout=5.0)
+    producer.stop()
+
+    received1 = _drain(q1)
+    received2 = _drain(q2)
+    assert received1  # something was actually published
+    assert len(created) == 1  # exactly one Deskewer built for this stream's whole life
+    # The proof: the warp routine ran exactly once per published frame --
+    # not once per (frame, subscriber) pair. Two subscribers receiving N
+    # frames each off one producer, with only N deskew calls total (not
+    # 2N), is what "computed once, shared" means structurally.
+    assert created[0].calls == len(received1) == len(received2)
+    # Every subscriber's queue holds the *same* ImageFrame objects, by
+    # identity -- one warp+encode per tick, fanned out, never recomputed
+    # per subscriber.
+    assert received1 == received2
+    for a, b in zip(received1, received2):
+        assert a is b
+    assert len({f.px_per_cm for f in received1}) == 1
+    assert len({f.world_extent for f in received1}) == 1
+
+
+# ---------------------------------------------------------------------------
+# Slow subscriber drops frames without affecting a fast subscriber
+# ---------------------------------------------------------------------------
+
+
+def test_image_slow_subscriber_drops_frames_without_affecting_a_fast_subscriber():
+    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    cam = _camera("cam-image-slow")
+    n_ticks = 30
+    clock = _FakeClock()
+    reached = threading.Event()
+    fast_received: List[ImageFrame] = []
+    fast_queue_holder: Dict[str, "queue.Queue[ImageFrame]"] = {}
+
+    def wait(stop_event: threading.Event, timeout: float) -> bool:
+        clock.wait_calls += 1
+        clock.now += timeout
+        fast_q = fast_queue_holder.get("fast")
+        if fast_q is not None:
+            fast_received.extend(_drain(fast_q))
+        if clock.wait_calls >= n_ticks:
+            reached.set()
+        return stop_event.is_set()
+
+    producer = ImageStreamProducer(
+        "cam-image-slow",
+        cam,
+        engine,
+        interval_s=0.001,
+        clock=clock.clock,
+        wait=wait,
+    )
+    slow_q = producer.broadcaster.subscribe()
+    fast_q = producer.broadcaster.subscribe()
+    fast_queue_holder["fast"] = fast_q
+
+    producer.start()
+    assert reached.wait(timeout=5.0)
+    producer.stop()
+
+    assert slow_q.qsize() <= DEFAULT_SUBSCRIBER_QUEUE_DEPTH
+    assert len(fast_received) > DEFAULT_SUBSCRIBER_QUEUE_DEPTH
+
+
+# ---------------------------------------------------------------------------
+# Frame geometry stable for the life of a stream (UC-07, this ticket's AC4)
+# ---------------------------------------------------------------------------
+
+
+def test_deskewed_image_geometry_stays_stable_across_a_mid_stream_playfield_replace():
+    calibration = _fixture_calibration("cam-geom-stable")
+    original_definition = main_playfield_definition()  # 134.3 x 89.3
+    playfields: Dict[str, PlayfieldDefinition] = {"main-playfield": original_definition}
+    calibrations: Dict[str, Calibration] = {"cam-geom-stable": calibration}
+
+    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    cam = _camera("cam-geom-stable")
+    n_ticks = 15
+    swap_at_tick = 5
+    clock = _FakeClock()
+    reached = threading.Event()
+
+    def wait(stop_event: threading.Event, timeout: float) -> bool:
+        clock.wait_calls += 1
+        clock.now += timeout
+        if clock.wait_calls == swap_at_tick:
+            # A "config push" mid-stream (a new playfield definition
+            # with different dimensions, same name) -- must not move
+            # this already-running stream's published geometry.
+            playfields["main-playfield"] = PlayfieldDefinition(
+                name="main-playfield", width_cm=50.0, height_cm=50.0
+            )
+        if clock.wait_calls >= n_ticks:
+            reached.set()
+        return stop_event.is_set()
+
+    producer = ImageStreamProducer(
+        "cam-geom-stable",
+        cam,
+        engine,
+        deskewed=True,
+        calibration_lookup=calibrations.get,
+        playfield_lookup=playfields.get,
+        annotations_lookup=lambda name: _empty_annotations(),
+        interval_s=0.001,
+        queue_depth=1000,
+        clock=clock.clock,
+        wait=wait,
+    )
+
+    q = producer.broadcaster.subscribe()
+    assert reached.wait(timeout=5.0)
+    producer.stop()
+
+    received = _drain(q)
+    assert received
+    px_per_cm_values = {f.px_per_cm for f in received}
+    world_extent_values = {f.world_extent for f in received}
+    assert len(px_per_cm_values) == 1
+    assert len(world_extent_values) == 1
+    assert world_extent_values.pop() == pytest.approx((134.3, 89.3))  # original, never the swapped 50x50
+
+
+def test_image_producer_resubscribe_starts_fresh_and_rebuilds_geometry():
+    """AC7 ("a resubscribe starts fresh"), applied specifically to the
+    geometry snapshot: a config push that lands while the stream is
+    idle (no subscribers) *does* take effect on the next stream life --
+    only a push *during* an active stream is ignored (the test above).
+    """
+    calibration = _fixture_calibration("cam-image-resub")
+    definition_a = PlayfieldDefinition(name="main-playfield", width_cm=100.0, height_cm=80.0)
+    definition_b = PlayfieldDefinition(name="main-playfield", width_cm=50.0, height_cm=40.0)
+    playfields: Dict[str, PlayfieldDefinition] = {"main-playfield": definition_a}
+    calibrations: Dict[str, Calibration] = {"cam-image-resub": calibration}
+    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    cam = _camera("cam-image-resub")
+
+    producer = ImageStreamProducer(
+        "cam-image-resub",
+        cam,
+        engine,
+        deskewed=True,
+        calibration_lookup=calibrations.get,
+        playfield_lookup=playfields.get,
+        annotations_lookup=lambda name: _empty_annotations(),
+        interval_s=0.01,
+    )
+
+    q1 = producer.broadcaster.subscribe()
+    _wait_until(lambda: producer.running)
+    frame1 = q1.get(timeout=2.0)
+    producer.broadcaster.unsubscribe(q1)
+    assert producer.running is False
+
+    playfields["main-playfield"] = definition_b  # pushed while idle
+
+    q2 = producer.broadcaster.subscribe()
+    _wait_until(lambda: producer.running)
+    frame2 = q2.get(timeout=2.0)
+    producer.broadcaster.unsubscribe(q2)
+
+    assert frame1.world_extent == pytest.approx((100.0, 80.0))
+    assert frame2.world_extent == pytest.approx((50.0, 40.0))
+
+
+# ---------------------------------------------------------------------------
+# Calibration going stale mid-stream (UC-11.S-3's contract, applied to images)
+# ---------------------------------------------------------------------------
+
+
+def test_deskewed_image_calibration_going_stale_mid_stream_reaches_the_next_published_frame():
+    calibration = _fixture_calibration("cam-image-stale")
+    definition = main_playfield_definition()
+    playfields = {"main-playfield": definition}
+    calibrations: Dict[str, Calibration] = {"cam-image-stale": calibration}
+
+    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    cam = _camera("cam-image-stale")
+    n_ticks = 12
+    flip_at_tick = 5
+    clock = _FakeClock()
+    reached = threading.Event()
+
+    def wait(stop_event: threading.Event, timeout: float) -> bool:
+        clock.wait_calls += 1
+        clock.now += timeout
+        if clock.wait_calls == flip_at_tick:
+            calibrations["cam-image-stale"] = replace(calibrations["cam-image-stale"], stale=True)
+        if clock.wait_calls >= n_ticks:
+            reached.set()
+        return stop_event.is_set()
+
+    producer = ImageStreamProducer(
+        "cam-image-stale",
+        cam,
+        engine,
+        deskewed=True,
+        calibration_lookup=calibrations.get,
+        playfield_lookup=playfields.get,
+        annotations_lookup=lambda name: _empty_annotations(),
+        interval_s=0.001,
+        queue_depth=1000,
+        clock=clock.clock,
+        wait=wait,
+    )
+
+    q = producer.broadcaster.subscribe()
+    assert reached.wait(timeout=5.0)
+    producer.stop()
+
+    received = _drain(q)
+    assert received, "expected at least one published frame"
+    stale_flags = [frame.calibration_stale for frame in received]
+    assert True in stale_flags
+    first_stale_index = stale_flags.index(True)
+    assert all(flag is False for flag in stale_flags[:first_stale_index])
+    assert all(flag is True for flag in stale_flags[first_stale_index:])
+    # The staleness flip must not have disturbed the frozen geometry.
+    assert len({f.px_per_cm for f in received}) == 1
+
+
+# ---------------------------------------------------------------------------
+# Embed parity with get_frame: tags (raw and deskewed), annotations
+# (deskewed only) -- daemon/service.py's existing three-way None/empty/
+# populated contract, not a new embed policy invented here.
+# ---------------------------------------------------------------------------
+
+
+def test_raw_image_producer_embeds_latest_tags_but_never_annotations():
+    detector = _CallCountingDetector(hits=[_pixel_hit(1, 10.0, 10.0)])
+    engine = DetectionEngine(detector_factory=lambda: detector, confirmation_streak=1)
+    cam = _camera("cam-raw-embed")
+    engine.run_burst("cam-raw-embed", cam)  # seed the buffer once, before streaming starts
+    expected_tag_frame = engine.latest("cam-raw-embed")
+    assert expected_tag_frame is not None
+
+    n_ticks = 5
+    clock, wait, reached = _clock_and_wait_stopping_after(n_ticks)
+    producer = ImageStreamProducer(
+        "cam-raw-embed",
+        cam,
+        engine,
+        interval_s=0.01,
+        queue_depth=1000,
+        clock=clock.clock,
+        wait=wait,
+    )
+
+    q = producer.broadcaster.subscribe()
+    assert reached.wait(timeout=5.0)
+    producer.stop()
+
+    received = _drain(q)
+    assert received
+    for frame in received:
+        assert frame.deskewed is False
+        assert frame.annotations is None  # raw never carries annotations (UC-16)
+        assert frame.px_per_cm is None
+        assert frame.world_extent is None
+        assert frame.tags == expected_tag_frame  # no further burst ran -- unchanged
+
+
+def test_deskewed_image_producer_embeds_latest_tags_and_current_annotations():
+    calibration = _fixture_calibration("cam-embed")
+    definition = main_playfield_definition()
+    playfields = {"main-playfield": definition}
+    calibrations = {"cam-embed": calibration}
+    annotation_set = AnnotationSet(annotations=(), revision=3, timestamp=123.0)
+
+    detector = _CallCountingDetector(hits=[_pixel_hit(1, 10.0, 10.0)])
+    engine = DetectionEngine(detector_factory=lambda: detector, confirmation_streak=1)
+    cam = _camera("cam-embed")
+    engine.run_burst("cam-embed", cam)  # seed the buffer once, before streaming starts
+    expected_tag_frame = engine.latest("cam-embed")
+    assert expected_tag_frame is not None
+
+    n_ticks = 5
+    clock, wait, reached = _clock_and_wait_stopping_after(n_ticks)
+    producer = ImageStreamProducer(
+        "cam-embed",
+        cam,
+        engine,
+        deskewed=True,
+        calibration_lookup=calibrations.get,
+        playfield_lookup=playfields.get,
+        annotations_lookup=lambda name: annotation_set,
+        interval_s=0.01,
+        queue_depth=1000,
+        clock=clock.clock,
+        wait=wait,
+    )
+
+    q = producer.broadcaster.subscribe()
+    assert reached.wait(timeout=5.0)
+    producer.stop()
+
+    received = _drain(q)
+    assert received
+    for frame in received:
+        assert frame.deskewed is True
+        assert frame.annotations == annotation_set  # always a real set, even when empty
+        assert frame.tags == expected_tag_frame
+
+
+# ---------------------------------------------------------------------------
+# BroadcasterImageStream: close() unsubscribes and is idempotent
+# ---------------------------------------------------------------------------
+
+
+def test_broadcaster_image_stream_close_unsubscribes_and_is_idempotent():
+    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    cam = _camera("cam-image-stream-close")
+    producer = ImageStreamProducer("cam-image-stream-close", cam, engine, interval_s=0.01)
+
+    q = producer.broadcaster.subscribe()
+    stream = BroadcasterImageStream(producer.broadcaster, q)
+    _wait_until(lambda: producer.running)
+
+    stream.close()
+    assert producer.running is False  # last subscriber left -- idle-gated
+
+    stream.close()  # idempotent -- no error
