@@ -8,7 +8,8 @@
 ``get_annotations`` added by ticket 024-002; ``find_feature`` added by
 ticket 025-002; ``register_tag``/``unregister_tag``/
 ``list_tag_parameters`` added by ticket 025-004; ``get_guide`` added by
-ticket 025-007, this sprint's last): a typed
+ticket 025-007; ``stream_images``/``stream_tags`` added by ticket
+027-006, completing the interface): a typed
 wrapper over the generated gRPC stub for
 ``list_cameras``, ``probe_cameras``, ``get_frame``, ``status``,
 ``get_tags``, ``get_tag``, ``get_tag_history``, ``set_playfield``,
@@ -17,18 +18,15 @@ wrapper over the generated gRPC stub for
 ``reset_camera_config``, ``put_annotation``, ``remove_annotation``,
 ``replace_layer``, ``clear_annotations``, ``get_annotations``,
 ``find_feature``, ``register_tag``, ``unregister_tag``,
-``list_tag_parameters``, ``get_guide``.
+``list_tag_parameters``, ``get_guide``, ``stream_images``,
+``stream_tags``.
 
-**Only these twenty-five methods are implemented**, mirroring
-``daemon.service.DaemonService``'s own stance: ``daemon.interfaces.
-Daemon`` is a much larger base class (``stream_images``/``stream_tags``
-remain the unimplemented pair as of this sprint), and
-those are inherited as-is here rather than overridden -- calling one
-raises ``NotImplementedError`` naming itself instead of failing with a
-bare ``AttributeError``. ``isinstance(client,
-Daemon)`` is ``True``: this really is a ``Daemon``, an incomplete one
-this sprint, honestly so via the inherited stubs rather than by a
-Protocol's structural guess.
+**All twenty-seven methods are implemented** -- ``daemon.interfaces.
+Daemon`` in full, as of this ticket. Nothing is inherited as-is from the
+base class any more; every method above overrides its
+``NotImplementedError`` stub. ``isinstance(client, Daemon)`` was always
+``True``; the difference this ticket makes is that it is now true of a
+*complete* implementation, not an honestly-partial one.
 
 **Request marshalling lives here; response marshalling does not.** This
 module builds ``aprilcam_v2_pb2`` request messages directly (nothing
@@ -36,7 +34,13 @@ else may -- it is the one client module that talks the wire's request
 side), but every response crosses back into Python exclusively through
 ``client/models.py``'s ``from_proto`` constructors
 (``docs/design/design.md`` §6's proto boundary) -- this module never
-reads a response field itself.
+reads a response field itself. ``stream_images``/``stream_tags`` follow
+the identical one-hop shape for their own response sub-message
+(``response.endpoint``), just handing it to ``client/streams.py``'s
+``SocketImageStream.connect``/``SocketTagStream.connect`` instead of a
+``client/models.py`` converter -- opening a socket, not building an
+``aprilcam.types`` dataclass, is what happens next for that one field
+(see ``client/streams.py``'s module docstring).
 
 **Error mapping.** ``daemon/rpc.py``'s ``_abort`` docstring documents
 the exact trailing-metadata contract this reconstructs from
@@ -75,10 +79,11 @@ from aprilcam.client.models import (
     tag_parameters_from_proto,
     tag_record_from_get_tag_response,
 )
+from aprilcam.client.streams import SocketImageStream, SocketTagStream
 from aprilcam.config.interfaces import CameraConfig, Feature
 from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitionIface
 from aprilcam.config.loader import PlayfieldDefinition
-from aprilcam.daemon.interfaces import Daemon, DaemonStatus
+from aprilcam.daemon.interfaces import Daemon, DaemonStatus, ImageStream, TagStream
 from aprilcam.errors import (
     AlreadyRunning,
     CameraNotPresent,
@@ -302,15 +307,18 @@ def _reconstruct_error(exc: grpc.RpcError, target: str) -> Exception:
 
 
 class GrpcDaemon(Daemon):
-    """Concrete ``daemon.interfaces.Daemon`` (this sprint's slice only),
-    driven by an already-connected gRPC stub.
+    """Concrete ``daemon.interfaces.Daemon``, driven by an
+    already-connected gRPC stub -- complete as of ticket 027-006, which
+    added the last two methods (``stream_images``/``stream_tags``).
 
     Derives from ``Daemon`` (see that class's module docstring for the
-    base-class-vs-``Protocol`` design rule), mirroring
-    ``daemon.service.DaemonService``'s own stance: the methods this
-    sprint does not implement are inherited as-is and raise
-    ``NotImplementedError`` naming themselves if called, rather than
-    disappearing into a bare ``AttributeError``.
+    base-class-vs-``Protocol`` design rule). Nothing is inherited as-is
+    from the base class any more -- every method is overridden -- but
+    the class still derives from ``Daemon`` rather than, say, standing
+    alone, for the same reason ``daemon.service.DaemonService`` derives
+    from it too: a future ``Daemon`` method added upstream is inherited
+    here as an honest ``NotImplementedError`` stub naming itself, not a
+    bare ``AttributeError``, until this class catches up.
 
     Parameters
     ----------
@@ -330,7 +338,7 @@ class GrpcDaemon(Daemon):
         self._stub = stub
         self._target = target
 
-    # -- daemon.interfaces.Daemon (this sprint's slice) --------------------
+    # -- daemon.interfaces.Daemon (complete, ticket 027-006) ----------------
 
     def list_cameras(self) -> Tuple[CameraState, ...]:
         response = self._call(self._stub.ListCameras, aprilcam_v2_pb2.ListCamerasRequest())
@@ -373,6 +381,27 @@ class GrpcDaemon(Daemon):
             request.frames = frames
         response = self._call(self._stub.GetTagHistory, request)
         return tuple(tag_frame_from_proto(f) for f in response.history)
+
+    def stream_images(self, camera: str, *, deskewed: bool = False) -> ImageStream:
+        """See ``daemon.interfaces.Daemon.stream_images`` (ticket
+        027-006, UC-07). ``GetImageStream`` only allocates (or reuses)
+        a socket endpoint -- it starts no producer
+        (``daemon/stream_transport.py``'s own contract); it is the
+        *connection* :meth:`~aprilcam.client.streams.SocketImageStream.
+        connect` makes next that the daemon-side accept loop notices and
+        turns into a real subscription. ``response.endpoint`` is handed
+        straight across, unread, per this module's docstring."""
+        request = aprilcam_v2_pb2.GetImageStreamRequest(camera=camera, deskewed=deskewed)
+        response = self._call(self._stub.GetImageStream, request)
+        return SocketImageStream.connect(response.endpoint, host=self._target)
+
+    def stream_tags(self, camera: str) -> TagStream:
+        """See ``daemon.interfaces.Daemon.stream_tags`` (ticket 027-006,
+        UC-11). Same shape as :meth:`stream_images` above, for
+        ``GetTagStream``."""
+        request = aprilcam_v2_pb2.GetTagStreamRequest(camera=camera)
+        response = self._call(self._stub.GetTagStream, request)
+        return SocketTagStream.connect(response.endpoint, host=self._target)
 
     def set_playfield(self, definition: PlayfieldDefinitionIface) -> None:
         if not isinstance(definition, PlayfieldDefinition):
