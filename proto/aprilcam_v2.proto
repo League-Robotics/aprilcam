@@ -127,11 +127,15 @@
 // established `UnknownTarget` precedent above.
 //
 // Sprint 027 ticket 001 is the ninth: `GetImageStream` / `GetTagStream`
-// -- **endpoint allocation only**. The handler bodies and the raw-socket
-// transport they point at (design.md section 5's `[uint32 BE
-// length][protobuf]` framing, on a socket separate from this gRPC
-// connection) are ticket 005; this ticket only adds the RPC shapes so
-// later tickets have a stable wire contract to build against.
+// -- **endpoint allocation only**. Ticket 001 added only the RPC shapes
+// below so later tickets would have a stable wire contract to build
+// against; ticket 005 (still sprint 027) is what implemented the
+// handler bodies (`daemon/rpc.py`) and the raw-socket transport they
+// point at (`daemon/stream_transport.py`, design.md section 5's
+// `[uint32 BE length][protobuf]` framing, on a socket separate from
+// this gRPC connection). Calling either RPC now genuinely allocates
+// (or reuses) a listening socket and returns where to connect for it --
+// no frame bytes ever cross this gRPC connection itself.
 // `GetImageStreamRequest`/`GetTagStreamRequest` mirror
 // `daemon.interfaces.Daemon.stream_images(camera, *, deskewed=False)`/
 // `.stream_tags(camera)` field-for-field. `StreamEndpoint` mirrors v1's
@@ -166,10 +170,12 @@
 // mobile-tag registry, and now stream endpoint allocation have all
 // since been added by later sprints, above. Stream endpoint allocation
 // -- `GetImageStream`/`GetTagStream` -- was this note's other named
-// absence until sprint 027 ticket 001 added it above; the raw-socket
-// transport those endpoints point at is still not this file's concern
-// and never will be -- design.md section 5's bulk streams are
-// deliberately not gRPC.)
+// absence until sprint 027 ticket 001 added the RPC shapes above and
+// ticket 005 implemented them end to end; the raw-socket transport
+// those endpoints point at is, and always will be, outside this
+// file's concern -- design.md section 5's bulk streams are
+// deliberately not gRPC, so no amount of future work here will ever
+// describe them beyond the `StreamEndpoint` message already above.)
 
 syntax = "proto3";
 
@@ -335,16 +341,20 @@ service AprilCamV2 {
   rpc GetGuide (GetGuideRequest) returns (GetGuideResponse);
 
   // Allocate (or reuse) a raw-socket endpoint for a camera's image
-  // stream, raw or deskewed (UC-07, sprint 027 ticket 001). Endpoint
-  // allocation only -- the handler body and the socket transport it
-  // points at are ticket 005; calling this RPC before then fails with
-  // gRPC's own UNIMPLEMENTED, not a hand-rolled error. No frame bytes
-  // ever cross this connection -- see design.md section 5.
+  // stream, raw or deskewed (UC-07, sprint 027 tickets 001/005).
+  // Endpoint allocation only -- the handler body
+  // (`daemon/rpc.py::_Servicer.GetImageStream`) delegates to
+  // `daemon/stream_transport.py::StreamTransportManager`, which binds
+  // (or reuses) a listener for this (camera, deskewed) pair and
+  // returns where to connect for it; a client that never connects to
+  // the returned endpoint leaves the daemon fully idle for that
+  // product. No frame bytes ever cross this gRPC connection itself --
+  // see design.md section 5.
   rpc GetImageStream (GetImageStreamRequest) returns (GetImageStreamResponse);
 
   // Allocate (or reuse) a raw-socket endpoint for a camera's tag stream
-  // (UC-11, sprint 027 ticket 001). Same "endpoint allocation only,
-  // handler is ticket 005" scope as `GetImageStream` above.
+  // (UC-11, sprint 027 tickets 001/005). Same "endpoint allocation
+  // only, reused per key" scope as `GetImageStream` above.
   rpc GetTagStream (GetTagStreamRequest) returns (GetTagStreamResponse);
 }
 
