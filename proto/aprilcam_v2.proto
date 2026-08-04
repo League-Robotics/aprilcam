@@ -126,6 +126,30 @@
 // exist (`"agent"`, `"robot"`), matching `FindFeature`/`GetPlayfield`'s
 // established `UnknownTarget` precedent above.
 //
+// Sprint 027 ticket 001 is the ninth: `GetImageStream` / `GetTagStream`
+// -- **endpoint allocation only**. Ticket 001 added only the RPC shapes
+// below so later tickets would have a stable wire contract to build
+// against; ticket 005 (still sprint 027) is what implemented the
+// handler bodies (`daemon/rpc.py`) and the raw-socket transport they
+// point at (`daemon/stream_transport.py`, design.md section 5's
+// `[uint32 BE length][protobuf]` framing, on a socket separate from
+// this gRPC connection). Calling either RPC now genuinely allocates
+// (or reuses) a listening socket and returns where to connect for it --
+// no frame bytes ever cross this gRPC connection itself.
+// `GetImageStreamRequest`/`GetTagStreamRequest` mirror
+// `daemon.interfaces.Daemon.stream_images(camera, *, deskewed=False)`/
+// `.stream_tags(camera)` field-for-field. `StreamEndpoint` mirrors v1's
+// message of the same name (`archive/proto/aprilcam.proto`) -- unlike
+// v1's implicit-zero-is-absent `string socket_path`/`uint32 tcp_port`,
+// both fields are proto3 `optional` here, matching this file's own
+// established Optional-presence discipline elsewhere (e.g.
+// `CameraState.number`) rather than v1's convention. `GetImageStreamResponse`/
+// `GetTagStreamResponse` each wrap one `StreamEndpoint` rather than
+// inlining its two fields directly, since both RPCs need the identical
+// shape -- the same "one shared message, not two duplicates" choice
+// `CameraState` already makes across `ListCamerasResponse`/
+// `ProbeCamerasResponse`/`GetStatusResponse`.
+//
 // Wire conventions this file follows (docs/design/design.md §6):
 //   - World-cm coordinates cross this boundary only inside `TagRecord`
 //     (`world`, `world_velocity`, `world_corners`), and every camera
@@ -139,13 +163,19 @@
 //
 // Deliberately absent this sprint (Stage 8 territory, not forgotten):
 // OpenCamera/CloseCamera (no explicit open/close verb -- `GetFrame`
-// opens on demand and the daemon holds it, see `daemon/service.py`),
-// stream endpoint allocation (`GetImageStream`/`GetTagStream`). None of
-// this sprint's use cases need them. (This note is sprint 020's own,
-// scoped to sprint 020's original four-RPC surface -- calibration
-// trigger, config push/pull, the annotation store, `WhereIs`, and now
-// the mobile-tag registry have all since been added by later sprints,
-// above.)
+// opens on demand and the daemon holds it, see `daemon/service.py`).
+// None of this sprint's use cases need it. (This note is sprint 020's
+// own, scoped to sprint 020's original four-RPC surface -- calibration
+// trigger, config push/pull, the annotation store, `WhereIs`, the
+// mobile-tag registry, and now stream endpoint allocation have all
+// since been added by later sprints, above. Stream endpoint allocation
+// -- `GetImageStream`/`GetTagStream` -- was this note's other named
+// absence until sprint 027 ticket 001 added the RPC shapes above and
+// ticket 005 implemented them end to end; the raw-socket transport
+// those endpoints point at is, and always will be, outside this
+// file's concern -- design.md section 5's bulk streams are
+// deliberately not gRPC, so no amount of future work here will ever
+// describe them beyond the `StreamEndpoint` message already above.)
 
 syntax = "proto3";
 
@@ -309,6 +339,23 @@ service AprilCamV2 {
   // `client.guides.Guides` accessor by construction -- both read
   // `aprilcam.guides.read_guide`, never a second copy of the text.
   rpc GetGuide (GetGuideRequest) returns (GetGuideResponse);
+
+  // Allocate (or reuse) a raw-socket endpoint for a camera's image
+  // stream, raw or deskewed (UC-07, sprint 027 tickets 001/005).
+  // Endpoint allocation only -- the handler body
+  // (`daemon/rpc.py::_Servicer.GetImageStream`) delegates to
+  // `daemon/stream_transport.py::StreamTransportManager`, which binds
+  // (or reuses) a listener for this (camera, deskewed) pair and
+  // returns where to connect for it; a client that never connects to
+  // the returned endpoint leaves the daemon fully idle for that
+  // product. No frame bytes ever cross this gRPC connection itself --
+  // see design.md section 5.
+  rpc GetImageStream (GetImageStreamRequest) returns (GetImageStreamResponse);
+
+  // Allocate (or reuse) a raw-socket endpoint for a camera's tag stream
+  // (UC-11, sprint 027 tickets 001/005). Same "endpoint allocation
+  // only, reused per key" scope as `GetImageStream` above.
+  rpc GetTagStream (GetTagStreamRequest) returns (GetTagStreamResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -937,4 +984,46 @@ message GetGuideRequest {
 
 message GetGuideResponse {
   string text = 1;
+}
+
+// ---------------------------------------------------------------------------
+// GetImageStream / GetTagStream (sprint 027 ticket 001, UC-07/UC-11).
+// Endpoint allocation only -- see this file's header comment and the RPC
+// comments above. Handlers and the raw-socket transport are ticket 005.
+// ---------------------------------------------------------------------------
+
+// Where to connect for a stream's raw framed socket ([uint32 BE
+// length][protobuf] on a bulk-stream socket, separate from this
+// control-plane gRPC connection -- design.md section 5). Mirrors v1's
+// `StreamEndpoint` (`archive/proto/aprilcam.proto`) field-for-field,
+// except both fields are proto3 `optional` here rather than v1's
+// implicit-zero-is-absent `uint32`/`string` -- see this file's header
+// comment for why.
+message StreamEndpoint {
+  // Present (HasField true) when the daemon offers a Unix-domain socket
+  // for this stream -- the same-host, lower-overhead path a local
+  // client prefers.
+  optional string socket_path = 1;
+  // Present (HasField true) when the daemon offers a TCP socket --
+  // required for a remote client. A daemon may offer both; which one a
+  // client picks is a client-side decision (ticket 006), not this
+  // message's concern.
+  optional int32 tcp_port = 2;
+}
+
+message GetImageStreamRequest {
+  string camera = 1;
+  bool deskewed = 2;
+}
+
+message GetImageStreamResponse {
+  StreamEndpoint endpoint = 1;
+}
+
+message GetTagStreamRequest {
+  string camera = 1;
+}
+
+message GetTagStreamResponse {
+  StreamEndpoint endpoint = 1;
 }

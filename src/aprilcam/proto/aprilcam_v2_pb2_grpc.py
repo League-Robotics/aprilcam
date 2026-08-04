@@ -163,6 +163,16 @@ class AprilCamV2Stub(object):
                 request_serializer=aprilcam__v2__pb2.GetGuideRequest.SerializeToString,
                 response_deserializer=aprilcam__v2__pb2.GetGuideResponse.FromString,
                 _registered_method=True)
+        self.GetImageStream = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/GetImageStream',
+                request_serializer=aprilcam__v2__pb2.GetImageStreamRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.GetImageStreamResponse.FromString,
+                _registered_method=True)
+        self.GetTagStream = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/GetTagStream',
+                request_serializer=aprilcam__v2__pb2.GetTagStreamRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.GetTagStreamResponse.FromString,
+                _registered_method=True)
 
 
 class AprilCamV2Servicer(object):
@@ -426,6 +436,27 @@ class AprilCamV2Servicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetImageStream(self, request, context):
+        """Allocate (or reuse) a raw-socket endpoint for a camera's image
+        stream, raw or deskewed (UC-07, sprint 027 ticket 001). Endpoint
+        allocation only -- the handler body and the socket transport it
+        points at are ticket 005; calling this RPC before then fails with
+        gRPC's own UNIMPLEMENTED, not a hand-rolled error. No frame bytes
+        ever cross this connection -- see design.md section 5.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetTagStream(self, request, context):
+        """Allocate (or reuse) a raw-socket endpoint for a camera's tag stream
+        (UC-11, sprint 027 ticket 001). Same "endpoint allocation only,
+        handler is ticket 005" scope as `GetImageStream` above.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_AprilCamV2Servicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -553,6 +584,16 @@ def add_AprilCamV2Servicer_to_server(servicer, server):
                     servicer.GetGuide,
                     request_deserializer=aprilcam__v2__pb2.GetGuideRequest.FromString,
                     response_serializer=aprilcam__v2__pb2.GetGuideResponse.SerializeToString,
+            ),
+            'GetImageStream': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetImageStream,
+                    request_deserializer=aprilcam__v2__pb2.GetImageStreamRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.GetImageStreamResponse.SerializeToString,
+            ),
+            'GetTagStream': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetTagStream,
+                    request_deserializer=aprilcam__v2__pb2.GetTagStreamRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.GetTagStreamResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1234,6 +1275,60 @@ class AprilCamV2(object):
             '/aprilcam.v2.AprilCamV2/GetGuide',
             aprilcam__v2__pb2.GetGuideRequest.SerializeToString,
             aprilcam__v2__pb2.GetGuideResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetImageStream(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/GetImageStream',
+            aprilcam__v2__pb2.GetImageStreamRequest.SerializeToString,
+            aprilcam__v2__pb2.GetImageStreamResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetTagStream(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/GetTagStream',
+            aprilcam__v2__pb2.GetTagStreamRequest.SerializeToString,
+            aprilcam__v2__pb2.GetTagStreamResponse.FromString,
             options,
             channel_credentials,
             insecure,

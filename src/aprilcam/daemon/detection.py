@@ -93,16 +93,26 @@ hook for staleness' *other* trigger (sprint.md Decision 6, outside this
 module entirely -- a reopen marks stale unconditionally, with no drift
 measurement involved).
 
-**Accepted scope boundary: the ring buffer is query-driven, not
-wall-clock-bounded, this sprint** (sprint.md Open Question 3). Because a
-buffer only grows when :meth:`run_burst` is called, and nothing calls it
-except a live ``get_tags``/``get_tag`` request, "roughly 10 seconds"
-(UC-26) is not a wall-clock guarantee here -- a camera queried once a
-minute has a buffer that spans 300 minutes, not 300 frames' worth of
-seconds, before it fills. This is an accepted, honest consequence of
-shipping burst detection before streaming (Decision 1), not a defect;
-revisit once a background/streaming producer can genuinely fill the
-buffer at frame rate.
+**Scope boundary closed for a camera with an active tag-stream
+subscriber (sprint 027 ticket 003).** Sprint 021's own scope boundary
+here used to read "query-driven, not wall-clock-bounded, this sprint"
+(sprint.md Open Question 3): because a buffer only grew when
+:meth:`run_burst` was called, and nothing called it except a live
+``get_tags``/``get_tag`` request, "roughly 10 seconds" (UC-26) was not a
+wall-clock guarantee -- a camera queried once a minute had a buffer that
+spanned 300 minutes, not 300 frames' worth of seconds, before it
+filled. ``daemon.streaming.TagStreamProducer`` (sprint 027 ticket 003)
+is the "background/streaming producer" this note said to wait for: it
+drives :meth:`run_burst` at a steady wall-clock cadence for as long as
+at least one tag-stream subscriber exists for that camera, so the
+buffer genuinely fills at that cadence, not only on demand, exactly as
+UC-26's "~10 seconds" wants. **This remains query-driven, unchanged,
+for any camera with no active tag-stream subscriber** -- a caller that
+only ever uses one-shot ``get_tags``/``get_tag`` sees exactly sprint
+021's original behaviour (sprint.md Design Rationale 3's stated
+consequence: intentional, not a regression). This was never a defect,
+only an accepted, honest consequence of shipping burst detection before
+streaming (Decision 1).
 
 **Mount correction (ticket 025-004, UC-12).** :meth:`DetectionEngine.run_burst`
 also asks its injected ``mount_lookup`` for each confirmed tag's currently

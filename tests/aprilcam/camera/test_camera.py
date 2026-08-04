@@ -12,6 +12,8 @@ if either is not attached.
 from __future__ import annotations
 
 import sys
+import threading
+import time
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -35,7 +37,14 @@ class FakeBackend:
 
     ``read_queue`` items are popped one per ``read()`` call; once
     exhausted, ``read()`` returns ``None`` (a failure) as long as the
-    backend is open. ``fail_open`` makes ``open()`` raise instead of
+    backend is open — unless ``loop=True`` (ticket 027-003), in which
+    case an exhausted queue is refilled from *read_queue* as originally
+    given and popping continues, so a background reader (a
+    ``daemon.streaming.TagStreamProducer``, in production) has
+    continuous frames to read for as long as it runs, rather than
+    degrading to "no frame available" once a short, fixed queue runs
+    out — development-plan.md Stage 8's "fake-camera daemon (fixture
+    replay backend)". ``fail_open`` makes ``open()`` raise instead of
     succeeding — for AC "present but unopenable" style scenarios.
     """
 
@@ -45,37 +54,91 @@ class FakeBackend:
         read_queue: Optional[List[Optional[np.ndarray]]] = None,
         fail_open: bool = False,
         size: Tuple[int, int] = (640, 480),
+        read_delay: float = 0.0,
+        loop: bool = False,
     ) -> None:
         self._is_open = False
-        self._queue: List[Optional[np.ndarray]] = list(read_queue) if read_queue else []
+        #: ticket 027-003 -- the original frames, kept aside so a
+        #: ``loop=True`` backend can refill ``self._queue`` from it once
+        #: exhausted, rather than exhausting to ``None`` permanently.
+        self._original_queue: List[Optional[np.ndarray]] = list(read_queue) if read_queue else []
+        self._queue: List[Optional[np.ndarray]] = list(self._original_queue)
         self.fail_open = fail_open
         self._size = size
+        #: ticket 027-003 -- when ``True`` and the queue is exhausted,
+        #: ``read()`` refills it from the original frames instead of
+        #: returning ``None`` -- the "looping/fixture-replay fake camera
+        #: backend" this ticket's testing infrastructure needs so a
+        #: continuously-running background producer never runs dry.
+        #: Default ``False`` leaves every pre-existing exhaust-to-``None``
+        #: test unaffected.
+        self.loop = loop
         self.open_calls = 0
         self.close_calls = 0
         self.read_calls = 0
         self._properties: Dict[str, float] = {}
+        #: ticket 027-002 -- an artificial delay inside read(), widening
+        #: the window in which a concurrency bug (two threads calling
+        #: into this backend at the same time) would actually manifest.
+        #: Zero by default, so every pre-existing single-threaded test
+        #: is unaffected.
+        self.read_delay = read_delay
+        #: ticket 027-002 -- a reentrancy detector, not a synchronization
+        #: primitive. Set for the duration of any read()/open()/close()
+        #: call and checked on entry to each; deliberately *not* guarded
+        #: by a lock of its own, since the whole point is to catch
+        #: ``Camera``'s read lock failing to serialize calls into this
+        #: backend. ``reentrant_hits`` is asserted to be exactly ``0``
+        #: after a concurrent test run -- the fake backend's own internal
+        #: state never observed concurrent entry.
+        self._busy = False
+        self.reentrant_hits = 0
+
+    def _enter(self) -> None:
+        if self._busy:
+            self.reentrant_hits += 1
+        self._busy = True
+
+    def _exit(self) -> None:
+        self._busy = False
 
     @property
     def is_open(self) -> bool:
         return self._is_open
 
     def open(self) -> None:
-        self.open_calls += 1
-        if self.fail_open:
-            raise RuntimeError("simulated open failure")
-        self._is_open = True
+        self._enter()
+        try:
+            self.open_calls += 1
+            if self.fail_open:
+                raise RuntimeError("simulated open failure")
+            self._is_open = True
+        finally:
+            self._exit()
 
     def read(self) -> Optional[np.ndarray]:
-        self.read_calls += 1
-        if not self._is_open:
+        self._enter()
+        try:
+            self.read_calls += 1
+            if self.read_delay:
+                time.sleep(self.read_delay)
+            if not self._is_open:
+                return None
+            if not self._queue and self.loop and self._original_queue:
+                self._queue = list(self._original_queue)
+            if self._queue:
+                return self._queue.pop(0)
             return None
-        if self._queue:
-            return self._queue.pop(0)
-        return None
+        finally:
+            self._exit()
 
     def close(self) -> None:
-        self.close_calls += 1
-        self._is_open = False
+        self._enter()
+        try:
+            self.close_calls += 1
+            self._is_open = False
+        finally:
+            self._exit()
 
     def frame_size(self) -> Optional[Tuple[int, int]]:
         return self._size if self._is_open else None
@@ -338,6 +401,129 @@ def test_default_on_reopen_is_none_and_self_heal_still_works():
         cam.read()
 
     assert backend.open_calls == 2  # reopened without error
+
+
+# ---------------------------------------------------------------------------
+# Concurrent read() (ticket 027-002): a background stream producer
+# (tickets 027-003/004) and one-shot RPC reads now call read() on the
+# same Camera from different threads. These tests prove Camera._read_lock
+# makes that safe: no two threads ever run inside the same FakeBackend
+# call at once (FakeBackend.reentrant_hits stays 0), self-heal reopen
+# stays correct under concurrent pressure, and nothing deadlocks (every
+# join() below is timeout-bounded so a real deadlock fails the test
+# instead of hanging the suite).
+# ---------------------------------------------------------------------------
+
+
+def _run_concurrent(worker, thread_count: int, join_timeout: float = 10.0) -> None:
+    """Start *thread_count* threads all running *worker*, join them all
+    with a bounded timeout, and assert every one actually finished --
+    the shared deadlock guard every test below uses."""
+    threads = [threading.Thread(target=worker) for _ in range(thread_count)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=join_timeout)
+    assert not any(t.is_alive() for t in threads), (
+        "a thread did not finish within the timeout -- possible deadlock"
+    )
+
+
+def test_concurrent_reads_never_interleave_backend_calls():
+    """Two threads calling ``Camera.read()`` concurrently against the
+    same backend must never overlap their calls into it. An artificial
+    per-read delay widens the race window so the bug would reliably
+    manifest if the lock were missing or scoped wrong."""
+    reads_per_thread = 100
+    thread_count = 4
+    total = reads_per_thread * thread_count
+    frames = [_frame() for _ in range(total)]
+    backend = FakeBackend(read_queue=frames, read_delay=0.002)
+    cam = Camera("cam-a", backend)
+    cam.open()
+
+    errors: List[BaseException] = []
+    errors_lock = threading.Lock()
+
+    def worker() -> None:
+        for _ in range(reads_per_thread):
+            try:
+                cam.read()
+            except BaseException as exc:  # pragma: no cover - failure path
+                with errors_lock:
+                    errors.append(exc)
+
+    _run_concurrent(worker, thread_count)
+
+    assert errors == []
+    assert backend.reentrant_hits == 0  # no two threads were ever inside the backend together
+    assert backend.read_calls == total  # every call landed exactly once -- none lost, none duplicated
+
+
+def test_concurrent_reads_self_heal_reopen_stays_correct_under_pressure():
+    """Self-heal reopen (5 consecutive failures -> reopen, capped at 10)
+    must stay correct when the failures driving it come from multiple
+    threads racing on the same ``Camera``. Because ``read()`` holds the
+    lock for its whole body -- including the self-heal reopen it may
+    trigger -- every call is fully serialized, so the outcome is exactly
+    what a single-threaded run of the same total call count would
+    produce, regardless of which thread happens to execute which call.
+    """
+    reads_per_thread = 25
+    thread_count = 4
+    total = reads_per_thread * thread_count  # 100 -- well past FAILURE_THRESHOLD * MAX_REOPENS (50)
+    backend = FakeBackend(read_queue=[], read_delay=0.002)  # every read fails
+    cam = Camera("cam-a", backend)
+    cam.open()
+
+    errors: List[BaseException] = []
+    errors_lock = threading.Lock()
+
+    def worker() -> None:
+        for _ in range(reads_per_thread):
+            try:
+                cam.read()
+            except BaseException as exc:  # pragma: no cover - failure path
+                with errors_lock:
+                    errors.append(exc)
+
+    _run_concurrent(worker, thread_count)
+
+    assert errors == []
+    assert backend.reentrant_hits == 0
+    assert backend.read_calls == total
+    # Deterministic regardless of thread interleaving: with every read
+    # failing, the reopen budget is exhausted after MAX_REOPENS reopens
+    # (FAILURE_THRESHOLD * MAX_REOPENS = 50 failed reads), and never
+    # exceeds that no matter how the 100 calls are split across threads.
+    assert backend.open_calls == 1 + MAX_REOPENS
+    assert cam.state.usable is False  # budget spent -- "plugged in and broken"
+    assert cam.state.present is True
+
+
+def test_concurrent_reads_do_not_deadlock():
+    """A dedicated deadlock check: many threads reading concurrently
+    (including self-heal-triggering failures) must all finish within a
+    bounded timeout. If the lock were held across the wrong scope (e.g.
+    re-acquired non-reentrantly from within itself), this test would
+    hang until the timeout and then fail, rather than hanging the whole
+    suite forever."""
+    # Alternate success/failure frames so both the plain-read path and
+    # the self-heal path are exercised concurrently.
+    frames: List[Optional[np.ndarray]] = []
+    for i in range(200):
+        frames.append(_frame() if i % 7 else None)
+    backend = FakeBackend(read_queue=frames, read_delay=0.001)
+    cam = Camera("cam-a", backend)
+    cam.open()
+
+    def worker() -> None:
+        for _ in range(50):
+            cam.read()
+
+    _run_concurrent(worker, thread_count=4, join_timeout=15.0)
+
+    assert backend.reentrant_hits == 0
 
 
 # ---------------------------------------------------------------------------

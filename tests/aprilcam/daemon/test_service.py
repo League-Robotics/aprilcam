@@ -72,6 +72,7 @@ from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
 from aprilcam.types import (
     Annotation,
     Circle,
+    ImageFrame,
     Marker,
     MountParameters,
     PathShape,
@@ -328,6 +329,203 @@ def test_close_closes_every_held_camera(service, held_camera):
 
     assert cam.state.usable is False
     assert service.active_slugs() == frozenset()
+
+
+# ---------------------------------------------------------------------------
+# stream_tags (ticket 027-003, UC-11/SUC-001) -- in-process only this
+# ticket: no socket/gRPC endpoint, just DaemonService.stream_tags wired
+# to daemon.streaming.TagStreamProducer/BroadcasterTagStream.
+# ---------------------------------------------------------------------------
+
+
+def test_stream_tags_returns_a_tag_stream_that_publishes_real_frames(service, held_camera):
+    _, slug, _ = held_camera
+
+    stream = service.stream_tags(slug)
+    try:
+        frame = next(iter(stream))
+        assert isinstance(frame, TagFrame)
+    finally:
+        stream.close()
+
+
+def test_stream_tags_reuses_the_same_producer_across_repeated_calls(service, held_camera):
+    _, slug, _ = held_camera
+
+    stream1 = service.stream_tags(slug)
+    stream2 = service.stream_tags(slug)
+    try:
+        producer = service._tag_stream_producers[slug]  # noqa: SLF001 - internal, pinning reuse
+        assert producer.broadcaster.subscriber_count == 2
+    finally:
+        stream1.close()
+        stream2.close()
+
+
+def test_close_stops_every_tracked_tag_stream_producer(service, held_camera):
+    _, slug, _ = held_camera
+
+    service.stream_tags(slug)
+    producer = service._tag_stream_producers[slug]  # noqa: SLF001 - internal, pinning shutdown
+    deadline = time.monotonic() + 2.0
+    while not producer.running and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert producer.running is True
+
+    service.close()
+
+    assert producer.running is False
+    assert service._tag_stream_producers == {}  # noqa: SLF001
+
+
+# ---------------------------------------------------------------------------
+# stream_images (ticket 027-004, UC-07/SUC-002) -- in-process only this
+# ticket: no socket/gRPC endpoint, just DaemonService.stream_images wired
+# to daemon.streaming.ImageStreamProducer/BroadcasterImageStream.
+# ---------------------------------------------------------------------------
+
+
+def _open_camera_looping(
+    registry: CameraRegistry,
+    frame: np.ndarray,
+    *,
+    hardware_key: str = "hw:stream-image",
+    device_name: str = "Stream Image Camera",
+):
+    """Like ``_open_camera_with_frames`` above, but with ``loop=True`` --
+    a background stream producer keeps reading for as long as it has a
+    subscriber, so (unlike the one-shot calibration fixtures) it must
+    never run dry."""
+    identity = _identity(hardware_key, device_name)
+    slug = registry.resolve(identity)
+    number = registry.get(slug).number
+    backend = FakeBackend(read_queue=[frame], loop=True)
+    cam = Camera(slug, backend, number=number)
+    cam.open()
+    return identity, slug, cam, backend
+
+
+def _calibrated_streaming_service(directories, registry):
+    """A ``DaemonService`` with one camera, calibrated against
+    ``main-playfield``, backed by a *looping* fake camera -- the shared
+    setup every deskewed ``stream_images`` test below needs."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_looping(registry, frame)
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True
+    return service, slug
+
+
+def test_stream_images_raw_returns_a_stream_that_publishes_real_frames(service, held_camera):
+    _, slug, _ = held_camera
+
+    stream = service.stream_images(slug)
+    try:
+        frame = next(iter(stream))
+        assert isinstance(frame, ImageFrame)
+        assert frame.deskewed is False
+    finally:
+        stream.close()
+
+
+def test_stream_images_deskewed_raises_not_calibrated(service, held_camera):
+    _, slug, _ = held_camera
+
+    with pytest.raises(NotCalibrated):
+        service.stream_images(slug, deskewed=True)
+
+    # No producer was created for the rejected request.
+    assert service._image_stream_producers == {}  # noqa: SLF001
+
+
+def test_stream_images_deskewed_returns_a_stream_that_publishes_real_deskewed_frames(
+    directories, registry
+):
+    service, slug = _calibrated_streaming_service(directories, registry)
+
+    stream = service.stream_images(slug, deskewed=True)
+    try:
+        frame = next(iter(stream))
+        assert frame.deskewed is True
+        assert frame.width == 800 and frame.height == 532
+        assert frame.px_per_cm == pytest.approx(800 / 134.3)
+        assert frame.world_extent == pytest.approx((134.3, 89.3))
+        assert frame.annotations is not None  # deskewed always embeds a real set
+    finally:
+        stream.close()
+
+
+def test_stream_images_deskewed_embed_matches_get_frame_for_the_same_moment(directories, registry):
+    """The literal 'embedded tags/annotations match what get_frame would
+    return for the same moment' check: neither the streaming path nor
+    the one-shot path ever triggers its own detection burst (sprint 021
+    Decision 4), so both must be embedding the *same* already-buffered
+    ``TagFrame`` -- not independently-arrived-at equal-looking ones."""
+    service, slug = _calibrated_streaming_service(directories, registry)
+    burst = service.get_tags(slug)  # exactly one burst runs; becomes "latest" for both paths below
+
+    stream = service.stream_images(slug, deskewed=True)
+    try:
+        streamed = next(iter(stream))
+    finally:
+        stream.close()
+    one_shot = service.get_frame(slug, deskewed=True)
+
+    assert streamed.tags == burst
+    assert one_shot.tags == burst
+    # Content, not wall-clock ``timestamp`` (each ``get_annotations`` call
+    # stamps its own -- content equality is what "matches" means here).
+    assert streamed.annotations is not None and one_shot.annotations is not None
+    assert streamed.annotations.annotations == one_shot.annotations.annotations
+    assert streamed.annotations.revision == one_shot.annotations.revision
+    assert streamed.px_per_cm == pytest.approx(one_shot.px_per_cm)
+    assert streamed.world_extent == pytest.approx(one_shot.world_extent)
+    assert streamed.deskewed is True and one_shot.deskewed is True
+
+
+def test_stream_images_reuses_the_same_producer_across_repeated_calls(service, held_camera):
+    _, slug, _ = held_camera
+
+    stream1 = service.stream_images(slug)
+    stream2 = service.stream_images(slug)
+    try:
+        producer = service._image_stream_producers[(slug, False)]  # noqa: SLF001
+        assert producer.broadcaster.subscriber_count == 2
+    finally:
+        stream1.close()
+        stream2.close()
+
+
+def test_stream_images_raw_and_deskewed_are_independently_tracked(directories, registry):
+    service, slug = _calibrated_streaming_service(directories, registry)
+
+    raw_stream = service.stream_images(slug, deskewed=False)
+    deskewed_stream = service.stream_images(slug, deskewed=True)
+    try:
+        producers = service._image_stream_producers  # noqa: SLF001
+        assert set(producers.keys()) == {(slug, False), (slug, True)}
+        assert producers[(slug, False)] is not producers[(slug, True)]
+    finally:
+        raw_stream.close()
+        deskewed_stream.close()
+
+
+def test_close_stops_every_tracked_image_stream_producer(service, held_camera):
+    _, slug, _ = held_camera
+
+    service.stream_images(slug)
+    producer = service._image_stream_producers[(slug, False)]  # noqa: SLF001
+    deadline = time.monotonic() + 2.0
+    while not producer.running and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert producer.running is True
+
+    service.close()
+
+    assert producer.running is False
+    assert service._image_stream_producers == {}  # noqa: SLF001
 
 
 def test_valid_encodings_matches_daemon_get_frame_contract():

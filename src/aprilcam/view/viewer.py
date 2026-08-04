@@ -1,17 +1,56 @@
-"""``view/viewer.py`` — the poll-driven live-view window core (ticket
-022-002; sprint.md Architecture Decisions 2 and 3).
+"""``view/viewer.py`` -- the streaming live-view window core (ticket
+027-007; supersedes the poll-driven design ticket 022-002 built, which
+sprint 022's own module docstring explicitly deferred replacing until
+"the streaming subsystem exists and the two can be compared" (Decision
+3). That subsystem now exists (tickets 027-001 through 027-006) and
+this module is the comparison's result.
 
-**Polls; does not stream (Decision 3).** Both view commands need frames
-continuously, but ``ImageStream``/``TagStream`` are undeclared-but-
-unimplemented Stage 8/12 territory this sprint does not otherwise
-touch -- streaming needs backpressure (bounded queues, silent drop), a
-stream-endpoint allocation RPC, and per-subscriber lifecycle, a real
-subsystem in its own right. Building a partial version of it just to
-feed one viewer window would be built twice, so :class:`PollLoop` below
-instead calls a plain ``fetch`` callable at a modest fixed rate
-(:data:`DEFAULT_POLL_HZ`, ~2 Hz -- a starting guess, not a tuned
-constant per sprint.md's Open Question 3; revisit once the streaming
-subsystem exists and the two can be compared).
+**Streams; does not poll.** Both view commands subscribe once to
+``daemon.stream_images(camera, deskewed=...)`` (``daemon/broadcast.py``'s
+fan-out, ``daemon/streaming.py``'s producers, ``daemon/
+stream_transport.py``'s socket transport, ``client/streams.py``'s
+``SocketImageStream`` -- tickets 027-001 through 027-006) instead of
+calling ``get_frame``/``get_tags`` on a fixed-rate timer.
+:func:`run_raw_view` subscribes with ``deskewed=False``;
+:func:`run_playfield_view` subscribes with ``deskewed=True`` **only** --
+a deskewed ``ImageFrame`` already embeds its own ``TagFrame``
+(``frame.tags``) and ``AnnotationSet`` (``frame.annotations``), so the
+playfield view needs no second subscription and no ``get_tags``/
+``stream_tags`` call at all (``types.ImageFrame``'s own "frames carry
+tags" / "deskewed frames carry annotations" contract, unchanged by this
+ticket). This is a real simplification over the old two-call
+``_fetch_playfield`` (``get_tags`` then ``get_frame``), not merely a
+speed-up: one subscription is everything the renderer needs, on every
+frame it is handed.
+
+**A background reader thread feeds a single-slot "latest frame" cell.**
+Tk's main loop cannot block on a stream read without freezing the
+window, so :class:`StreamLoop` runs a daemon-mode background thread
+that iterates the ``ImageStream``, converts each yielded ``ImageFrame``
+into a :class:`DisplayFrame`, and stores it in a lock-protected single
+attribute -- replacing, never queuing, whatever was there before. The
+calling thread (Tk's own) samples that cell non-blockingly on
+:data:`_PUMP_INTERVAL_S`'s cadence -- the same interval that, under the
+old :class:`!PollLoop`, only governed how promptly a mid-poll window
+close was noticed. It now does double duty as both the responsiveness
+cadence and the display refresh cadence, which is why this module has
+only *one* timing constant instead of two (``poll_hz`` plus this
+interval) -- ticket 027-007's own instruction: reuse
+``Window.pump()``'s existing cadence rather than inventing a second
+one. Older undisplayed frames are silently dropped rather than queued
+for later display, carrying the streaming subsystem's own backpressure
+model (``daemon/broadcast.py``: a slow consumer loses frames, it never
+stalls the pipeline or another subscriber) one layer further, to the
+one display slot a live-view window has room for anyway.
+
+Closing the window (``Window.pump()`` reporting ``False``) and the
+reader thread ending with an exception both stop :meth:`StreamLoop.run`
+promptly: the stream is closed (unsubscribing -- a daemon-visible event
+per ``daemon/interfaces.py``'s ``ImageStream`` docstring) and the reader
+thread is joined, bounded by :data:`_READER_JOIN_TIMEOUT_S`, before
+``run()`` returns or re-raises -- so no reader thread survives past a
+``run_raw_view``/``run_playfield_view`` call returning, in ordinary
+operation.
 
 **No OpenCV here, ever.** The daemon serves already-encoded JPEG/PNG
 bytes; this module decodes them with Pillow (``PIL.Image``) for display
@@ -20,38 +59,42 @@ no vision" rule, extended to the one adapter that touches pixels at
 all (to put them on screen, not to process them). See
 ``tests/test_no_cv2_in_client_modules.py`` for the automated check.
 
-**The ticket-006 reuse seam.** :class:`Window` (a display surface:
-encoded bytes in, pixels on screen) and :class:`PollLoop` (fetch, show,
-wait, repeat, until the window closes) know nothing about *what* the
-raw view vs. the deskewed+tags view fetch or how it was produced --
-only :func:`run_raw_view`/:func:`run_playfield_view` and their private
-``_fetch_raw``/``_fetch_playfield`` below are specific to a view kind.
-Ticket 006's ``playfield view`` (:func:`run_playfield_view`) reuses
-``Window``/``PollLoop`` unchanged and supplies a different ``fetch``
-callable (``get_tags`` then ``get_frame(deskewed=True)``, rendered
-through ``client/renderer.py`` into PNG bytes) -- the loop, timing, and
-window lifecycle stay identical, exactly as sprint.md's Step 3 table
-describes the "Live viewing" responsibility.
+**The reuse seam.** :class:`Window` (a display surface: encoded bytes
+in, pixels on screen) and :class:`StreamLoop` (subscribe, read, show,
+repeat, until the window closes or the stream fails) know nothing about
+*what* the raw view vs. the deskewed+tags view subscribes to or how a
+frame becomes displayed bytes -- only :func:`run_raw_view`/
+:func:`run_playfield_view` and their private ``_convert_raw_frame``/
+``_make_playfield_converter`` below are specific to a view kind. This
+is the same reuse seam ticket 022-006 established for ``PollLoop``,
+carried forward onto ``StreamLoop``: the loop, timing, and window
+lifecycle stay identical between the two views; only the subscription's
+``deskewed`` flag and the conversion callable differ.
 
 **``playfield view``'s "raw means raw" counterpart: never fall back.**
-:func:`_fetch_playfield` only ever calls ``get_frame`` with
-``deskewed=True`` and has no ``except`` around ``NotCalibrated`` --
-so an uncalibrated camera's error propagates out of :func:`run_playfield_view`
-untouched, and a raw-frame substitute is structurally impossible on this
-path, not merely avoided by discipline (UC-18.S-2's central rule,
-mirrored from UC-16's "raw means raw" the other direction).
+:func:`run_playfield_view` calls ``daemon.stream_images`` with
+``deskewed=True`` and has no ``except`` around that call or around
+anything the returned stream raises -- so
+:class:`~aprilcam.errors.NotCalibrated` (raised for a deskewed request
+against an uncalibrated camera, per ``Daemon.get_frame``'s and
+``Daemon.stream_images``'s shared "fails explicitly, never silently
+substitutes a raw frame" contract) propagates out of
+:func:`run_playfield_view` untouched, and a raw-frame substitute is
+structurally impossible on this path, not merely avoided by discipline
+(UC-18.S-2's central rule, mirrored from UC-16's "raw means raw" the
+other direction). Unchanged in substance from ticket 022-006 -- only
+the call this propagates from moved, from ``get_frame`` to
+``stream_images``.
 
 **"Raw means raw" is enforced by omission, not by a switch.**
-``_fetch_raw`` never reads ``ImageFrame.tags`` at all, even though a
-frame may carry one (an active ring buffer from a recent ``camera
-tags``/``camera calibrate`` call on the same camera) -- UC-16's
-"raw means raw" contract, taken literally as a *display-time* rule per
-the ticket brief: the daemon's query is unconditional (``get_frame``
-always embeds the latest ring-buffer entry when one exists), but
-nothing on this path ever turns that embedded data into a drawn
-boundary or hat. This is what makes it safe to reuse ``_fetch_raw`` as
-written even while detection happens to be running for an unrelated
-reason (the ticket's first acceptance criterion).
+:func:`_convert_raw_frame` never reads ``ImageFrame.tags`` at all, even
+though a raw frame may carry one (an active ring buffer from a recent
+``camera tags``/``camera calibrate`` call on the same camera, or
+detection simply running for an unrelated reason) -- UC-16's "raw means
+raw" contract, taken literally as a *display-time* rule: nothing on
+this path ever turns embedded tag data into a drawn boundary or hat.
+This is what makes it safe to reuse ``_convert_raw_frame`` as written
+even while detection happens to be active for an unrelated reason.
 
 **Headless detection (UC-16.S-3).** :class:`TkWindow` raises
 :class:`NoDisplayAvailable` instead of letting a GUI-toolkit failure
@@ -72,9 +115,10 @@ UC-16.S-3 message pointing at ``camera image``.
 from __future__ import annotations
 
 import glob
-import io
 import os
+import io
 import sys
+import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass
@@ -84,28 +128,51 @@ from PIL import Image, ImageTk
 
 from aprilcam.client.interfaces import Renderer as RendererBase
 from aprilcam.client.renderer import Renderer as PillowRenderer
-from aprilcam.daemon.interfaces import Daemon
+from aprilcam.daemon.interfaces import Daemon, ImageStream
+from aprilcam.types import ImageFrame
 
 __all__ = [
     "DEFAULT_POLL_HZ",
     "NoDisplayAvailable",
-    "PolledFrame",
+    "DisplayFrame",
     "Window",
     "TkWindow",
-    "PollLoop",
+    "StreamLoop",
     "run_raw_view",
     "run_playfield_view",
 ]
 
-#: Decision 3 (sprint.md): a starting guess, not a tuned constant --
-#: see the module docstring.
+#: The poll rate this module used before ticket 027-007's migration to
+#: streaming (sprint 022's Decision 3). Nothing in this module reads it
+#: to drive a timer any more -- frames now arrive at whatever rate the
+#: daemon's stream publishes, sampled for display at
+#: :data:`_PUMP_INTERVAL_S`'s cadence instead. Kept only as the "old
+#: way" comparison baseline this ticket's own acceptance criteria and
+#: tests measure the new streaming throughput against (the "visibly
+#: beats 2 Hz" success criterion).
 DEFAULT_POLL_HZ = 2.0
 
-#: How often ``PollLoop`` pumps the window's toolkit event loop while
-#: waiting for the next poll tick, so a close click is noticed within
-#: this long even at a slow poll rate, rather than only at the next
-#: fetch.
+#: How often :class:`StreamLoop`'s main-thread loop samples the
+#: single-slot "latest frame" cell and pumps the window's toolkit event
+#: loop -- both the display refresh cadence and the window-close
+#: responsiveness cadence are now this one number (module docstring:
+#: "do not invent a second timing constant"), where the old
+#: :class:`!PollLoop` needed two (a poll interval, plus this same
+#: sub-interval purely for noticing a close mid-wait).
 _PUMP_INTERVAL_S = 0.05
+
+#: How long :meth:`StreamLoop.run` waits for the background reader
+#: thread to join once the window has closed or the stream has failed
+#: -- mirrors ``daemon/stream_transport.py``'s own ``_JOIN_TIMEOUT_S``
+#: bounded-join discipline, for the identical reason: never block
+#: shutdown forever on a thread that might be stuck in a blocking
+#: socket read.
+_READER_JOIN_TIMEOUT_S = 2.0
+
+#: The background reader thread's name -- distinctive enough that a
+#: test can confirm via ``threading.enumerate()`` that no reader thread
+#: survives past a :meth:`StreamLoop.run` call returning.
+_READER_THREAD_NAME = "aprilcam-view-stream-reader"
 
 #: Large camera frames (a 4K webcam) are scaled down for the window --
 #: purely a screen-real-estate convenience for :class:`TkWindow`, never
@@ -125,11 +192,10 @@ class NoDisplayAvailable(Exception):
 
 
 @dataclass(frozen=True, kw_only=True)
-class PolledFrame:
-    """One poll tick's display payload -- an already-encoded image
-    (JPEG or PNG) plus an optional advisory line for the window
-    chrome, never drawn onto the image itself (see
-    ``Window.set_status``)."""
+class DisplayFrame:
+    """One display update's payload -- an already-encoded image (JPEG
+    or PNG) plus an optional advisory line for the window chrome, never
+    drawn onto the image itself (see ``Window.set_status``)."""
 
     data: bytes
     status: Optional[str] = None
@@ -141,7 +207,7 @@ class Window:
     A plain base class, not ``typing.Protocol`` (see
     ``daemon/interfaces.py``'s module docstring for the codebase-wide
     design rule): :class:`TkWindow` derives from this for real use;
-    tests derive a fake so :class:`PollLoop` is exercised with no real
+    tests derive a fake so :class:`StreamLoop` is exercised with no real
     GUI toolkit instantiated.
     """
 
@@ -149,22 +215,20 @@ class Window:
         """Decode *data* (an encoded image -- JPEG or PNG) and display
         it, replacing whatever was shown before. Never draws anything
         beyond the pixels handed in -- any overlay is baked into *data*
-        upstream (``client/renderer.py``, ticket 006) or, on this
-        ticket's raw path, simply absent."""
+        upstream (``client/renderer.py``) or, on the raw path, simply
+        absent."""
         raise NotImplementedError(f"{type(self).__name__} does not implement Window.show")
 
     def set_status(self, text: Optional[str]) -> None:
         """An advisory line shown in the window chrome, never drawn
-        onto the image itself -- e.g. the ``frame_dark`` advisory
-        (this ticket's last acceptance criterion). ``None`` clears
-        it."""
+        onto the image itself -- e.g. the ``frame_dark`` advisory.
+        ``None`` clears it."""
         raise NotImplementedError(f"{type(self).__name__} does not implement Window.set_status")
 
     def pump(self) -> bool:
         """Process one tick of the toolkit's event loop. Returns
         ``False`` once the user has closed the window -- the signal
-        :class:`PollLoop` uses to stop polling -- ``True``
-        otherwise."""
+        :class:`StreamLoop` uses to stop -- ``True`` otherwise."""
         raise NotImplementedError(f"{type(self).__name__} does not implement Window.pump")
 
     def close(self) -> None:
@@ -287,82 +351,123 @@ class TkWindow(Window):
             pass
 
 
-class PollLoop:
-    """Poll-driven display loop: fetch a frame, hand it to a
-    :class:`Window`, pump the toolkit's event loop, wait for the next
-    tick, repeat -- until the window closes.
+class StreamLoop:
+    """Streaming display loop (ticket 027-007): a background thread
+    iterates *stream*, converts each yielded ``ImageFrame`` via
+    *convert* into a :class:`DisplayFrame`, and stores it in a
+    lock-protected single-slot "latest frame" cell; the calling thread
+    -- Tk's main thread, via :meth:`run` -- pumps *window* and samples
+    that cell on its own cadence (*pump_interval*), never blocking on
+    the stream itself. Older undisplayed frames are dropped (replace,
+    not append) -- see the module docstring's backpressure note.
 
-    This is the plumbing ticket 006's ``playfield view`` reuses
-    unchanged (see the module docstring): only *what* ``fetch``
-    returns differs between the raw and deskewed+tags views.
+    This is the plumbing both :func:`run_raw_view` and
+    :func:`run_playfield_view` share unchanged (module docstring's
+    "reuse seam"): only *stream* (which ``deskewed`` value it was
+    opened with) and *convert* differ between the raw and deskewed+tags
+    views.
 
     Parameters
     ----------
     window:
         Where frames are displayed.
-    fetch:
-        Produces the next :class:`PolledFrame`. Called once per tick,
-        synchronously -- any exception it raises (e.g. an
-        ``aprilcam.errors.AprilCamError`` from a dropped connection)
-        propagates out of :meth:`run`, ending the loop.
-    poll_hz:
-        Ticks per second (default :data:`DEFAULT_POLL_HZ`).
-    sleep / clock:
-        Overridable time sources so tests exercise real cadence logic
-        without a real clock (``time.sleep``/``time.monotonic`` by
+    stream:
+        The subscription to read from -- closed by :meth:`run` in its
+        own cleanup, regardless of how the loop ends.
+    convert:
+        Turns one streamed ``ImageFrame`` into a :class:`DisplayFrame`.
+        Called on the background reader thread, not the caller's --
+        must not touch *window* itself.
+    pump_interval / sleep:
+        Overridable so tests exercise the sampling cadence without a
+        real clock cost (``_PUMP_INTERVAL_S``/``time.sleep`` by
         default).
+
+    **Best-effort thread cleanup.** ``stream.close()`` closes the
+    client-side socket (``client/streams.py``'s ``SocketImageStream``);
+    if the reader thread happens to be blocked inside a socket read at
+    that exact moment, how promptly that read unblocks is a property of
+    the socket/threading layer this class does not own (out of this
+    module's scope) -- :data:`_READER_JOIN_TIMEOUT_S` bounds how long
+    :meth:`run` waits either way, so a wedged reader thread can never
+    block window shutdown forever; it is left to exit as a daemon
+    thread instead.
     """
 
     def __init__(
         self,
         window: Window,
-        fetch: Callable[[], PolledFrame],
+        stream: ImageStream,
+        convert: Callable[[ImageFrame], DisplayFrame],
         *,
-        poll_hz: float = DEFAULT_POLL_HZ,
+        pump_interval: float = _PUMP_INTERVAL_S,
         sleep: Callable[[float], None] = time.sleep,
-        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._window = window
-        self._fetch = fetch
-        self._interval = 1.0 / poll_hz
+        self._stream = stream
+        self._convert = convert
+        self._pump_interval = pump_interval
         self._sleep = sleep
-        self._clock = clock
+        self._lock = threading.Lock()
+        self._latest: Optional[DisplayFrame] = None
+        self._error: Optional[Exception] = None
+
+    def _read_stream(self) -> None:
+        """Runs on the background reader thread: iterate ``stream``,
+        converting and replacing the single-slot cell on every frame.
+        Any exception the stream raises while iterating (e.g. an
+        ``aprilcam.errors.AprilCamError`` from a dropped connection) is
+        caught here and relayed to :meth:`run`, which re-raises it on
+        the caller's own thread once the loop has stopped -- a bare
+        thread target that raised would otherwise just print a
+        traceback and vanish silently."""
+        try:
+            for frame in self._stream:
+                displayed = self._convert(frame)
+                with self._lock:
+                    self._latest = displayed
+        except Exception as exc:  # noqa: BLE001 - relayed to run(), never swallowed
+            with self._lock:
+                self._error = exc
+
+    def _take_latest(self) -> "tuple[Optional[DisplayFrame], Optional[Exception]]":
+        with self._lock:
+            frame, self._latest = self._latest, None
+            return frame, self._error
 
     def run(self) -> None:
-        """Poll until the window closes. Returns normally once
-        :meth:`Window.pump` reports the window closed -- never raises
-        for that case, since a closed window is the expected way this
-        loop ends (the ticket's second acceptance criterion: closing
-        the window stops polling)."""
-        while self._window.pump():
-            frame = self._fetch()
-            self._window.show(frame.data)
-            self._window.set_status(frame.status)
-            if not self._wait_for_next_tick():
-                break
+        """Start the reader thread, then pump *window* and display the
+        latest available frame until the window closes or the reader
+        thread reports a failure -- whichever happens first.
 
-    def _wait_for_next_tick(self) -> bool:
-        """Sleep until *interval* has elapsed since this tick started,
-        pumping the window periodically so a close during the wait is
-        noticed promptly. Returns ``False`` the moment the window
-        reports closed."""
-        deadline = self._clock() + self._interval
-        while True:
-            remaining = deadline - self._clock()
-            if remaining <= 0:
-                return True
-            if not self._window.pump():
-                return False
-            self._sleep(min(remaining, _PUMP_INTERVAL_S))
+        Returns normally once :meth:`Window.pump` reports the window
+        closed -- never raises for that case, since a closed window is
+        the expected way this loop ends. Re-raises whatever exception
+        the stream raised, once the reader thread has stopped, if that
+        is instead why the loop ended.
+        """
+        thread = threading.Thread(target=self._read_stream, name=_READER_THREAD_NAME, daemon=True)
+        thread.start()
+        try:
+            while self._window.pump():
+                frame, error = self._take_latest()
+                if error is not None:
+                    raise error
+                if frame is not None:
+                    self._window.show(frame.data)
+                    self._window.set_status(frame.status)
+                self._sleep(self._pump_interval)
+        finally:
+            self._stream.close()
+            thread.join(timeout=_READER_JOIN_TIMEOUT_S)
 
 
-def _fetch_raw(daemon: Daemon, camera: str) -> PolledFrame:
-    """One poll tick's raw-view payload (UC-16, SUC-002). See the
-    module docstring's "raw means raw is enforced by omission" note --
-    this never reads ``frame.tags``."""
-    frame = daemon.get_frame(camera, deskewed=False)
+def _convert_raw_frame(frame: ImageFrame) -> DisplayFrame:
+    """One streamed frame's raw-view display payload (UC-16, SUC-002).
+    See the module docstring's "raw means raw is enforced by omission"
+    note -- this never reads ``frame.tags``."""
     status = "frame dark -- image may be hard to see" if frame.frame_dark else None
-    return PolledFrame(data=frame.data, status=status)
+    return DisplayFrame(data=frame.data, status=status)
 
 
 def run_raw_view(
@@ -370,12 +475,11 @@ def run_raw_view(
     daemon: Daemon,
     *,
     window_factory: Callable[[str], Window] = TkWindow,
-    poll_hz: float = DEFAULT_POLL_HZ,
 ) -> None:
     """``camera view <camera>`` (UC-16, SUC-002): open a window and
-    poll ``get_frame(camera, deskewed=False)`` at *poll_hz*, displaying
-    each frame's raw bytes exactly as received -- no drawn overlays of
-    any kind.
+    subscribe to ``stream_images(camera, deskewed=False)``, displaying
+    each streamed frame's raw bytes exactly as received -- no drawn
+    overlays of any kind.
 
     Raises :class:`NoDisplayAvailable` if no display can be opened
     (propagated from *window_factory*, i.e. before any daemon call is
@@ -386,43 +490,42 @@ def run_raw_view(
     """
     window = window_factory(f"aprilcam camera view -- {camera}")
     try:
-        PollLoop(window, lambda: _fetch_raw(daemon, camera), poll_hz=poll_hz).run()
+        stream = daemon.stream_images(camera, deskewed=False)
+        StreamLoop(window, stream, _convert_raw_frame).run()
     finally:
         window.close()
 
 
-def _fetch_playfield(daemon: Daemon, camera: str, renderer: RendererBase) -> PolledFrame:
-    """One poll tick's deskewed+tags payload (UC-18, ticket 022-006).
+def _make_playfield_converter(renderer: RendererBase) -> Callable[[ImageFrame], DisplayFrame]:
+    """Builds the deskewed+tags view's per-frame converter (UC-18,
+    ticket 022-006, adapted for streaming by ticket 027-007).
 
-    Calls ``get_tags`` first -- triggering a fresh detection burst,
-    since ``get_frame`` alone never does (sprint 021's Decision 4) --
-    then ``get_frame(camera, deskewed=True)``, and hands the resulting
-    frame to *renderer* (``client/renderer.py``'s tag-drawing half of
-    ``Renderer.render()``) to produce the displayed PNG bytes. See the
-    module docstring's "never fall back" note: this function has no
-    ``except`` around ``get_frame`` and never calls it with
-    ``deskewed=False``, so :class:`~aprilcam.errors.NotCalibrated`
-    propagates to the caller untouched.
-
-    ``calibration_stale`` (UC-18's stale-mid-view failure mode) and
+    Hands each streamed, already-deskewed ``ImageFrame`` straight to
+    *renderer* (``client/renderer.py``'s ``Renderer.render()``), which
+    draws tag boundaries/hats from the frame's own embedded ``tags``
+    and any embedded ``annotations`` -- no second query, since a
+    deskewed frame already carries both (module docstring). ``
+    calibration_stale`` (UC-18's stale-mid-view failure mode) and
     ``frame_dark`` both surface as the window's advisory status line --
-    never drawn onto the image itself, same as :func:`_fetch_raw`'s
+    never drawn onto the image itself, same as :func:`_convert_raw_frame`'s
     ``frame_dark`` handling.
     """
-    daemon.get_tags(camera)
-    frame = daemon.get_frame(camera, deskewed=True)
-    data = renderer.render(frame)
 
-    status_parts = []
-    if frame.calibration_stale:
-        status_parts.append(
-            "calibration stale -- re-run 'aprilcam camera calibrate' (UC-18)"
-        )
-    if frame.frame_dark:
-        status_parts.append("frame dark -- image may be hard to see")
-    status = "; ".join(status_parts) if status_parts else None
+    def convert(frame: ImageFrame) -> DisplayFrame:
+        data = renderer.render(frame)
 
-    return PolledFrame(data=data, status=status)
+        status_parts = []
+        if frame.calibration_stale:
+            status_parts.append(
+                "calibration stale -- re-run 'aprilcam camera calibrate' (UC-18)"
+            )
+        if frame.frame_dark:
+            status_parts.append("frame dark -- image may be hard to see")
+        status = "; ".join(status_parts) if status_parts else None
+
+        return DisplayFrame(data=data, status=status)
+
+    return convert
 
 
 def run_playfield_view(
@@ -431,38 +534,35 @@ def run_playfield_view(
     *,
     renderer_factory: Callable[[], RendererBase] = PillowRenderer,
     window_factory: Callable[[str], Window] = TkWindow,
-    poll_hz: float = DEFAULT_POLL_HZ,
 ) -> None:
-    """``playfield view`` (UC-18, ticket 022-006): open a window and
-    poll ``get_tags(camera)`` then ``get_frame(camera, deskewed=True)``
-    at *poll_hz*, rendering each frame's embedded tag boundaries and
-    "hats" through *renderer_factory* (``client/renderer.py`` by
-    default) before display -- reusing :class:`PollLoop`/:class:`Window`
-    unchanged (module docstring's "ticket-006 reuse seam").
+    """``playfield view`` (UC-18, ticket 022-006, streaming per ticket
+    027-007): open a window and subscribe to ``stream_images(camera,
+    deskewed=True)`` **only** -- no ``get_tags``/``stream_tags`` call --
+    rendering each streamed frame's embedded tag boundaries and "hats"
+    through *renderer_factory* (``client/renderer.py`` by default)
+    before display, reusing :class:`StreamLoop`/:class:`Window`
+    unchanged (module docstring's "reuse seam").
 
     As a side effect, opening this view is what makes the target
-    camera's ring buffer start filling at roughly the poll rate for as
-    long as the window stays open (sprint.md Decision 3's consequence,
-    sprint 021's Open Question 3): every tick's ``get_tags`` call is a
-    fresh detection burst request.
+    camera's ring buffer start filling for as long as the window stays
+    open and the daemon keeps at least one subscriber -- the streaming
+    subsystem's own idle-gating (``daemon/streaming.py``), the
+    successor to sprint 022's per-poll ``get_tags`` side effect.
 
     Raises :class:`NoDisplayAvailable` if no display can be opened
     (propagated from *window_factory*, i.e. before any daemon call is
     made). Raises :class:`~aprilcam.errors.NotCalibrated` if *camera* is
-    not calibrated -- propagated from the first poll tick's
-    ``get_frame`` call (i.e. after the window has already opened, since
-    calibration state is only knowable from the daemon), **never**
-    caught here to substitute a raw frame (see :func:`_fetch_playfield`).
-    ``cli/playfield.py`` is the boundary that turns either exception
-    into a UC-18-worded message. Any other
-    ``aprilcam.errors.AprilCamError`` raised mid-view propagates the
-    same way, after the window is closed.
+    not calibrated -- propagated from the ``stream_images`` call itself,
+    **never** caught here to substitute a raw stream (see the module
+    docstring's "never fall back" note). ``cli/playfield.py`` is the
+    boundary that turns either exception into a UC-18-worded message.
+    Any other ``aprilcam.errors.AprilCamError`` raised mid-view
+    propagates the same way, after the window is closed.
     """
     renderer = renderer_factory()
     window = window_factory(f"aprilcam playfield view -- {camera}")
     try:
-        PollLoop(
-            window, lambda: _fetch_playfield(daemon, camera, renderer), poll_hz=poll_hz
-        ).run()
+        stream = daemon.stream_images(camera, deskewed=True)
+        StreamLoop(window, stream, _make_playfield_converter(renderer)).run()
     finally:
         window.close()

@@ -53,6 +53,20 @@ to :func:`_abort` below; ticket 005 should read them from there rather
 than duplicate the list. ``UnknownCamera``/``CameraNotPresent`` need no
 new mapping here for the tag-detection RPCs -- they flow through the
 same ``_camera_for`` path ``GetFrame`` already uses.
+
+**``GetImageStream``/``GetTagStream`` (ticket 027-005).** Unlike every
+other RPC above, these two never call into ``daemon.service`` directly
+-- they delegate endpoint allocation to
+``daemon.stream_transport.StreamTransportManager`` (built by
+:func:`build_stream_transport` below, the one place this module hands
+that transport-only module the two proto-serializing callables
+(``_image_frame_bytes_for_stream``/``_tag_frame_bytes_for_stream``) it
+needs without ever letting it import ``aprilcam.proto`` itself -- see
+``daemon/stream_transport.py``'s own module docstring for why that
+boundary matters). Marshalling still happens here (``StreamEndpoint``
+-> ``aprilcam_v2_pb2.StreamEndpoint``); the socket accept loop and
+per-connection sender threads that endpoint points at are entirely
+``daemon/stream_transport.py``'s concern, never this module's.
 """
 
 from __future__ import annotations
@@ -61,7 +75,7 @@ import json
 import logging
 from concurrent import futures
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
 
 import grpc
 
@@ -71,6 +85,7 @@ from aprilcam.config.interfaces import CameraConfig, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
 from aprilcam.daemon.lifecycle import ControlPlaneListener
+from aprilcam.daemon.stream_transport import StreamEndpoint, StreamTransportManager
 from aprilcam.errors import (
     AlreadyRunning,
     AprilCamError,
@@ -105,7 +120,7 @@ from aprilcam.types import (
     WorldPoint,
 )
 
-__all__ = ["build_server"]
+__all__ = ["build_server", "build_stream_transport"]
 
 logger = logging.getLogger(__name__)
 
@@ -301,6 +316,42 @@ def _tag_frame_to_proto(frame: TagFrame) -> aprilcam_v2_pb2.TagFrame:
         frame_index=frame.frame_index,
         calibration_stale=frame.calibration_stale,
     )
+
+
+def _image_frame_bytes_for_stream(frame: ImageFrame) -> bytes:
+    """The exact bytes ``daemon/stream_transport.py``'s image-stream
+    sender thread writes per published tick (ticket 027-005). Reuses
+    :func:`_image_frame_to_proto` -- the identical ``GetFrameResponse``-
+    shaped message ``GetFrame``'s one-shot path already produces
+    (``design.md`` §5: "one deskewed frame carries everything needed to
+    render a fully annotated view") -- rather than a second, separately-
+    maintained image-wire-message conversion. A stream tick and a
+    one-shot ``GetFrame`` response for the same ``ImageFrame`` are
+    therefore byte-for-byte identical on the wire.
+    """
+    return _image_frame_to_proto(frame).SerializeToString()
+
+
+def _tag_frame_bytes_for_stream(frame: TagFrame) -> bytes:
+    """Same idea as :func:`_image_frame_bytes_for_stream`, for tag
+    streams: reuses :func:`_tag_frame_to_proto`, the identical
+    ``TagFrame`` conversion ``GetTagsResponse.tags`` already uses."""
+    return _tag_frame_to_proto(frame).SerializeToString()
+
+
+def _stream_endpoint_to_proto(endpoint: StreamEndpoint) -> aprilcam_v2_pb2.StreamEndpoint:
+    """``daemon.stream_transport.StreamEndpoint`` -> the wire message of
+    the same name (``proto/aprilcam_v2.proto``). Presence discipline
+    matches every other optional field in this module: a ``None`` half
+    stays unset (``HasField(...) is False``), never coerced to an
+    empty string / zero port that could be mistaken for a real value.
+    """
+    msg = aprilcam_v2_pb2.StreamEndpoint()
+    if endpoint.socket_path is not None:
+        msg.socket_path = endpoint.socket_path
+    if endpoint.tcp_port is not None:
+        msg.tcp_port = endpoint.tcp_port
+    return msg
 
 
 def _playfield_feature_entry_to_proto(
@@ -663,8 +714,9 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
     interfaces.Daemon`. See the module docstring -- no business logic
     lives here, only marshalling and error mapping."""
 
-    def __init__(self, service: Daemon) -> None:
+    def __init__(self, service: Daemon, transport: Optional[StreamTransportManager] = None) -> None:
         self._service = service
+        self._transport = transport
 
     def ListCameras(self, request, context):  # noqa: N802 - gRPC-generated name
         try:
@@ -929,6 +981,34 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
             return aprilcam_v2_pb2.GetGuideResponse()
         return aprilcam_v2_pb2.GetGuideResponse(text=text)
 
+    def GetImageStream(self, request, context):  # noqa: N802
+        """Endpoint allocation only (ticket 027-005, UC-07) -- never
+        touches ``self._service`` here, and never starts a producer.
+        See ``daemon.stream_transport.StreamTransportManager``'s module
+        docstring for why: validation and producer start both happen
+        later, inside the first accepted connection's own sender
+        thread, not this RPC handler.
+        """
+        if self._transport is None:
+            # No transport was wired into build_server (e.g. a test
+            # exercising only the one-shot RPCs above) -- the same
+            # UNIMPLEMENTED a caller would have seen before this ticket
+            # existed, made explicit rather than raising an
+            # AttributeError.
+            context.abort(grpc.StatusCode.UNIMPLEMENTED, "stream transport not configured")
+            return aprilcam_v2_pb2.GetImageStreamResponse()
+        endpoint = self._transport.get_or_create_image_endpoint(request.camera, deskewed=request.deskewed)
+        return aprilcam_v2_pb2.GetImageStreamResponse(endpoint=_stream_endpoint_to_proto(endpoint))
+
+    def GetTagStream(self, request, context):  # noqa: N802
+        """Same "endpoint allocation only" contract as
+        :meth:`GetImageStream` above, for tag streams (UC-11)."""
+        if self._transport is None:
+            context.abort(grpc.StatusCode.UNIMPLEMENTED, "stream transport not configured")
+            return aprilcam_v2_pb2.GetTagStreamResponse()
+        endpoint = self._transport.get_or_create_tag_endpoint(request.camera)
+        return aprilcam_v2_pb2.GetTagStreamResponse(endpoint=_stream_endpoint_to_proto(endpoint))
+
 
 class _GrpcListener(ControlPlaneListener):
     """Adapts ``grpc.Server`` to ``daemon.lifecycle.ControlPlaneListener``
@@ -954,17 +1034,30 @@ class _GrpcListener(ControlPlaneListener):
         self._server.stop(grace).wait(timeout=grace + 1.0)
 
 
-def build_server(service: Daemon, socket_path: Path, *, max_workers: int = 10) -> _GrpcListener:
+def build_server(
+    service: Daemon,
+    socket_path: Path,
+    *,
+    max_workers: int = 10,
+    transport: Optional[StreamTransportManager] = None,
+) -> _GrpcListener:
     """Construct and bind, but do not start, a gRPC server serving
     *service* over the unix socket at *socket_path*.
 
     Deliberately unstarted -- this is the callable
     ``daemon/lifecycle.py``'s ``build_listener`` factory parameter
     expects (typically via ``functools.partial(build_server, service,
-    socket_path)``), matching that module's "fresh server object per
-    ``start()``" requirement: a stopped ``grpc.Server`` cannot be
-    restarted, so ``daemon/__main__.py`` passes this function itself,
-    not an already-built server.
+    socket_path, transport=transport)``), matching that module's "fresh
+    server object per ``start()``" requirement: a stopped ``grpc.Server``
+    cannot be restarted, so ``daemon/__main__.py`` passes this function
+    itself, not an already-built server.
+
+    *transport* (``None`` by default -- every existing caller predating
+    ticket 027-005 is unaffected) is handed straight to the
+    :class:`_Servicer` this builds, so its ``GetImageStream``/
+    ``GetTagStream`` handlers can allocate real endpoints; omitting it
+    still builds a fully working server for every other RPC, with
+    ``GetImageStream``/``GetTagStream`` answering ``UNIMPLEMENTED``.
 
     Removes a stale socket file left by a crashed prior run before
     binding -- safe here specifically because ``DaemonLifecycle.
@@ -976,6 +1069,37 @@ def build_server(service: Daemon, socket_path: Path, *, max_workers: int = 10) -
     if socket_path.exists():
         socket_path.unlink()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
-    aprilcam_v2_pb2_grpc.add_AprilCamV2Servicer_to_server(_Servicer(service), server)
+    aprilcam_v2_pb2_grpc.add_AprilCamV2Servicer_to_server(_Servicer(service, transport), server)
     server.add_insecure_port(f"unix:{socket_path}")
     return _GrpcListener(server)
+
+
+def build_stream_transport(
+    service: Daemon,
+    socket_dir: Path,
+    *,
+    enable_unix: bool = True,
+    enable_tcp: bool = True,
+) -> StreamTransportManager:
+    """Construct the :class:`~aprilcam.daemon.stream_transport.
+    StreamTransportManager` a real daemon wires into :func:`build_server`
+    (its *transport* parameter) and into ``daemon/__main__.py``'s
+    shutdown hook (ticket 027-005).
+
+    Lives here, not in ``daemon/stream_transport.py``, because the two
+    callables it hands that module -- *image_encoder*/*tag_encoder* --
+    are exactly this module's own :func:`_image_frame_bytes_for_stream`/
+    :func:`_tag_frame_bytes_for_stream`: this is the one seam where the
+    proto-serializing half of the boundary (owned here) meets the
+    transport-only half (owned there), and this function is what wires
+    them together without either module importing the other's private
+    internals directly.
+    """
+    return StreamTransportManager(
+        service,
+        socket_dir,
+        image_encoder=_image_frame_bytes_for_stream,
+        tag_encoder=_tag_frame_bytes_for_stream,
+        enable_unix=enable_unix,
+        enable_tcp=enable_tcp,
+    )
