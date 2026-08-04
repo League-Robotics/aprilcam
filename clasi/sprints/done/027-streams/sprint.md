@@ -1,7 +1,7 @@
 ---
 id: '027'
 title: Streams
-status: planning-docs
+status: closed
 branch: sprint/027-streams
 worktree: false
 use-cases: []
