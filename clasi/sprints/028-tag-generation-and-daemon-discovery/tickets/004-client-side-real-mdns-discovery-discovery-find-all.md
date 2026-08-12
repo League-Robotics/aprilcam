@@ -1,9 +1,13 @@
 ---
 id: '004'
 title: Client-side real mDNS discovery (Discovery.find_all)
-status: open
-use-cases: [SUC-004, SUC-005, SUC-006]
-depends-on: ['003']
+status: done
+use-cases:
+- SUC-004
+- SUC-005
+- SUC-006
+depends-on:
+- '003'
 github-issue: ''
 issue: tag-generation-and-daemon-discovery.md
 completes_issue: true
@@ -96,11 +100,11 @@ remote fan-out to a non-default port.
 
 ## Acceptance Criteria
 
-- [ ] `find_all()`'s existing local-lock-probe behavior is
+- [x] `find_all()`'s existing local-lock-probe behavior is
       **byte-for-byte unchanged** for every existing test in
       `test_discovery.py` — none of the 9 existing tests needs to
       change to keep passing (only new tests are added).
-- [ ] SUC-004: with a local daemon (found via lock-probe) and a second,
+- [x] SUC-004: with a local daemon (found via lock-probe) and a second,
       distinctly-hostnamed advertising daemon (found via browse — the
       two-local-daemon test stand-in), `find_all()` returns both: one
       `DaemonInfo(is_local=True, host="localhost", ...)`, one
@@ -109,30 +113,30 @@ remote fan-out to a non-default port.
       local branch already determines it — attempt a real connect/
       channel-ready probe, not merely "it advertised so it must be
       up").
-- [ ] The local daemon's own mDNS advertisement (same hostname as the
+- [x] The local daemon's own mDNS advertisement (same hostname as the
       client) never produces a **second, duplicate** entry alongside
       the lock-probe's local entry.
-- [ ] SUC-005: no daemon running or advertising anywhere → `find_all()`
+- [x] SUC-005: no daemon running or advertising anywhere → `find_all()`
       returns `()` — not an error (unchanged behavior, now also true
       when the browse step itself finds nothing).
-- [ ] SUC-006: the browse step itself raising (simulated via the
+- [x] SUC-006: the browse step itself raising (simulated via the
       `browse=` DI seam — e.g. an injected callable raising `OSError`)
       causes `find_all()` to raise `DiscoveryFailed`, **never** silently
       degrading to an empty or partial result. Add a test mirroring
       `test_find_all_raises_discovery_failed_distinctly_from_empty`
       (`tests/aprilcam/client/test_discovery.py:140-150`) but for the
       browse seam instead of `lock_holder`.
-  - [ ] `connect(host)` (explicitly-named `-d HOST`) is confirmed
+  - [x] `connect(host)` (explicitly-named `-d HOST`) is confirmed
         unaffected by this ticket — it does not call `find_all()` at
         all (already true today; add a one-line assertion/comment in a
         test if not already obviously covered, since SUC-006's own
         acceptance criteria call this out explicitly).
-- [ ] A held-but-unreachable local daemon combined with a distinct,
+- [x] A held-but-unreachable local daemon combined with a distinct,
       reachable remote/browsed one: both appear, each with its own
       correct `reachable` value (extends the existing "listed, not
       filtered out" contract — `test_find_all_lists_a_held_but_
       unreachable_daemon` — to the multi-daemon case).
-- [ ] `Discovery.__init__` gains a `browse: Callable[[], <BrowseResultType>]`
+- [x] `Discovery.__init__` gains a `browse: Callable[[], <BrowseResultType>]`
       parameter, defaulting to a real zeroconf-backed implementation,
       overridable exactly like the existing `lock_holder`/
       `socket_reachable` parameters (`src/aprilcam/client/discovery.py:
@@ -144,14 +148,14 @@ remote fan-out to a non-default port.
       integration test can inject plain data with no zeroconf import at
       all, mirroring how `lock_holder`/`socket_reachable` take plain
       `Path`s rather than daemon-internal types.
-- [ ] The real (default) `browse` implementation performs an actual
+- [x] The real (default) `browse` implementation performs an actual
       zeroconf `ServiceBrowser` scan of `_aprilcam._tcp.local.` with a
       bounded wait (a fixed, short timeout — document the chosen value
       and why — so `find_all()` cannot hang indefinitely on a machine
       with no responders; this bound is itself worth a test: `find_all()`
       returns within a small multiple of the timeout when nothing
       answers).
-- [ ] One real, two-local-daemon-alternate-port integration test:
+- [x] One real, two-local-daemon-alternate-port integration test:
       start ticket 003's real daemon stack twice in-process (or as two
       subprocesses — implementer's call, matching how `daemon/
       __main__.py`'s own `build()` is already tested elsewhere in this
@@ -164,9 +168,77 @@ remote fan-out to a non-default port.
       distinguished from the fast, fully-DI'd unit tests around it
       (e.g. a short real-multicast wait is expected and acceptable
       here, unlike everywhere else in this file).
-- [ ] `uv run mypy` clean. Zero `typing.Protocol`.
-- [ ] Full existing suite stays green, including all 9 pre-existing
+- [x] `uv run mypy` clean. Zero `typing.Protocol`.
+- [x] Full existing suite stays green, including all 9 pre-existing
       `test_discovery.py` tests unmodified.
+
+## Completion Notes
+
+Implemented exactly as planned. Key decisions and honest caveats:
+
+- **The `browse=` DI seam resolves lazily, not by direct default
+  binding.** `Discovery.__init__` takes `browse: Optional[Callable[...]]
+  = None` and resolves `None` to `_browse_zeroconf` *inside* `__init__`
+  (a bare-name lookup in this module's globals at call time), not as a
+  literally-bound default-argument value. This was necessary, not
+  cosmetic: with a directly-bound default (`browse: Callable[...] =
+  _browse_zeroconf`), the 9 pre-existing tests — which construct
+  `Discovery(directories=directories)` with no opinion about mDNS at
+  all — would each open a real multicast socket and wait
+  `_DEFAULT_BROWSE_TIMEOUT` (2s), violating this file's own "no real
+  network" design intent and this ticket's "every test except the one
+  integration test" instruction, and introducing real flakiness (a
+  developer's own already-running `aprilcam daemon start` would leak
+  into `test_find_all_returns_empty_tuple_when_no_daemon_running`'s
+  result). The lazy-resolution form lets the shared `directories`
+  fixture blanket-monkeypatch the module-level `_browse_zeroconf` name
+  to a no-op for every test that doesn't explicitly pass its own
+  `browse=` — production callers see zero difference (they never pass
+  `browse=` either way, so they always get the real implementation).
+  The one integration test deliberately does *not* use the
+  `directories` fixture, for exactly this reason (see its own comment).
+- **`_SERVICE_TYPE` is duplicated, not imported, from `daemon/mdns.py`.**
+  Same call already made in this sprint for `tags/generator.py` vs.
+  `vision/detector.py`'s family→dictionary map: the name is
+  module-private on the daemon side, and `client/`/`daemon/` are drawn
+  as independent `zeroconf` consumers in the sprint architecture's
+  dependency diagram, not of each other. Cross-referenced in both
+  places.
+- **`_DEFAULT_BROWSE_TIMEOUT = 2.0`** — chosen and documented in
+  `discovery.py`; validated empirically during implementation (a
+  same-process advertise→browse round trip over real loopback multicast
+  resolved in ~0.01–2s across repeated manual runs before this was
+  written into the test suite).
+- **Honest gap, matching the ticket's own "same-host test-scenario
+  problem" framing**: the integration test proves the mechanism (real
+  advertise, real bounded browse, real self-filter, real TCP
+  reachability probe) using two real daemon *processes* on one physical
+  machine, exactly as designed. It does **not** and cannot prove
+  multicast traversal across a genuine LAN with a second physical host
+  — that remains hardware-blocked per sprint.md and is ticket 006's
+  documentation responsibility, not this ticket's.
+- No `daemon/__main__.py` or other file outside this ticket's declared
+  scope (`client/discovery.py`, `tests/aprilcam/client/test_discovery.py`)
+  was touched. The integration test works around `build()`'s lack of a
+  `hostname=` passthrough by monkeypatching `daemon_main.MdnsAdvertiser`
+  to a thin wrapper that delegates to the real `MdnsAdvertiser` with the
+  override baked in (mirroring `tests/aprilcam/daemon/test_main.py`'s
+  own precedent of monkeypatching that exact name) — a test-only
+  workaround, not a production code change.
+
+**Verification performed**: `uv run pytest tests/aprilcam/client/test_discovery.py
+-m "not integration"` (17 passed, ~5s); `uv run pytest
+tests/aprilcam/client/test_discovery.py -m integration` (1 passed,
+~6s); `uv run mypy` (clean, 78 files); `uv run pytest -q -m "not camera
+and not integration"` (1264 passed — 1256 baseline + 8 new fast tests,
+50 deselected, ~112s); `uv run pytest -q -m "not camera"` (the full
+suite including every `@pytest.mark.integration` test, this ticket's
+new one included: 1270 passed, 44 deselected [camera-only], ~171s) —
+confirms no resource contention or flakiness between this ticket's real
+daemon/mDNS integration test and the rest of the suite when run
+together. `-m camera` was not run (no camera hardware attached to this
+machine; unrelated to this ticket, matches the stated pre-existing
+SIGABRT caveat for headless+hardware together).
 
 ## Implementation Plan
 
