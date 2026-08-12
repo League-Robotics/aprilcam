@@ -113,7 +113,21 @@ class ControlPlaneListener:
     never imports ``daemon.rpc``).
     """
 
-    def start(self) -> None:
+    def start(self) -> Optional[int]:
+        """Start accepting connections. Returns the TCP port this
+        listener is reachable on, or ``None`` if it was never asked to
+        bind TCP or that bind failed (ticket 028-003) -- unix-socket
+        reachability is unconditional and not reported here, since
+        every ``ControlPlaneListener`` has always had a unix socket;
+        only the *optional* TCP half needs a way to say "not this
+        time". ``DaemonLifecycle.start()`` uses this return value to
+        decide whether (and with which port) to call its ``advertise``
+        hook. A listener that never offers TCP at all (e.g. a test
+        double) simply returns ``None`` unconditionally -- a bare
+        ``return``/implicit ``None`` already satisfies this signature,
+        so no existing fake needs to change for tests that do not care
+        about TCP.
+        """
         raise NotImplementedError(f"{type(self).__name__} does not implement ControlPlaneListener.start")
 
     def stop(self, grace: float) -> None:
@@ -156,6 +170,21 @@ class DaemonLifecycle(_DaemonLifecycleBase):
         and disappearing"). ``None`` (the default) skips passive
         watching entirely -- this ticket's headless lock/shutdown tests
         have no camera subsystem wired at all and do not need it.
+    advertise / stop_advertise (ticket 028-003):
+        Optional hooks into mDNS self-advertisement
+        (``daemon.mdns.MdnsAdvertiser.start``/``.stop``, wired by
+        ``daemon/__main__.py``). ``advertise`` is called from
+        :meth:`start`, after the control-plane listener itself has
+        started, and only when :meth:`ControlPlaneListener.start`
+        reported a real bound TCP port (never before the control plane
+        is genuinely accepting connections, and never when TCP did not
+        bind) -- there is no port to announce any earlier than that.
+        ``stop_advertise`` is called from :meth:`stop` alongside
+        ``stop_watch``, i.e. early, before the listener stops accepting
+        RPCs -- matching this method's own "stop passive watching
+        first... then the listener" ordering, extended one hook
+        further. ``None`` (the default) skips advertisement entirely,
+        exactly like ``watch``/``stop_watch``.
     on_stop:
         Optional zero-argument hook run during ``stop()``, after the
         listener has stopped accepting new RPCs and before the lock is
@@ -179,6 +208,8 @@ class DaemonLifecycle(_DaemonLifecycleBase):
         status_source: Callable[[], DaemonStatus],
         watch: Optional[Callable[[], None]] = None,
         stop_watch: Optional[Callable[[], None]] = None,
+        advertise: Optional[Callable[[int], None]] = None,
+        stop_advertise: Optional[Callable[[], None]] = None,
         on_stop: Optional[Callable[[], None]] = None,
         lock_path: Optional[Path] = None,
         socket_path: Optional[Path] = None,
@@ -189,6 +220,8 @@ class DaemonLifecycle(_DaemonLifecycleBase):
         self._status_source = status_source
         self._watch = watch
         self._stop_watch = stop_watch
+        self._advertise = advertise
+        self._stop_advertise = stop_advertise
         self._on_stop = on_stop
         self._lock_path = (
             Path(lock_path) if lock_path is not None else directories.socket_dir / LOCK_FILENAME
@@ -228,14 +261,25 @@ class DaemonLifecycle(_DaemonLifecycleBase):
         -- nothing here inspects camera count at all, so an empty-field
         start is neither slower nor different in kind from a populated
         one.
+
+        **Ticket 028-003**: once the listener has started, if it
+        reports a real bound TCP port (``listener.start()``'s return
+        value, not ``None``) and an ``advertise`` hook was wired, that
+        hook is called with the port. There is no port to announce
+        before the listener has genuinely started, and nothing to
+        announce at all if TCP never bound -- both conditions are
+        checked here so ``advertise`` never fires for a listener that
+        only ever offered a unix socket.
         """
         self._acquire_lock()
         if self._watch is not None:
             self._watch()
         listener = self._build_listener()
-        listener.start()
+        tcp_port = listener.start()
         self._listener = listener
         self._running = True
+        if self._advertise is not None and tcp_port is not None:
+            self._advertise(tcp_port)
         logger.info(
             "daemon lifecycle started: lock=%s socket=%s", self._lock_path, self._socket_path
         )
@@ -245,7 +289,11 @@ class DaemonLifecycle(_DaemonLifecycleBase):
 
         Shutdown order (independent of ``start()``'s own ordering, per
         020-007): stop passive watching first, so no further discovery
-        updates land mid-shutdown; then the listener (grace period for
+        updates land mid-shutdown; **then stop mDNS advertisement
+        (ticket 028-003)**, alongside it, before the listener stops
+        accepting RPCs -- so a browsing client never sees this daemon
+        advertised a moment after it has already stopped announcing
+        readiness for new work; then the listener (grace period for
         in-flight RPCs), so no new RPC can be dispatched afterward; then
         any held-camera cleanup (``on_stop``); then the lock last -- so
         a racing second ``start()`` can never observe a released lock
@@ -257,6 +305,8 @@ class DaemonLifecycle(_DaemonLifecycleBase):
             return
         if self._stop_watch is not None:
             self._stop_watch()
+        if self._stop_advertise is not None:
+            self._stop_advertise()
         if self._listener is not None:
             self._listener.stop(self._stop_grace)
             self._listener = None

@@ -31,9 +31,10 @@ from typing import Dict, Optional
 from aprilcam.camera.camera import Camera
 from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.registry import CameraRegistry
-from aprilcam.config.directories import Directories
+from aprilcam.config.directories import DEFAULT_DAEMON_PORT, Directories
 from aprilcam.config.loader import ConfigLoader
 from aprilcam.daemon.lifecycle import SOCKET_FILENAME, DaemonLifecycle
+from aprilcam.daemon.mdns import MdnsAdvertiser
 from aprilcam.daemon.rpc import build_server, build_stream_transport
 from aprilcam.daemon.service import DaemonService
 
@@ -48,11 +49,12 @@ def build(
     lock_path: Optional[Path] = None,
     socket_path: Optional[Path] = None,
     start_watch: bool = True,
+    tcp_port: Optional[int] = DEFAULT_DAEMON_PORT,
 ) -> DaemonLifecycle:
     """Assemble the full daemon stack -- registry, discovery, service,
-    the gRPC control-plane server, and the process-lifecycle wrapper
-    around them -- and return the not-yet-started
-    :class:`~aprilcam.daemon.lifecycle.DaemonLifecycle`.
+    the gRPC control-plane server, mDNS self-advertisement, and the
+    process-lifecycle wrapper around them -- and return the
+    not-yet-started :class:`~aprilcam.daemon.lifecycle.DaemonLifecycle`.
 
     Real callers (``main()`` below) pass no arguments: a fresh
     :class:`Directories` resolves the real system/XDG roots, and
@@ -61,6 +63,22 @@ def build(
     ``lock_path``/``socket_path`` to a ``tmp_path`` so they never
     collide with a real running daemon on this machine (this ticket's
     Testing section requirement).
+
+    ``tcp_port`` (ticket 028-003) defaults to
+    ``config.directories.DEFAULT_DAEMON_PORT`` (5280, spec §4.1) --
+    every real caller gets the documented control-plane port with no
+    extra argument, mirroring the existing ``lock_path``/``socket_path``
+    override pattern. Passed straight through to
+    :func:`~aprilcam.daemon.rpc.build_server` via the
+    ``functools.partial`` below; ``None`` disables the TCP bind
+    entirely, preserving unix-socket-only behavior for a caller that
+    wants it (e.g. a test that would otherwise collide with a real
+    daemon's 5280, or a genuinely socket-only deployment). Binding
+    failure is never fatal here either -- see ``build_server``'s own
+    docstring -- so passing the default is always safe even when a
+    real daemon (or this ticket's two-local-daemon test scenario) has
+    already taken the port; :class:`~aprilcam.daemon.lifecycle.
+    DaemonLifecycle` simply will not call ``advertise`` in that case.
 
     **Boot-time config load (ticket 023-003).** Immediately after
     *service* is constructed and before the control-plane listener is
@@ -117,6 +135,16 @@ def build(
     # idle-gating guarantee this daemon makes.
     transport = build_stream_transport(service, directories.socket_dir)
 
+    # Ticket 028-003: constructing this touches no socket or thread --
+    # MdnsAdvertiser.start() is what actually opens the multicast
+    # socket, and that only happens once DaemonLifecycle.start() calls
+    # the advertise hook below, itself gated on a real bound TCP port
+    # (see DaemonLifecycle.start()'s own docstring). No extra gating
+    # logic belongs here beyond that -- duplicating the "was TCP
+    # actually bound" check in this module would just be a second,
+    # independently-maintained copy of the same decision.
+    advertiser = MdnsAdvertiser()
+
     def _stop_service() -> None:
         """DaemonLifecycle's on_stop hook: tear down the stream
         transport (every listener, every accepted connection, every
@@ -145,11 +173,13 @@ def build(
     return DaemonLifecycle(
         directories=directories,
         build_listener=functools.partial(
-            build_server, service, resolved_socket_path, transport=transport
+            build_server, service, resolved_socket_path, transport=transport, tcp_port=tcp_port
         ),
         status_source=service.status,
         watch=enumerate_then_watch if start_watch else None,
         stop_watch=discovery.stop_watch if start_watch else None,
+        advertise=advertiser.start,
+        stop_advertise=advertiser.stop,
         on_stop=_stop_service,
         lock_path=lock_path,
         socket_path=socket_path,

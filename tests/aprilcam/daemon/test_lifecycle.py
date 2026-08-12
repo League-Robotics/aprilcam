@@ -25,18 +25,43 @@ from aprilcam.errors import AlreadyRunning
 
 class _FakeListener:
     """A ``ControlPlaneListener`` double: records start/stop calls,
-    nothing more."""
+    nothing more.
 
-    def __init__(self) -> None:
+    *tcp_port* (ticket 028-003) is what :meth:`start` reports as
+    bound -- ``None`` (the default) matches every ``ControlPlaneListener``
+    predating this ticket and keeps every existing test using this fake
+    unchanged, a bare ``return``/implicit ``None`` being a valid
+    ``Optional[int]``.
+
+    *events*, if given, additionally appends ``"listener_start"``/
+    ``"listener_stop"`` to that shared log. Opt-in (``None`` by
+    default) so it never perturbs the exact event sequences already
+    asserted by tests predating the ``advertise``/``stop_advertise``
+    hooks below.
+    """
+
+    def __init__(
+        self,
+        *,
+        tcp_port: Optional[int] = None,
+        events: Optional[List[str]] = None,
+    ) -> None:
         self.started = False
         self.stop_grace_calls: List[float] = []
+        self._tcp_port = tcp_port
+        self._events = events
 
-    def start(self) -> None:
+    def start(self) -> Optional[int]:
         self.started = True
+        if self._events is not None:
+            self._events.append("listener_start")
+        return self._tcp_port
 
     def stop(self, grace: float) -> None:
         self.stop_grace_calls.append(grace)
         self.started = False
+        if self._events is not None:
+            self._events.append("listener_stop")
 
 
 def _make_lifecycle(
@@ -49,16 +74,30 @@ def _make_lifecycle(
     lock_path: Optional[Path] = None,
     socket_path: Optional[Path] = None,
     with_hooks: bool = True,
+    with_advertise: bool = False,
+    listener_tcp_port: Optional[int] = None,
+    record_listener_events: bool = False,
 ) -> DaemonLifecycle:
     """Build a ``DaemonLifecycle`` wired to fakes, recording every
-    hook invocation (in call order) into *events* when supplied."""
+    hook invocation (in call order) into *events* when supplied.
+
+    *with_advertise*/*listener_tcp_port*/*record_listener_events*
+    (ticket 028-003) are all opt-in and default to the pre-028-003
+    behavior (no ``advertise``/``stop_advertise`` wired, the fake
+    listener reports no TCP port, and the listener's own start/stop
+    calls are invisible to *events*) so no existing test using this
+    helper needed to change.
+    """
     events = events if events is not None else []
     listeners = listeners if listeners is not None else []
     root = tmp_path / subdir if subdir else tmp_path
 
     def build_listener() -> _FakeListener:
         events.append("build_listener")
-        listener = _FakeListener()
+        listener = _FakeListener(
+            tcp_port=listener_tcp_port,
+            events=events if record_listener_events else None,
+        )
         listeners.append(listener)
         return listener
 
@@ -67,6 +106,9 @@ def _make_lifecycle(
         kwargs["watch"] = lambda: events.append("watch")
         kwargs["stop_watch"] = lambda: events.append("stop_watch")
         kwargs["on_stop"] = lambda: events.append("on_stop")
+    if with_advertise:
+        kwargs["advertise"] = lambda port: events.append(f"advertise:{port}")
+        kwargs["stop_advertise"] = lambda: events.append("stop_advertise")
 
     return DaemonLifecycle(
         directories=Directories(config_dir=root / "config", state_dir=root / "state"),
@@ -132,6 +174,82 @@ def test_start_marks_the_listener_started(tmp_path):
 
     assert len(listeners) == 1
     assert listeners[0].started is True
+
+
+# ---------------------------------------------------------------------------
+# advertise / stop_advertise hooks (ticket 028-003)
+# ---------------------------------------------------------------------------
+
+
+def test_start_does_not_call_advertise_when_no_tcp_port_was_bound(tmp_path):
+    """AC: ``advertise`` never fires for a listener that only ever
+    offered a unix socket -- ``ControlPlaneListener.start()`` returning
+    ``None`` (the default, and what every listener predating this
+    ticket returns) must not be mistaken for a real port."""
+    events: List[str] = []
+    lifecycle = _make_lifecycle(tmp_path, events=events, with_advertise=True)
+
+    lifecycle.start()
+
+    assert not any(e.startswith("advertise:") for e in events)
+
+
+def test_start_calls_advertise_with_the_bound_tcp_port_after_the_listener_starts(tmp_path):
+    """AC/ordering test (mirrors
+    test_start_calls_watch_before_building_the_control_plane_listener):
+    ``advertise(port)`` fires only after ``build_listener``/
+    ``listener.start()`` have returned, carrying exactly the port the
+    listener reported bound."""
+    events: List[str] = []
+    lifecycle = _make_lifecycle(
+        tmp_path,
+        events=events,
+        with_advertise=True,
+        listener_tcp_port=5280,
+        record_listener_events=True,
+    )
+
+    lifecycle.start()
+
+    assert events == ["watch", "build_listener", "listener_start", "advertise:5280"]
+
+
+def test_stop_advertise_fires_before_the_listeners_own_stop(tmp_path):
+    """AC/ordering test: ``stop_advertise()`` runs alongside
+    ``stop_watch`` -- early, strictly before the listener's own
+    ``stop()`` -- matching ``stop()``'s documented "stop passive
+    watching first... then the listener" ordering, extended one hook
+    further."""
+    events: List[str] = []
+    lifecycle = _make_lifecycle(
+        tmp_path,
+        events=events,
+        with_advertise=True,
+        listener_tcp_port=5280,
+        record_listener_events=True,
+    )
+    lifecycle.start()
+    events.clear()
+
+    lifecycle.stop()
+
+    assert events == ["stop_watch", "stop_advertise", "listener_stop", "on_stop"]
+
+
+def test_advertise_and_stop_advertise_default_to_none_and_are_skipped(tmp_path):
+    """No behavior change for every caller that does not wire these
+    hooks -- the same guarantee ``watch``/``stop_watch`` already give
+    (this is the un-opted-in default every other test in this module
+    already relies on; asserted explicitly here for the record)."""
+    events: List[str] = []
+    lifecycle = _make_lifecycle(
+        tmp_path, events=events, listener_tcp_port=5280, record_listener_events=True
+    )
+
+    lifecycle.start()
+    lifecycle.stop()
+
+    assert not any("advertise" in e for e in events)
 
 
 def test_status_delegates_to_status_source_while_running(tmp_path):

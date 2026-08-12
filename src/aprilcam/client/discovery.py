@@ -48,7 +48,7 @@ import grpc
 from aprilcam.client.daemon_client import GrpcDaemon
 from aprilcam.client.interfaces import DaemonInfo
 from aprilcam.client.interfaces import Discovery as _DiscoveryBase
-from aprilcam.config.directories import Directories
+from aprilcam.config.directories import DEFAULT_DAEMON_PORT, Directories
 from aprilcam.daemon.interfaces import Daemon
 from aprilcam.daemon.lifecycle import LOCK_FILENAME, SOCKET_FILENAME
 from aprilcam.errors import ConnectionFailed, DiscoveryFailed
@@ -64,15 +64,20 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-#: spec §4.1's TCP:5280 -- the default port for an explicitly named
-#: remote host (``-d HOST`` with no ``:port`` suffix, or
-#: ``APRILCAM_DAEMON_HOST`` likewise bare). No daemon this sprint
-#: actually *listens* on TCP yet (``config/directories.py``'s Open
-#: Question 2 resolution) -- this constant only matters to
-#: :meth:`Discovery.connect` against an explicitly named host, tested
-#: against a second local process bound to an alternate port standing
-#: in for "remote" on this one dev machine.
-DEFAULT_DAEMON_PORT = 5280
+# DEFAULT_DAEMON_PORT itself: re-exported from ``config.directories``
+# (moved there in sprint 028, ticket 003, so ``client/`` and
+# ``daemon/`` share one definition without either importing the
+# other) via the module-level import above, rather than redefined
+# here -- ``from aprilcam.client.discovery import DEFAULT_DAEMON_PORT``
+# keeps working unchanged for every existing importer, this module's
+# own :meth:`Discovery._connect_remote` included, and stays listed in
+# __all__ above. Originally the *only* default port for an explicitly
+# named remote host (``-d HOST`` with no ``:port`` suffix, or
+# ``APRILCAM_DAEMON_HOST`` likewise bare) because no daemon actually
+# *listened* on TCP yet; as of ticket 003 it is also the port
+# ``daemon/rpc.py``'s ``build_server`` binds by default, so this
+# constant's two meanings ("what a client assumes" and "what the
+# daemon opens") now agree by construction rather than by coincidence.
 
 APRILCAM_DAEMON_HOST_ENV = "APRILCAM_DAEMON_HOST"
 
