@@ -134,6 +134,12 @@ _CORNER_REFINE_MODES = {
 #: Family -> OpenCV predefined-dictionary constant. Fixed to exactly these
 #: two this sprint (issue scope: "AprilTag 36h11 and ArUco 4x4, not v1's
 #: full four-AprilTag-family option").
+#:
+#: ``tags/generator.py`` has an identical mapping, deliberately
+#: duplicated rather than imported -- ``tags/`` is a standalone,
+#: purely-offline utility (design.md §4.10) and must not gain an import
+#: edge to this daemon-only detection module (sprint 028 sprint.md,
+#: Design Rationale Step 6). If one changes, check the other.
 _DICTIONARY_BY_FAMILY = {
     TagFamily.APRILTAG: cv.aruco.DICT_APRILTAG_36h11,
     TagFamily.ARUCO: cv.aruco.DICT_4X4_50,

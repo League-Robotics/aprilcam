@@ -17,6 +17,7 @@ not be carried out or the request itself was wrong.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 
@@ -146,6 +147,20 @@ class InvalidTagId(AprilCamError):
             f"{family} id {tag_id} outside valid range "
             f"{valid.start}..{valid.stop - 1}"
         )
+
+
+class UnwritableOutputPath(AprilCamError):
+    """A ``tags generate`` output directory the process cannot write to
+    (UC-21, SUC-003).
+
+    Raised before any image is rendered or encoded -- checked once, up
+    front, exactly like :class:`InvalidTagId`'s whole-batch id
+    validation, so a batch is never partially written to disk.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        super().__init__(f"cannot write to output directory: {path}")
 
 
 class AlreadyRunning(AprilCamError):

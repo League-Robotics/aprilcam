@@ -1,8 +1,11 @@
 ---
 id: '001'
 title: Implement TagGenerator and move OpenCV to base dependencies
-status: open
-use-cases: [SUC-001, SUC-002, SUC-003]
+status: done
+use-cases:
+- SUC-001
+- SUC-002
+- SUC-003
 depends-on: []
 github-issue: ''
 issue: tag-generation-and-daemon-discovery.md
@@ -69,7 +72,7 @@ base `dependencies` — do not touch it; this ticket's only
 
 ## Acceptance Criteria
 
-- [ ] `TagGenerator.valid_ids(TagFamily.APRILTAG)` returns a `range`
+- [x] `TagGenerator.valid_ids(TagFamily.APRILTAG)` returns a `range`
       matching OpenCV's real `DICT_APRILTAG_36h11` dictionary size
       (587 ids, confirmed against the OpenCV 4.11 this sprint was
       planned against — assert the actual dictionary size
@@ -77,15 +80,15 @@ base `dependencies` — do not touch it; this ticket's only
       .bytesList.shape[0]`, not a hardcoded `587` literal, so the test
       stays correct if the installed OpenCV version changes the
       dictionary).
-- [ ] `TagGenerator.valid_ids(TagFamily.ARUCO)` returns a `range`
+- [x] `TagGenerator.valid_ids(TagFamily.ARUCO)` returns a `range`
       matching `DICT_4X4_50` (50 ids), same programmatic-assertion
       approach.
-- [ ] SUC-001: `generate(TagFamily.ARUCO, (1,...,10), size_cm=8,
+- [x] SUC-001: `generate(TagFamily.ARUCO, (1,...,10), size_cm=8,
       out_dir=<dir>, dpi=300)` writes ten distinct PNG files, one per
       id; each image's pixel dimensions match `size_cm` at `dpi`
       (within normal rounding, e.g. `round(size_cm / 2.54 * dpi)`);
       nothing else in `out_dir` is touched.
-- [ ] SUC-002: requesting an id outside `valid_ids(family)` (e.g. ArUco
+- [x] SUC-002: requesting an id outside `valid_ids(family)` (e.g. ArUco
       id 55, where `valid_ids` is `range(0, 50)`) raises `InvalidTagId`
       naming the valid range, **and writes nothing for any id in the
       same batch** — including in-range ids requested alongside the
@@ -94,7 +97,7 @@ base `dependencies` — do not touch it; this ticket's only
       validated against `valid_ids` before any image is rendered or
       written — a single up-front validation pass, not a
       validate-then-render loop that could partially succeed.
-- [ ] SUC-003: an unwritable `out_dir` (e.g. a read-only directory)
+- [x] SUC-003: an unwritable `out_dir` (e.g. a read-only directory)
       raises `UnwritableOutputPath` — a typed `AprilCamError` — **before
       any image-encoding call**, verified by a call-count assertion
       (e.g. monkeypatch/mock the encode-and-write step and assert it
@@ -102,30 +105,81 @@ base `dependencies` — do not touch it; this ticket's only
       disk. `UnwritableOutputPath` must be usable with the existing
       `cli.cli._common.report_error` helper (i.e. it needs nothing
       beyond deriving from `AprilCamError` with a clear `str()`).
-- [ ] A requested `size_cm`/`dpi` combination that is unachievable
+- [x] A requested `size_cm`/`dpi` combination that is unachievable
       (e.g. too small to render legibly) **warns** (e.g.
       `warnings.warn` or a logged WARNING — implementer's call, document
       the choice and threshold rationale in the code as the sprint
       architecture's Open Question 4 anticipates) rather than raising
       or silently producing an unusable image; the image is still
       generated and written.
-- [ ] No import of `daemon`, `client`, or `vision` anywhere in
+- [x] No import of `daemon`, `client`, or `vision` anywhere in
       `tags/generator.py`'s call path (verify by reading the import
       list — no test needed beyond the existing cv2-free-package
       static gate below, since `tags/` is not the `daemon`/`vision`
       side of that boundary).
-- [ ] `tests/test_no_cv2_in_client_modules.py` is confirmed unaffected:
+- [x] `tests/test_no_cv2_in_client_modules.py` is confirmed unaffected:
       read `_CV2_FREE_PACKAGES = ("client", "view", "mcp")` in that
       file and note in this ticket's completion notes that `tags/` was
       never in scope and adding `cv2` there introduces no violation —
       do not modify that test file.
-- [ ] `pyproject.toml`: `opencv-contrib-python>=4.8` appears in
+- [x] `pyproject.toml`: `opencv-contrib-python>=4.8` appears in
       `[project].dependencies`, not in `[project.optional-dependencies]
       .daemon`. `pip install aprilcam` (no extras) now pulls OpenCV.
       Every other dependency entry (both lists) is unchanged.
-- [ ] `uv run mypy` clean on `src/aprilcam/tags/generator.py` and
+- [x] `uv run mypy` clean on `src/aprilcam/tags/generator.py` and
       `src/aprilcam/errors.py`. Zero `typing.Protocol` anywhere touched.
-- [ ] Full existing suite stays green (`uv run pytest`).
+- [x] Full existing suite stays green (`uv run pytest`).
+
+## Completion Notes
+
+- `src/aprilcam/tags/generator.py` (new): concrete `TagGenerator`,
+  deriving from `tags.interfaces.TagGenerator`. Whole-batch id
+  validation runs before any output-directory check, which runs before
+  any rendering, matching the plan's ordering exactly. The
+  family→dictionary mapping is duplicated (not imported) from
+  `vision/detector.py`, with a cross-reference comment added to *both*
+  files (`tags/generator.py`'s module docstring/mapping comment and a
+  new comment block above `vision/detector.py`'s own
+  `_DICTIONARY_BY_FAMILY`).
+- Legibility warning threshold: 300px per edge (`_MIN_LEGIBLE_PIXELS`
+  in `generator.py`), a deliberately conservative round number chosen
+  because there is no single hard failure threshold (depends on
+  printer DPI, camera resolution, viewing distance) — documented in
+  code as the implementation-level judgment call the sprint
+  architecture's Open Question 4 anticipated. Below it, `generate`
+  calls `warnings.warn` and still produces and writes the image.
+- `UnwritableOutputPath` added to `src/aprilcam/errors.py`, matching
+  `InvalidTagId`'s existing pattern (small `__init__`, clear `str()`,
+  no message-string parsing elsewhere). Verified directly usable with
+  `cli._common.report_error` in
+  `test_unwritable_output_path_usable_with_report_error`.
+  `InvalidTagId` itself was **not** redefined — reused verbatim as it
+  already existed with the exact signature needed.
+- `tests/test_no_cv2_in_client_modules.py`: read directly.
+  `_CV2_FREE_PACKAGES = ("client", "view", "mcp")` — `tags/` was never
+  in that scope. File not modified; confirmed unaffected by inspection,
+  and the full suite run below includes it passing unchanged.
+- `pyproject.toml`: `opencv-contrib-python>=4.8` moved from
+  `[project.optional-dependencies].daemon` into `[project].dependencies`.
+  Diff is a clean two-line move — no other entry in either list
+  touched, `zeroconf>=0.131` untouched (was already base).
+- Verification run: `uv run pytest -q -m "not camera and not
+  integration"` → 1212 passed (1201 baseline + 11 new tests in
+  `tests/aprilcam/tags/test_generator.py`), 49 deselected
+  (camera/integration). `uv run mypy` (full sweep) → "Success: no
+  issues found in 77 source files". Zero `typing.Protocol` used
+  anywhere touched.
+- Did not run the full unfiltered `uv run pytest` (no `-m` filter) per
+  the dispatching instructions — the sprint-027 streaming-detection
+  SIGABRT when headless and hardware tests run together is a known,
+  pre-existing, out-of-scope issue on this machine; the `-m "not
+  camera and not integration"` run is this ticket's green-check per
+  explicit instruction.
+- Unrelated observation, not touched: an untracked `config/devices.json`
+  (real hardware/serial-device registry data, unrelated to `tags/`)
+  was already present in the working tree before this ticket's changes
+  and is left alone — out of scope, not created by this ticket's tests
+  or code.
 
 ## Implementation Plan
 
