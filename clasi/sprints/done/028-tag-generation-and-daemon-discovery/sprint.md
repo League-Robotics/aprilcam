@@ -1,10 +1,12 @@
 ---
 id: 028
 title: Tag generation and daemon discovery
-status: planning-docs
+status: closed
 branch: sprint/028-tag-generation-and-daemon-discovery
 worktree: false
-use-cases: [UC-21, UC-13]
+use-cases:
+- UC-21
+- UC-13
 issues:
 - tag-generation-and-daemon-discovery.md
 ---
