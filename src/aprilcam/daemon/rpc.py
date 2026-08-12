@@ -1022,13 +1022,24 @@ class _GrpcListener(ControlPlaneListener):
     this is a mechanically real ``ControlPlaneListener``, not merely a
     structural match -- while ``daemon/lifecycle.py`` itself still
     imports no gRPC (this module imports *it*, not the other way
-    around)."""
+    around).
 
-    def __init__(self, server: grpc.Server) -> None:
+    *tcp_port* (ticket 028-003) is the TCP port :func:`build_server`
+    already bound this listener's server to, or ``None`` if no TCP bind
+    was requested or it failed -- captured at construction time (the
+    bind itself happens in :func:`build_server`, before this object
+    exists) and simply handed back by :meth:`start`, which is the
+    signal ``daemon.lifecycle.DaemonLifecycle.start`` uses to decide
+    whether (and with which port) to call its ``advertise`` hook.
+    """
+
+    def __init__(self, server: grpc.Server, *, tcp_port: Optional[int] = None) -> None:
         self._server = server
+        self._tcp_port = tcp_port
 
-    def start(self) -> None:
+    def start(self) -> Optional[int]:
         self._server.start()
+        return self._tcp_port
 
     def stop(self, grace: float) -> None:
         self._server.stop(grace).wait(timeout=grace + 1.0)
@@ -1040,17 +1051,22 @@ def build_server(
     *,
     max_workers: int = 10,
     transport: Optional[StreamTransportManager] = None,
+    tcp_port: Optional[int] = None,
 ) -> _GrpcListener:
     """Construct and bind, but do not start, a gRPC server serving
-    *service* over the unix socket at *socket_path*.
+    *service* over the unix socket at *socket_path* -- and, if
+    *tcp_port* is given, also over TCP on all interfaces (ticket
+    028-003; stakeholder decision recorded in that ticket: ``0.0.0.0``,
+    unauthenticated, matching UC-01's documented end state).
 
     Deliberately unstarted -- this is the callable
     ``daemon/lifecycle.py``'s ``build_listener`` factory parameter
     expects (typically via ``functools.partial(build_server, service,
-    socket_path, transport=transport)``), matching that module's "fresh
-    server object per ``start()``" requirement: a stopped ``grpc.Server``
-    cannot be restarted, so ``daemon/__main__.py`` passes this function
-    itself, not an already-built server.
+    socket_path, transport=transport, tcp_port=tcp_port)``), matching
+    that module's "fresh server object per ``start()``" requirement: a
+    stopped ``grpc.Server`` cannot be restarted, so
+    ``daemon/__main__.py`` passes this function itself, not an
+    already-built server.
 
     *transport* (``None`` by default -- every existing caller predating
     ticket 027-005 is unaffected) is handed straight to the
@@ -1058,6 +1074,38 @@ def build_server(
     ``GetTagStream`` handlers can allocate real endpoints; omitting it
     still builds a fully working server for every other RPC, with
     ``GetImageStream``/``GetTagStream`` answering ``UNIMPLEMENTED``.
+
+    *tcp_port* (``None`` by default -- every existing caller predating
+    ticket 028-003 is unaffected, and keeps today's unix-socket-only
+    behavior exactly) requests a TCP bind on ``0.0.0.0:<tcp_port>``
+    alongside the unix socket, via the same ``grpc.Server.
+    add_insecure_port`` call the unix bind already makes -- one gRPC
+    server, two transports, no change to :class:`_Servicer` or any
+    RPC's request/response shape. **Binding TCP is never fatal**: this
+    codebase's pinned ``grpc`` (1.80.0) raises ``RuntimeError`` from
+    ``add_insecure_port`` on a genuine bind failure rather than
+    returning ``0`` (``grpc._common.validate_port_binding_result``
+    converts the C-core's ``0`` into that exception before it ever
+    reaches a Python-level caller -- confirmed by direct testing while
+    building this, contrary to a literal "returns 0" reading; both
+    signals are handled below so this stays correct if some other
+    ``grpc`` build ever surfaces the older return-based signal
+    instead). Either way, a failure is caught, logged at WARNING naming
+    the port, and treated as "no TCP" -- the returned
+    :class:`_GrpcListener` still has a fully working unix socket, and
+    its ``start()`` reports ``tcp_port=None`` so
+    ``daemon.lifecycle.DaemonLifecycle`` knows not to advertise.
+
+    The server disables ``grpc.so_reuseport``. ``grpc`` enables
+    ``SO_REUSEPORT`` by default on its TCP listeners, which means two
+    *independent* ``grpc.server()`` processes can both silently succeed
+    binding the exact same port -- the kernel then load-balances
+    incoming connections between two unrelated daemons, a far worse
+    failure mode than the graceful unix-socket-only degradation this
+    function otherwise promises (a stray second daemon on the same port
+    must be *observable* as a bind failure, not invisible RPC
+    misrouting between two processes). Disabling it has no effect on
+    the unix-socket bind.
 
     Removes a stale socket file left by a crashed prior run before
     binding -- safe here specifically because ``DaemonLifecycle.
@@ -1068,10 +1116,38 @@ def build_server(
     socket_path.parent.mkdir(parents=True, exist_ok=True)
     if socket_path.exists():
         socket_path.unlink()
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=max_workers),
+        options=[("grpc.so_reuseport", 0)],
+    )
     aprilcam_v2_pb2_grpc.add_AprilCamV2Servicer_to_server(_Servicer(service, transport), server)
     server.add_insecure_port(f"unix:{socket_path}")
-    return _GrpcListener(server)
+
+    bound_tcp_port: Optional[int] = None
+    if tcp_port is not None:
+        try:
+            bound = server.add_insecure_port(f"0.0.0.0:{tcp_port}")
+        except RuntimeError as exc:
+            logger.warning(
+                "daemon: TCP control-plane bind failed on port %d (%s) -- "
+                "continuing unix-socket-only",
+                tcp_port,
+                exc,
+            )
+        else:
+            if bound == 0:
+                # Defensive: see the docstring above -- this codebase's
+                # pinned grpc raises instead, but a 0 return is handled
+                # identically if a future/older build ever surfaces it.
+                logger.warning(
+                    "daemon: TCP control-plane bind failed on port %d -- "
+                    "continuing unix-socket-only",
+                    tcp_port,
+                )
+            else:
+                bound_tcp_port = bound
+
+    return _GrpcListener(server, tcp_port=bound_tcp_port)
 
 
 def build_stream_transport(

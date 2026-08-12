@@ -45,6 +45,17 @@ real second host. This is recorded here, in the module that owns
 socket resolution, so the omission reads as a decision rather than an
 oversight.
 
+**Resolved by sprint 028 (ticket 003).** That future sprint arrived:
+``daemon/rpc.py``'s ``build_server`` now binds ``DEFAULT_DAEMON_PORT``
+(below) on all interfaces alongside the unix socket, mDNS-advertised
+via ``daemon/mdns.py``'s ``MdnsAdvertiser`` once bound. The reasoning
+above is left in place rather than deleted -- it explains why the gap
+existed for eight sprints, not just that it closed. Binding is still
+never load-bearing: a failure to acquire the TCP port is caught,
+logged at WARNING, and the daemon continues unix-socket-only exactly
+as it always has (``daemon/lifecycle.py``'s ``advertise`` hook simply
+never fires in that case).
+
 **Reporting.** UC-01 requires that "which roots were chosen is never a
 mystery." Every resolved root is logged at INFO on construction *and*
 returned: ``config_dir_source`` / ``state_dir_source`` /
@@ -65,7 +76,7 @@ from typing import Callable, Optional, Union
 
 from aprilcam.config.interfaces import Directories as _DirectoriesBase
 
-__all__ = ["Directories"]
+__all__ = ["DEFAULT_DAEMON_PORT", "Directories"]
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +87,18 @@ logger = logging.getLogger(__name__)
 SYSTEM_CONFIG_DIR = Path("/etc/aprilcam")
 SYSTEM_STATE_DIR = Path("/var/lib/aprilcam")
 SYSTEM_SOCKET_DIR = Path("/run/aprilcam")
+
+#: spec §4.1's fixed TCP control-plane port. Lives here, not in
+#: ``daemon/`` or ``client/``, because both need it (``daemon/rpc.py``'s
+#: ``build_server`` binds it by default; ``client/discovery.py``'s
+#: ``Discovery.connect`` uses it as the implied port for an explicitly
+#: named ``-d HOST``/``APRILCAM_DAEMON_HOST`` with no ``:port`` suffix)
+#: and neither should import the other -- this module is the
+#: dependency-direction-clean shared home (sprint 028 architecture,
+#: Step 5 item 9). ``client/discovery.py`` re-exports this name rather
+#: than redefining it, so every existing importer of
+#: ``client.discovery.DEFAULT_DAEMON_PORT`` keeps working unchanged.
+DEFAULT_DAEMON_PORT = 5280
 
 APRILCAM_CONFIG_DIR_ENV = "APRILCAM_CONFIG_DIR"
 APRILCAM_STATE_DIR_ENV = "APRILCAM_STATE_DIR"
