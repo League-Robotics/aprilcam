@@ -18,6 +18,20 @@ is the first concrete thing in that noun. Sprint 028's later
 subcommand to *this same file* rather than conflict with it -- both
 are argv-to-client-call shells for the ``tags`` top-level noun.
 
+**``generate`` is offline; ``mount`` is not.** ``tags generate`` (added
+by ticket 028-002) never touches ``Discovery`` or a daemon at all --
+unlike every other command in this file, it gets no ``-d``/``--daemon``
+or ``--all`` flag, because there is no daemon in its path for those
+flags to target. It is a thin argv shell over
+``tags.generator.TagGenerator``, which owns both whole-batch id
+validation and output-directory writability checking
+(``InvalidTagId``/``UnwritableOutputPath``, SUC-002/SUC-003) -- this
+file calls ``generate`` once with the whole id tuple and lets those
+typed errors flow through ``report_error`` unchanged, the same pattern
+``mount``'s commands use for daemon-side errors. The ``--ids`` spec
+syntax (``"1-10"``, ``"1-3,55"``) is parsed by a small module-level
+function written fresh for this file, not imported from ``archive/``.
+
 Thin argv-to-client-call shell over ``client/daemon_client.py``'s
 ``register_tag``/``unregister_tag``/``list_tag_parameters`` --
 ``adapters.md``'s "adapters hold no authoritative state, adapters do
@@ -64,7 +78,9 @@ from __future__ import annotations
 
 import argparse
 import math
+import re
 import sys
+from pathlib import Path
 from typing import Callable, Dict
 
 from aprilcam.cli._common import (
@@ -78,6 +94,7 @@ from aprilcam.cli._common import (
 )
 from aprilcam.client.discovery import Discovery
 from aprilcam.errors import AprilCamError
+from aprilcam.tags.generator import TagGenerator
 from aprilcam.types import MountParameters, TagFamily, TagId
 
 __all__ = [
@@ -85,6 +102,7 @@ __all__ = [
     "cmd_register",
     "cmd_clear",
     "cmd_list",
+    "cmd_generate",
 ]
 
 
@@ -226,15 +244,94 @@ def cmd_list(
     return EXIT_OK
 
 
-def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
-    """Wire ``tags mount register|clear|list`` into the top-level
-    parser. ``tags`` is its own top-level command (not nested under
-    ``camera`` or ``playfield``, see the module docstring), with
-    ``mount`` as its first sub-noun -- leaving room for sprint 028's
-    ``tags generate`` (UC-21) to add a sibling sub-noun to the same
-    ``tags`` subparsers action without conflict.
+_ID_RANGE = re.compile(r"(\d+)-(\d+)")
+
+
+def _parse_ids(spec: str) -> tuple[int, ...]:
+    """Parse a ``--ids`` spec like ``"1-3,55"`` into a sorted tuple of
+    unique ints. Comma-separated parts are either a single id or an
+    inclusive ``lo-hi`` range.
+
+    Written fresh for this CLI boundary -- mirrors, but is not imported
+    from, ``archive/src/aprilcam/tags/taggen.py``'s ``parse_ids``
+    (CLAUDE.md's "mine it for ideas, don't copy it" rule: v2 has no
+    import edge to ``archive/``). Id *validity* -- is this id in the
+    family's dictionary -- is not this function's job; that whole-batch
+    check belongs to ``TagGenerator.generate`` itself (``InvalidTagId``,
+    SUC-002). This only turns the argv string into the
+    ``tuple[int, ...]`` shape ``generate`` takes.
+
+    Raises ``ValueError`` on a malformed spec (non-numeric part, etc.),
+    the same exception type ``int()`` itself raises -- ``cmd_generate``
+    catches it and reports a clean CLI error rather than a traceback.
     """
-    parser = subparsers.add_parser("tags", help="tag mount registration (and, later, generation)")
+    ids: set[int] = set()
+    for part in (p.strip() for p in spec.split(",")):
+        if not part:
+            continue
+        m = _ID_RANGE.fullmatch(part)
+        if m:
+            lo, hi = int(m.group(1)), int(m.group(2))
+            ids.update(range(lo, hi + 1))
+        else:
+            ids.add(int(part))
+    return tuple(sorted(ids))
+
+
+def cmd_generate(
+    args: argparse.Namespace,
+    *,
+    tag_generator_factory: Callable[[], TagGenerator] = TagGenerator,
+) -> int:
+    """``aprilcam tags generate --family FAMILY --ids SPEC --size-cm CM
+    --out DIR [--dpi DPI]`` (UC-21).
+
+    Purely offline -- no ``Discovery``, no daemon, no ``-d``/``--daemon``
+    or ``--all`` flag (see the module docstring). ``family`` is already
+    restricted to a valid :class:`TagFamily` value by ``argparse``'s own
+    ``choices=`` (matching ``_tag_from_args``'s reasoning above), so
+    ``TagFamily(args.family)`` always succeeds.
+
+    ``TagGenerator`` itself owns whole-batch id validation and
+    output-directory writability checking
+    (``InvalidTagId``/``UnwritableOutputPath``, SUC-002/SUC-003); this
+    calls it once with the whole id tuple -- never looping per-id -- and
+    lets those typed errors flow through
+    :func:`~aprilcam.cli._common.report_error` unchanged.
+    """
+    try:
+        ids = _parse_ids(args.ids)
+    except ValueError:
+        print(f"error: invalid --ids spec: {args.ids!r}", file=sys.stderr)
+        return EXIT_ERROR
+
+    family = TagFamily(args.family)
+    out_dir = Path(args.out)
+
+    try:
+        written = tag_generator_factory().generate(
+            family, ids, size_cm=args.size_cm, out_dir=out_dir, dpi=args.dpi
+        )
+    except AprilCamError as exc:
+        return report_error(exc)
+
+    print(f"generated {len(written)} {family.value} tag image(s) in {out_dir}")
+    return EXIT_OK
+
+
+def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
+    """Wire ``tags mount register|clear|list`` and ``tags generate``
+    into the top-level parser. ``tags`` is its own top-level command
+    (not nested under ``camera`` or ``playfield``, see the module
+    docstring), with ``mount`` and ``generate`` as sibling sub-nouns
+    hanging off the same ``tags`` subparsers action -- ``mount`` has its
+    own further sub-subcommands (``register``/``clear``/``list``);
+    ``generate`` is a leaf command, since it is a single offline
+    operation with no further nouns under it.
+    """
+    parser = subparsers.add_parser(
+        "tags", help="tag mount registration and marker generation (UC-12, UC-21)"
+    )
     parser.set_defaults(func=incomplete_command(parser))
     sub = parser.add_subparsers(dest="tags_command", metavar="<command>")
 
@@ -289,3 +386,26 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     add_daemon_option(p_list)
     add_all_option(p_list)
     p_list.set_defaults(func=cmd_list)
+
+    p_generate = sub.add_parser(
+        "generate", help="generate printable AprilTag/ArUco marker images (UC-21)"
+    )
+    p_generate.add_argument("--family", choices=families, required=True, help="tag family")
+    p_generate.add_argument(
+        "--ids", required=True, metavar="SPEC",
+        help="tag id spec: comma-separated ids and/or inclusive ranges, "
+        "e.g. '1-10' or '1-3,55'",
+    )
+    p_generate.add_argument(
+        "--size-cm", type=float, required=True, metavar="CM",
+        help="physical edge length the printed tag must have",
+    )
+    p_generate.add_argument(
+        "--out", required=True, metavar="DIR",
+        help="output directory for the generated PNG images",
+    )
+    p_generate.add_argument(
+        "--dpi", type=int, default=300, metavar="DPI",
+        help="print resolution used to size the image in pixels (default: 300)",
+    )
+    p_generate.set_defaults(func=cmd_generate)
