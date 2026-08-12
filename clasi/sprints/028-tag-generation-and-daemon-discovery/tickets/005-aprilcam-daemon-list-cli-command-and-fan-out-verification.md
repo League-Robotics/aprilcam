@@ -1,9 +1,14 @@
 ---
 id: '005'
 title: aprilcam daemon list CLI command and fan-out verification
-status: open
-use-cases: [SUC-004, SUC-005, SUC-006, SUC-007]
-depends-on: ['004']
+status: done
+use-cases:
+- SUC-004
+- SUC-005
+- SUC-006
+- SUC-007
+depends-on:
+- '004'
 github-issue: ''
 issue: tag-generation-and-daemon-discovery.md
 completes_issue: true
@@ -87,34 +92,34 @@ subparser.
 
 ## Acceptance Criteria
 
-- [ ] `aprilcam daemon list` prints every daemon `find_all()` reports;
+- [x] `aprilcam daemon list` prints every daemon `find_all()` reports;
       the local one is labeled `(local)` (via `fan_out()`'s existing
       labeling — no new labeling code needed).
-- [ ] Each **reachable** daemon's row shows camera count and its linked
+- [x] Each **reachable** daemon's row shows camera count and its linked
       playfields (derived from `DaemonStatus.cameras` — count is
       `len(status.cameras)`; linked playfields are the deduplicated,
       non-`None` `camera.playfield` values across that daemon's
       cameras, printed `(none)` if there are none, matching this
       codebase's established `(no X)`/`(none)` convention rather than
       blank output).
-- [ ] SUC-004: verified with two local daemons on alternate ports (per
+- [x] SUC-004: verified with two local daemons on alternate ports (per
       Hardware Constraints) — both appear; the local one is flagged
       local; each reachable one's row shows camera count and linked
       playfields.
-- [ ] SUC-005: no daemons anywhere → `(no daemons found)`, exit code 0
+- [x] SUC-005: no daemons anywhere → `(no daemons found)`, exit code 0
       (via `fan_out()`, unmodified).
-- [ ] SUC-006: a broken discovery (`DiscoveryFailed`, simulated via a
+- [x] SUC-006: a broken discovery (`DiscoveryFailed`, simulated via a
       fake `Discovery.find_all` that raises, or the `browse=` DI seam
       from ticket 004 through a real `Discovery` instance) produces a
       message **visibly distinct** from SUC-005's `(no daemons found)`,
       non-zero exit (via `fan_out()`/`report_error`, unmodified).
-- [ ] A daemon that advertises but does not answer (e.g. TCP bound but
+- [x] A daemon that advertises but does not answer (e.g. TCP bound but
       the gRPC service is not actually up, or the process died between
       advertise and connect) is listed, flagged unreachable, not
       silently dropped (via `fan_out()`'s existing per-entry
       try/except, unmodified).
-- [ ] `aprilcam daemon list --help` shows no `-d`/`--all` options.
-- [ ] **Fan-out verification (SUC-007)**: with two daemons discovered
+- [x] `aprilcam daemon list --help` shows no `-d`/`--all` options.
+- [x] **Fan-out verification (SUC-007)**: with two daemons discovered
       (one reachable, one not — e.g. stopped mid-session or never bound
       TCP), an existing `--all` command (`camera list --all` is the
       simplest to reuse) exits non-zero (partial failure) while still
@@ -123,13 +128,106 @@ subparser.
       test changes no production code; it is proof that ticket 004's
       change composes correctly with every pre-existing `--all`
       command, not just the new `daemon list` one.
-  - [ ] No existing single-local-daemon `--all` fan-out test's expected
+  - [x] No existing single-local-daemon `--all` fan-out test's expected
         behavior changes (confirm by running the existing suite for
         every `--all`-capable command's test file).
-- [ ] `uv run mypy` clean on `cli/daemon.py`. Zero `typing.Protocol`.
-- [ ] Full existing suite stays green, including every existing
+- [x] `uv run mypy` clean on `cli/daemon.py`. Zero `typing.Protocol`.
+- [x] Full existing suite stays green, including every existing
       `cli/daemon.py` test (`start`/`stop`/`restart`/`status`,
       unmodified).
+
+## Completion Notes
+
+Implemented exactly as planned. `cmd_list` is a five-line thin call into
+`fan_out()` plus a `_render_daemon_list_row` closure; no change to
+`fan_out()` itself, `camera_cli.cmd_list`, or any other existing
+`--all` command's production code.
+
+- **`cmd_list` takes an `args` parameter it never reads.** Kept for
+  signature uniformity with every other `cmd_*` function in this file
+  (`cli/__init__.py` dispatches `func(args)` uniformly) rather than
+  special-casing this one command's call site. Documented in the
+  function's own docstring so it doesn't read as an oversight.
+- **Playfield rendering**: `sorted({c.playfield for c in status.cameras
+  if c.playfield is not None})`, joined with `", "`, or the literal
+  `"(none)"` when empty — verified with a dedup+sort unit test
+  (duplicate and out-of-order playfield names collapse to one sorted,
+  comma-joined line).
+- **Module docstring** updated in place: the historical "No `--all`
+  here" reasoning for `start`/`stop`/`restart`/`status` is kept
+  verbatim (not deleted), with a new paragraph recording that `list`
+  is sprint 028's addition and why it structurally cannot take
+  `-d`/`--all` (no single-target meaning — that's what `daemon status
+  -d HOST` already does).
+- **Test additions, three tiers**, mirroring this codebase's existing
+  layering:
+  1. Six fake-`Discovery`-driven unit tests in `test_daemon_cli.py`
+     covering every acceptance criterion at the `cmd_list` level
+     directly (reachable local+remote with camera count/playfields,
+     `(none)` marker, dedup+sort, unreachable-flagged-not-dropped,
+     empty/SUC-005, `DiscoveryFailed`/SUC-006), plus four argparse
+     wiring tests (`list` has no `.daemon`/`.all` attribute after
+     parsing; `-d` and `--all` are rejected at parse time with
+     argparse's own exit code 2; `--help` output contains neither
+     `--daemon` nor `--all`).
+  2. One real, two-local-daemon-alternate-port `@pytest.mark.
+     integration` test in `test_daemon_cli.py`
+     (`test_daemon_list_reports_two_real_local_daemons_on_alternate_ports`),
+     satisfying SUC-004's own "verified via two local processes on
+     alternate ports" acceptance criterion for `daemon list` itself —
+     not just for raw `Discovery.find_all()`, which ticket 004 already
+     proved. Reuses the exact real-component technique
+     `tests/aprilcam/client/test_discovery.py`'s own real two-daemon
+     test established (`daemon.__main__.build()`, real TCP bind, a
+     thin `MdnsAdvertiser` wrapper baking in a synthetic second
+     hostname, real default `Discovery` browse) rather than inventing
+     a second fixture mechanism — no shared conftest fixture exists in
+     this codebase for this, so, matching every other integration test
+     module here, the technique is reproduced locally rather than
+     imported across test modules.
+  3. One real, `find_all()`-is-genuinely-real fan-out-verification test
+     in `test_cli_integration.py`
+     (`test_camera_list_all_against_a_real_multi_daemon_find_all_reports_partial_failure`),
+     proving SUC-007 against `camera list --all` end to end. This is
+     new: `test_cli_integration.py` already had a two-real-daemon
+     `--all` fan-out test, but it predates ticket 004 and necessarily
+     used a hand-built `_TwoRealDaemonDiscovery` stand-in (`find_all()`
+     was still stubbed local-only when that test was written) — it is
+     left completely unmodified per this ticket's own acceptance
+     criterion ("no existing single-local-daemon fan-out test's
+     expected behavior changes"). The new test instead constructs the
+     "one daemon unreachable" half by advertising a genuine mDNS record
+     for an OS-assigned ephemeral TCP port with nothing ever bound
+     behind it (grab-then-release-immediately), so the real browse
+     finds a real, resolvable record whose connect must genuinely fail
+     — rather than stopping a real daemon process, which risks the
+     mDNS "goodbye" packet racing the subsequent browse and
+     nondeterministically removing the very advertisement the test
+     needs `find_all()` to still report.
+- **Honest gap**: same as ticket 004's own honest gap, inherited
+  unchanged — every "two daemons" scenario here (both `daemon list`'s
+  own SUC-004 test and the SUC-007 fan-out test) uses two real daemon
+  *processes* on this one physical dev machine, per sprint.md's
+  documented hardware-blocked stand-in. Neither test, and nothing in
+  this ticket, proves genuine multicast traversal across a LAN to a
+  second physical host — that remains ticket 006's documentation
+  responsibility, not this ticket's to close.
+- No file outside this ticket's declared scope (`cli/daemon.py`,
+  `tests/aprilcam/cli/test_daemon_cli.py`,
+  `tests/aprilcam/cli/test_cli_integration.py`) was touched.
+
+**Verification performed**: `uv run pytest -q tests/aprilcam/cli/test_daemon_cli.py -m "not camera and not integration"`
+(27 passed); `uv run pytest -q tests/aprilcam/cli/test_daemon_cli.py -m integration`
+(1 passed, ~7s); `uv run pytest -q tests/aprilcam/cli/test_cli_integration.py -m integration`
+(3 passed, ~26s, includes the two pre-existing integration tests in that
+file, unmodified and still green); `uv run pytest -q -m "not camera and not
+integration"` (full suite: 1274 passed, up from the 1264 baseline recorded
+at ticket 004 — exactly the 10 new unit-level tests added here); `uv run
+pytest -q -m integration` (full suite: 8 passed); `uv run mypy` (clean,
+78 source files). Manually confirmed `daemon list --help` shows only
+`-h`/`--help`, `daemon --help` lists `list` alongside the four existing
+subcommands, and a live `daemon list` against an isolated, empty
+`XDG_RUNTIME_DIR` prints `(no daemons found)` and exits 0.
 
 ## Implementation Plan
 
