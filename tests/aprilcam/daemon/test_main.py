@@ -141,6 +141,95 @@ def test_build_with_no_config_dir_starts_with_nothing_loaded(tmp_path, short_tmp
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# ticket 028-003: tcp_port threaded through to build_server, and a real
+# MdnsAdvertiser wired into DaemonLifecycle's advertise/stop_advertise
+# hooks. A fake stands in for MdnsAdvertiser here (monkeypatched at the
+# module level daemon_main.build() actually calls it from) so this
+# test never opens a real multicast socket -- test_mdns.py covers
+# MdnsAdvertiser's own zeroconf-facing behavior with its own injected
+# fakes, and this test is only about build()'s wiring.
+# ---------------------------------------------------------------------------
+
+
+class _FakeAdvertiser:
+    """Records ``start``/``stop`` calls; constructed with no arguments,
+    matching ``daemon.mdns.MdnsAdvertiser``'s real constructor."""
+
+    instances: list = []
+
+    def __init__(self) -> None:
+        self.calls: list = []
+        _FakeAdvertiser.instances.append(self)
+
+    def start(self, tcp_port, *, hostname=None):
+        self.calls.append(("start", tcp_port, hostname))
+
+    def stop(self):
+        self.calls.append(("stop",))
+
+
+def test_build_wires_a_bound_tcp_port_into_the_mdns_advertise_hook(
+    tmp_path, short_tmp_dir, monkeypatch
+):
+    """AC: build()'s tcp_port parameter flows through to build_server
+    (observable via a real TCP client connecting), and
+    DaemonLifecycle's advertise/stop_advertise hooks are wired to a
+    real MdnsAdvertiser instance's start/stop methods."""
+    _FakeAdvertiser.instances = []
+    monkeypatch.setattr(daemon_main, "MdnsAdvertiser", _FakeAdvertiser)
+
+    directories = Directories(config_dir=tmp_path / "config", state_dir=tmp_path / "state")
+    lifecycle = daemon_main.build(
+        directories,
+        lock_path=short_tmp_dir / "daemon.lock",
+        socket_path=short_tmp_dir / "control.sock",
+        start_watch=False,
+        tcp_port=0,
+    )
+    lifecycle.start()
+    try:
+        assert len(_FakeAdvertiser.instances) == 1
+        advertiser = _FakeAdvertiser.instances[0]
+        assert len(advertiser.calls) == 1
+        assert advertiser.calls[0][0] == "start"
+        bound_port = advertiser.calls[0][1]
+        assert isinstance(bound_port, int) and bound_port != 0
+
+        channel = grpc.insecure_channel(f"127.0.0.1:{bound_port}")
+        try:
+            grpc.channel_ready_future(channel).result(timeout=5)
+        finally:
+            channel.close()
+    finally:
+        lifecycle.stop()
+
+    assert advertiser.calls[-1] == ("stop",)
+
+
+def test_build_with_tcp_port_none_never_calls_advertise(tmp_path, short_tmp_dir, monkeypatch):
+    """AC: passing tcp_port=None disables the TCP bind entirely, and
+    DaemonLifecycle.start() -- which only calls advertise when a real
+    port was bound -- never invokes the (fake) MdnsAdvertiser at all."""
+    _FakeAdvertiser.instances = []
+    monkeypatch.setattr(daemon_main, "MdnsAdvertiser", _FakeAdvertiser)
+
+    directories = Directories(config_dir=tmp_path / "config", state_dir=tmp_path / "state")
+    lifecycle = daemon_main.build(
+        directories,
+        lock_path=short_tmp_dir / "daemon.lock",
+        socket_path=short_tmp_dir / "control.sock",
+        start_watch=False,
+        tcp_port=None,
+    )
+    lifecycle.start()
+    try:
+        advertiser = _FakeAdvertiser.instances[0]
+        assert advertiser.calls == []
+    finally:
+        lifecycle.stop()
+
+
 def test_build_with_a_malformed_file_among_valid_ones_still_starts_and_loads_the_rest(
     tmp_path, short_tmp_dir, caplog
 ):

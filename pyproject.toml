@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aprilcam"
-version = "0.20260803.3"
+version = "0.20260812.1"
 description = "MCP server and CLI for camera management, AprilTag/ArUco detection, playfield homography, and image processing"
 authors = [
   { name = "Eric Busboom" }
@@ -41,6 +41,7 @@ dependencies = [
   "zeroconf>=0.131",
   "pillow>=10.0",
   "mcp>=1.0",
+  "opencv-contrib-python>=4.8",
 ]
 
 [project.urls]
@@ -52,7 +53,6 @@ aprilcam = "aprilcam.cli:main"
 [project.optional-dependencies]
 imaging = []
 daemon = [
-  "opencv-contrib-python>=4.8",
   "mss>=9.0",
   "websockets>=12.0",
   "fpdf2>=2.7",

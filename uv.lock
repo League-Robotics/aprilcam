@@ -80,13 +80,14 @@ wheels = [
 
 [[package]]
 name = "aprilcam"
-version = "0.20260803.2"
+version = "0.20260803.3"
 source = { editable = "." }
 dependencies = [
     { name = "grpcio" },
     { name = "mcp" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "opencv-contrib-python" },
     { name = "pillow" },
     { name = "protobuf" },
     { name = "pydantic" },
@@ -102,7 +103,6 @@ daemon = [
     { name = "grpcio-reflection" },
     { name = "msgpack" },
     { name = "mss" },
-    { name = "opencv-contrib-python" },
     { name = "websockets" },
 ]
 dev = [
@@ -146,7 +146,7 @@ requires-dist = [
     { name = "msgpack", marker = "extra == 'daemon'", specifier = ">=1.0" },
     { name = "mss", marker = "extra == 'daemon'", specifier = ">=9.0" },
     { name = "numpy", specifier = ">=1.23" },
-    { name = "opencv-contrib-python", marker = "extra == 'daemon'", specifier = ">=4.8" },
+    { name = "opencv-contrib-python", specifier = ">=4.8" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "protobuf", specifier = ">=4.25" },
     { name = "pydantic", specifier = ">=2.0" },

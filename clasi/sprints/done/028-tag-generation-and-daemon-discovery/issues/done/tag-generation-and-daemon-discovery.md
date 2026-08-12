@@ -1,5 +1,13 @@
 ---
-status: pending
+status: done
+sprint: 028
+tickets:
+- 028-001
+- 028-002
+- 028-003
+- 028-004
+- 028-005
+- 028-006
 ---
 
 # Tag generation and real daemon discovery

@@ -1,4 +1,5 @@
-"""``aprilcam daemon start|stop|restart|status`` (ticket 020-006).
+"""``aprilcam daemon start|stop|restart|status|list`` (ticket 020-006;
+``list`` added by ticket 028-005).
 
 Thin argv-to-client-call shells, per ``adapters.md``'s "adapters hold
 no authoritative state" rule -- every line here either shapes argv,
@@ -28,14 +29,27 @@ view that correctly reports "not running" before any daemon exists
 (unlike a bare RPC connect attempt, which would just fail to connect
 and look identical to "daemon crashed").
 
-**No ``--all`` here.** The sprint architecture's Scope section names
-exactly three fan-out-eligible commands this sprint (``camera list``,
-``camera probe``, ``camera image``); ``daemon status --all`` is
-sanctioned by ``cli.md``'s general fan-out table but out of this
-sprint's slice -- there is no ``daemon list`` yet to make multi-daemon
-status especially useful, and Architecture Decision 2 means
-``find_all()`` cannot discover more than the local daemon this sprint
-regardless. Recorded here as a scope decision, not an oversight.
+**No ``--all`` here on start/stop/restart/status -- except ``list``,
+which fans out inherently.** The sprint-020 architecture's Scope
+section named exactly three fan-out-eligible commands for that sprint
+(``camera list``, ``camera probe``, ``camera image``); ``daemon status
+--all`` was sanctioned by ``cli.md``'s general fan-out table but out of
+that sprint's slice -- there was no ``daemon list`` yet to make
+multi-daemon status especially useful, and that sprint's Architecture
+Decision 2 meant ``find_all()`` could not discover more than the local
+daemon anyway. Recorded here as a scope decision, not an oversight.
+
+Sprint 028 (ticket 005) adds ``daemon list``, resolving that gap now
+that ``Discovery.find_all()`` is real (ticket 004). It is the first
+command in this file with no single-target meaning at all -- that is
+what ``daemon status -d HOST`` already does -- so, unlike ``mount
+list``'s default-single/opt-in-``--all`` shape, it takes no
+``-d``/``--all`` flags whatsoever: listing daemons is inherently
+"every daemon". It reuses ``cli/_common.py``'s ``fan_out()``
+unmodified and is built entirely on the existing ``Daemon.status()``
+RPC -- no new RPC method, no ``.proto`` change (see ``cmd_list``'s own
+docstring). ``start``/``stop``/``restart``/``status`` above are
+untouched by this addition and keep the reasoning above.
 """
 
 from __future__ import annotations
@@ -47,6 +61,7 @@ from typing import Callable
 from aprilcam.cli._common import (
     EXIT_OK,
     add_daemon_option,
+    fan_out,
     format_camera_row,
     incomplete_command,
     report_error,
@@ -62,6 +77,7 @@ __all__ = [
     "cmd_stop",
     "cmd_restart",
     "cmd_status",
+    "cmd_list",
 ]
 
 
@@ -182,6 +198,54 @@ def cmd_status(
     return EXIT_OK
 
 
+def _render_daemon_list_row(label: str, status: DaemonStatus) -> None:
+    """One ``daemon list`` row: *label* (already ``fan_out()``-formatted,
+    e.g. ``"localhost (local)"``), then the reachable daemon's camera
+    count and linked playfields -- mirroring ``cli/tags.py``'s
+    ``cmd_list`` (mount list) rendering shape (label line, then indented
+    summary fields), the pattern this ticket follows.
+
+    Linked playfields are the deduplicated, sorted, non-``None``
+    ``CameraState.playfield`` values across *status*'s cameras, printed
+    ``(none)`` when there are none -- this codebase's established
+    ``(no X)``/``(none)`` convention rather than blank output. An
+    unreachable daemon never reaches this function at all: ``fan_out()``
+    prints its own ``"{label}: unreachable -- {exc}"`` line and skips
+    *render* entirely (SUC-004's "listed and flagged, not filtered
+    out").
+    """
+    print(f"{label}:")
+    print(f"  cameras: {len(status.cameras)}")
+    playfields = sorted({c.playfield for c in status.cameras if c.playfield is not None})
+    print(f"  playfields: {', '.join(playfields) if playfields else '(none)'}")
+
+
+def cmd_list(
+    args: argparse.Namespace,
+    *,
+    discovery_factory: Callable[[], Discovery] = Discovery,
+) -> int:
+    """``aprilcam daemon list``. Lists every daemon
+    ``Discovery.find_all()`` reports -- local and remote -- with each
+    reachable one's camera count and linked playfields, built entirely
+    from the existing ``Daemon.status()`` RPC (no new RPC method, no
+    ``.proto`` change; sprint architecture).
+
+    A thin call into ``fan_out()`` (see the module docstring's "No
+    ``--all`` here -- except ``list``" section): that helper already
+    implements every behavioural requirement this command has --
+    ``"(no daemons found)"`` plus exit 0 on an empty result (SUC-005),
+    aborting via ``report_error`` on ``DiscoveryFailed`` (SUC-006),
+    ``f"{host} (local)"``/bare-``host`` labelling, and printing an
+    unreachable daemon flagged rather than dropping it (SUC-004) --
+    so none of that is reimplemented here. Takes no ``-d``/``--all``
+    flags; *args* is accepted only to match every other ``cmd_*``
+    function's ``(args, *, ...)`` dispatch signature (``cli/__init__.py``
+    calls ``func(args)`` uniformly) and is otherwise unused.
+    """
+    return fan_out(discovery_factory(), lambda daemon: daemon.status(), _render_daemon_list_row)
+
+
 def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     """Wire ``daemon start|stop|restart|status`` into the top-level parser."""
     parser = subparsers.add_parser(
@@ -207,3 +271,8 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     p_status = sub.add_parser("status", help="report daemon readiness")
     add_daemon_option(p_status)
     p_status.set_defaults(func=cmd_status)
+
+    p_list = sub.add_parser(
+        "list", help="list every discovered daemon, local and remote"
+    )
+    p_list.set_defaults(func=cmd_list)

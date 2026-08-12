@@ -27,6 +27,20 @@ Two tiers:
   sockets directly, as this test supplies, can fan out across two real
   daemons before that lands.
 
+* ``test_camera_list_all_against_a_real_multi_daemon_find_all_reports_partial_failure``
+  -- ``@pytest.mark.integration``, no camera hardware needed (ticket
+  028-005, SUC-007). Unlike the test above -- which predates ticket
+  004, when ``Discovery.find_all()`` was still stubbed local-only, and
+  so had to fake ``find_all()``/``connect()`` entirely -- this one
+  drives the **real** ``client.discovery.Discovery`` (no fakes, no DI
+  overrides beyond a shrunk ``connect_timeout``) against a real local
+  daemon plus a genuine mDNS advertisement with nothing listening
+  behind its advertised port. It is proof that ticket 004's now-real
+  ``find_all()`` composes correctly with every pre-existing ``--all``
+  command, not only the new ``daemon list`` one (ticket 005) -- and
+  changes no production code in ``fan_out()``/``camera_cli.cmd_list``
+  to get there.
+
 Startup-race note (read before touching the round-trip test's
 ordering): the client-side readiness signal
 (``client.discovery.probe_socket_reachable`` -- bare gRPC channel
@@ -335,6 +349,76 @@ def test_camera_list_all_fans_out_across_two_real_daemons_and_one_dead_target(ca
             listener_b.stop(1.0)
         shutil.rmtree(dir_a, ignore_errors=True)
         shutil.rmtree(dir_b, ignore_errors=True)
+
+
+@pytest.mark.integration
+def test_camera_list_all_against_a_real_multi_daemon_find_all_reports_partial_failure(
+    capsys, tmp_path: Path, monkeypatch
+):
+    """SUC-007, proven against the REAL, now-multi-daemon
+    ``Discovery.find_all()`` (ticket 028-004) -- see the module
+    docstring for why this is distinct from the fake-``Discovery``
+    fan-out test above. One real local daemon (found via the
+    lock-probe) is reachable; a genuine mDNS advertisement with
+    nothing actually listening behind its advertised port (found via
+    the real default browse) is not -- "the process died between
+    advertise and connect", per SUC-007's own acceptance-criterion
+    wording. ``start_watch=False`` means the real local daemon never
+    runs an actual camera probe, so it reports zero cameras regardless
+    of what hardware, if any, is attached to the machine running this
+    suite -- no ``@pytest.mark.camera`` needed. This test changes no
+    production code: ``fan_out()`` and ``camera_cli.cmd_list`` run
+    completely unmodified.
+    """
+    import argparse
+    import socket
+
+    from aprilcam.cli import camera as camera_cli
+    from aprilcam.client.discovery import Discovery
+    from aprilcam.config.directories import Directories
+    from aprilcam.daemon import __main__ as daemon_main
+    from aprilcam.daemon.mdns import MdnsAdvertiser
+
+    short_dir = Path(tempfile.mkdtemp(prefix="ac-fanout-real-", dir="/tmp"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(short_dir))
+    directories = Directories(config_dir=tmp_path / "config", state_dir=tmp_path / "state")
+    assert directories.socket_dir == short_dir / "aprilcam"
+
+    lifecycle = daemon_main.build(directories, start_watch=False, tcp_port=0)
+    lifecycle.start()
+
+    # A phantom second daemon: a genuine mDNS advertisement for an
+    # OS-assigned ephemeral TCP port that is grabbed and released
+    # immediately, with nothing ever bound to it afterward -- so the
+    # real browse finds a real, resolvable record whose connect must
+    # genuinely fail, rather than a fake standing in for that failure.
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("0.0.0.0", 0))
+    dead_port = probe.getsockname()[1]
+    probe.close()
+
+    advertiser = MdnsAdvertiser()
+    advertiser.start(dead_port, hostname="test-second-host")
+    try:
+        # No browse= override, no lock_holder/socket_reachable override
+        # -- the real Discovery, real default browse. connect_timeout
+        # is shrunk only so this test does not wait out the production
+        # 5s default against a port nothing answers on.
+        discovery = Discovery(directories=directories, connect_timeout=1.5)
+
+        code = camera_cli.cmd_list(
+            argparse.Namespace(daemon=None, all=True), discovery_factory=lambda: discovery
+        )
+
+        assert code == 1  # partial failure is visible in the exit code
+        out, err = capsys.readouterr()
+        assert "localhost (local):" in out
+        assert "(no cameras)" in out
+        assert "unreachable" in err
+    finally:
+        advertiser.stop()
+        lifecycle.stop()
+        shutil.rmtree(short_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------

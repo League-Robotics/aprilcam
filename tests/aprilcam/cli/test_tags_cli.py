@@ -1,4 +1,5 @@
-"""Tests for ``aprilcam.cli.tags`` (ticket 025-005, UC-12).
+"""Tests for ``aprilcam.cli.tags`` (ticket 025-005, UC-12; ``generate``
+added by ticket 028-002, UC-21).
 
 Headless, matching ``test_playfield_cli.py``'s/``test_camera_cli.py``'s
 established style: a fake ``Daemon``/``Discovery`` pair injected through
@@ -6,6 +7,12 @@ established style: a fake ``Daemon``/``Discovery`` pair injected through
 daemon, no real gRPC. Each CLI test module defines its own small fakes
 rather than importing another module's (this file's own precedent,
 matching every other ``tests/aprilcam/cli/test_*_cli.py`` module).
+
+``generate``'s own tests need no ``Discovery``/daemon fake at all --
+it is purely offline (SUC-001/002/003) -- only a fake/spy
+``TagGenerator`` injected through ``cmd_generate``'s
+``tag_generator_factory`` seam, so these tests never import real
+OpenCV rendering (ticket 028-001's own suite already covers that).
 """
 
 from __future__ import annotations
@@ -13,12 +20,13 @@ from __future__ import annotations
 import argparse
 import math
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import pytest
 
 from aprilcam.cli import tags as tags_cli
-from aprilcam.errors import ConnectionFailed, NotCalibrated
+from aprilcam.errors import ConnectionFailed, InvalidTagId, NotCalibrated, UnwritableOutputPath
 from aprilcam.types import MountParameters, TagFamily, TagId
 
 
@@ -79,6 +87,23 @@ class _Info:
     is_local: bool
 
 
+@dataclass
+class _FakeTagGenerator:
+    """A spy standing in for ``tags.generator.TagGenerator`` -- no real
+    OpenCV rendering happens in this file's tests (see module
+    docstring)."""
+
+    generate_returns: Tuple[Path, ...] = ()
+    generate_raises: Optional[Exception] = None
+    calls: List[tuple] = field(default_factory=list)
+
+    def generate(self, family, ids, *, size_cm, out_dir, dpi=300):
+        self.calls.append((family, ids, size_cm, out_dir, dpi))
+        if self.generate_raises is not None:
+            raise self.generate_raises
+        return self.generate_returns
+
+
 def _args(**overrides) -> argparse.Namespace:
     base = dict(
         daemon=None,
@@ -101,6 +126,18 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = top.add_subparsers(dest="command")
     tags_cli.add_subparser(subparsers)
     return top
+
+
+def _generate_args(**overrides) -> argparse.Namespace:
+    base = dict(
+        family="aruco",
+        ids="1-10",
+        size_cm=8.0,
+        out="./playfield-tags",
+        dpi=300,
+    )
+    base.update(overrides)
+    return argparse.Namespace(**base)
 
 
 # ---------------------------------------------------------------------------
@@ -403,3 +440,234 @@ def test_mount_with_no_subcommand_uses_the_incomplete_command_default(capsys):
 
     assert code == 1
     assert "usage" in capsys.readouterr().out.lower()
+
+
+# ---------------------------------------------------------------------------
+# generate -- _parse_ids (ticket 028-002, UC-21)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_ids_single_values():
+    assert tags_cli._parse_ids("1,2,3") == (1, 2, 3)
+
+
+def test_parse_ids_a_range_is_inclusive_on_both_ends():
+    assert tags_cli._parse_ids("1-10") == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+
+
+def test_parse_ids_mixed_ranges_and_singles():
+    assert tags_cli._parse_ids("1-3,55") == (1, 2, 3, 55)
+
+
+def test_parse_ids_deduplicates_and_sorts():
+    assert tags_cli._parse_ids("5,1,3-4,1,3") == (1, 3, 4, 5)
+
+
+def test_parse_ids_tolerates_surrounding_whitespace():
+    assert tags_cli._parse_ids(" 1 , 3-4 , 7 ") == (1, 3, 4, 7)
+
+
+def test_parse_ids_rejects_a_non_numeric_part():
+    with pytest.raises(ValueError):
+        tags_cli._parse_ids("1,abc")
+
+
+# ---------------------------------------------------------------------------
+# generate -- cmd_generate (ticket 028-002, UC-21, SUC-001/002/003)
+# ---------------------------------------------------------------------------
+
+
+def test_generate_parses_ids_and_calls_tag_generator_with_the_right_arguments(capsys):
+    generator = _FakeTagGenerator(generate_returns=tuple(Path(f"tag-{i}.png") for i in range(1, 11)))
+
+    code = tags_cli.cmd_generate(_generate_args(), tag_generator_factory=lambda: generator)
+
+    assert code == 0
+    assert len(generator.calls) == 1
+    family, ids, size_cm, out_dir, dpi = generator.calls[0]
+    assert family == TagFamily.ARUCO
+    assert ids == tuple(range(1, 11))
+    assert size_cm == 8.0
+    assert out_dir == Path("./playfield-tags")
+    assert dpi == 300
+
+
+def test_generate_calls_tag_generator_exactly_once_for_the_whole_batch():
+    """SUC-002's 'nothing written for any id in the batch' guarantee is
+    ``TagGenerator``'s, not the CLI's -- the CLI must not loop per-id
+    (module docstring/ticket 028-002)."""
+    generator = _FakeTagGenerator()
+
+    tags_cli.cmd_generate(_generate_args(ids="1-3,55"), tag_generator_factory=lambda: generator)
+
+    assert len(generator.calls) == 1
+    assert generator.calls[0][1] == (1, 2, 3, 55)
+
+
+def test_generate_family_choice_needs_no_translation_table():
+    generator = _FakeTagGenerator()
+
+    tags_cli.cmd_generate(
+        _generate_args(family="apriltag"), tag_generator_factory=lambda: generator
+    )
+
+    assert generator.calls[0][0] == TagFamily.APRILTAG
+
+
+def test_generate_dpi_defaults_to_300_and_is_overridable():
+    generator = _FakeTagGenerator()
+
+    tags_cli.cmd_generate(_generate_args(dpi=600), tag_generator_factory=lambda: generator)
+
+    assert generator.calls[0][4] == 600
+
+
+def test_generate_prints_a_confirmation_naming_count_and_out_dir(capsys):
+    generator = _FakeTagGenerator(generate_returns=(Path("a.png"), Path("b.png"), Path("c.png")))
+
+    code = tags_cli.cmd_generate(
+        _generate_args(ids="1-3"), tag_generator_factory=lambda: generator
+    )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "3" in out
+    assert "playfield-tags" in out
+
+
+def test_generate_surfaces_invalid_tag_id_via_report_error(capsys):
+    """SUC-002: an out-of-range id surfaces ``InvalidTagId`` through
+    ``report_error`` -- stderr, non-zero exit."""
+    generator = _FakeTagGenerator(
+        generate_raises=InvalidTagId("aruco", 55, range(0, 50))
+    )
+
+    code = tags_cli.cmd_generate(
+        _generate_args(ids="1-3,55"), tag_generator_factory=lambda: generator
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "55" in err
+    assert "outside valid range" in err
+
+
+def test_generate_surfaces_unwritable_output_path_via_report_error(capsys):
+    """SUC-003: an unwritable ``--out`` surfaces ``UnwritableOutputPath``
+    through ``report_error`` -- stderr, non-zero exit."""
+    generator = _FakeTagGenerator(
+        generate_raises=UnwritableOutputPath(Path("/no/such/writable/dir"))
+    )
+
+    code = tags_cli.cmd_generate(
+        _generate_args(out="/no/such/writable/dir"), tag_generator_factory=lambda: generator
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "/no/such/writable/dir" in err
+
+
+def test_generate_rejects_a_malformed_ids_spec_without_a_traceback(capsys):
+    generator = _FakeTagGenerator()
+
+    code = tags_cli.cmd_generate(
+        _generate_args(ids="1,abc"), tag_generator_factory=lambda: generator
+    )
+
+    assert code == 1
+    assert "--ids" in capsys.readouterr().err
+    assert generator.calls == []
+
+
+# ---------------------------------------------------------------------------
+# generate -- argparse wiring (ticket 028-002, UC-21)
+# ---------------------------------------------------------------------------
+
+
+def test_generate_is_wired_with_the_documented_flags():
+    parser = _build_parser()
+    args = parser.parse_args(
+        [
+            "tags", "generate",
+            "--family", "aruco", "--ids", "1-10",
+            "--size-cm", "8", "--out", "./playfield-tags",
+        ]
+    )
+    assert args.func is tags_cli.cmd_generate
+    assert args.family == "aruco"
+    assert args.ids == "1-10"
+    assert args.size_cm == 8.0
+    assert args.out == "./playfield-tags"
+    assert args.dpi == 300  # default
+
+
+def test_generate_dpi_is_overridable_on_the_command_line():
+    parser = _build_parser()
+    args = parser.parse_args(
+        [
+            "tags", "generate",
+            "--family", "apriltag", "--ids", "1", "--size-cm", "5",
+            "--out", "out", "--dpi", "600",
+        ]
+    )
+    assert args.dpi == 600
+
+
+def test_generate_rejects_an_unknown_family():
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            ["tags", "generate", "--family", "qr", "--ids", "1", "--size-cm", "5", "--out", "out"]
+        )
+
+
+def test_generate_requires_family_ids_size_cm_and_out():
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["tags", "generate"])
+
+
+def test_generate_has_no_daemon_or_all_option():
+    """``generate`` is purely offline -- it never gets ``-d``/``--daemon``
+    or ``--all`` (module docstring, ticket 028-002)."""
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "tags", "generate",
+                "--family", "aruco", "--ids", "1", "--size-cm", "5", "--out", "out",
+                "--daemon", "pi-field.local",
+            ]
+        )
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "tags", "generate",
+                "--family", "aruco", "--ids", "1", "--size-cm", "5", "--out", "out",
+                "--all",
+            ]
+        )
+
+
+def test_tags_help_shows_generate_alongside_mount(capsys):
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["tags", "--help"])
+    out = capsys.readouterr().out
+    assert "mount" in out
+    assert "generate" in out
+
+
+def test_generate_help_does_not_crash_and_documents_its_flags(capsys):
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["tags", "generate", "--help"])
+    out = capsys.readouterr().out
+    assert "--family" in out
+    assert "--ids" in out
+    assert "--size-cm" in out
+    assert "--out" in out
+    assert "--dpi" in out
+    assert "--daemon" not in out
+    assert "--all" not in out
