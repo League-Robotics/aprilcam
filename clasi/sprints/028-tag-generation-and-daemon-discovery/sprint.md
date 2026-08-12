@@ -115,6 +115,25 @@ UC-21's already-recorded decision.
   existing local command.
 - Full suite green, `uv run mypy` clean, zero `typing.Protocol`
   anywhere touched.
+  **Ticket 006 update, reported honestly rather than left as the
+  planning-time aspiration**: green *per subset* — headless
+  (`-m "not camera and not integration"`, 1274 passed) and
+  `-m integration` (8 passed, including both of this sprint's own real
+  two-local-daemon mechanism tests) are both fully green with zero
+  regressions from this sprint. The full, unfiltered `uv run pytest`
+  (camera + integration together) is not clean, but its 14 failures all
+  trace to one real, current, pre-existing field-calibration condition
+  (main-playfield's live `calibrate()` consistently missing ArUco ids
+  6-10) in sprints 020-026's own hardware/integration suites — none
+  touched by this sprint. This ticket's execution environment also came
+  with a report of a separate, previously-observed SIGABRT crash when
+  running the complete unfiltered suite in one process (attributed to a
+  sprint-027 streaming worker thread's behavior during garbage
+  collection, predating this sprint). That crash did not reproduce in
+  this ticket's own one complete full-unfiltered run this session (exit
+  1, the 14 calibration-related failures above, no abort); see ticket
+  006's completion notes for the full, honest account of both data
+  points rather than a single unqualified claim either way.
 
 ## Scope
 
@@ -185,6 +204,62 @@ skip cleanly — never assume-passing):
 Both are `@pytest.mark.camera`-equivalent — written, correctly marked,
 and documented as blocked, not silently treated as passing. See ticket
 006.
+
+**Ticket 006's actual findings, closing the loop on both items above.**
+Both `@pytest.mark.camera` tests were written
+(`tests/aprilcam/tags/test_taggen_hardware.py`,
+`tests/aprilcam/client/test_discovery_hardware.py`), run for real against
+this machine's real hardware/network, and both genuinely stayed blocked
+this sprint — but for two different, now-recorded reasons, not assumed
+without checking (mirroring sprint 027 ticket 008's own precedent of
+running the hardware suite rather than assuming the worst case):
+
+1. **Printed-tag detection**: `TagGenerator().generate()` ran for real
+   and wrote a real 8cm-edge ArUco-42 PNG; the arducam is genuinely
+   attached on this machine and its real detection pipeline was polled
+   for real (10 attempts over ~10s). Blocked for the expected reason —
+   nobody had printed the generated PNG and placed it in view — not for
+   any code defect; the test's own skip message names the exact file
+   path a human needs to print. The *mechanism* is proven working: the
+   same polling loop, in the same run, was observed detecting
+   main-playfield's own real printed ArUco markers (1-5) on every
+   attempt, so "a printed tag detects via this pipeline" is not in
+   doubt — only "the specific tag this test generated has been printed
+   and placed" is unverified.
+2. **Genuine second physical machine**: `Discovery().find_all()` ran for
+   real (real default `browse=`, no fakes, no synthetic hostname) against
+   this machine's actual LAN. The real `zeroconf` multicast socket opens
+   fine in this environment (confirmed — this is not a sandboxing/
+   permission block) and the browse completes promptly and returns
+   empty, because no second physical AprilCam host (e.g. a Raspberry Pi)
+   is currently anywhere on this LAN. Distinct from and additional to
+   the two-local-daemon-alternate-port mechanism proof already covered
+   by `test_discovery.py`'s/`test_daemon_cli.py`'s
+   `@pytest.mark.integration` tests (unconditionally green on every dev
+   machine) — this is the genuinely-still-open leg: nobody has yet run
+   this suite with a real second host on the LAN.
+
+Neither is fixable in code — both require a real human action (print a
+sheet of paper; plug in a second physical host) this sprint's execution
+environment cannot perform. See ticket 006's completion notes for the
+full evidence and exact skip messages.
+
+**A third, unplanned finding from ticket 006's full-suite sweep, unrelated
+to either criterion above.** Running the complete `uv run pytest` (no
+marker filter, camera and integration tests included) surfaced 14
+failures, all tracing to one real, current field condition: a live
+`calibrate()` against `main-playfield` consistently matches ArUco ids
+`(1, 2, 3, 4, 5)` and misses `(6, 7, 8, 9, 10)` — a different, and larger,
+occlusion than the 2-3-missing-id pattern sprint 027 ticket 008 recorded
+against the same field. All 14 failures are in `test_calibration_
+hardware.py` (8), `test_detection_hardware.py` (3), `test_lifecycle_
+integration.py` (1), `test_mobile_tags_hardware.py` (1), and `mcp/
+test_integration.py` (1) — sprints 020-026's own hardware/integration
+suites, none touched by sprint 028. Confirmed pre-existing and unrelated
+to this sprint's changes (`git status`/`git diff` show no modification to
+any of those test files or the modules under test this sprint). Not this
+sprint's regression, not fixed here — the field's real occlusion is a
+standing hardware condition, not a code defect.
 
 ## Test Strategy
 
@@ -404,6 +479,35 @@ either UC-21 or UC-13.
   weight increase, already accepted in principle by UC-21's recorded
   decision but landing as a concrete change in this sprint.
 
+**Ticket 006's Architecture cross-check (what tickets 001-005 actually
+built vs. this section's plan): no divergence found.** Every module,
+class, and constant name above was checked against the real source
+during ticket 006's integration pass: `tags/generator.py`'s
+`TagGenerator` (plus the planned `_MIN_LEGIBLE_PIXELS` judgment call —
+implemented at 300px, documented with its own rationale in the module,
+exactly as Step 7 Open Question 4 anticipated); `errors.py`'s
+`UnwritableOutputPath`; `pyproject.toml`'s `opencv-contrib-python` in
+base `dependencies` (confirmed, not merely in the `daemon` extra);
+`daemon/mdns.py`'s `MdnsAdvertiser` (no base class, exactly as Design
+Rationale Step 6 argued for); `daemon/rpc.py`'s `build_server(...,
+tcp_port=...)` additive TCP bind; `daemon/lifecycle.py`'s
+`advertise`/`stop_advertise` constructor hooks, wired from `start()`/
+`stop()` exactly like the existing `watch`/`stop_watch` pair;
+`daemon/__main__.py`'s `build(..., tcp_port=DEFAULT_DAEMON_PORT)` wiring
+a real `MdnsAdvertiser`; `config/directories.py`'s `DEFAULT_DAEMON_PORT
+= 5280`; `client/discovery.py`'s real `find_all()` (local lock-probe
+unchanged, merged with a real `_browse_zeroconf`, self-filtered by
+hostname, `"ip:port"`-formatted remote `host`); `cli/daemon.py`'s `list`
+subcommand built on the existing `fan_out()`. One shape not literally
+named in this Architecture section but consistent with its intent:
+ticket 004's `_BrowseResult` (a small local dataclass the `browse=` DI
+seam speaks in, deliberately not a raw zeroconf type) — an
+implementation-level choice within the "client-side daemon discovery"
+responsibility this section already scoped, not a divergence from it.
+Zero `typing.Protocol` confirmed by grep across every file this sprint
+touched (all hits are prose explicitly stating "not `Protocol`" — see
+ticket 006's completion notes for the exact grep output).
+
 ### Step 6 — Design rationale
 
 **Decision: open the daemon's gRPC control plane on TCP, fixed port
@@ -500,7 +604,14 @@ browse results are filtered (by the TXT record's `host` property vs.
    processes on alternate ports; genuine multicast traversal across a
    real LAN with a physically separate host (e.g. a Raspberry Pi) is
    not exercised. Recommend a follow-up real-hardware verification pass
-   before relying on this in a field deployment.
+   before relying on this in a field deployment. **Ticket 006 update**:
+   this question is now backed by a real, executable check rather than
+   just a plan — `tests/aprilcam/client/test_discovery_hardware.py`
+   attempted the genuine check for real this sprint (real `zeroconf`
+   browse against this machine's actual LAN, no fakes) and confirmed
+   no second physical AprilCam host is currently reachable here; the
+   test is ready to pass for real the moment one is. Still genuinely
+   open, not resolved — just now falsifiable rather than assumed.
 3. **PDF output** (UC-21's own open question) remains genuinely open,
    not decided against — a future sprint's call.
 4. **The exact "unachievable size at DPI" warning threshold** is left
