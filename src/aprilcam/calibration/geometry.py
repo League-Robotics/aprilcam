@@ -48,7 +48,8 @@ tag-pose->robot-pose) than the pixel<->world pair above.
 from __future__ import annotations
 
 import math
-from typing import Tuple
+from dataclasses import dataclass
+from typing import Sequence, Tuple
 
 import numpy as np
 
@@ -64,6 +65,9 @@ __all__ = [
     "project_tag_to_field_plane",
     "apply_mount_offset",
     "correct_tag_pose",
+    "ReferenceObservation",
+    "CameraGeometrySolution",
+    "solve_camera_geometry",
 ]
 
 
@@ -389,3 +393,176 @@ def correct_tag_pose(
         camera_height_cm=camera_height_cm,
     )
     return apply_mount_offset(field_position, yaw_rad, mount)
+
+
+# ---------------------------------------------------------------------------
+# Camera-geometry solver (sprint 029 ticket 002, SUC-003): the inverse of
+# project_tag_to_field_plane -- given two or more elevated references at
+# known surveyed positions, recover the camera's own ground nadir and
+# optical height. Consumed by ``cli/locate.py`` (ticket 003, ``aprilcam
+# camera locate``), which supplies the observations; this module still
+# talks to no camera, no daemon, no cv2.
+#
+# **Why least squares over all references, never line intersection.** A
+# first attempt at this solve intersected the two displacement lines
+# (surveyed -> observed, extended) and recovered a nadir ~20 cm off, with a
+# residual 150x worse than optimum. The cause: camera nadir C, a
+# reference's true footprint T, and its apparent (uncorrected) observed
+# position A are collinear by construction (T = C + (true - C), A = C + k *
+# (true - C) for the same k) -- this is exactly what parallax *is*, a ray
+# from the camera continuing past the tag to the ground. Two references on
+# opposite sides of C produce two displacement *lines* that are nearly
+# coincident (same orientation, opposite sense), and intersecting them
+# uses only *direction*, discarding *magnitude* -- wildly ill-conditioned.
+# Least squares over the full 2D residual (magnitude and direction both)
+# on the very same data is well-conditioned. See ``solve_camera_geometry``
+# below for the linearization that makes this a single, non-iterative
+# ``numpy.linalg.lstsq`` call.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, kw_only=True)
+class ReferenceObservation:
+    """One elevated reference used to solve for a camera's geometry:
+    a surveyed ground position, seen through some known stand height,
+    reported (uncorrected) by ``GetTag`` at an apparent world position.
+
+    ``surveyed`` and ``observed`` are both already-projected world
+    points (``pixel_to_world``'s output, or a playfield definition's
+    surveyed feature) -- this dataclass carries no pixels, exactly like
+    every other value type in this module.
+    """
+
+    surveyed: WorldPoint
+    observed: WorldPoint
+    height_cm: float
+
+
+@dataclass(frozen=True, kw_only=True)
+class CameraGeometrySolution:
+    """The result of :func:`solve_camera_geometry`: the camera's solved
+    ground nadir and optical height, plus two numbers that make a bad
+    solve visible rather than silent.
+
+    ``rms_residual_cm`` refits ``observed`` from the solved ``(nadir,
+    height_cm)`` for every reference via the forward relation (the same
+    ``apparent = C + k * (true - C)`` this module's own
+    :func:`project_tag_to_field_plane` inverts) and RMS's the 2D error
+    against the references' actual ``observed`` values -- how well the
+    solved geometry explains the data it was fit from.
+
+    ``condition_number`` is the solved design matrix's largest-to-
+    smallest singular-value ratio (``numpy.linalg.svd``) -- large means
+    the references were too close to collinear-with-the-nadir to
+    constrain the fit well, the exact failure mode line-intersection
+    suffered from. A caller (``cli/locate.py``) uses this to warn or
+    refuse to write an ill-conditioned or high-residual solve.
+    """
+
+    nadir: WorldPoint
+    height_cm: float
+    rms_residual_cm: float
+    condition_number: float
+
+
+def solve_camera_geometry(
+    references: Sequence[ReferenceObservation],
+) -> CameraGeometrySolution:
+    """Solve a camera's ground nadir ``C`` and optical height ``H`` from
+    two or more elevated *references* at known surveyed positions --
+    the inverse problem :func:`project_tag_to_field_plane` assumes is
+    already solved.
+
+    **The math.** The forward relation (already proven correct and
+    tested -- see :func:`project_tag_to_field_plane`'s own worked
+    example; this function adds no new physics, only inverts an
+    already-verified relation)::
+
+        apparent = C + k * (true - C),   k = H / (H - h)
+
+    is bilinear in the unknowns ``(C, H)`` -- direct least squares over
+    ``(Cx, Cy, H)`` would be nonlinear. Linearize by substitution: let
+    ``A = C / H`` (a 2-vector) and ``b = 1 / H`` (a scalar). Substituting
+    and rearranging the equivalent reverse form (``project_tag_to_field_
+    plane``'s own ``ratio = h / H`` correction, run backwards)::
+
+        true = apparent + (h / H) * (C - apparent)
+             = apparent + h*A - h*b*apparent
+        =>  true - apparent = h*A - h*apparent*b
+
+    which is **linear** in ``(Ax, Ay, b)``. Per reference this gives two
+    equations::
+
+        true_x - apparent_x = h * Ax - h * apparent_x * b
+        true_y - apparent_y = h * Ay - h * apparent_y * b
+
+    Stacking all references into a design matrix ``M`` (shape ``2n x
+    3``) and right-hand side ``r`` (shape ``2n``), ``[Ax, Ay, b] =
+    lstsq(M, r)`` recovers ``H = 1/b``, ``C = A * H`` -- one
+    non-iterative call, no initial guess.
+
+    **Worked/regression example** (measured live on a real camera, no
+    mounts registered): tag 15 surveyed at ``(50, 30)`` cm on a 17.2 cm
+    stand, observed (uncorrected) at ``(57.38, 34.90)``; tag 14 surveyed
+    at ``(-50, -30)`` on a 15.0 cm stand, observed at ``(-57.15,
+    -33.40)``. This function recovers nadir ``(3.06, -2.80)`` cm, height
+    ``128.23`` cm, ``rms_residual_cm`` ``~0.16``, and
+    ``condition_number`` ``~67.4`` -- well-conditioned despite the two
+    references sitting diametrically opposite the nadir, because the fit
+    uses the full 2D residual (magnitude and direction), unlike a
+    line-intersection approach that uses direction alone and is wildly
+    ill-conditioned on the very same data (see the module section header
+    above). An independent nonlinear grid search over ``(Cx, Cy, H)`` on
+    the same data agrees to within ~0.5 mm, by a completely different
+    method. Applying this solved geometry via
+    :func:`project_tag_to_field_plane` corrects the two references' raw
+    ~8-9 cm errors down to ~0.2 cm; see the test suite for the full
+    reproduction.
+
+    Raises ``ValueError`` for fewer than 2 *references*, before any
+    linear algebra runs -- two references is the minimum that makes
+    ``M`` (4 equations) not underdetermined for 3 unknowns.
+    """
+    if len(references) < 2:
+        raise ValueError(
+            "solve_camera_geometry requires at least 2 references, got "
+            f"{len(references)}"
+        )
+
+    rows = []
+    rhs = []
+    for reference in references:
+        h = reference.height_cm
+        true_x, true_y = reference.surveyed.x, reference.surveyed.y
+        apparent_x, apparent_y = reference.observed.x, reference.observed.y
+        rows.append([h, 0.0, -h * apparent_x])
+        rhs.append(true_x - apparent_x)
+        rows.append([0.0, h, -h * apparent_y])
+        rhs.append(true_y - apparent_y)
+
+    design_matrix = np.array(rows, dtype=np.float64)
+    residual_vector = np.array(rhs, dtype=np.float64)
+
+    solution, _residuals, _rank, singular_values = np.linalg.lstsq(
+        design_matrix, residual_vector, rcond=None
+    )
+    a_x, a_y, b = (float(value) for value in solution)
+    height_cm = 1.0 / b
+    nadir = WorldPoint(x=a_x * height_cm, y=a_y * height_cm)
+    condition_number = float(singular_values[0] / singular_values[-1])
+
+    squared_errors = []
+    for reference in references:
+        k = height_cm / (height_cm - reference.height_cm)
+        predicted_x = nadir.x + k * (reference.surveyed.x - nadir.x)
+        predicted_y = nadir.y + k * (reference.surveyed.y - nadir.y)
+        squared_errors.append((predicted_x - reference.observed.x) ** 2)
+        squared_errors.append((predicted_y - reference.observed.y) ** 2)
+    rms_residual_cm = float(np.sqrt(np.mean(squared_errors)))
+
+    return CameraGeometrySolution(
+        nadir=nadir,
+        height_cm=height_cm,
+        rms_residual_cm=rms_residual_cm,
+        condition_number=condition_number,
+    )
