@@ -1,7 +1,7 @@
 ---
 id: 029
 title: Camera geometry and real parallax correction
-status: ticketing
+status: closed
 branch: sprint/029-camera-geometry-and-real-parallax-correction
 worktree: false
 use-cases: []
