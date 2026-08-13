@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from aprilcam.config.directories import Directories
-from aprilcam.config.interfaces import CameraConfig
+from aprilcam.config.interfaces import CameraConfig, CameraPosition
 from aprilcam.config.loader import ConfigLoader, PlayfieldFeatureEntry
 from aprilcam.errors import MalformedDocument
 from aprilcam.types import WorldPoint
@@ -404,6 +404,121 @@ def test_camera_config_non_string_playfield_is_rejected(loader, tmp_path):
 def test_camera_config_non_object_settings_is_rejected(loader, tmp_path):
     doc = {"name": "hd-usb-camera", "settings": "not-an-object"}
     path = _write(tmp_path, "camera-bad-settings.json", doc)
+
+    with pytest.raises(MalformedDocument):
+        loader.load_camera_config(path)
+
+
+# ---------------------------------------------------------------------------
+# camera_position (sprint 029 ticket 001) -- nadir + optical height, the
+# two inputs calibration.geometry.project_tag_to_field_plane needs.
+# ---------------------------------------------------------------------------
+
+
+def test_camera_config_loads_camera_position_nadir_and_height(loader, tmp_path):
+    doc = {
+        "name": "arducam-ov9782-usb-camera",
+        "camera_position": {"nadir_x_cm": 3.05, "nadir_y_cm": -2.75, "height_cm": 128.25},
+    }
+    path = _write(tmp_path, "camera-with-position.json", doc)
+
+    config = loader.load_camera_config(path)
+
+    assert config.camera_position == CameraPosition(
+        nadir=WorldPoint(x=3.05, y=-2.75), height_cm=128.25
+    )
+
+
+def test_camera_config_camera_position_absent_parses_as_none(loader, tmp_path):
+    """A pre-029 config file (no ``camera_position`` key at all) parses
+    unchanged -- explicit regression test, not just "no test failed"
+    (the ticket's own acceptance criterion)."""
+    doc = {"name": "hd-usb-camera", "playfield": "main-playfield", "settings": {"exposure": 100}}
+    path = _write(tmp_path, "pre-029-camera.json", doc)
+
+    config = loader.load_camera_config(path)
+
+    assert config.camera_position is None
+
+
+def test_camera_config_round_trip_with_camera_position(loader, tmp_path):
+    """``load(x.to_dict()) == x`` with ``camera_position`` set -- the
+    round-trip contract extended to the new field."""
+    original = CameraConfig(
+        name="arducam-ov9782-usb-camera",
+        playfield="main-playfield",
+        settings={"exposure": 100},
+        camera_position=CameraPosition(nadir=WorldPoint(x=3.05, y=-2.75), height_cm=128.25),
+    )
+
+    dumped_path = tmp_path / "dumped-camera-with-position.json"
+    dumped_path.write_text(json.dumps(original.to_dict()), encoding="utf-8")
+    reloaded = loader.load_camera_config(dumped_path)
+
+    assert reloaded == original
+
+
+def test_camera_config_to_dict_omits_camera_position_key_when_unset():
+    """``to_dict()`` never emits a ``null`` placeholder -- a config
+    document that never configured position round-trips byte-for-byte
+    identical to before this ticket."""
+    config = CameraConfig(name="hd-usb-camera", playfield=None, settings={})
+
+    assert "camera_position" not in config.to_dict()
+
+
+def test_camera_config_to_dict_includes_camera_position_when_set():
+    config = CameraConfig(
+        name="arducam-ov9782-usb-camera",
+        playfield=None,
+        settings={},
+        camera_position=CameraPosition(nadir=WorldPoint(x=3.05, y=-2.75), height_cm=128.25),
+    )
+
+    assert config.to_dict()["camera_position"] == {
+        "nadir_x_cm": 3.05,
+        "nadir_y_cm": -2.75,
+        "height_cm": 128.25,
+    }
+
+
+def test_camera_config_camera_position_zero_height_is_rejected_naming_the_problem(loader, tmp_path):
+    doc = {
+        "name": "arducam-ov9782-usb-camera",
+        "camera_position": {"nadir_x_cm": 0.0, "nadir_y_cm": 0.0, "height_cm": 0.0},
+    }
+    path = _write(tmp_path, "zero-height.json", doc)
+
+    with pytest.raises(MalformedDocument) as excinfo:
+        loader.load_camera_config(path)
+    assert "height_cm" in str(excinfo.value)
+
+
+def test_camera_config_camera_position_negative_height_is_rejected(loader, tmp_path):
+    doc = {
+        "name": "arducam-ov9782-usb-camera",
+        "camera_position": {"nadir_x_cm": 0.0, "nadir_y_cm": 0.0, "height_cm": -5.0},
+    }
+    path = _write(tmp_path, "negative-height.json", doc)
+
+    with pytest.raises(MalformedDocument):
+        loader.load_camera_config(path)
+
+
+def test_camera_config_camera_position_non_object_is_rejected(loader, tmp_path):
+    doc = {"name": "arducam-ov9782-usb-camera", "camera_position": "not-an-object"}
+    path = _write(tmp_path, "bad-camera-position.json", doc)
+
+    with pytest.raises(MalformedDocument):
+        loader.load_camera_config(path)
+
+
+def test_camera_config_camera_position_missing_field_is_rejected(loader, tmp_path):
+    doc = {
+        "name": "arducam-ov9782-usb-camera",
+        "camera_position": {"nadir_x_cm": 1.0, "height_cm": 100.0},  # nadir_y_cm missing
+    }
+    path = _write(tmp_path, "incomplete-camera-position.json", doc)
 
     with pytest.raises(MalformedDocument):
         loader.load_camera_config(path)

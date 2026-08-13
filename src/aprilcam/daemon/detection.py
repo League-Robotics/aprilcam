@@ -135,29 +135,34 @@ whole mechanism is a true no-op for every existing caller/test that does
 not opt in, exactly mirroring :func:`_default_calibration_lookup`'s own
 regression guarantee.
 
-**Camera-geometry caveat (ticket 025-004's own open decision, explicitly
-provisional).** ``correct_tag_pose``'s parallax half
+**Camera-geometry caveat -- resolved (sprint 029 ticket 001).**
+``correct_tag_pose``'s parallax half
 (``calibration.geometry.project_tag_to_field_plane``) needs a camera's
-own ground position and height above the field -- nothing in this
-codebase models that yet (see ``calibration/geometry.py``'s module
-docstring for the full gap analysis: ``config.interfaces.CameraConfig``
-carries no position/height field, and adding one would be a real
-expansion of proto/config-loader scope, not a wiring exercise). This
-module therefore also gains ``camera_geometry_lookup``, defaulting to
-:func:`_default_camera_geometry_lookup` -- a **stopgap**, not a settled
-design: it reports ground position ``(0, 0)`` and height ``0.0`` for
-every camera, and height ``0.0`` is ``project_tag_to_field_plane``'s own
-documented "nothing to correct" sentinel, so ``mount_z``'s parallax
-projection is wired end-to-end and fully unit-tested here (hand-picked
-geometry, exactly like ``calibration.geometry``'s own test suite) but
-has **no effect against a live camera** under this default -- only
-``mount_x``/``mount_y``/``mount_yaw_rad``'s offset+yaw composition
-actually moves a real reported position today. ``daemon.service.
-DaemonService`` wires this same stopgap in for a real daemon process
-(see that module's ``_camera_geometry_for`` docstring); a follow-up
-ticket must add a real per-camera position/height source before
-``mount_z`` does anything against real hardware. Flagged here plainly,
-not silently, per this ticket's own honesty requirement.
+own ground position and height above the field. ``config.interfaces.
+CameraConfig`` now carries an optional ``camera_position``
+(``config.interfaces.CameraPosition``: ``nadir``/``height_cm``),
+plumbed through the same proto/config-loader/CLI-push path every other
+camera setting uses (see ``calibration/geometry.py``'s module docstring
+for the full history of this gap). This module's own
+``camera_geometry_lookup`` still defaults to
+:func:`_default_camera_geometry_lookup` -- the ground position ``(0,
+0)``, height ``0.0`` stopgap -- for a bare :class:`DetectionEngine`
+constructed with no real lookup injected (every test in this module
+that never sets ``camera_geometry_lookup`` explicitly, plus any future
+caller with no reason to need real geometry). A real daemon process
+instead injects ``daemon.service.DaemonService._camera_geometry_for``,
+which reads a configured camera's real ``camera_position`` when one
+exists, falling back to this exact stopgap only for a camera nobody has
+run ``aprilcam camera locate`` against (or hand-authored
+``camera_position`` for) -- so a registered ``mount_z`` now has a real,
+measurable effect against a configured live camera, not only against
+hand-picked test geometry (``mount_x``/``mount_y``/``mount_yaw_rad``'s
+offset+yaw composition needed no camera geometry and was already
+verified working). A registered ``mount_z`` at or above a configured
+camera's own height is guarded separately, in
+:meth:`DetectionEngine._apply_mount_correction`: rather than
+extrapolating past the camera, correction is skipped and the raw
+position is reported.
 
 **Presence-based temporal confirmation (ticket 024-006; streak raised to
 3 by ticket 024-007's real-hardware run).** Before any ``Detection``
@@ -384,25 +389,29 @@ def _default_mount_lookup(tag: TagId) -> Optional[MountParameters]:
 
 
 def _default_camera_geometry_lookup(slug: str) -> Tuple[WorldPoint, float]:
-    """No real camera-geometry source exists yet -- **an explicitly
-    provisional stopgap**, not a settled design (module docstring's
-    "camera-geometry caveat" section; ``calibration/geometry.py``'s
-    module docstring has the full gap analysis).
+    """The constructor default for a bare :class:`DetectionEngine` with
+    no real geometry source injected (module docstring's "camera-
+    geometry caveat" section; ``calibration/geometry.py``'s module
+    docstring has the full history of this gap, closed by sprint 029
+    ticket 001).
 
     Returns ground position ``(0, 0)`` and height ``0.0`` for every
     camera. Height ``0.0`` is ``calibration.geometry.
     project_tag_to_field_plane``'s own documented "nothing to correct"
     sentinel (that function short-circuits to the identity whenever
     ``camera_height_cm`` is not strictly positive), so under this
-    default a registered ``mount_z`` has **no effect** against a live
-    camera -- only ``mount_x``/``mount_y``/``mount_yaw_rad``'s
-    offset+yaw composition (:func:`~aprilcam.calibration.geometry.apply_mount_offset`,
-    which needs no camera geometry at all) actually moves a real
-    reported position today. The default for both
-    :class:`DetectionEngine`'s own constructor and ``daemon.service.
-    DaemonService``'s real wiring (see that module's
-    ``_camera_geometry_for``) until a real per-camera position/height
-    source exists -- a follow-up ticket's job, not this one's.
+    default a registered ``mount_z`` has **no effect** -- only
+    ``mount_x``/``mount_y``/``mount_yaw_rad``'s offset+yaw composition
+    (:func:`~aprilcam.calibration.geometry.apply_mount_offset`, which
+    needs no camera geometry at all) actually moves a reported
+    position. This is no longer what a real daemon process wires in:
+    ``daemon.service.DaemonService`` injects its own
+    ``_camera_geometry_for`` instead, which reads a configured camera's
+    real ``camera_position`` when one exists and falls back to this
+    exact stopgap only when one does not (see that method's own
+    docstring). This function remains the default for
+    :class:`DetectionEngine`'s own constructor and every test/caller
+    that has no reason to inject real geometry.
     """
     return WorldPoint(x=0.0, y=0.0), 0.0
 
@@ -878,14 +887,28 @@ class DetectionEngine:
         own trajectory, not the tag's (module docstring's "mount
         correction" section).
 
-        A no-op (returns *record* unchanged) in either of two cases,
-        both required by this ticket's acceptance criteria:
+        A no-op (returns *record* unchanged) in any of three cases, the
+        first two required by this ticket's acceptance criteria and the
+        third added by sprint 029 ticket 001:
 
         * ``record.world is None`` -- an uncalibrated hit has nothing to
           correct (mirrors :meth:`_finish_record`'s identical guard).
         * ``self._mount_lookup(record.tag)`` returns ``None`` -- no
           registration exists for this tag, so it is **unaffected**, by
           construction, regardless of any other tag's registration.
+        * the looked-up ``camera_height_cm`` is a real configured value
+          (``> 0``) and ``mount.mount_z >= camera_height_cm`` -- an
+          implausible mount at or above the observing camera's own
+          height. ``project_tag_to_field_plane``'s ``ratio =
+          mount_z_cm / camera_height_cm`` would be ``>= 1``,
+          extrapolating the corrected position *past* the camera's own
+          nadir -- a plausible-looking but physically nonsensical
+          answer, exactly the "silently wrong" failure mode this
+          codebase treats as worse than an explicit failure. This is a
+          per-burst, per-observing-camera check (sprint.md's Design
+          Rationale explains why it lives here rather than at
+          ``register_tag`` time): registration itself always succeeds
+          regardless of ``mount_z``, and never raises mid-burst.
 
         ``record.world_corners`` is never touched here -- per
         ``types.TagRecord``'s own docstring, corners outline the tag as
@@ -902,6 +925,8 @@ class DetectionEngine:
             "yaw_rad populated by _build_tag_record -- a DetectionEngine bug otherwise"
         )
         camera_ground_position, camera_height_cm = self._camera_geometry_lookup(slug)
+        if camera_height_cm > 0.0 and mount.mount_z >= camera_height_cm:
+            return record
         corrected_world, corrected_yaw = correct_tag_pose(
             record.world,
             record.yaw_rad,

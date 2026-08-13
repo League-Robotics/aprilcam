@@ -81,7 +81,7 @@ import grpc
 
 from aprilcam.calibration.calibration import Calibration
 from aprilcam.calibration.interfaces import CalibrationResult
-from aprilcam.config.interfaces import CameraConfig, Feature
+from aprilcam.config.interfaces import CameraConfig, CameraPosition, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
 from aprilcam.daemon.lifecycle import ControlPlaneListener
@@ -476,12 +476,34 @@ def _mount_parameters_from_proto(msg: aprilcam_v2_pb2.MountParameters) -> MountP
     )
 
 
+def _camera_position_to_proto(position: CameraPosition) -> aprilcam_v2_pb2.CameraPosition:
+    """Python -> proto, for a ``GetCameraConfig`` response's optional
+    ``camera_position`` (sprint 029 ticket 001)."""
+    return aprilcam_v2_pb2.CameraPosition(
+        nadir=_world_point_to_proto(position.nadir), height_cm=position.height_cm
+    )
+
+
+def _camera_position_from_proto(msg: aprilcam_v2_pb2.CameraPosition) -> CameraPosition:
+    """Proto -> Python, for an incoming ``SetCameraConfigRequest``'s
+    optional ``camera_position``. The module docstring's "reading this
+    module's own incoming requests" exception applies here exactly as it
+    already does for :func:`_tag_id_from_proto`."""
+    return CameraPosition(nadir=_world_point_from_proto(msg.nadir), height_cm=msg.height_cm)
+
+
 def _camera_config_to_proto(config: CameraConfig) -> aprilcam_v2_pb2.CameraConfig:
     """Python -> proto, for a ``GetCameraConfig`` response. ``settings``
-    crosses as JSON text -- see ``aprilcam_v2.proto``'s header comment."""
+    crosses as JSON text -- see ``aprilcam_v2.proto``'s header comment.
+    ``camera_position`` is ``HasField``-guarded (sprint 029 ticket 001):
+    absent means "not configured," never a fabricated zero-valued
+    ``CameraPosition``, mirroring ``GetCalibrationResponse.calibration``'s
+    presence discipline."""
     msg = aprilcam_v2_pb2.CameraConfig(name=config.name, settings_json=json.dumps(config.settings))
     if config.playfield is not None:
         msg.playfield = config.playfield
+    if config.camera_position is not None:
+        msg.camera_position.CopyFrom(_camera_position_to_proto(config.camera_position))
     return msg
 
 
@@ -492,6 +514,11 @@ def _camera_config_from_proto(msg: aprilcam_v2_pb2.CameraConfig) -> CameraConfig
         name=msg.name,
         playfield=msg.playfield if msg.HasField("playfield") else None,
         settings=settings,
+        camera_position=(
+            _camera_position_from_proto(msg.camera_position)
+            if msg.HasField("camera_position")
+            else None
+        ),
     )
 
 

@@ -23,8 +23,9 @@ from aprilcam.camera.backends import ControlBackend
 from aprilcam.camera.backends.opencv_backend import property_map
 from aprilcam.camera.camera import FAILURE_THRESHOLD, MAX_REOPENS, Camera
 from aprilcam.camera.interfaces import Camera as CameraProtocol
-from aprilcam.config.interfaces import CameraConfig
+from aprilcam.config.interfaces import CameraConfig, CameraPosition
 from aprilcam.errors import UnsupportedSetting
+from aprilcam.types import WorldPoint
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +607,39 @@ def test_camera_config_round_trips_to_dict():
     cfg = CameraConfig(name="cam-a", playfield=None, settings={"k": 1})
     d = cfg.to_dict()
     assert d == {"name": "cam-a", "playfield": None, "settings": {"k": 1}}
+
+
+def test_apply_config_ignores_camera_position_sibling_field():
+    """Ticket 029-001's own regression: ``Camera.apply_config`` needs no
+    code change for the new ``camera_position`` field -- it iterates
+    ``config.settings`` only, so a config push carrying
+    ``camera_position`` (with or without ``settings`` changes) applies
+    cleanly to a held-open camera. ``camera_position`` is operator-
+    asserted metadata that never touches hardware (config/interfaces.py's
+    ``CameraPosition`` docstring)."""
+    backend = FakeBackend()
+    cam = Camera("cam-a", backend)
+    cam.open()
+    cfg = CameraConfig(
+        name="cam-a",
+        playfield="main-playfield",
+        settings={"gain": 3.0},
+        camera_position=CameraPosition(nadir=WorldPoint(x=3.05, y=-2.75), height_cm=128.25),
+    )
+
+    cam.apply_config(cfg)  # must not raise
+
+    assert backend.get_property("gain") == 3.0
+
+    # Also applies cleanly with no settings changes at all -- the
+    # sibling field is invisible to apply_config by construction.
+    cfg_no_settings = CameraConfig(
+        name="cam-a",
+        playfield="main-playfield",
+        settings={},
+        camera_position=CameraPosition(nadir=WorldPoint(x=3.05, y=-2.75), height_cm=128.25),
+    )
+    cam.apply_config(cfg_no_settings)  # must not raise
 
 
 # ---------------------------------------------------------------------------

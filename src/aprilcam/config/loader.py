@@ -39,8 +39,10 @@ Checked here: unreadable path, invalid JSON, a document with no
 filename), missing/invalid field geometry, a feature entry missing
 ``slug``/``x``/``y`` (or ``id`` for a tag entry), a feature positioned
 outside the declared field's half-extents ("field-size/corner
-inconsistency"), and an ArUco or AprilTag id repeated at two different
-coordinates within its own family.
+inconsistency"), an ArUco or AprilTag id repeated at two different
+coordinates within its own family, and (sprint 029 ticket 001) a camera
+config's optional ``camera_position.height_cm`` that is not strictly
+positive -- see :func:`_parse_camera_position`.
 
 **Dict-based entry points (ticket 026-003).** ``parse_camera_config``/
 ``parse_playfield`` run the exact same whole-document validation as
@@ -63,7 +65,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from aprilcam.config.interfaces import CameraConfig, ConfigLoader as _ConfigLoaderBase
+from aprilcam.config.interfaces import CameraConfig, CameraPosition, ConfigLoader as _ConfigLoaderBase
 from aprilcam.config.interfaces import Directories
 from aprilcam.config.interfaces import Feature
 from aprilcam.config.interfaces import PlayfieldDefinition as _PlayfieldDefinitionBase
@@ -341,7 +343,11 @@ class ConfigLoader(_ConfigLoaderBase):
         if not isinstance(settings, dict):
             raise MalformedDocument(f"camera config in {source}: 'settings' must be an object")
 
-        return CameraConfig(name=name, playfield=playfield, settings=dict(settings))
+        camera_position = _parse_camera_position(data, source=source)
+
+        return CameraConfig(
+            name=name, playfield=playfield, settings=dict(settings), camera_position=camera_position
+        )
 
     def parse_playfield(
         self, data: Dict[str, Any], *, source: str = "the pushed document"
@@ -430,6 +436,47 @@ def _require_geometry(data: Dict[str, Any], *, source: str) -> Tuple[float, floa
             f"(got {width_cm}x{height_cm})"
         )
     return width_cm, height_cm
+
+
+def _parse_camera_position(data: Dict[str, Any], *, source: str) -> Optional[CameraPosition]:
+    """Parse a camera config's optional ``camera_position`` block (sprint
+    029 ticket 001) -- ``{"nadir_x_cm": ..., "nadir_y_cm": ...,
+    "height_cm": ...}``, a fresh v2 shape (see ``config/interfaces.py``'s
+    ``CameraPosition`` docstring and this sprint's sprint.md Design
+    Rationale for why it diverges from v1's ``{height, x_offset,
+    y_offset}``).
+
+    Key absent -> ``None`` -- a pre-029 camera config parses unchanged,
+    exactly like every other optional block this loader already treats
+    this way. ``nadir_x_cm``/``nadir_y_cm`` are plain floats, no bounds
+    check -- unlike a playfield feature, a camera's nadir has no reason
+    to be constrained to the field's own rectangle. ``height_cm <= 0``
+    is rejected whole-document, mirroring :func:`_require_geometry`'s
+    identical positivity check for playfield ``width_cm``/``height_cm``:
+    a non-positive height is ``project_tag_to_field_plane``'s own
+    "nothing to correct" sentinel, so silently accepting one here would
+    silently configure a camera that can never parallax-correct anything.
+    """
+    raw = data.get("camera_position")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise MalformedDocument(f"camera config in {source}: 'camera_position' must be an object")
+    try:
+        nadir_x_cm = float(raw["nadir_x_cm"])
+        nadir_y_cm = float(raw["nadir_y_cm"])
+        height_cm = float(raw["height_cm"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MalformedDocument(
+            f"camera config in {source}: 'camera_position' is missing/invalid "
+            f"nadir_x_cm/nadir_y_cm/height_cm: {exc}"
+        ) from exc
+    if height_cm <= 0:
+        raise MalformedDocument(
+            f"camera config in {source}: 'camera_position.height_cm' must be positive "
+            f"(got {height_cm})"
+        )
+    return CameraPosition(nadir=WorldPoint(x=nadir_x_cm, y=nadir_y_cm), height_cm=height_cm)
 
 
 def _parse_section(

@@ -18,8 +18,9 @@ See ``aprilcam.daemon.interfaces``'s module docstring for the interface
 design rule applied below: ``Directories`` is a behavioral interface
 with an ordinary-class implementation (``config.directories.
 Directories``), so it is a plain base class. ``ConfigDocument``,
-``CameraConfig``, ``PlayfieldDefinition``, and ``Feature`` are
-value-shaped, so they are frozen ``@dataclass``\\ es declaring fields.
+``CameraConfig``, ``CameraPosition``, ``PlayfieldDefinition``, and
+``Feature`` are value-shaped, so they are frozen ``@dataclass``\\ es
+declaring fields.
 ``CameraConfig`` needed no separate "implementation" dataclass —
 ``camera.camera``'s former ``SimpleCameraConfig`` was exactly the same
 shape, so it has been deleted in favour of constructing ``CameraConfig``
@@ -69,6 +70,31 @@ class ConfigDocument:
 
 
 @dataclass(frozen=True, kw_only=True)
+class CameraPosition:
+    """The ground point directly below a camera's optical centre
+    (nadir) and its optical height above the field plane -- the two
+    inputs ``calibration.geometry.project_tag_to_field_plane`` needs.
+
+    Operator-asserted metadata, not a hardware control: it never
+    touches ``Camera.apply_config`` (``CameraConfig.settings``' own
+    docstring on that boundary) and has no bearing on what a device's
+    control surface reports as settable. Set by hand (a hand-authored
+    ``camera_position`` block) or solved (``aprilcam camera locate``,
+    sprint 029 ticket 003) -- either way, this is the value
+    ``daemon.service.DaemonService._camera_geometry_for`` reads
+    directly once present.
+
+    ``height_cm`` is an *effective optical centre*, not a tape-measured
+    distance to the sensor or lens -- see this sprint's own measured
+    fixture (sprint.md Problem section) for why a solve, not a ruler,
+    is the only thing that produces a usable value.
+    """
+
+    nadir: WorldPoint
+    height_cm: float
+
+
+@dataclass(frozen=True, kw_only=True)
 class CameraConfig(ConfigDocument):
     """Everything adjustable about one camera (UC-03).
 
@@ -98,9 +124,34 @@ class CameraConfig(ConfigDocument):
     adjustable without prior knowledge. This is the template every
     camera configuration starts from (UC-25).
     """
+    camera_position: Optional[CameraPosition] = None
+    """This camera's physical ground nadir and optical height, if
+    configured (sprint 029). ``None`` means "not configured" — the
+    exact pre-029 state every existing consumer of this class already
+    behaves as if it were, since a camera nobody has run ``aprilcam
+    camera locate`` against (or been hand-authored a ``camera_position``
+    block for) has never had this field at all.
+
+    Deliberately **not** inside :attr:`settings`: this is metadata an
+    operator asserts, never a hardware control pushed through
+    ``Camera.apply_config`` or validated against a device's control
+    surface (see :class:`CameraPosition`'s own docstring, and
+    sprint.md's Design Rationale for the full reasoning).
+    """
 
     def to_dict(self) -> dict[str, Any]:
-        return {"name": self.name, "playfield": self.playfield, "settings": dict(self.settings)}
+        data: dict[str, Any] = {
+            "name": self.name,
+            "playfield": self.playfield,
+            "settings": dict(self.settings),
+        }
+        if self.camera_position is not None:
+            data["camera_position"] = {
+                "nadir_x_cm": self.camera_position.nadir.x,
+                "nadir_y_cm": self.camera_position.nadir.y,
+                "height_cm": self.camera_position.height_cm,
+            }
+        return data
 
 
 @dataclass(frozen=True, kw_only=True)

@@ -200,24 +200,35 @@ def world_to_deskewed_pixel(
 # and the robot's own mount frame (+x forward, +y left, rotating with
 # mount_yaw) is correctly ordered.
 #
-# **Camera-geometry caveat.** project_tag_to_field_plane needs the camera's
-# own ground position and height to do its projection -- this is genuinely
-# new math (see the ticket: "there is no isolated, portable parallax
-# function in the archive to lift directly"), derived fresh from optics
-# rather than ported. Nothing in the current v2 codebase models that
-# camera geometry yet: `calibration.interfaces.Calibration` (the object the
-# ticket that requested this module pointed at) carries only `stale`,
-# `calibrated_at`, `playfield`, and the solved homography -- no camera
-# position or height field. `docs/design/design.md` Sec.7 and
-# `specification.md` Sec.5 mention a `camera_position` key inside
-# `config.json` in their storage-layout prose, but no such field exists in
-# `config.interfaces.CameraConfig` or `config/loader.py` today. Whoever
-# wires this into the daemon (ticket 004, or a follow-up) will need to
-# source `camera_ground_position`/`camera_height_cm` from somewhere real
-# before parallax correction can run against a live camera; until then
-# these are plain function parameters, supplied directly by callers (and,
-# in tests, by hand), which keeps this module pure and fully testable
-# without deciding that open question.
+# **Camera-geometry caveat -- resolved (sprint 029 ticket 001).**
+# project_tag_to_field_plane needs the camera's own ground position and
+# height to do its projection -- this was genuinely new math when this
+# module was written (see the ticket that requested it: "there is no
+# isolated, portable parallax function in the archive to lift directly"),
+# derived fresh from optics rather than ported. At the time, nothing in
+# the v2 codebase modelled that camera geometry: `calibration.interfaces.
+# Calibration` carried only `stale`, `calibrated_at`, `playfield`, and
+# the solved homography -- no camera position or height field, even
+# though `docs/design/design.md` Sec.7 and `specification.md` Sec.5
+# already mentioned a `camera_position` key inside `config.json` in
+# their storage-layout prose.
+#
+# That gap is now closed: `config.interfaces.CameraPosition` (`nadir:
+# WorldPoint`, `height_cm: float`) is a real, optional `CameraConfig`
+# field, plumbed through `config/loader.py`, `proto/aprilcam_v2.proto`,
+# `daemon/rpc.py`, and `client/daemon_client.py`/`client/models.py`
+# exactly like every other camera setting (set by hand, or solved by
+# `aprilcam camera locate`, sprint 029 ticket 003). `daemon.service.
+# DaemonService._camera_geometry_for` reads it directly and is what a
+# real daemon process wires in as `camera_geometry_lookup`; a camera
+# nobody has run `locate` against (or been hand-authored a
+# `camera_position` for) still falls back to the exact pre-029 stopgap
+# -- ground position `(0, 0)`, height `0.0`, this module's own
+# documented "nothing to correct" sentinel. This module itself is
+# unaffected either way: `camera_ground_position`/`camera_height_cm`
+# remain plain function parameters, supplied by whichever caller has a
+# real geometry source (or, in tests, by hand), which keeps this module
+# pure and fully testable independent of where its inputs come from.
 # ---------------------------------------------------------------------------
 
 
