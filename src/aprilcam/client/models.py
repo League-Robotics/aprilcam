@@ -38,7 +38,7 @@ import json
 from typing import Dict, Optional, Tuple
 
 from aprilcam.calibration.interfaces import Calibration, CalibrationResult
-from aprilcam.config.interfaces import CameraConfig, Feature
+from aprilcam.config.interfaces import CameraConfig, CameraPosition, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import DaemonStatus
 from aprilcam.playfield.playfield import Playfield
@@ -350,15 +350,28 @@ def features_from_proto(msgs) -> Tuple[Feature, ...]:
     return tuple(feature_from_proto(m) for m in msgs)
 
 
+def _camera_position_from_proto(msg: aprilcam_v2_pb2.CameraPosition) -> CameraPosition:
+    """The client-side mirror of ``daemon/rpc.py``'s
+    ``_camera_position_to_proto`` (sprint 029 ticket 001)."""
+    return CameraPosition(nadir=_world_point_from_proto(msg.nadir), height_cm=msg.height_cm)
+
+
 def camera_config_from_proto(msg: aprilcam_v2_pb2.CameraConfig) -> CameraConfig:
     """The client-side mirror of ``daemon/rpc.py``'s
     ``_camera_config_to_proto``. ``settings`` crosses as JSON text (see
-    ``aprilcam_v2.proto``'s header comment)."""
+    ``aprilcam_v2.proto``'s header comment). ``camera_position`` round-trips
+    through ``HasField()`` (sprint 029 ticket 001): absent means "not
+    configured," never a fabricated zero-valued ``CameraPosition``."""
     settings = json.loads(msg.settings_json) if msg.settings_json else {}
     return CameraConfig(
         name=msg.name,
         playfield=msg.playfield if msg.HasField("playfield") else None,
         settings=settings,
+        camera_position=(
+            _camera_position_from_proto(msg.camera_position)
+            if msg.HasField("camera_position")
+            else None
+        ),
     )
 
 

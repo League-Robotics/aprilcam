@@ -37,19 +37,26 @@ the file-based CLI's "a bad file never reaches the daemon" guarantee.
 **Fetch tools return the ``to_dict()``-equivalent shape, not the raw
 dataclass.** ``get_playfield``/``list_playfields`` return
 ``PlayfieldDefinition.to_dict()`` (a plain ``dict``), not the
-dataclass itself -- unlike ``config.interfaces.CameraConfig`` (which has
-no separate implementation class, so its fields already match
-``to_dict()``'s shape field-for-field), the concrete
-``config.loader.PlayfieldDefinition`` renames fields on the way out
-(``tag_id`` -> ``id``, ``colour`` -> ``color``) and nests geometry under
-a ``"playfield"`` key -- ``to_dict()`` is the one canonical, loadable
-shape (``ConfigLoader.parse_playfield(get_playfield(name)) ==`` what the
+dataclass itself -- the concrete ``config.loader.PlayfieldDefinition``
+renames fields on the way out (``tag_id`` -> ``id``, ``colour`` ->
+``color``) and nests geometry under a ``"playfield"`` key --
+``to_dict()`` is the one canonical, loadable shape
+(``ConfigLoader.parse_playfield(get_playfield(name)) ==`` what the
 daemon holds), matching the round-trip contract ``config/loader.py``
 already documents and the same shape ``cli/playfield.py``'s own
-``--dump`` flag prints. ``get_camera_config`` returns the
-``CameraConfig`` dataclass directly (FastMCP's pydantic ``TypeAdapter``
-handles it natively, ticket 002's precedent) since that already *is*
-the ``to_dict()`` shape.
+``--dump`` flag prints. ``get_camera_config`` follows the same
+explicit-``to_dict()`` shape (sprint 029 ticket 001): before
+``CameraConfig`` gained the optional ``camera_position`` field, its
+fields already matched ``to_dict()``'s shape field-for-field, so
+returning the dataclass directly and letting FastMCP's pydantic
+``TypeAdapter`` serialize it natively (ticket 002's original precedent)
+happened to coincide with ``to_dict()``'s output. That coincidence
+broke the moment ``camera_position`` became a field that ``to_dict()``
+*omits* when unset (``config/interfaces.py``'s own "never a ``null``
+placeholder" rule) but a naive dataclass serializer would still emit as
+``null`` -- so this tool now calls ``.to_dict()`` explicitly, exactly
+like ``get_playfield``, rather than relying on raw dataclass
+introspection to keep matching a shape it no longer automatically does.
 
 **``calibrate``/``get_calibration`` use the interface-declared types,
 never the concrete cv2-backed ones.** ``calibration.interfaces.
@@ -82,7 +89,6 @@ from typing import Any, Optional
 from mcp.server.fastmcp import FastMCP
 
 from aprilcam.calibration.interfaces import Calibration, CalibrationResult
-from aprilcam.config.interfaces import CameraConfig
 from aprilcam.config.loader import ConfigLoader
 from aprilcam.mcp.connection import ConnectionManager
 from aprilcam.mcp.errors import handle_tool_errors
@@ -105,14 +111,19 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
 
     @mcp.tool()
     @handle_tool_errors
-    def get_camera_config(camera: str, daemon: Optional[str] = None) -> CameraConfig:
+    def get_camera_config(camera: str, daemon: Optional[str] = None) -> dict[str, Any]:
         """The whole live camera config document for *camera* (UC-03,
-        UC-24) -- every settable key the camera reports, blank when
-        unset. Answers exactly what was last pushed or installed on
-        disk, never a live hardware readback merged in (UC-03.S-1,
-        UC-24.S-3).
+        UC-24), in its ``to_dict()``-equivalent shape (sprint 029
+        ticket 001: explicit now, matching :func:`get_playfield`'s own
+        precedent below -- see the module docstring for why) -- every
+        settable key the camera reports, blank when unset, plus
+        ``camera_position`` only when one is configured (never a
+        ``null`` placeholder). Answers exactly what was last pushed or
+        installed on disk, never a live hardware readback merged in
+        (UC-03.S-1, UC-24.S-3).
         """
-        return connection.call(lambda d: d.get_camera_config(camera), host=daemon)
+        config = connection.call(lambda d: d.get_camera_config(camera), host=daemon)
+        return config.to_dict()
 
     @mcp.tool()
     @handle_tool_errors

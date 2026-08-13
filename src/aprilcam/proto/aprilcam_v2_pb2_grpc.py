@@ -438,11 +438,15 @@ class AprilCamV2Servicer(object):
 
     def GetImageStream(self, request, context):
         """Allocate (or reuse) a raw-socket endpoint for a camera's image
-        stream, raw or deskewed (UC-07, sprint 027 ticket 001). Endpoint
-        allocation only -- the handler body and the socket transport it
-        points at are ticket 005; calling this RPC before then fails with
-        gRPC's own UNIMPLEMENTED, not a hand-rolled error. No frame bytes
-        ever cross this connection -- see design.md section 5.
+        stream, raw or deskewed (UC-07, sprint 027 tickets 001/005).
+        Endpoint allocation only -- the handler body
+        (`daemon/rpc.py::_Servicer.GetImageStream`) delegates to
+        `daemon/stream_transport.py::StreamTransportManager`, which binds
+        (or reuses) a listener for this (camera, deskewed) pair and
+        returns where to connect for it; a client that never connects to
+        the returned endpoint leaves the daemon fully idle for that
+        product. No frame bytes ever cross this gRPC connection itself --
+        see design.md section 5.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -450,8 +454,8 @@ class AprilCamV2Servicer(object):
 
     def GetTagStream(self, request, context):
         """Allocate (or reuse) a raw-socket endpoint for a camera's tag stream
-        (UC-11, sprint 027 ticket 001). Same "endpoint allocation only,
-        handler is ticket 005" scope as `GetImageStream` above.
+        (UC-11, sprint 027 tickets 001/005). Same "endpoint allocation
+        only, reused per key" scope as `GetImageStream` above.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')

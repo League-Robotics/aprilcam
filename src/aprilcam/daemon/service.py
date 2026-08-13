@@ -1272,42 +1272,45 @@ class DaemonService(Daemon):
 
     def _camera_geometry_for(self, slug: str) -> Tuple[WorldPoint, float]:
         """``DetectionEngine``'s ``camera_geometry_lookup`` callable
-        (ticket 025-004) -- **explicitly provisional, not a settled
-        design.** See below for the full reasoning; this is the one
-        piece of this ticket's Definition of Done most likely to need
-        revisiting.
+        (ticket 025-004; wired to a real source by sprint 029 ticket
+        001 -- no longer explicitly provisional).
 
         ``calibration.geometry.project_tag_to_field_plane`` needs a
         camera's own ground position and height above the field to
-        perform its parallax projection, but nothing in this codebase
-        currently models that: ``config.interfaces.CameraConfig``
-        carries no position/height field, and no proto/config-loader
-        plumbing exists to set one over RPC or load one from disk.
-        Adding that would be a real expansion of *this* ticket's scope
-        (new ``CameraConfig`` fields, a new proto message field, new
-        client/config-loader marshalling) — a decision about *where an
-        operator records a camera's physical mount* that deserves its
-        own ticket and its own review, not a side effect of wiring the
-        mobile-tag registry. See ``calibration/geometry.py``'s module
-        docstring for the full gap analysis this ticket inherited from
-        ticket 003.
+        perform its parallax projection. This reads it from that
+        camera's configured ``config.interfaces.CameraConfig.
+        camera_position`` (``config.interfaces.CameraPosition``:
+        ``nadir``/``height_cm``) -- the same in-memory
+        :attr:`_camera_configs` store ``set_camera_config``/
+        ``get_camera_config`` already hold, set by an operator (by hand,
+        or via ``aprilcam camera locate``, sprint 029 ticket 003)
+        exactly like every other camera setting.
 
-        Until that real source exists, every camera reports ground
-        position ``(0, 0)`` and height ``0.0`` -- ``project_tag_to_field_plane``'s
-        own documented "nothing to correct" sentinel (height not
-        strictly positive short-circuits to the identity). Concretely:
-        a registered ``mount_z`` is fully wired end-to-end and covered
-        by unit tests with hand-picked geometry (``tests/aprilcam/daemon/
-        test_detection.py``), but has **no observable effect against a
-        live camera** today -- only ``mount_x``/``mount_y``/
-        ``mount_yaw_rad``'s offset+yaw composition
-        (``calibration.geometry.apply_mount_offset``, which needs no
-        camera geometry at all) actually moves a real reported position.
-        This is a known, explicitly-flagged gap: a follow-up ticket must
-        add a real per-camera position/height source before ``mount_z``
-        does anything against real hardware.
+        A camera with no known configuration at all (``config is
+        None``) or one that has never been located (``config.
+        camera_position is None``) falls back to the exact pre-029
+        stopgap: ground position ``(0, 0)``, height ``0.0`` --
+        ``project_tag_to_field_plane``'s own documented "nothing to
+        correct" sentinel (height not strictly positive short-circuits
+        to the identity). A registered ``mount_z`` for such a camera
+        remains fully wired end-to-end and covered by unit tests with
+        hand-picked geometry (``tests/aprilcam/daemon/test_detection.py``),
+        but has no observable effect until that camera is located --
+        only ``mount_x``/``mount_y``/``mount_yaw_rad``'s offset+yaw
+        composition (``calibration.geometry.apply_mount_offset``, which
+        needs no camera geometry at all) moves a reported position
+        either way.
+
+        See ``daemon/detection.py``'s ``_apply_mount_correction`` for
+        the companion guard: a registered ``mount_z`` at or above a
+        configured camera's own ``height_cm`` skips correction rather
+        than extrapolating past the camera's own nadir.
         """
-        return WorldPoint(x=0.0, y=0.0), 0.0
+        with self._lock:
+            config = self._camera_configs.get(slug)
+        if config is None or config.camera_position is None:
+            return WorldPoint(x=0.0, y=0.0), 0.0
+        return config.camera_position.nadir, config.camera_position.height_cm
 
     # -- calibration (ticket 022-003) --------------------------------------
 
