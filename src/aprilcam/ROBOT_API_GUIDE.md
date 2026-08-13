@@ -94,7 +94,14 @@ aprilcam tags mount clear apriltag 7
 
 `mount_z` nonzero requires a calibrated camera — registering it against
 an uncalibrated one is rejected rather than silently accepted and
-ignored.
+ignored. Calibration alone is not enough for the correction to actually
+move the reported position, though: it also needs the observing
+camera's own ground position and height (`camera_position`), which
+nobody tape-measures — run `aprilcam camera locate` once per camera
+(after a physical move) to solve it from a couple of elevated reference
+tags at surveyed positions (UC-29). A camera nobody has `locate`d
+accepts a nonzero `mount_z` registration without error but reports the
+tag's raw, uncorrected position, exactly as if `mount_z` were zero.
 
 ### This registration does not survive a daemon restart
 
