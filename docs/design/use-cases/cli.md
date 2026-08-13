@@ -1131,10 +1131,132 @@ cameras it does have.
 
 ---
 
+### UC-29 — Determine a camera's physical position and height
+
+**Job:** JTBD-06, JTBD-01 · **Primary actor:** A-03
+**Status:** draft
+**Interfaces:** CLI
+
+**Goal.** An operator who has calibrated a camera against a playfield
+(UC-15) also fixes the one input `mount_z`'s parallax correction (UC-12)
+has always needed and never had — the camera's own ground position
+(nadir) and optical height. `aprilcam camera locate` *solves* both from
+surveyed elevated AprilTag references instead of asking anyone to
+tape-measure them.
+
+**Preconditions.** Camera calibrated and linked to a playfield (UC-15).
+At least 2 AprilTag references physically placed on stands at surveyed
+playfield feature positions, each stand's height measured. None of the
+reference tags is currently registered (UC-12) with a positive
+`mount_z` — that registration's own (possibly stale) correction would
+corrupt the raw reading the solve needs.
+
+**Main success path.**
+1. `aprilcam camera locate arducam-ov9782-usb-camera --reference
+   15:dot-northeast-orange:17.2 --reference 14:dot-southwest-orange:15.0`
+   (`-d` for remote; `--reference TAG:SLUG:HEIGHT_CM`, repeatable, 2
+   minimum, 3+ recommended for redundancy).
+2. The command resolves each `SLUG` to a surveyed position via the
+   camera's linked playfield (exact match only, no fuzzy lookup), then
+   drives one detection per reference through the daemon (`GetTag`) —
+   the only pixel-touching step, and it happens entirely inside the
+   daemon, never in the CLI.
+3. The collected (surveyed, observed, height) triples are fit with a
+   least-squares solve (`calibration.geometry.solve_camera_geometry`)
+   for the camera's ground nadir and optical height.
+4. The command reports the solved nadir, height, and RMS residual, and
+   warns if the references are too near-collinear with the estimated
+   nadir to trust.
+5. A good fit is written into the camera's `camera_position` config, on
+   disk and pushed live (`SetCameraConfig`) — the daemon picks it up on
+   its very next detection burst, no restart (UC-24's own round trip).
+   A poor fit (high residual or near-collinear) is reported but refused
+   without `--force`. `--dry-run` reports without ever writing,
+   regardless of fit quality.
+
+**Postconditions.** On a written solve, `camera_position` is set for the
+camera and every subsequent detection burst's `mount_z` correction
+(UC-12) uses it. `--dry-run`, or a refused poor fit without `--force`,
+leaves the camera's configuration untouched.
+
+**The real fixture (worked example, camera 3 / `main-playfield` from
+README.md §3).** Two AprilTags on stands at surveyed dot positions: tag
+15 at `dot-northeast-orange` (surveyed (50, 30) cm, stand height 17.2
+cm), tag 14 at `dot-southwest-orange` (surveyed (-50, -30) cm, stand
+height 15.0 cm). Raw, uncorrected readings were (57.38, 34.90) cm and
+(-57.15, -33.40) cm — 8.86 cm and 7.92 cm of real, measured parallax
+error at only a 15-17 cm mount height. `camera locate` solved nadir
+(3.057, -2.799) cm, height 128.230 cm, RMS residual 0.1585 cm; applying
+that geometry brings both readings to within ~0.2 cm of their surveyed
+ground truth. The 128.230 cm solved height is **not** the physical
+sensor plane (measured separately at 127 cm) — it is the effective
+optical centre the pinhole model needs, most plausibly absorbing
+unmodelled lens distortion (v2 calibration stores only the homography,
+no intrinsics); no tape measure yields it, only a solve does.
+
+**Failure modes.**
+- Fewer than 2 `--reference` args → refused before any connection is
+  attempted.
+- A named feature slug not found on the camera's linked playfield →
+  refused (exact-slug match only — an operator's typo must be a hard
+  error, never a near-miss).
+- A reference tag currently registered with a positive `mount_z` →
+  refused before any detection is attempted (contamination guard).
+- A reference tag not detected → fails fast at the first missing
+  reference, never a partial solve over whatever *was* seen.
+- A poor fit (RMS residual or condition number over threshold) →
+  reported but not written, unless `--force`.
+- `--all` → refused; solving one camera's geometry from another
+  daemon's references has no sensible meaning.
+
+**Open questions.** Are the provisional quality-gate thresholds
+(`RMS_RESIDUAL_THRESHOLD_CM = 1.0`, `CONDITION_NUMBER_THRESHOLD =
+447.2`) right for cameras or mount heights very different from this
+fixture? Evidence-based and revisit-if-real-data-disagrees, the same
+posture as `CONFIRMATION_STREAK` — ticket 029-004's real-hardware pass
+is the first data point checked against them, and did not disagree
+(real fixture RMS residual 0.1585 cm, condition number 67.44, both
+comfortably inside threshold).
+
+#### Scenarios
+
+**UC-29.S-1 — The real fixture, solved and applied** · _happy path_
+The worked example above, run live: `camera locate` solves nadir
+(3.057, -2.799) cm, height 128.230 cm, RMS residual 0.1585 cm, and
+writes `camera_position` on disk and live, without `--force` — the fit
+is well within both quality thresholds.
+
+**UC-29.S-2 — Ill-conditioned references** · _failure/warning path_
+Two references placed diametrically opposite the camera's true nadir —
+collinear with it by construction, since camera nadir, a tag's true
+footprint, and its apparent position all lie on one ray. The solve does
+not reproduce the ~20 cm-off, 150x-worse-residual failure a naive
+line-intersection approach hit on this exact shape; it reports a
+materially closer answer and/or a condition number the CLI flags as a
+near-collinearity warning.
+
+**UC-29.S-3 — Fewer than 2 references** · _failure path_
+`aprilcam camera locate arducam-ov9782-usb-camera --reference
+15:dot-northeast-orange:17.2` (only one) is refused with a clear error
+before any connection is attempted.
+
+**UC-29.S-4 — Contaminated reference** · _failure path_
+Tag 15 is currently registered (UC-12) with `mount_z=5.0`. `camera
+locate` refuses before attempting any detection, naming the tag and its
+stale registration as the problem.
+
+**UC-29.S-5 — Poor fit, no `--force`** · _failure path_
+A near-collinear reference pair solves with a condition number over
+threshold. The CLI reports the solve (nadir, height, RMS) but refuses to
+write it. Re-running with `--force` writes it anyway. `--dry-run` never
+writes, with or without `--force`.
+
+---
+
 ## Traceability
 
-Tests are unassigned — the next stage of the process. This file covers 13
-use cases and 49 scenarios.
+Tests are unassigned — the next stage of the process. This file covers 14
+use cases and 54 scenarios.
 
 **The configuration lifecycle** spans four use cases in workflow order:
 **UC-25 probe** → **UC-24 dump** → edit → **UC-23 push** → loop → install
@@ -1155,6 +1277,7 @@ on disk. UC-25.S-1 walks the whole chain end to end.
 | UC-23 Push config | JTBD-05 | A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗, S-5 ✗ | no | — |
 | UC-24 Dump config | JTBD-05 | A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗ | yes | — |
 | UC-25 Probe / hotplug | JTBD-05 | A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗, S-5 ✓, S-6 ✓, S-7 ✗ | yes | — |
+| UC-29 Locate a camera's position | JTBD-06, 01 | A-03 | S-1 ✓, S-2 ✗, S-3 ✗, S-4 ✗, S-5 ✗ | no | — |
 
 ✓ happy path · ✗ failure path
 
