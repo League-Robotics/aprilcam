@@ -634,3 +634,290 @@ def test_correct_tag_pose_composes_parallax_then_offset_and_yaw():
     assert robot_position.x == pytest.approx(0.0, abs=1e-9)
     assert robot_position.y == pytest.approx(0.0, abs=1e-9)
     assert robot_yaw_rad == pytest.approx(0.0, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# solve_camera_geometry (sprint 029 ticket 002, SUC-003): the least-squares
+# inverse of project_tag_to_field_plane. Never relaxed (design.md Sec.6):
+# the real-fixture regression below pins the actual numbers a real solve
+# on real hardware produced.
+# ---------------------------------------------------------------------------
+
+
+def _forward_apparent(true: WorldPoint, height_cm: float, nadir: WorldPoint, camera_height_cm: float) -> WorldPoint:
+    """The forward relation ``apparent = C + k*(true - C)``, ``k = H /
+    (H - h)`` -- used by the tests below to build synthetic, noise-free
+    observations from a known ground-truth camera geometry."""
+    k = camera_height_cm / (camera_height_cm - height_cm)
+    return WorldPoint(
+        x=nadir.x + k * (true.x - nadir.x),
+        y=nadir.y + k * (true.y - nadir.y),
+    )
+
+
+def test_solve_camera_geometry_rejects_fewer_than_two_references():
+    """ValueError before any linear algebra runs -- 0 and 1 references
+    are both underdetermined for the 3 unknowns (Ax, Ay, b)."""
+    with pytest.raises(ValueError):
+        geometry.solve_camera_geometry([])
+
+    with pytest.raises(ValueError):
+        geometry.solve_camera_geometry(
+            [
+                geometry.ReferenceObservation(
+                    surveyed=WorldPoint(x=50.0, y=30.0),
+                    observed=WorldPoint(x=57.38, y=34.90),
+                    height_cm=17.2,
+                )
+            ]
+        )
+
+
+def test_solve_camera_geometry_forward_relation_and_linearization_equivalence():
+    """The ticket's own required equivalence check, run numerically (not
+    merely asserted in a docstring): the forward relation ``apparent = C
+    + k*(true - C)`` and the linearized reformulation ``true - apparent
+    = h*A - h*apparent*b`` (``A = C/H``, ``b = 1/H``) must agree exactly
+    for the same (true, apparent, h) triple, since the second is nothing
+    but algebra applied to the first."""
+    nadir = WorldPoint(x=3.0, y=-2.8)
+    camera_height_cm = 128.2
+    true = WorldPoint(x=50.0, y=30.0)
+    height_cm = 17.2
+
+    apparent = _forward_apparent(true, height_cm, nadir, camera_height_cm)
+
+    a_x = nadir.x / camera_height_cm
+    a_y = nadir.y / camera_height_cm
+    b = 1.0 / camera_height_cm
+
+    lhs_x = true.x - apparent.x
+    lhs_y = true.y - apparent.y
+    rhs_x = height_cm * a_x - height_cm * apparent.x * b
+    rhs_y = height_cm * a_y - height_cm * apparent.y * b
+
+    assert lhs_x == pytest.approx(rhs_x, abs=1e-9)
+    assert lhs_y == pytest.approx(rhs_y, abs=1e-9)
+
+
+def test_solve_camera_geometry_real_fixture_regression():
+    """The real acceptance fixture (sprint.md, measured live on camera 3
+    / main-playfield, no mounts registered, mean of stable repeated
+    samples) -- hand-copied, not re-derived.
+
+    Pinned to the solver's actual, numerically-verified output: nadir
+    (3.057, -2.799) cm, height 128.230 cm, rms_residual_cm 0.1585,
+    condition_number 67.44. Tolerances are wide enough to also bound the
+    ticket's independently-cross-checked target (a completely different
+    method -- a nonlinear grid search over (Cx, Cy, H) on the same data
+    -- gives nadir (3.05, -2.75), height 128.25, agreeing to ~0.5 mm),
+    without loosening past what would actually catch a regression.
+    """
+    references = [
+        geometry.ReferenceObservation(
+            surveyed=WorldPoint(x=50.0, y=30.0),
+            observed=WorldPoint(x=57.38, y=34.90),
+            height_cm=17.2,
+        ),
+        geometry.ReferenceObservation(
+            surveyed=WorldPoint(x=-50.0, y=-30.0),
+            observed=WorldPoint(x=-57.15, y=-33.40),
+            height_cm=15.0,
+        ),
+    ]
+
+    solution = geometry.solve_camera_geometry(references)
+
+    assert solution.nadir.x == pytest.approx(3.05, abs=0.1)
+    assert solution.nadir.y == pytest.approx(-2.75, abs=0.1)
+    assert solution.height_cm == pytest.approx(128.25, abs=0.1)
+    assert solution.rms_residual_cm == pytest.approx(0.16, abs=0.05)
+    assert solution.condition_number == pytest.approx(67.4, rel=0.05)
+
+
+def test_solve_camera_geometry_real_fixture_correction_matches_documented_errors():
+    """Applying the solved geometry (via ``project_tag_to_field_plane``,
+    the already-verified forward-correction function) to the fixture's
+    raw observations must reproduce the documented ~0.2 cm residual
+    errors -- down from the raw ~8-9 cm errors -- proving the solved
+    geometry is actually useful for correction, not just a fit that
+    looks good on paper."""
+    tag_15 = geometry.ReferenceObservation(
+        surveyed=WorldPoint(x=50.0, y=30.0),
+        observed=WorldPoint(x=57.38, y=34.90),
+        height_cm=17.2,
+    )
+    tag_14 = geometry.ReferenceObservation(
+        surveyed=WorldPoint(x=-50.0, y=-30.0),
+        observed=WorldPoint(x=-57.15, y=-33.40),
+        height_cm=15.0,
+    )
+    solution = geometry.solve_camera_geometry([tag_15, tag_14])
+
+    def _dist(a: WorldPoint, b: WorldPoint) -> float:
+        return math.hypot(a.x - b.x, a.y - b.y)
+
+    for reference in (tag_15, tag_14):
+        uncorrected_error = _dist(reference.observed, reference.surveyed)
+        corrected = geometry.project_tag_to_field_plane(
+            reference.observed,
+            mount_z_cm=reference.height_cm,
+            camera_ground_position=solution.nadir,
+            camera_height_cm=solution.height_cm,
+        )
+        corrected_error = _dist(corrected, reference.surveyed)
+
+        assert uncorrected_error > 7.0  # sanity: the raw ~8-9cm error is real
+        assert corrected_error < 0.3
+        assert corrected_error < uncorrected_error
+
+    tag_15_corrected = geometry.project_tag_to_field_plane(
+        tag_15.observed,
+        mount_z_cm=tag_15.height_cm,
+        camera_ground_position=solution.nadir,
+        camera_height_cm=solution.height_cm,
+    )
+    tag_14_corrected = geometry.project_tag_to_field_plane(
+        tag_14.observed,
+        mount_z_cm=tag_14.height_cm,
+        camera_ground_position=solution.nadir,
+        camera_height_cm=solution.height_cm,
+    )
+    assert tag_15_corrected.x == pytest.approx(50.09, abs=0.05)
+    assert tag_15_corrected.y == pytest.approx(29.85, abs=0.05)
+    assert tag_14_corrected.x == pytest.approx(-50.11, abs=0.05)
+    assert tag_14_corrected.y == pytest.approx(-29.82, abs=0.05)
+
+
+def test_solve_camera_geometry_well_conditioned_three_reference_baseline():
+    """The "good" baseline the ill-conditioned cases below are compared
+    against: three synthetic, noise-free references spread ~120 degrees
+    apart around a known nadir recover ground truth to near-exact
+    precision and report a low condition_number -- comparable to, not
+    wildly different from, the real fixture's well-conditioned 67.4."""
+    true_nadir = WorldPoint(x=5.0, y=-5.0)
+    true_height_cm = 130.0
+    radius = 60.0
+    height_cm = 15.0
+
+    references = []
+    for angle_deg in (0.0, 120.0, 240.0):
+        angle = math.radians(angle_deg)
+        true = WorldPoint(
+            x=true_nadir.x + radius * math.cos(angle),
+            y=true_nadir.y + radius * math.sin(angle),
+        )
+        apparent = _forward_apparent(true, height_cm, true_nadir, true_height_cm)
+        references.append(
+            geometry.ReferenceObservation(
+                surveyed=true, observed=apparent, height_cm=height_cm
+            )
+        )
+
+    solution = geometry.solve_camera_geometry(references)
+
+    assert solution.nadir.x == pytest.approx(true_nadir.x, abs=1e-6)
+    assert solution.nadir.y == pytest.approx(true_nadir.y, abs=1e-6)
+    assert solution.height_cm == pytest.approx(true_height_cm, abs=1e-6)
+    assert solution.rms_residual_cm == pytest.approx(0.0, abs=1e-6)
+    assert solution.condition_number < 200.0
+
+
+def test_solve_camera_geometry_diametrically_opposite_references_do_not_reproduce_the_failed_line_intersection():
+    """The failure this ticket must not reproduce (sprint.md/the
+    ticket's own account): a first attempt intersected the two
+    displacement lines for two references diametrically opposite the
+    camera's nadir and got a nadir ~20 cm off, with a residual 150x
+    worse than optimum -- because line-intersection discards
+    displacement *magnitude* and uses direction alone.
+
+    This reproduces the *shape* of that failed attempt (two synthetic,
+    noise-free references placed on opposite sides of a known nadir),
+    not necessarily its exact numbers, and checks the least-squares
+    solver here does not reproduce anything close to that failure: the
+    recovered nadir must land far closer to ground truth than a ~20 cm
+    error (least squares over the full 2D residual is well-conditioned
+    on this exact configuration -- see the module's own section header
+    for why)."""
+    true_nadir = WorldPoint(x=5.0, y=-5.0)
+    true_height_cm = 130.0
+
+    true_a = WorldPoint(x=50.0, y=30.0)
+    true_b = WorldPoint(x=2 * true_nadir.x - true_a.x, y=2 * true_nadir.y - true_a.y)  # diametrically opposite true_a, through the nadir
+
+    reference_a = geometry.ReferenceObservation(
+        surveyed=true_a,
+        observed=_forward_apparent(true_a, 15.0, true_nadir, true_height_cm),
+        height_cm=15.0,
+    )
+    reference_b = geometry.ReferenceObservation(
+        surveyed=true_b,
+        observed=_forward_apparent(true_b, 15.0, true_nadir, true_height_cm),
+        height_cm=15.0,
+    )
+
+    solution = geometry.solve_camera_geometry([reference_a, reference_b])
+
+    nadir_error = math.hypot(
+        solution.nadir.x - true_nadir.x, solution.nadir.y - true_nadir.y
+    )
+    # The failed line-intersection attempt was ~20cm off; this must be
+    # dramatically closer to ground truth than that (near-exact, since
+    # this is a noise-free synthetic case).
+    assert nadir_error < 1.0
+
+
+def test_solve_camera_geometry_near_collinear_references_condition_number_blows_up():
+    """The guard that makes a future bad solve loud, not silent: a
+    genuinely degenerate/near-collinear reference set (two references
+    on nearly the same ray from the nadir, barely separated) must
+    report a condition_number dramatically elevated versus the
+    well-conditioned baseline (~67-70) -- this is the signal
+    ``cli/locate.py`` (ticket 003) uses to warn or refuse to write an
+    ill-conditioned solve, per the module's own section header on why
+    line-intersection failed and least squares over all references does
+    not."""
+    true_nadir = WorldPoint(x=5.0, y=-5.0)
+    true_height_cm = 130.0
+    height_cm = 17.2
+
+    true_a = WorldPoint(x=50.0, y=30.0)
+    direction = WorldPoint(x=true_a.x - true_nadir.x, y=true_a.y - true_nadir.y)
+    # A second reference on the *same ray* from the nadir, only 2% farther
+    # out than the first -- nearly a duplicate observation.
+    true_b = WorldPoint(
+        x=true_nadir.x + 1.02 * direction.x, y=true_nadir.y + 1.02 * direction.y
+    )
+
+    references = [
+        geometry.ReferenceObservation(
+            surveyed=true_a,
+            observed=_forward_apparent(true_a, height_cm, true_nadir, true_height_cm),
+            height_cm=height_cm,
+        ),
+        geometry.ReferenceObservation(
+            surveyed=true_b,
+            observed=_forward_apparent(true_b, height_cm, true_nadir, true_height_cm),
+            height_cm=height_cm,
+        ),
+    ]
+
+    well_conditioned = geometry.solve_camera_geometry(
+        [
+            geometry.ReferenceObservation(
+                surveyed=WorldPoint(x=50.0, y=30.0),
+                observed=WorldPoint(x=57.38, y=34.90),
+                height_cm=17.2,
+            ),
+            geometry.ReferenceObservation(
+                surveyed=WorldPoint(x=-50.0, y=-30.0),
+                observed=WorldPoint(x=-57.15, y=-33.40),
+                height_cm=15.0,
+            ),
+        ]
+    )
+
+    degenerate = geometry.solve_camera_geometry(references)
+
+    assert degenerate.condition_number > 20 * well_conditioned.condition_number
+    assert degenerate.condition_number > 1000.0

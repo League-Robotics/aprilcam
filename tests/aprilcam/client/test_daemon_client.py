@@ -36,7 +36,7 @@ from aprilcam.camera.registry import CameraRegistry
 from aprilcam.client.daemon_client import GrpcDaemon
 from aprilcam.client.guides import Guides
 from aprilcam.config.directories import Directories
-from aprilcam.config.interfaces import CameraConfig, Feature
+from aprilcam.config.interfaces import CameraConfig, CameraPosition, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.rpc import build_server
 from aprilcam.daemon.service import CALIBRATION_FRAME_COUNT, DaemonService
@@ -250,6 +250,37 @@ def test_get_frame_png_round_trip(client, held_camera):
 
     assert frame.encoding == "png"
     assert frame.data[:8] == b"\x89PNG\r\n\x1a\n"  # PNG signature
+
+
+def test_set_camera_config_and_get_camera_config_round_trip_camera_position(client, held_camera):
+    """Ticket 029-001, SUC-002: the full client stack (``GrpcDaemon.
+    set_camera_config``/``get_camera_config``, not just the raw gRPC
+    stub -- ``test_service.py`` covers that layer) carries
+    ``camera_position`` both directions as a real ``CameraPosition``
+    dataclass, not proto fields."""
+    _, slug, _ = held_camera
+    pushed = CameraConfig(
+        name=slug,
+        playfield="main-playfield",
+        settings={},
+        camera_position=CameraPosition(nadir=WorldPoint(x=3.05, y=-2.75), height_cm=128.25),
+    )
+
+    client.set_camera_config(pushed)
+    fetched = client.get_camera_config(slug)
+
+    assert fetched.camera_position == CameraPosition(
+        nadir=WorldPoint(x=3.05, y=-2.75), height_cm=128.25
+    )
+
+
+def test_get_camera_config_camera_position_none_when_unset(client, held_camera):
+    _, slug, _ = held_camera
+    client.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+
+    fetched = client.get_camera_config(slug)
+
+    assert fetched.camera_position is None
 
 
 def test_status_round_trip(client, directories, held_camera):

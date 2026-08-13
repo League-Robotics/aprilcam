@@ -49,7 +49,7 @@ from aprilcam.camera.identity import CameraIdentity
 from aprilcam.camera.registry import CameraRegistry
 from aprilcam.client.guides import Guides
 from aprilcam.config.directories import Directories
-from aprilcam.config.interfaces import CameraConfig
+from aprilcam.config.interfaces import CameraConfig, CameraPosition
 from aprilcam.config.loader import ConfigLoader, PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon import __main__ as daemon_main
 from aprilcam.daemon.detection import CONFIRMATION_STREAK, DetectionEngine
@@ -1563,6 +1563,53 @@ def test_set_camera_config_links_camera_and_get_camera_config_echoes_it_back(ser
     assert fetched.playfield == "main-playfield"
 
 
+def test_camera_geometry_for_unconfigured_camera_returns_the_exact_pre_sprint_stopgap(
+    service, held_camera
+):
+    """Ticket 029-001: a camera with no config at all held by this
+    service, and a camera configured but never located, both fall back
+    to the exact pre-029 stopgap -- ``(WorldPoint(0, 0), 0.0)``."""
+    _, slug, _ = held_camera
+
+    position, height_cm = service._camera_geometry_for(slug)
+    assert position == WorldPoint(x=0.0, y=0.0)
+    assert height_cm == 0.0
+
+    # Configured, but never located -- camera_position still None.
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    position, height_cm = service._camera_geometry_for(slug)
+    assert position == WorldPoint(x=0.0, y=0.0)
+    assert height_cm == 0.0
+
+    # A slug this service has never even heard of -- config is None.
+    position, height_cm = service._camera_geometry_for("never-registered-camera")
+    assert position == WorldPoint(x=0.0, y=0.0)
+    assert height_cm == 0.0
+
+
+def test_camera_geometry_for_configured_camera_returns_its_real_nadir_and_height(
+    service, held_camera
+):
+    """The real fixture (sprint.md's Problem section): camera 3's
+    solved nadir/height."""
+    _, slug, _ = held_camera
+    service.set_camera_config(
+        CameraConfig(
+            name=slug,
+            playfield="main-playfield",
+            settings={},
+            camera_position=CameraPosition(
+                nadir=WorldPoint(x=3.05, y=-2.75), height_cm=128.25
+            ),
+        )
+    )
+
+    position, height_cm = service._camera_geometry_for(slug)
+
+    assert position == WorldPoint(x=3.05, y=-2.75)
+    assert height_cm == 128.25
+
+
 def test_get_camera_config_by_persistent_number_reaches_the_same_config_as_by_slug(
     service, held_camera, registry
 ):
@@ -2245,6 +2292,38 @@ def test_rpc_set_camera_config_and_get_camera_config_round_trip_settings(stub, h
 
     assert response.config.playfield == "main-playfield"
     assert json.loads(response.config.settings_json) == {"exposure": 100, "gain": 2.5}
+
+
+def test_rpc_set_camera_config_and_get_camera_config_round_trip_camera_position(stub, held_camera):
+    """Ticket 029-001, SUC-002: ``camera_position`` round-trips over a
+    real gRPC channel."""
+    _, slug, _ = held_camera
+    pushed = _camera_config_msg(slug, playfield="main-playfield", settings={})
+    pushed.camera_position.CopyFrom(
+        aprilcam_v2_pb2.CameraPosition(
+            nadir=aprilcam_v2_pb2.WorldPoint(x=3.05, y=-2.75), height_cm=128.25
+        )
+    )
+    stub.SetCameraConfig(aprilcam_v2_pb2.SetCameraConfigRequest(config=pushed))
+
+    response = stub.GetCameraConfig(aprilcam_v2_pb2.GetCameraConfigRequest(camera=slug))
+
+    assert response.config.HasField("camera_position")
+    assert response.config.camera_position.nadir.x == pytest.approx(3.05)
+    assert response.config.camera_position.nadir.y == pytest.approx(-2.75)
+    assert response.config.camera_position.height_cm == pytest.approx(128.25)
+
+
+def test_rpc_get_camera_config_camera_position_absent_when_unset(stub, held_camera):
+    """``HasField("camera_position")`` is false on the wire when
+    unset -- never a fabricated zero-valued message."""
+    _, slug, _ = held_camera
+    pushed = _camera_config_msg(slug, playfield="main-playfield", settings={})
+    stub.SetCameraConfig(aprilcam_v2_pb2.SetCameraConfigRequest(config=pushed))
+
+    response = stub.GetCameraConfig(aprilcam_v2_pb2.GetCameraConfigRequest(camera=slug))
+
+    assert not response.config.HasField("camera_position")
 
 
 def test_rpc_get_camera_config_unknown_camera_maps_to_not_found(stub):

@@ -1409,6 +1409,137 @@ def test_default_camera_geometry_lookup_makes_mount_z_inert_against_a_live_camer
     assert stopgap_record.yaw_rad == pytest.approx(raw_record.yaw_rad, abs=1e-9)
 
 
+def test_mount_z_at_configured_camera_height_skips_correction_reports_raw_position():
+    """Sprint 029 ticket 001's mount-height guard: a registered
+    ``mount_z`` *exactly at* a configured camera's own ``height_cm``
+    would give ``project_tag_to_field_plane`` a ``ratio == 1``,
+    extrapolating the corrected position all the way to the camera's
+    own nadir -- a degenerate, physically nonsensical case this guard
+    exists to catch. The whole correction (not just parallax) is
+    skipped -- ``mount_x``/``mount_y``/``mount_yaw_rad`` are nonzero
+    here specifically to prove the offset/yaw half is *also* withheld,
+    not just parallax -- and the raw (uncorrected) pose is reported."""
+    calibration = _fixture_calibration()
+    tag = TagId(family=TagFamily.APRILTAG, number=11)
+    hit = _detection_at(TagFamily.APRILTAG, 11, center_world=(50.0, 37.5), yaw_rad=0.0)
+    camera_height_cm = 100.0
+    mount = MountParameters(mount_x=8.0, mount_y=3.0, mount_z=camera_height_cm)  # at, not above
+
+    raw_engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        calibration_lookup=lambda slug: calibration,
+        confirmation_streak=1,
+    )
+    raw_frame = raw_engine.run_burst("raw-guard-cam", _camera("raw-guard-cam", frames=[_blank_frame()]))
+    raw_record = raw_frame.tags[0]
+    assert raw_record.world is not None
+
+    guarded_engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        calibration_lookup=lambda slug: calibration,
+        mount_lookup=lambda t: mount if t == tag else None,
+        camera_geometry_lookup=lambda slug: (WorldPoint(x=0.0, y=0.0), camera_height_cm),
+        confirmation_streak=1,
+    )
+    guarded_frame = guarded_engine.run_burst(
+        "guarded-cam", _camera("guarded-cam", frames=[_blank_frame()])
+    )
+    guarded_record = guarded_frame.tags[0]
+
+    assert guarded_record.world is not None
+    assert guarded_record.world.x == pytest.approx(raw_record.world.x, abs=1e-9)
+    assert guarded_record.world.y == pytest.approx(raw_record.world.y, abs=1e-9)
+    assert guarded_record.yaw_rad == pytest.approx(raw_record.yaw_rad, abs=1e-9)
+
+
+def test_mount_z_above_configured_camera_height_skips_correction_reports_raw_position():
+    """Same guard, ``mount_z`` strictly *above* the configured camera's
+    height -- the more clearly-implausible case (a tag mounted higher
+    than the camera observing it)."""
+    calibration = _fixture_calibration()
+    tag = TagId(family=TagFamily.APRILTAG, number=13)
+    hit = _detection_at(TagFamily.APRILTAG, 13, center_world=(50.0, 37.5), yaw_rad=0.0)
+    camera_height_cm = 100.0
+    mount = MountParameters(mount_z=150.0)  # well above the configured camera height
+
+    raw_engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        calibration_lookup=lambda slug: calibration,
+        confirmation_streak=1,
+    )
+    raw_frame = raw_engine.run_burst(
+        "raw-guard-above-cam", _camera("raw-guard-above-cam", frames=[_blank_frame()])
+    )
+    raw_record = raw_frame.tags[0]
+    assert raw_record.world is not None
+
+    guarded_engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        calibration_lookup=lambda slug: calibration,
+        mount_lookup=lambda t: mount if t == tag else None,
+        camera_geometry_lookup=lambda slug: (WorldPoint(x=0.0, y=0.0), camera_height_cm),
+        confirmation_streak=1,
+    )
+    guarded_frame = guarded_engine.run_burst(
+        "guarded-above-cam", _camera("guarded-above-cam", frames=[_blank_frame()])
+    )
+    guarded_record = guarded_frame.tags[0]
+
+    assert guarded_record.world is not None
+    assert guarded_record.world.x == pytest.approx(raw_record.world.x, abs=1e-9)
+    assert guarded_record.world.y == pytest.approx(raw_record.world.y, abs=1e-9)
+    assert guarded_record.yaw_rad == pytest.approx(raw_record.yaw_rad, abs=1e-9)
+
+
+def test_mount_z_below_configured_camera_height_still_corrects():
+    """Sanity check on the guard's boundary: a ``mount_z`` genuinely
+    below the configured camera height is unaffected by the guard and
+    still receives the real parallax correction -- the guard must not
+    over-trigger and swallow legitimate corrections."""
+    calibration = _fixture_calibration()
+    tag = TagId(family=TagFamily.APRILTAG, number=14)
+    hit = _detection_at(TagFamily.APRILTAG, 14, center_world=(50.0, 37.5), yaw_rad=0.0)
+    camera_height_cm = 100.0
+    mount = MountParameters(mount_z=20.0)
+
+    raw_engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        calibration_lookup=lambda slug: calibration,
+        confirmation_streak=1,
+    )
+    raw_frame = raw_engine.run_burst(
+        "raw-below-cam", _camera("raw-below-cam", frames=[_blank_frame()])
+    )
+    raw_record = raw_frame.tags[0]
+    assert raw_record.world is not None
+    assert raw_record.yaw_rad is not None
+
+    corrected_engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        calibration_lookup=lambda slug: calibration,
+        mount_lookup=lambda t: mount if t == tag else None,
+        camera_geometry_lookup=lambda slug: (WorldPoint(x=0.0, y=0.0), camera_height_cm),
+        confirmation_streak=1,
+    )
+    corrected_frame = corrected_engine.run_burst(
+        "corrected-below-cam", _camera("corrected-below-cam", frames=[_blank_frame()])
+    )
+    corrected_record = corrected_frame.tags[0]
+
+    expected_position, expected_yaw = correct_tag_pose(
+        raw_record.world,
+        raw_record.yaw_rad,
+        mount,
+        camera_ground_position=WorldPoint(x=0.0, y=0.0),
+        camera_height_cm=camera_height_cm,
+    )
+
+    assert corrected_record.world is not None
+    assert corrected_record.world.x == pytest.approx(expected_position.x, abs=1e-9)
+    assert corrected_record.world.y == pytest.approx(expected_position.y, abs=1e-9)
+    assert corrected_record.world.x != pytest.approx(raw_record.world.x)
+
+
 def test_unregistered_tag_is_unaffected_by_another_tags_mount_registration():
     """Acceptance criterion: unregistered tags are unaffected. A mount
     registered for a *different* tag id must never leak onto this one."""

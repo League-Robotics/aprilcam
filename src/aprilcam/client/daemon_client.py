@@ -80,7 +80,7 @@ from aprilcam.client.models import (
     tag_record_from_get_tag_response,
 )
 from aprilcam.client.streams import SocketImageStream, SocketTagStream
-from aprilcam.config.interfaces import CameraConfig, Feature
+from aprilcam.config.interfaces import CameraConfig, CameraPosition, Feature
 from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitionIface
 from aprilcam.config.loader import PlayfieldDefinition
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus, ImageStream, TagStream
@@ -179,13 +179,25 @@ def _mount_parameters_to_proto(params: MountParameters) -> aprilcam_v2_pb2.Mount
     return msg
 
 
+def _camera_position_to_proto(position: CameraPosition) -> aprilcam_v2_pb2.CameraPosition:
+    """Request-building direction only (sprint 029 ticket 001), for an
+    outgoing ``SetCameraConfigRequest``'s optional ``camera_position``."""
+    return aprilcam_v2_pb2.CameraPosition(
+        nadir=_world_point_to_proto(position.nadir), height_cm=position.height_cm
+    )
+
+
 def _camera_config_to_proto(config: CameraConfig) -> aprilcam_v2_pb2.CameraConfig:
     """Request-building direction only, for an outgoing
     ``SetCameraConfigRequest``. ``settings`` crosses as JSON text (see
-    ``aprilcam_v2.proto``'s header comment)."""
+    ``aprilcam_v2.proto``'s header comment). ``camera_position`` is
+    ``HasField``-guarded (sprint 029 ticket 001): absent means "not
+    configured," never a fabricated zero-valued ``CameraPosition``."""
     msg = aprilcam_v2_pb2.CameraConfig(name=config.name, settings_json=json.dumps(config.settings))
     if config.playfield is not None:
         msg.playfield = config.playfield
+    if config.camera_position is not None:
+        msg.camera_position.CopyFrom(_camera_position_to_proto(config.camera_position))
     return msg
 
 

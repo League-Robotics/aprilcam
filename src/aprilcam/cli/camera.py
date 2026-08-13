@@ -72,6 +72,7 @@ from aprilcam.cli._common import (
     report_error,
 )
 from aprilcam.cli import calibrate as calibrate_cli
+from aprilcam.cli import locate as locate_cli
 from aprilcam.client.discovery import Discovery
 from aprilcam.config.interfaces import ConfigLoader
 from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
@@ -498,3 +499,8 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     # 022-003) but is grouped under this ``camera`` subparser tree --
     # see that module's docstring for why.
     calibrate_cli.add_subparser(sub)
+
+    # ``locate`` lives in its own module (cli/locate.py, sprint 029
+    # ticket 003) but is grouped under this ``camera`` subparser tree --
+    # see that module's docstring for why.
+    locate_cli.add_subparser(sub)
