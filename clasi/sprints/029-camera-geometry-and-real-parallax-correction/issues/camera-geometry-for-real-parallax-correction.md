@@ -1,5 +1,11 @@
 ---
-status: pending
+status: in-progress
+sprint: 029
+tickets:
+- 029-001
+- 029-002
+- 029-003
+- 029-004
 ---
 
 # Camera geometry needed for real mount_z parallax correction
