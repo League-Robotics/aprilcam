@@ -284,6 +284,7 @@ def _playfield_feature_entry_from_proto(
         y=msg.y,
         tag_id=msg.id if msg.HasField("id") else None,
         colour=msg.colour if msg.HasField("colour") else None,
+        height_cm=msg.height_cm,
     )
 
 
@@ -343,6 +344,7 @@ def feature_from_proto(msg: aprilcam_v2_pb2.FeatureMatch) -> Feature:
         kind=msg.kind,
         position=_world_point_from_proto(msg.position),
         colour=msg.colour if msg.HasField("colour") else None,
+        height_cm=msg.height_cm,
     )
 
 
@@ -420,6 +422,13 @@ def calibration_result_from_proto(msg: aprilcam_v2_pb2.CalibrationResult) -> Cal
             msg.reprojection_error_cm if msg.HasField("reprojection_error_cm") else None
         ),
         reason=msg.reason if msg.HasField("reason") else None,
+        intrinsics_estimated=(
+            msg.intrinsics_estimated if msg.HasField("intrinsics_estimated") else None
+        ),
+        intrinsics_mode=msg.intrinsics_mode if msg.HasField("intrinsics_mode") else None,
+        elevated_features_used=(
+            msg.elevated_features_used if msg.HasField("elevated_features_used") else None
+        ),
     )
 
 
@@ -427,8 +436,10 @@ def calibration_from_proto(msg: aprilcam_v2_pb2.Calibration) -> Calibration:
     """The client-side mirror of ``daemon/rpc.py``'s
     ``_calibration_to_proto`` -- but deliberately a narrowing mirror, not
     a field-for-field one. The wire message also carries ``homography``/
-    ``matched_ids``/``reprojection_error_cm`` (the daemon-internal solve
-    detail persisted alongside a calibration), but nothing on this side
+    ``matched_ids``/``reprojection_error_cm``/``camera_matrix``/
+    ``dist_coeffs`` (sprint 030 ticket 002 adds the latter two, for
+    daemon-internal round-tripping only) -- the daemon-internal solve
+    detail persisted alongside a calibration -- but nothing on this side
     of the wire ever reads them -- every ``client``/``mcp`` consumer of
     ``get_calibration`` only ever needs ``stale``/``calibrated_at``/
     ``playfield``, "the ones an agent actually needs to reason about

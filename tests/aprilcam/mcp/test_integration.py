@@ -181,7 +181,7 @@ class _GoldenFakeDaemon:
     def set_camera_config(self, config: CameraConfig) -> None:
         self.pushed_camera_config = config
 
-    def calibrate(self, camera: str) -> CalibrationResult:
+    def calibrate(self, camera: str, *, estimate_intrinsics: bool = False) -> CalibrationResult:
         self.requested_camera = camera
         assert self.calibration_result is not None, "test forgot to set calibration_result"
         return self.calibration_result
@@ -295,6 +295,12 @@ async def test_golden_path_against_a_fake_daemon(tmp_path):
             "missing_ids": [],
             "reprojection_error_cm": 0.18,
             "reason": None,
+            # sprint 030 ticket 002: absent this call (no
+            # estimate_intrinsics argument passed above -> defaults to
+            # False -> the concept never ran).
+            "intrinsics_estimated": None,
+            "intrinsics_mode": None,
+            "elevated_features_used": None,
         }
 
         # -- perceive again: tags, then a deskewed frame --

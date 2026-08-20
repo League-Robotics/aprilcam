@@ -364,6 +364,19 @@ class DaemonService(Daemon):
             get_camera_config=self._camera_config_for_calibration,
             get_playfield=self._playfield_for_calibration,
             capture_frames=self._capture_calibration_frames,
+            # Fixes a confirmed carry-forward-after-restart bug (sprint
+            # 030 ticket 002): without this, an ordinary recalibration
+            # right after a daemon restart would read Calibrator's own
+            # empty in-process cache instead of this service's
+            # disk-loaded self._calibrations, silently wiping any
+            # previously-estimated lens model back to None. Bound to
+            # self.get_calibration -- resolved at call time, safe to
+            # pass before self._calibrations exists below, the same
+            # pattern calibration_lookup=self.get_calibration already
+            # uses a few lines up. See Calibrator.__init__'s own
+            # get_prior_calibration docstring for the full story and the
+            # test that specifically exercises the restart path.
+            get_prior_calibration=self.get_calibration,
         )
         self._calibrations: Dict[str, Calibration] = {}
         self._load_calibrations()
@@ -1314,12 +1327,13 @@ class DaemonService(Daemon):
 
     # -- calibration (ticket 022-003) --------------------------------------
 
-    def calibrate(self, camera: str) -> CalibrationResult:
+    def calibrate(self, camera: str, *, estimate_intrinsics: bool = False) -> CalibrationResult:
         """See ``daemon.interfaces.Daemon.calibrate``.
 
         A thin wrapper: every vision/geometry decision (multi-frame
         averaging, id matching, all-or-nothing acceptance, homography
-        solve, degenerate-geometry rejection) lives in
+        solve, degenerate-geometry rejection, and -- sprint 030 ticket
+        002 -- intrinsics estimation) lives in
         ``calibration.calibration.Calibrator``, injected as
         ``self._calibrator`` -- this method's only job is to run it and,
         on success, persist the result. ``NoPlayfieldLinked`` propagates
@@ -1340,6 +1354,12 @@ class DaemonService(Daemon):
         resolution rather than re-implementing it (see
         :meth:`_resolve_slug_if_known`'s docstring).
 
+        *estimate_intrinsics* is passed straight through to
+        ``self._calibrator.calibrate`` -- this method makes no decision
+        of its own about it, matching the "pure carry a bool from
+        caller to Calibrator" framing of this parameter throughout the
+        stack (sprint.md Architecture, responsibility 4).
+
         A failed attempt (``result.succeeded is False``) leaves
         ``calibration.json`` and this service's in-memory
         ``self._calibrations`` entry for *camera* completely untouched
@@ -1349,7 +1369,7 @@ class DaemonService(Daemon):
         guard.
         """
         slug = self._resolve_slug_if_known(camera)
-        result = self._calibrator.calibrate(slug)
+        result = self._calibrator.calibrate(slug, estimate_intrinsics=estimate_intrinsics)
         if result.succeeded:
             calibration = self._calibrator.get_calibration(slug)
             assert calibration is not None, (

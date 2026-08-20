@@ -91,6 +91,7 @@ from tests.aprilcam.calibration.test_calibration import (
     MAIN_PLAYFIELD_ARUCO_POSITIONS,
     main_playfield_definition,
     render_playfield_frame,
+    render_projective_frame,
 )
 from tests.aprilcam.camera.test_camera import FakeBackend
 
@@ -3485,6 +3486,220 @@ def test_rpc_calibrate_no_playfield_linked_maps_to_failed_precondition(stub, hel
     metadata = dict(excinfo.value.trailing_metadata())
     assert metadata["aprilcam-error-type"] == "NoPlayfieldLinked"
     assert metadata["aprilcam-camera"] == slug
+
+
+# ---------------------------------------------------------------------------
+# Opt-in intrinsics estimation (sprint 030 ticket 002) -- estimate_intrinsics
+# plumbing end to end over the real RPC/proto wire, height_cm playfield
+# round trip, and the confirmed carry-forward-after-restart bug fix.
+# ---------------------------------------------------------------------------
+
+
+def test_rpc_calibrate_estimate_intrinsics_true_stores_and_reports_intrinsics(directories, registry):
+    frame = render_projective_frame(
+        {i: (x, y, 0.0) for i, (x, y) in MAIN_PLAYFIELD_ARUCO_POSITIONS.items()}, tilt_deg=8.0
+    )
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+
+    with _bind_stub(service) as stub:
+        response = stub.Calibrate(
+            aprilcam_v2_pb2.CalibrateRequest(camera=slug, estimate_intrinsics=True)
+        )
+
+    assert response.result.succeeded is True, response.result.reason
+    assert response.result.HasField("intrinsics_estimated")
+    assert response.result.intrinsics_estimated is True
+    assert response.result.intrinsics_mode == "coplanar-constrained"
+    assert response.result.elevated_features_used == 0
+
+    calibration = service.get_calibration(slug)
+    assert calibration.camera_matrix is not None
+    assert calibration.dist_coeffs is not None
+
+    path = _calibration_path(directories, slug)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert "camera_matrix" in data
+    assert "dist_coeffs" in data
+
+
+def test_rpc_calibrate_without_the_flag_reports_intrinsics_estimated_false(directories, registry):
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+
+    with _bind_stub(service) as stub:
+        response = stub.Calibrate(aprilcam_v2_pb2.CalibrateRequest(camera=slug))
+
+    assert response.result.succeeded is True
+    assert response.result.HasField("intrinsics_estimated")
+    assert response.result.intrinsics_estimated is False
+    assert response.result.HasField("intrinsics_mode") is False
+    assert response.result.HasField("elevated_features_used") is False
+
+
+def test_rpc_calibrate_request_without_estimate_intrinsics_field_defaults_to_false(
+    directories, registry
+):
+    """Proto3's own default -- an old client that has never heard of
+    this field sends a request with it simply absent, which must behave
+    identically to ``estimate_intrinsics=False`` explicitly."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+
+    with _bind_stub(service) as stub:
+        request = aprilcam_v2_pb2.CalibrateRequest(camera=slug)
+        response = stub.Calibrate(request)
+
+    assert response.result.succeeded is True
+    assert response.result.intrinsics_estimated is False
+
+
+def test_rpc_estimate_intrinsics_flag_genuinely_reaches_the_daemon(directories, registry):
+    """A structural proof the field actually crosses the wire, not just
+    that the response happens to look right: a playfield with only 4
+    surveyed ArUco points (below the n_pts >= 6 floor) succeeds under a
+    plain ``Calibrate`` but fails, naming the floor, only when
+    ``estimate_intrinsics=True`` is genuinely threaded through --
+    something a silently-dropped field could never produce."""
+    positions = {1: (-40.0, 30.0), 2: (40.0, 30.0), 3: (40.0, -30.0), 4: (-40.0, -30.0)}
+    small_definition = PlayfieldDefinition(
+        name="tiny-field",
+        width_cm=120.0,
+        height_cm=100.0,
+        aruco_tags=tuple(
+            PlayfieldFeatureEntry(slug=f"a{i}", x=x, y=y, tag_id=i) for i, (x, y) in positions.items()
+        ),
+    )
+    frame = render_playfield_frame(positions, canvas_size=(700, 700))
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(small_definition)
+    service.set_camera_config(CameraConfig(name=slug, playfield="tiny-field", settings={}))
+
+    with _bind_stub(service) as stub:
+        plain = stub.Calibrate(aprilcam_v2_pb2.CalibrateRequest(camera=slug))
+        assert plain.result.succeeded is True, plain.result.reason
+
+        with_intrinsics = stub.Calibrate(
+            aprilcam_v2_pb2.CalibrateRequest(camera=slug, estimate_intrinsics=True)
+        )
+    assert with_intrinsics.result.succeeded is False
+    assert "6" in with_intrinsics.result.reason
+    assert "4" in with_intrinsics.result.reason
+
+
+def test_rpc_playfield_feature_height_cm_round_trips(directories, registry):
+    """Sprint 030 ticket 002's other additive wire field: an elevated
+    feature's ``height_cm`` survives a real ``SetPlayfield``/
+    ``GetPlayfield`` round trip over the wire, and a coplanar one
+    (absent/0.0) round-trips as exactly 0.0, never a fabricated value."""
+    definition = PlayfieldDefinition(
+        name="elevated-field",
+        width_cm=200.0,
+        height_cm=140.0,
+        aruco_tags=(
+            PlayfieldFeatureEntry(slug="a1", x=-40.0, y=30.0, tag_id=1, height_cm=12.5),
+            PlayfieldFeatureEntry(slug="a2", x=40.0, y=30.0, tag_id=2),
+        ),
+    )
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [_frame()])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+
+    with _bind_stub(service) as stub:
+        stub.SetPlayfield(
+            aprilcam_v2_pb2.SetPlayfieldRequest(
+                definition=aprilcam_v2_pb2.PlayfieldDefinition(
+                    name=definition.name,
+                    width_cm=definition.width_cm,
+                    height_cm=definition.height_cm,
+                    aruco_tags=[
+                        aprilcam_v2_pb2.PlayfieldFeatureEntry(
+                            slug=e.slug, x=e.x, y=e.y, id=e.tag_id, height_cm=e.height_cm
+                        )
+                        for e in definition.aruco_tags
+                    ],
+                )
+            )
+        )
+        response = stub.GetPlayfield(aprilcam_v2_pb2.GetPlayfieldRequest(name="elevated-field"))
+
+    entries = {e.id: e for e in response.playfield.definition.aruco_tags}
+    assert entries[1].height_cm == 12.5
+    assert entries[2].height_cm == 0.0
+
+
+def test_recalibration_after_a_simulated_restart_carries_forward_previously_estimated_intrinsics(
+    directories, registry
+):
+    """The confirmed bug ticket 001 left open for this ticket to close:
+    ``Calibrator``'s in-process cache (populated only by a successful
+    ``calibrate()`` call *in this process*) is not the same store as
+    ``DaemonService``'s own disk-loaded ``self._calibrations``. Before
+    ``Calibrator.__init__``'s ``get_prior_calibration`` was wired to
+    ``DaemonService.get_calibration``, an ordinary recalibration
+    immediately after a daemon restart read the former (empty) instead
+    of the latter (disk-backed), silently wiping a previously-estimated
+    lens model back to ``None`` with no error. Exercised here with the
+    calibration living *only* on disk when the second ``DaemonService``
+    is constructed -- this process's first ``calibrate()`` call for that
+    instance is the plain, no-flag recalibration itself, so a
+    same-process-only test would pass with the bug still present."""
+    frame = render_projective_frame(
+        {i: (x, y, 0.0) for i, (x, y) in MAIN_PLAYFIELD_ARUCO_POSITIONS.items()}, tilt_deg=8.0
+    )
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+
+    first_result = service.calibrate(slug, estimate_intrinsics=True)
+    assert first_result.succeeded is True, first_result.reason
+    original = service.get_calibration(slug)
+    assert original is not None
+    assert original.camera_matrix is not None
+    assert original.dist_coeffs is not None
+
+    # Simulate a restart: a brand-new DaemonService instance (its own
+    # fresh Calibrator, whose in-process cache has never seen a
+    # calibrate() call), reading the SAME state_dir -- calibration.json
+    # is the only thing that survives a restart (UC-01); everything
+    # else (playfields, camera config) does not, which is why they are
+    # re-pushed below exactly like a real operator/agent would after a
+    # restart.
+    frame2 = render_projective_frame(
+        {i: (x, y, 0.0) for i, (x, y) in MAIN_PLAYFIELD_ARUCO_POSITIONS.items()}, tilt_deg=8.0
+    )
+    identity2, slug2, cam2, _backend2 = _open_camera_with_frames(registry, [frame2])
+    assert slug2 == slug  # same physical camera identity -> same slug
+    restarted = _service_with_camera(directories, registry, identity2, slug2, cam2)
+    restarted.set_playfield(main_playfield_definition())
+    restarted.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+
+    # Sanity: the fresh instance really did reload it from disk, before
+    # this process ever calls calibrate() on it.
+    reloaded = restarted.get_calibration(slug)
+    assert reloaded is not None
+    assert reloaded.camera_matrix == original.camera_matrix
+
+    second_result = restarted.calibrate(slug)  # ordinary, no estimate_intrinsics
+
+    assert second_result.succeeded is True, second_result.reason
+    assert second_result.intrinsics_estimated is False
+    after_recalibration = restarted.get_calibration(slug)
+    assert after_recalibration is not None
+    assert after_recalibration.camera_matrix is not None, (
+        "the bug this test guards: intrinsics silently wiped on a post-restart recalibration"
+    )
+    assert after_recalibration.camera_matrix == original.camera_matrix
+    assert after_recalibration.dist_coeffs == original.dist_coeffs
 
 
 # ---------------------------------------------------------------------------
