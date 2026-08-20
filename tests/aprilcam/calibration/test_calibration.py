@@ -25,6 +25,7 @@ import cv2 as cv
 import numpy as np
 import pytest
 
+from aprilcam.calibration import geometry
 from aprilcam.calibration.calibration import (
     DRIFT_CHECK_INTERVAL_S,
     DRIFT_TOLERANCE_CM,
@@ -37,7 +38,7 @@ from aprilcam.calibration.calibration import (
 from aprilcam.config.interfaces import CameraConfig
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.errors import NoPlayfieldLinked
-from aprilcam.types import PixelPoint
+from aprilcam.types import PixelPoint, WorldPoint
 
 __all__ = [
     "MAIN_PLAYFIELD_ARUCO_POSITIONS",
@@ -787,3 +788,370 @@ def test_compute_drift_cm_ignores_a_detected_id_the_calibration_never_matched():
     drift = compute_drift_cm(calibration, definition, detected)
 
     assert drift is None  # still only 2 real matched markers -- below the minimum
+
+
+# ---------------------------------------------------------------------------
+# Lens distortion (sprint 030 ticket 001): ``Calibration.camera_matrix``/
+# ``dist_coeffs`` storage round-trip, ``to_world``/``to_pixel`` applying
+# them, and ``Calibrator.calibrate``'s undistort-before-solve +
+# carry-forward mechanics. This ticket lands storage/application only --
+# ticket 002 is what lets an operator *estimate* real intrinsics, so
+# every ``Calibration`` here that "already has" intrinsics is hand-built.
+# ---------------------------------------------------------------------------
+
+#: A synthetic intrinsic matrix/distortion vector used only by this
+#: section's tests. Deliberately a strong-enough model (a small focal
+#: length relative to ``CANVAS_SIZE``) that the pixel shift it produces
+#: at main-playfield's own marker positions is many pixels -- large
+#: enough that a test comparing "corrected" against "known good" would
+#: fail loudly if the undistort-before-solve step were skipped or
+#: mis-ordered, not a sub-pixel effect detection noise could hide.
+_SYNTHETIC_CAMERA_MATRIX: Tuple[Tuple[float, float, float], Tuple[float, float, float], Tuple[float, float, float]] = (
+    (400.0, 0.0, 450.0),
+    (0.0, 400.0, 350.0),
+    (0.0, 0.0, 1.0),
+)
+_SYNTHETIC_DIST_COEFFS: Tuple[float, float, float, float, float] = (-0.5, 0.0, 0.0, 0.0, 0.0)
+
+
+def _forward_distort_pixel(px: float, py: float) -> Tuple[float, float]:
+    """OpenCV's standard forward radial/tangential distortion formula
+    (``docs.opencv.org``'s own camera-calibration model), applied
+    directly against :data:`_SYNTHETIC_CAMERA_MATRIX`/
+    :data:`_SYNTHETIC_DIST_COEFFS` -- deliberately **independent** of
+    ``geometry.distort_point``'s own fixed-point-iteration
+    implementation, so the tests below check against an
+    independently-computed ground truth rather than merely round-
+    tripping through the same code under test. Generates the *known,
+    ground-truth-distorted* marker render positions the ticket's own
+    acceptance criterion asks for ("known ground-truth distortion
+    applied to synthetic points")."""
+    fx, _ox, cx = _SYNTHETIC_CAMERA_MATRIX[0]
+    _oy, fy, cy = _SYNTHETIC_CAMERA_MATRIX[1]
+    k1, k2, p1, p2, k3 = _SYNTHETIC_DIST_COEFFS
+    x = (px - cx) / fx
+    y = (py - cy) / fy
+    r2 = x * x + y * y
+    radial = 1 + k1 * r2 + k2 * r2**2 + k3 * r2**3
+    x_d = x * radial + 2 * p1 * x * y + p2 * (r2 + 2 * x * x)
+    y_d = y * radial + p1 * (r2 + 2 * y * y) + 2 * p2 * x * y
+    return (fx * x_d + cx, fy * y_d + cy)
+
+
+def _distorted_pixel_for_world(x: float, y: float) -> Tuple[float, float]:
+    """``standard_pixel_for_world`` with :func:`_forward_distort_pixel`
+    additionally applied -- what this fixture's camera would actually
+    render a marker at, if its lens really distorted like this. A
+    ``PixelForWorld`` callable, passable to ``render_playfield_frame``
+    exactly like ``standard_pixel_for_world``/``inverted_pixel_for_world``
+    already are."""
+    return _forward_distort_pixel(*standard_pixel_for_world(x, y))
+
+
+def _seed_prior_calibration(calibrator: Calibrator, camera_slug: str, calibration: Calibration) -> None:
+    """Directly seed *calibrator*'s internal calibration cache with
+    *calibration*. There is no public setter -- a fresh ``Calibrator``
+    only ever populates its cache via a successful :meth:`Calibrator.
+    calibrate` call -- and this ticket's own acceptance criteria call
+    for testing the undistort-before-solve/carry-forward mechanics
+    against a *hand-constructed* prior ``Calibration`` (ticket 002 is
+    what lets an operator produce one for real)."""
+    calibrator._calibrations[camera_slug] = calibration
+
+
+def _dummy_prior_calibration(
+    *,
+    camera_matrix: Tuple[Tuple[float, float, float], ...] | None = None,
+    dist_coeffs: Tuple[float, ...] | None = None,
+) -> Calibration:
+    """A syntactically-valid but otherwise-arbitrary prior
+    ``Calibration`` -- only its ``camera_matrix``/``dist_coeffs`` are
+    read by :meth:`Calibrator.calibrate`'s carry-forward mechanic, so
+    every other field here is a placeholder."""
+    return Calibration(
+        stale=False,
+        calibrated_at=0.0,
+        playfield="main-playfield",
+        homography=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+        matched_ids=(),
+        camera_matrix=camera_matrix,
+        dist_coeffs=dist_coeffs,
+    )
+
+
+# -- Calibration.to_dict/from_dict round trip -------------------------------
+
+
+def test_to_dict_omits_camera_matrix_and_dist_coeffs_when_none():
+    """Mirrors ``config.interfaces.CameraConfig.to_dict``'s identical
+    treatment of its own optional ``camera_position`` (never a JSON
+    ``null`` placeholder) -- a camera with no lens model produces
+    exactly the same 6-key ``calibration.json`` shape this method
+    produced before this ticket."""
+    calibration = Calibration(
+        stale=False,
+        calibrated_at=123.0,
+        playfield="main-playfield",
+        homography=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+        matched_ids=(1, 2, 3, 4),
+        reprojection_error_cm=0.1,
+    )
+
+    data = calibration.to_dict()
+
+    assert "camera_matrix" not in data
+    assert "dist_coeffs" not in data
+    assert set(data.keys()) == {
+        "stale",
+        "calibrated_at",
+        "playfield",
+        "homography",
+        "matched_ids",
+        "reprojection_error_cm",
+    }
+
+
+def test_to_dict_and_from_dict_round_trip_camera_matrix_and_dist_coeffs():
+    calibration = Calibration(
+        stale=False,
+        calibrated_at=123.0,
+        playfield="main-playfield",
+        homography=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+        matched_ids=(1, 2, 3, 4),
+        reprojection_error_cm=0.1,
+        camera_matrix=_SYNTHETIC_CAMERA_MATRIX,
+        dist_coeffs=_SYNTHETIC_DIST_COEFFS,
+    )
+
+    data = calibration.to_dict()
+
+    assert data["camera_matrix"] == [list(row) for row in _SYNTHETIC_CAMERA_MATRIX]
+    assert data["dist_coeffs"] == list(_SYNTHETIC_DIST_COEFFS)
+
+    restored = Calibration.from_dict(data)
+
+    assert restored == calibration
+
+
+def test_from_dict_loads_a_pre_sprint_fixture_with_no_intrinsics_keys():
+    """A ``calibration.json`` written before this ticket (no
+    ``camera_matrix``/``dist_coeffs`` keys at all -- the real shape
+    ``daemon/service.py``'s ``_persist_calibration`` wrote for every
+    camera prior to this sprint) loads successfully, both fields
+    ``None`` -- backward compatibility, sprint.md's Migration Concerns
+    ("no forced conversion, no schema version bump")."""
+    pre_sprint_data = {
+        "stale": False,
+        "calibrated_at": 1700000000.0,
+        "playfield": "main-playfield",
+        "homography": [
+            [0.138, -0.002, -87.6],
+            [-0.003, -0.139, 52.7],
+            [-3e-5, 1.9e-5, 1.0],
+        ],
+        "matched_ids": list(range(1, 11)),
+        "reprojection_error_cm": 0.132,
+    }
+    assert "camera_matrix" not in pre_sprint_data
+    assert "dist_coeffs" not in pre_sprint_data
+
+    calibration = Calibration.from_dict(pre_sprint_data)
+
+    assert calibration.camera_matrix is None
+    assert calibration.dist_coeffs is None
+    assert calibration.matched_ids == tuple(range(1, 11))
+
+
+# -- Calibration.to_world/to_pixel applying the lens model -------------------
+
+
+def test_to_world_and_to_pixel_are_unaffected_when_intrinsics_are_none():
+    """The ticket's own "byte-for-byte identical to today's behaviour"
+    acceptance criterion: with no lens model, ``to_world``/``to_pixel``
+    do exactly what ``geometry.pixel_to_world``/``world_to_pixel``
+    alone already do -- no undistort/redistort step runs at all."""
+    homography = ((2.0, 0.0, -100.0), (0.0, -3.0, 150.0), (0.0, 0.0, 1.0))
+    calibration = Calibration(
+        stale=False,
+        calibrated_at=0.0,
+        playfield="main-playfield",
+        homography=homography,
+        matched_ids=(1, 2, 3, 4),
+    )
+    matrix = np.array(homography, dtype=np.float64)
+    pixel = PixelPoint(x=10.0, y=5.0)
+
+    world = calibration.to_world(pixel)
+    assert world == geometry.pixel_to_world(matrix, pixel)
+
+    pixel_back = calibration.to_pixel(world)
+    assert pixel_back == geometry.world_to_pixel(matrix, world)
+
+
+def test_to_world_undistorts_before_applying_the_homography_when_intrinsics_are_set():
+    """Isolates the undistort step from the homography math: with an
+    **identity** homography, ``to_world(pixel)`` reports exactly
+    ``geometry.undistort_point(pixel, ...)``'s own output (interpreted
+    as a world point), proving the undistort happens *before* the
+    homography is applied, not skipped."""
+    identity_homography = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+    calibration = Calibration(
+        stale=False,
+        calibrated_at=0.0,
+        playfield="main-playfield",
+        homography=identity_homography,
+        matched_ids=(),
+        camera_matrix=_SYNTHETIC_CAMERA_MATRIX,
+        dist_coeffs=_SYNTHETIC_DIST_COEFFS,
+    )
+    camera_matrix_array = np.array(_SYNTHETIC_CAMERA_MATRIX, dtype=np.float64)
+    dist_coeffs_array = np.array(_SYNTHETIC_DIST_COEFFS, dtype=np.float64)
+    distorted_pixel = PixelPoint(x=500.0, y=380.0)
+    expected = geometry.undistort_point(distorted_pixel, camera_matrix_array, dist_coeffs_array)
+
+    world = calibration.to_world(distorted_pixel)
+
+    assert world.x == pytest.approx(expected.x)
+    assert world.y == pytest.approx(expected.y)
+
+
+def test_to_pixel_redistorts_after_applying_the_inverse_homography_when_intrinsics_are_set():
+    """The ``to_pixel`` half of the isolation above: with an identity
+    homography, ``to_pixel(world)`` reports exactly
+    ``geometry.distort_point``'s own output for that same point,
+    proving the redistort happens *after* the inverse homography."""
+    identity_homography = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+    calibration = Calibration(
+        stale=False,
+        calibrated_at=0.0,
+        playfield="main-playfield",
+        homography=identity_homography,
+        matched_ids=(),
+        camera_matrix=_SYNTHETIC_CAMERA_MATRIX,
+        dist_coeffs=_SYNTHETIC_DIST_COEFFS,
+    )
+    camera_matrix_array = np.array(_SYNTHETIC_CAMERA_MATRIX, dtype=np.float64)
+    dist_coeffs_array = np.array(_SYNTHETIC_DIST_COEFFS, dtype=np.float64)
+    world = WorldPoint(x=500.0, y=380.0)
+    expected = geometry.distort_point(
+        PixelPoint(x=world.x, y=world.y), camera_matrix_array, dist_coeffs_array
+    )
+
+    pixel = calibration.to_pixel(world)
+
+    assert pixel.x == pytest.approx(expected.x)
+    assert pixel.y == pytest.approx(expected.y)
+
+
+def test_to_pixel_of_to_world_round_trips_when_intrinsics_are_set():
+    """The ticket's own explicit round-trip requirement, at the
+    ``Calibration`` object level: ``to_world(to_pixel(w)) ~= w`` for a
+    nontrivial homography *and* a nontrivial lens model together."""
+    homography = ((0.2, 0.0, -60.0), (0.0, -0.2, 40.0), (0.0, 0.0, 1.0))
+    calibration = Calibration(
+        stale=False,
+        calibrated_at=0.0,
+        playfield="main-playfield",
+        homography=homography,
+        matched_ids=(1, 2, 3, 4),
+        camera_matrix=_SYNTHETIC_CAMERA_MATRIX,
+        dist_coeffs=_SYNTHETIC_DIST_COEFFS,
+    )
+
+    for wx, wy in [(-30.0, 20.0), (0.0, 0.0), (25.0, -15.0)]:
+        world = WorldPoint(x=wx, y=wy)
+        pixel = calibration.to_pixel(world)
+        recovered = calibration.to_world(pixel)
+        assert recovered.x == pytest.approx(world.x, abs=1e-3)
+        assert recovered.y == pytest.approx(world.y, abs=1e-3)
+
+
+# -- Calibrator.calibrate: undistort-before-solve + carry-forward -----------
+
+
+def test_calibrate_with_no_prior_calibration_produces_no_intrinsics():
+    """The default path (no prior ``Calibration`` for this camera slug,
+    ticket 002's ``estimate_intrinsics`` not yet landed) must still
+    produce exactly what it did before this ticket: no lens model at
+    all."""
+    definition = main_playfield_definition()
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    calibrator = _calibrator_for(definition, {"frames": [frame]})
+
+    result = calibrator.calibrate("test-camera")
+
+    assert result.succeeded is True
+    calibration = calibrator.get_calibration("test-camera")
+    assert calibration is not None
+    assert calibration.camera_matrix is None
+    assert calibration.dist_coeffs is None
+
+
+def test_calibrate_undistorts_detected_pixels_before_solving_when_intrinsics_are_known():
+    """The ticket's own homography-solve-order acceptance criterion: a
+    homography solved from a *synthetically-distorted* marker-pixel set
+    (rendered at positions produced by the independent forward
+    distortion model :func:`_forward_distort_pixel`) matches the
+    known-good homography solved directly from the *undistorted*
+    points -- once a prior ``Calibration`` carrying the matching
+    ``camera_matrix``/``dist_coeffs`` is present for this camera slug
+    (this ticket's carry-forward mechanic, exercised here against a
+    hand-constructed prior per the ticket's own testing note)."""
+    definition = main_playfield_definition()
+    distorted_frame = render_playfield_frame(
+        MAIN_PLAYFIELD_ARUCO_POSITIONS, pixel_for_world=_distorted_pixel_for_world
+    )
+    calibrator = _calibrator_for(definition, {"frames": [distorted_frame]})
+    _seed_prior_calibration(
+        calibrator,
+        "test-camera",
+        _dummy_prior_calibration(
+            camera_matrix=_SYNTHETIC_CAMERA_MATRIX, dist_coeffs=_SYNTHETIC_DIST_COEFFS
+        ),
+    )
+
+    result = calibrator.calibrate("test-camera")
+
+    assert result.succeeded is True
+    assert result.matched_ids == tuple(range(1, 11))
+    # A healthy residual -- proof the homography and the RMS were both
+    # computed from the *same* undistorted point set (v1's own earned
+    # lesson, ``archive/.../calibration.py:1342-1346``): if the RMS
+    # were instead measured against the still-distorted pixels, or the
+    # homography solved from a different point set than the RMS, this
+    # would be many cm, not a fraction of one -- the strong synthetic
+    # distortion this fixture applies (see _SYNTHETIC_DIST_COEFFS) is
+    # chosen specifically to make that failure mode loud.
+    assert result.reprojection_error_cm is not None
+    assert result.reprojection_error_cm < 1.0
+
+    calibration = calibrator.get_calibration("test-camera")
+    assert calibration is not None
+    # Carried forward, unchanged -- this ticket does not *estimate*
+    # intrinsics (ticket 002), only stores/applies/carries them.
+    assert calibration.camera_matrix == _SYNTHETIC_CAMERA_MATRIX
+    assert calibration.dist_coeffs == _SYNTHETIC_DIST_COEFFS
+
+    # The "known-good" homography, solved directly from the *ideal*
+    # (undistorted) pixel positions. Compared functionally (via
+    # to_world), not as raw matrix elements, since a homography is only
+    # defined up to an overall scale factor.
+    ideal_pixel_pts = np.array(
+        [standard_pixel_for_world(*MAIN_PLAYFIELD_ARUCO_POSITIONS[i]) for i in range(1, 11)],
+        dtype=np.float32,
+    )
+    world_pts = np.array(
+        [MAIN_PLAYFIELD_ARUCO_POSITIONS[i] for i in range(1, 11)], dtype=np.float32
+    )
+    known_good, _mask = cv.findHomography(ideal_pixel_pts, world_pts, method=0)
+    assert known_good is not None
+
+    for tag_id in range(1, 11):
+        ideal_px, ideal_py = standard_pixel_for_world(*MAIN_PLAYFIELD_ARUCO_POSITIONS[tag_id])
+        expected_world = geometry.pixel_to_world(known_good, PixelPoint(x=ideal_px, y=ideal_py))
+        distorted_px, distorted_py = _distorted_pixel_for_world(
+            *MAIN_PLAYFIELD_ARUCO_POSITIONS[tag_id]
+        )
+        actual_world = calibration.to_world(PixelPoint(x=distorted_px, y=distorted_py))
+        assert actual_world.x == pytest.approx(expected_world.x, abs=0.5)
+        assert actual_world.y == pytest.approx(expected_world.y, abs=0.5)
