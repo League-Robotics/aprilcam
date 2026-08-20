@@ -31,6 +31,9 @@ def _result(
     missing_ids: Tuple[int, ...] = (),
     reprojection_error_cm: Optional[float] = 0.125,
     reason: Optional[str] = None,
+    intrinsics_estimated: Optional[bool] = None,
+    intrinsics_mode: Optional[str] = None,
+    elevated_features_used: Optional[int] = None,
 ) -> CalibrationResult:
     return CalibrationResult(
         succeeded=succeeded,
@@ -38,6 +41,9 @@ def _result(
         missing_ids=missing_ids,
         reprojection_error_cm=reprojection_error_cm,
         reason=reason,
+        intrinsics_estimated=intrinsics_estimated,
+        intrinsics_mode=intrinsics_mode,
+        elevated_features_used=elevated_features_used,
     )
 
 
@@ -46,9 +52,11 @@ class _FakeDaemon:
     result: Optional[CalibrationResult] = None
     calibrate_raises: Optional[Exception] = None
     requested_camera: Optional[str] = None
+    requested_estimate_intrinsics: Optional[bool] = None
 
-    def calibrate(self, camera: str) -> CalibrationResult:
+    def calibrate(self, camera: str, *, estimate_intrinsics: bool = False) -> CalibrationResult:
         self.requested_camera = camera
+        self.requested_estimate_intrinsics = estimate_intrinsics
         if self.calibrate_raises is not None:
             raise self.calibrate_raises
         return self.result if self.result is not None else _result()
@@ -68,7 +76,9 @@ class _FakeDiscovery:
 
 
 def _args(**overrides) -> argparse.Namespace:
-    base = dict(daemon=None, all=False, camera="arducam-ov9782-usb-camera")
+    base = dict(
+        daemon=None, all=False, camera="arducam-ov9782-usb-camera", with_intrinsics=False
+    )
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -123,6 +133,100 @@ def test_calibrate_passes_the_daemon_flag_through_to_connect():
     calibrate_cli.cmd_calibrate(_args(daemon="pi-field.local"), discovery_factory=lambda: discovery)
 
     assert discovery.connected_with == "pi-field.local"
+
+
+# ---------------------------------------------------------------------------
+# Intrinsics reporting (sprint 030 ticket 002)
+# ---------------------------------------------------------------------------
+
+
+def test_calibrate_success_reports_intrinsics_estimated_this_call_and_its_mode(capsys):
+    daemon = _FakeDaemon(
+        result=_result(
+            intrinsics_estimated=True, intrinsics_mode="coplanar-constrained", elevated_features_used=0
+        )
+    )
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = calibrate_cli.cmd_calibrate(
+        _args(with_intrinsics=True), discovery_factory=lambda: discovery
+    )
+
+    assert code == 0
+    assert daemon.requested_estimate_intrinsics is True
+    out = capsys.readouterr().out
+    assert "intrinsics estimated this call" in out
+    assert "coplanar-constrained" in out
+
+
+def test_calibrate_success_reports_elevated_feature_count_when_present(capsys):
+    daemon = _FakeDaemon(
+        result=_result(intrinsics_estimated=True, intrinsics_mode="elevated", elevated_features_used=3)
+    )
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    calibrate_cli.cmd_calibrate(_args(with_intrinsics=True), discovery_factory=lambda: discovery)
+
+    out = capsys.readouterr().out
+    assert "elevated" in out
+    assert "3" in out
+
+
+def test_calibrate_success_without_the_flag_reports_carried_forward_unchanged(capsys):
+    """``intrinsics_estimated=False`` (a plain, no-flag recalibration)
+    prints that any previously-stored lens model was carried forward
+    unchanged -- true whether or not one actually existed."""
+    daemon = _FakeDaemon(result=_result(intrinsics_estimated=False))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = calibrate_cli.cmd_calibrate(_args(), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "carried forward unchanged" in out
+
+
+def test_calibrate_success_reports_no_intrinsics_note_when_not_applicable(capsys):
+    """``intrinsics_estimated=None`` (the concept did not apply to this
+    call) prints neither the "estimated" nor the "carried forward"
+    note."""
+    daemon = _FakeDaemon(result=_result(intrinsics_estimated=None))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    calibrate_cli.cmd_calibrate(_args(), discovery_factory=lambda: discovery)
+
+    out = capsys.readouterr().out
+    assert "intrinsics" not in out
+
+
+def test_calibrate_success_with_four_or_fewer_matched_ids_prints_the_dof_caveat(capsys):
+    daemon = _FakeDaemon(result=_result(matched_ids=(1, 2, 3, 4)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = calibrate_cli.cmd_calibrate(_args(), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "degrees-of-freedom-limited" in err
+    assert "reprojection_error_cm" in err
+
+
+def test_calibrate_success_with_more_than_four_matched_ids_omits_the_dof_caveat(capsys):
+    daemon = _FakeDaemon(result=_result(matched_ids=tuple(range(1, 11))))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    calibrate_cli.cmd_calibrate(_args(), discovery_factory=lambda: discovery)
+
+    err = capsys.readouterr().err
+    assert "degrees-of-freedom-limited" not in err
+
+
+def test_calibrate_with_intrinsics_wired_into_help_text(capsys):
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["camera", "calibrate", "-h"])
+    out = capsys.readouterr().out
+    assert "--with-intrinsics" in out
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +315,33 @@ def test_calibrate_is_wired_under_camera_as_cmd_calibrate():
     assert args.camera == "arducam-ov9782-usb-camera"
     assert args.all is False
     assert args.daemon is None
+    assert args.with_intrinsics is False
+
+
+def test_calibrate_with_intrinsics_flag_parses_true_and_reaches_the_daemon_call():
+    """Sprint 030 ticket 002: ``--with-intrinsics`` threads through to
+    ``Daemon.calibrate``'s ``estimate_intrinsics`` keyword."""
+    parser = _build_parser()
+    args = parser.parse_args(
+        ["camera", "calibrate", "arducam-ov9782-usb-camera", "--with-intrinsics"]
+    )
+    assert args.with_intrinsics is True
+
+    daemon = _FakeDaemon()
+    discovery = _FakeDiscovery(daemon=daemon)
+    code = calibrate_cli.cmd_calibrate(args, discovery_factory=lambda: discovery)
+
+    assert code == 0
+    assert daemon.requested_estimate_intrinsics is True
+
+
+def test_calibrate_without_the_flag_passes_estimate_intrinsics_false():
+    daemon = _FakeDaemon()
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    calibrate_cli.cmd_calibrate(_args(), discovery_factory=lambda: discovery)
+
+    assert daemon.requested_estimate_intrinsics is False
 
 
 def test_calibrate_requires_a_camera_positional_argument():

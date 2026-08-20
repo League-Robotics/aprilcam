@@ -206,6 +206,24 @@ class Feature:
     """``april_tag``, ``aruco_tag``, ``rectangle``, or ``dot``."""
     position: WorldPoint
     colour: Optional[str] = None
+    height_cm: float = 0.0
+    """How far this feature sits above the field plane, in cm (sprint
+    030 ticket 002) -- the same vocabulary ``CameraPosition.height_cm``
+    and ``camera locate``'s ``HEIGHT_CM`` already use. ``0.0`` (the
+    default) means "on the field plane," true for every feature ever
+    surveyed before this ticket and for the ``rectangle``/``dot`` kinds
+    today. A declared field, never a ``@property`` (CLAUDE.md's
+    frozen-dataclass rule).
+
+    Calibration ground truth only: ``Calibrator`` (``calibration/
+    calibration.py``) uses a nonzero value on an ``april_tag``/
+    ``aruco_tag`` feature to build a real 3D object point
+    ``(x, y, height_cm)`` for intrinsics estimation, and to *exclude*
+    that feature from the homography solve, which only ever maps the
+    *field plane* (``height_cm == 0``) to pixels -- see that module's
+    docstring for why feeding an elevated point into the homography
+    solve would corrupt it exactly the way unmodelled parallax does.
+    """
 
 
 class ConfigLoader:

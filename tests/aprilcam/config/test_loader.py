@@ -537,6 +537,138 @@ def test_playfield_feature_entry_is_frozen_and_kw_only():
 
 
 # ---------------------------------------------------------------------------
+# Feature.height_cm / PlayfieldFeatureEntry.height_cm (sprint 030 ticket
+# 002) -- schema acceptance criteria: declared field, defaults to 0.0,
+# absent JSON key round-trips identically to every playfield on disk
+# today, negative values rejected.
+# ---------------------------------------------------------------------------
+
+
+def test_playfield_feature_entry_height_cm_defaults_to_zero():
+    entry = PlayfieldFeatureEntry(slug="s", x=1.0, y=2.0, tag_id=3)
+    assert entry.height_cm == 0.0
+
+
+def test_feature_height_cm_defaults_to_zero():
+    from aprilcam.config.interfaces import Feature
+    from aprilcam.types import WorldPoint as WP
+
+    feature = Feature(slug="s", kind="aruco_tag", position=WP(x=0.0, y=0.0))
+    assert feature.height_cm == 0.0
+
+
+def test_main_playfield_every_feature_has_height_cm_zero(loader):
+    """AC3 (schema): every playfield file on disk today (no ``height_cm``
+    keys at all) loads and behaves identically -- every feature's
+    ``height_cm`` is the default ``0.0``."""
+    definition = loader.load_playfield(MAIN_PLAYFIELD_PATH)
+    for feature in definition.features():
+        assert feature.height_cm == 0.0
+    for entry in definition.aruco_tags + definition.april_tags:
+        assert entry.height_cm == 0.0
+
+
+def test_aruco_tag_entry_with_height_cm_key_parses_the_value(loader, tmp_path):
+    doc = _minimal_playfield_doc(
+        aruco_tags=[
+            {"slug": "u1", "id": 1, "x": -40, "y": 30, "height_cm": 12.5},
+            {"slug": "u2", "id": 2, "x": 40, "y": -30},
+        ]
+    )
+    path = _write(tmp_path, "elevated.json", doc)
+
+    definition = loader.load_playfield(path)
+
+    by_slug = {e.slug: e for e in definition.aruco_tags}
+    assert by_slug["u1"].height_cm == 12.5
+    assert by_slug["u2"].height_cm == 0.0  # absent key -> default
+
+    feature_by_slug = {f.slug: f for f in definition.features()}
+    assert feature_by_slug["u1"].height_cm == 12.5
+
+
+def test_april_tag_entry_with_height_cm_key_parses_the_value(loader, tmp_path):
+    doc = _minimal_playfield_doc(
+        april_tags=[{"slug": "a1", "id": 1, "x": 0, "y": 0, "height_cm": 20.0}]
+    )
+    path = _write(tmp_path, "elevated-april.json", doc)
+
+    definition = loader.load_playfield(path)
+
+    assert definition.april_tags[0].height_cm == 20.0
+
+
+def test_playfield_round_trip_holds_for_an_entry_with_height_cm(loader, tmp_path):
+    """AC3: ``load(x.to_dict()) == x`` holds whether or not ``height_cm``
+    is present in the source JSON."""
+    doc = _minimal_playfield_doc(
+        aruco_tags=[
+            {"slug": "u1", "id": 1, "x": -40, "y": 30, "height_cm": 15.0},
+            {"slug": "u2", "id": 2, "x": 40, "y": -30},
+        ]
+    )
+    path = _write(tmp_path, "elevated-roundtrip.json", doc)
+    definition = loader.load_playfield(path)
+
+    dumped_path = tmp_path / "dumped-elevated.json"
+    dumped_path.write_text(json.dumps(definition.to_dict()), encoding="utf-8")
+    reloaded = loader.load_playfield(dumped_path)
+
+    assert reloaded == definition
+    assert reloaded.features() == definition.features()
+
+
+def test_playfield_round_trip_holds_for_an_entry_without_height_cm(loader, tmp_path):
+    """The counterpart case: no entry declares ``height_cm`` at all
+    (every playfield on disk today) -- the round trip holds identically
+    to before this ticket."""
+    path = _write(tmp_path, "coplanar-roundtrip.json", _minimal_playfield_doc())
+    definition = loader.load_playfield(path)
+
+    dumped_path = tmp_path / "dumped-coplanar.json"
+    dumped_path.write_text(json.dumps(definition.to_dict()), encoding="utf-8")
+    reloaded = loader.load_playfield(dumped_path)
+
+    assert reloaded == definition
+    assert "height_cm" not in json.loads(dumped_path.read_text())["aruco_tags"][0]
+
+
+def test_playfield_feature_negative_height_cm_is_rejected(loader, tmp_path):
+    doc = _minimal_playfield_doc(
+        aruco_tags=[{"slug": "u1", "id": 1, "x": -40, "y": 30, "height_cm": -5.0}]
+    )
+    path = _write(tmp_path, "negative-height.json", doc)
+
+    with pytest.raises(MalformedDocument, match="height_cm"):
+        loader.load_playfield(path)
+
+
+def test_playfield_feature_invalid_height_cm_type_is_rejected(loader, tmp_path):
+    doc = _minimal_playfield_doc(
+        aruco_tags=[{"slug": "u1", "id": 1, "x": -40, "y": 30, "height_cm": "not-a-number"}]
+    )
+    path = _write(tmp_path, "bad-height-type.json", doc)
+
+    with pytest.raises(MalformedDocument, match="height_cm"):
+        loader.load_playfield(path)
+
+
+def test_to_dict_omits_height_cm_when_zero_includes_when_nonzero():
+    zero = PlayfieldFeatureEntry(slug="u1", x=1.0, y=2.0, tag_id=1)
+    elevated = PlayfieldFeatureEntry(slug="u2", x=3.0, y=4.0, tag_id=2, height_cm=8.0)
+    from aprilcam.config.loader import PlayfieldDefinition as ConcretePlayfieldDefinition
+
+    definition = ConcretePlayfieldDefinition(
+        name="t", width_cm=100.0, height_cm=100.0, aruco_tags=(zero, elevated)
+    )
+
+    data = definition.to_dict()
+
+    assert "height_cm" not in data["aruco_tags"][0]
+    assert data["aruco_tags"][1]["height_cm"] == 8.0
+
+
+# ---------------------------------------------------------------------------
 # ConfigLoader.load_config_dir -- directory scan (ticket 023-003)
 # ---------------------------------------------------------------------------
 

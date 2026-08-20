@@ -136,7 +136,9 @@ def _tag_id_to_proto(tag: TagId) -> aprilcam_v2_pb2.TagId:
 
 
 def _playfield_feature_entry_to_proto(entry) -> aprilcam_v2_pb2.PlayfieldFeatureEntry:
-    msg = aprilcam_v2_pb2.PlayfieldFeatureEntry(slug=entry.slug, x=entry.x, y=entry.y)
+    msg = aprilcam_v2_pb2.PlayfieldFeatureEntry(
+        slug=entry.slug, x=entry.x, y=entry.y, height_cm=entry.height_cm
+    )
     if entry.tag_id is not None:
         msg.id = entry.tag_id
     if entry.colour is not None:
@@ -495,8 +497,10 @@ class GrpcDaemon(Daemon):
         response = self._call(self._stub.GetCameraConfig, request)
         return camera_config_from_proto(response.config)
 
-    def calibrate(self, camera: str) -> CalibrationResult:
-        request = aprilcam_v2_pb2.CalibrateRequest(camera=camera)
+    def calibrate(self, camera: str, *, estimate_intrinsics: bool = False) -> CalibrationResult:
+        request = aprilcam_v2_pb2.CalibrateRequest(
+            camera=camera, estimate_intrinsics=estimate_intrinsics
+        )
         response = self._call(self._stub.Calibrate, request)
         return calibration_result_from_proto(response.result)
 
