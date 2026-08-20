@@ -21,11 +21,22 @@ from unittest.mock import patch
 
 import pytest
 
-from aprilcam.camera.backends.uvc_util import UvcUtilBackend
+from aprilcam.camera.backends.uvc_util import _MAX_SET_ATTEMPTS, UvcUtilBackend
 
 
 def _completed(*, returncode: int = 0, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleep(monkeypatch):
+    """Ticket 030-005 (reopened): ``set_property`` now retries a raw CLI
+    rejection with a brief backoff (``time.sleep``). This module is
+    otherwise fully headless/instant (``subprocess.run`` mocked
+    throughout, per the module's own stated convention) -- keep it that
+    way rather than paying real wall-clock time whenever a test
+    deliberately exercises the retry path."""
+    monkeypatch.setattr("aprilcam.camera.backends.uvc_util.time.sleep", lambda seconds: None)
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +265,70 @@ def test_set_property_subprocess_timeout_returns_false():
         side_effect=subprocess.TimeoutExpired(cmd="uvc-util", timeout=5.0),
     ):
         assert backend.set_property("gain", 5) is False
+
+
+# ---------------------------------------------------------------------------
+# set_property retry -- ticket 030-005 (reopened). A raw ``-s`` rejection
+# (nonzero exit) is retried, bounded; a readback mismatch after an
+# *accepted* write is not -- see the module docstring's "Bounded retry"
+# section for why that split is deliberate.
+# ---------------------------------------------------------------------------
+
+
+def test_set_property_retries_a_raw_cli_rejection_and_succeeds():
+    """Real-hardware reproductions of the actual bug this ticket
+    investigates (``uvc-util -s ... exited 13``) succeeded on an
+    immediate next attempt every time it was observed live -- this pins
+    that exact recovery path headlessly."""
+    backend = UvcUtilBackend("cam", binary="/bin/uvc-util")
+    original = _completed(stdout="exposure-time-abs {\n  current-value: 157\n}\n")
+    rejected = _completed(returncode=13, stderr="unable to write new value")
+    accepted = _completed()
+    readback = _completed(stdout="exposure-time-abs {\n  current-value: 6\n}\n")
+    with patch(
+        "aprilcam.camera.backends.uvc_util.subprocess.run",
+        side_effect=[original, rejected, accepted, readback],
+    ) as run:
+        ok = backend.set_property("exposure", 6)
+    assert ok is True
+    # snapshot, rejected attempt, accepted attempt, readback -- one retry.
+    assert run.call_count == 4
+
+
+def test_set_property_gives_up_after_max_attempts_on_persistent_raw_rejection():
+    """A control that is never going to accept this write (every raw
+    attempt rejected) still fails, bounded -- exactly
+    ``_MAX_SET_ATTEMPTS`` raw attempts, never an unbounded spin, and no
+    readback call is ever reached since the raw write never succeeded."""
+    backend = UvcUtilBackend("cam", binary="/bin/uvc-util")
+    original = _completed(stdout="exposure-time-abs {\n  current-value: 157\n}\n")
+    rejected = _completed(returncode=13, stderr="unable to write new value")
+    with patch(
+        "aprilcam.camera.backends.uvc_util.subprocess.run",
+        side_effect=[original] + [rejected] * _MAX_SET_ATTEMPTS,
+    ) as run:
+        ok = backend.set_property("exposure", 6)
+    assert ok is False
+    assert run.call_count == 1 + _MAX_SET_ATTEMPTS  # snapshot + every raw attempt, no more
+
+
+def test_set_property_does_not_retry_an_accepted_write_that_reads_back_wrong():
+    """The mismatch-repair path (a write the CLI *accepted* but that
+    then reads back wrong, e.g. a silently clamped out-of-range value)
+    is a different, non-transient failure mode and must not be retried
+    -- exactly 4 calls (snapshot, accepted ``-s``, readback, repair),
+    never more, even though ``set_property`` now has retry logic for
+    the raw-rejection path."""
+    backend = UvcUtilBackend("cam", binary="/bin/uvc-util")
+    original = _completed(stdout="exposure-time-abs {\n  current-value: 6\n}\n")
+    clamped_readback = _completed(stdout="exposure-time-abs {\n  current-value: 5000\n}\n")
+    with patch(
+        "aprilcam.camera.backends.uvc_util.subprocess.run",
+        side_effect=[original, _completed(), clamped_readback, _completed()],
+    ) as run:
+        ok = backend.set_property("exposure", 99999)
+    assert ok is False
+    assert run.call_count == 4
 
 
 # ---------------------------------------------------------------------------
