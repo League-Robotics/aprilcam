@@ -1190,9 +1190,51 @@ error at only a 15-17 cm mount height. `camera locate` solved nadir
 that geometry brings both readings to within ~0.2 cm of their surveyed
 ground truth. The 128.230 cm solved height is **not** the physical
 sensor plane (measured separately at 127 cm) — it is the effective
-optical centre the pinhole model needs, most plausibly absorbing
-unmodelled lens distortion (v2 calibration stores only the homography,
-no intrinsics); no tape measure yields it, only a solve does.
+optical centre the pinhole model needs. Sprint 029's own sprint.md named
+unmodelled lens distortion as the most plausible explanation and
+chartered sprint 030 to re-verify it once a distortion model existed;
+see the next paragraph for what that re-verification actually found.
+
+**Sprint 030 ticket 003 re-verification (2026-08-20), against the real
+camera, with a distortion model now available (tickets 001/002).**
+**Falsifiable check 2 (optical height) stayed blocked**: the elevated
+reference stands for tags 14/15 are still removed (the same precedent
+029-004 hit), and a fresh `--dry-run` reproduced the documented "not
+detected" refusal rather than a stale success — so the solved height
+could not be re-run or re-measured. The `camera_position` above is
+also now of **uncertain provenance for an unrelated reason**: the
+camera was physically re-aimed between sprint 029 and this ticket, to
+recover main-playfield visibility lost to an environmental fault
+(`clasi/issues/camera-marked-tests-failing-en-masse-suspected-v1-daemon-contention.md`).
+Ground nadir/height are properties of the camera's fixed mounting
+point, not its pointing direction, so they survive a pure pan/tilt
+re-aim but not a physical relocation; the lens is wide enough
+(fx/width ≈ 0.4-0.5, roughly 90-100° horizontal FOV) to see the whole
+field from one fixed point without much tilt, which favours "re-aimed
+in place" over "relocated," but this is inference, not a
+re-measurement — treat the value above as unverified until a fresh
+`camera locate` run confirms or updates it.
+
+**Falsifiable check 1 (radial consistency), adapted to this camera**
+(the original seven 46.5mm AprilTags live on a different camera/
+playfield that cannot currently get its own intrinsics fit — see the
+knowledge-base entry below): main-playfield's own ten identically-sized
+surveyed ArUco markers stand in. Across six repeated live bursts, the
+correlation between each marker's apparent world size and its pixel
+radius² ranged -0.52 to +0.40 (mean magnitude ≈ 0.15) — whether or not
+the fitted lens model was applied, and never reaching the n=10
+significance threshold (≈0.63) — nowhere near the documented -0.96.
+That is evidence against a large real distortion hiding behind the
+sanity bound's small `k1`. It is not, however, evidence that the
+stored `k1` is a precisely known constant: the same repeated bursts
+show the fitted `fx`/`k1` pair itself swings noticeably run to run
+(`fx` roughly 504-661px, `k1` roughly 0.0069-0.0135) while the held-out
+reprojection residual stays flat (~2.7-3.2px) throughout — the same
+fx/depth ridge ticket 002's own investigation found for a near-nadir
+single coplanar view, softened by this camera's post-re-aim tilt but
+not eliminated. Full methodology, numbers, and the contention/exposure
+story behind why this took two tries:
+`docs/knowledge/2026-08-20-camera-3-distortion-reverification.md`.
 
 **Failure modes.**
 - Fewer than 2 `--reference` args → refused before any connection is
