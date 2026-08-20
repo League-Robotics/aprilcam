@@ -160,3 +160,23 @@ class ControlBackend:
     def settable_names(self) -> Set[str]:
         """Setting names this backend can attempt."""
         raise NotImplementedError(f"{type(self).__name__} does not implement ControlBackend.settable_names")
+
+    def describe_set_failure(self, name: str, value: float) -> Optional[str]:
+        """Best-effort, human-readable reason the most recent
+        ``set_property(name, value)`` returned ``False`` (ticket
+        030-005) -- e.g. "300 is outside exposure-time-abs's supported
+        range 1..100" or "auto_exposure is currently 8, not the manual
+        value 1". ``Camera.apply_config`` folds a non-``None`` result
+        straight into ``UnsupportedSetting.reason``.
+
+        Unlike this class's other three methods, this one has a
+        sensible default (``None``, meaning "nothing more specific
+        available") rather than ``NotImplementedError`` -- it is a
+        best-effort diagnostic add-on, not part of the core get/set
+        contract every backend must honour. ``Camera.apply_config``
+        resolves it with ``getattr(backend, "describe_set_failure",
+        None)``, the same duck-typed pattern already used for
+        ``get_property``/``set_property`` so that ``OpenCVBackend``
+        (which does not derive from this class -- see the module
+        docstring) is called identically to a real subclass."""
+        return None

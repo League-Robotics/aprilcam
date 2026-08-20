@@ -121,6 +121,20 @@ MAX_REOPENS = 10
 #: auto-white-balance off before WB temperature").
 _GATE_KEYS = ("auto_exposure", "auto_white_balance")
 
+#: The inverse relationship, key -> the gate that must be manual before
+#: *key* can be expected to stick -- diagnostic-only (ticket 030-005).
+#: Never used to block, reorder, or validate a push -- ``_GATE_KEYS``/
+#: ``ordered`` above already handle ordering unconditionally regardless
+#: of this map. Feeds :meth:`Camera._describe_set_failure`'s fallback
+#: when a backend has no ``describe_set_failure`` of its own (e.g. a
+#: bare ``FakeBackend``/``OpenCVBackend``) and can only report "the gate
+#: this key needs was not part of this push" from the config's own
+#: shape, not a live hardware readback.
+_GATED_BY = {
+    "exposure": "auto_exposure",
+    "white_balance_temperature": "auto_white_balance",
+}
+
 #: Keys that are a capture property, not a UVC control (ticket 023-002).
 #: Always routed through *backend* (the primary capture backend) for
 #: get/set, never through *control_backend* -- see the module docstring's
@@ -432,7 +446,7 @@ class Camera(_CameraBase):
         settable = self._settable_names()
         for key in config.settings:
             if key not in settable:
-                raise UnsupportedSetting(key)
+                raise UnsupportedSetting(key, reason="not a setting this camera's backend(s) expose")
 
         # Resolve each key's get/set pair up front. A key whose backend
         # exposes no settings surface at all (e.g. v4l2 loopback -- the
@@ -441,17 +455,19 @@ class Camera(_CameraBase):
         # per-camera -- unchanged in effect from the prior whole-backend
         # check for every case this codebase actually exercises, since a
         # key can only be in *settable* if its own backend advertised it.
-        accessors: Dict[str, Tuple[Any, Any]] = {}
+        accessors: Dict[str, Tuple[Any, Any, Any]] = {}
         for key in config.settings:
             backend = self._backend_for_key(key)
             get_property = getattr(backend, "get_property", None)
             set_property = getattr(backend, "set_property", None)
             if get_property is None or set_property is None:
-                raise UnsupportedSetting(key)
-            accessors[key] = (get_property, set_property)
+                raise UnsupportedSetting(
+                    key, reason="this camera's backend exposes no settings control surface"
+                )
+            accessors[key] = (backend, get_property, set_property)
 
         previous: Dict[str, float] = {}
-        for key, (get_property, _set_property) in accessors.items():
+        for key, (_backend, get_property, _set_property) in accessors.items():
             value = get_property(key)
             if value is not None:
                 previous[key] = value
@@ -464,17 +480,49 @@ class Camera(_CameraBase):
             value = config.settings[key]
             if value is None:
                 continue  # blank -- nothing to push for this key
-            _get_property, set_property = accessors[key]
+            backend, _get_property, set_property = accessors[key]
             if not set_property(key, float(value)):
                 # Whole push fails; undo everything already applied
                 # this call, each key through its own backend, so the
                 # camera is left exactly as it was (interfaces.py's
                 # Camera.apply_config contract).
                 for applied_key in applied:
-                    _, applied_set_property = accessors[applied_key]
+                    _, _, applied_set_property = accessors[applied_key]
                     applied_set_property(applied_key, previous.get(applied_key, 0.0))
-                raise UnsupportedSetting(key)
+                raise UnsupportedSetting(key, reason=self._describe_set_failure(key, value, backend))
             applied.append(key)
+
+    def _describe_set_failure(self, key: str, value: float, backend: Any) -> Optional[str]:
+        """Best-effort real cause behind ``set_property(key, value)``
+        just returning ``False`` (ticket 030-005's investigation into
+        ``UnsupportedSetting``'s previously-generic message).
+
+        Prefers *backend*'s own :meth:`~camera.backends.ControlBackend.
+        describe_set_failure` -- e.g. ``UvcUtilBackend``'s live
+        readback of the control's hardware-advertised range and any
+        gate control's current value, the most direct evidence
+        available. Falls back to a config-shape-only check this class
+        can make with no backend cooperation at all: whether *key* is
+        one this codebase knows is gated by another key (:data:`
+        _GATED_BY`) that this same push never included -- the one
+        cause a bare ``FakeBackend``/``OpenCVBackend`` (no hardware
+        readback) can still be right about. Returns ``None`` (today's
+        plain ``UnsupportedSetting`` message, unchanged) only when
+        neither source has anything more specific to add.
+        """
+        describe = getattr(backend, "describe_set_failure", None)
+        if describe is not None:
+            reason = describe(key, value)
+            if reason is not None:
+                return reason
+        gate = _GATED_BY.get(key)
+        if gate is not None:
+            return (
+                f"gate control {gate!r} was not part of this push -- if the "
+                f"camera is currently in an automatic mode, {key!r} cannot "
+                f"be written until {gate!r} is pushed to a manual value first"
+            )
+        return None
 
     def _settings_backend(self) -> Any:
         """The backend ordinary (non-resolution) settings are read and
