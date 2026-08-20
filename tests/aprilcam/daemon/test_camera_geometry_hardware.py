@@ -66,6 +66,37 @@ Helper functions are duplicated locally rather than imported from
 ``test_mobile_tags_hardware.py``, matching every other
 ``@pytest.mark.camera`` module's own stated precedent of defining its
 own copy.
+
+**Ticket 030-005: a third guard, and a deliberate non-isolation
+decision for the locate-reproduction test.**
+``test_locate_reports_missing_references_or_reproduces_the_documented_fixture``
+originally guarded two of its three real preconditions -- camera
+attached, reference tags present -- and fell through to a hard
+``no local daemon answered`` failure when nothing was listening on the
+local control socket, instead of skipping like the other two gaps. It
+now also calls ``_skip_if_no_local_daemon_reachable()``, an in-process
+probe of the same shape as ``_skip_if_arducam_not_attached``.
+
+Unlike ``test_mount_z_is_a_noop_until_camera_position_is_pushed_then_engages_with_no_restart``
+below (which stands up its own isolated, self-cleaning daemon on a temp
+``socket_dir`` via the ``cli_env`` fixture's ``_short_tmp_dir``
+machinery), the locate-reproduction test deliberately does **not** get
+that treatment. Its entire purpose is reproducing the documented
+fixture against the *real* production daemon's real, currently-held
+``camera_position``/calibration state (``REAL_NADIR_X_CM`` etc., sourced
+from what ``camera locate`` actually wrote to
+``~/.config/aprilcam/cameras/arducam-ov9782-usb-camera/config.json`` --
+see above). An isolated daemon on a fresh temp ``socket_dir`` would
+start with none of that state, so it could only ever hit this test's
+"references not staged" skip path, never the real reproduction path
+that recovers ``nadir``/``height``/``rms_residual_cm`` and checks them
+against the documented tolerance. Self-containment here would trade a
+real (if currently mostly-skipped) hardware check for a permanently
+vacuous one -- the wrong trade for a test whose whole point is trusting
+the production daemon's own state. This test therefore still requires a
+real local daemon to already be running (read-only, ``--dry-run``,
+never writes) -- the new guard makes that requirement skip cleanly
+instead of failing hard when unmet, it does not remove it.
 """
 
 from __future__ import annotations
@@ -85,7 +116,9 @@ from typing import Dict, Optional, Tuple
 import pytest
 
 from aprilcam.camera.identity import resolve_all
+from aprilcam.client.discovery import probe_socket_reachable
 from aprilcam.config.directories import Directories
+from aprilcam.daemon.lifecycle import SOCKET_FILENAME
 
 pytestmark = pytest.mark.camera
 
@@ -115,6 +148,28 @@ def _skip_if_arducam_not_attached() -> None:
             f"{ARDUCAM_SLUG!r} not attached to this machine -- this "
             "module's acceptance criteria are checked against that "
             "camera aimed at main-playfield (sprint 029 ticket 004)"
+        )
+
+
+def _skip_if_no_local_daemon_reachable() -> None:
+    """Third guard, same shape as :func:`_skip_if_arducam_not_attached`
+    -- an in-process, sub-second probe of the well-known local control
+    socket (:data:`~aprilcam.daemon.lifecycle.SOCKET_FILENAME` under
+    ``Directories().socket_dir``), not a subprocess round trip. ``camera
+    locate`` drives detection through the daemon's ``GetTag`` RPC (the
+    daemon is the sole vision authority), so with no local daemon
+    reachable the CLI would exit before it can ever reach the "not
+    detected" path the other guard depends on -- the bug this guard
+    exists to fix (issue: ``no local daemon answered`` surfacing as a
+    hard ``assert 1 == 0`` instead of a clean skip)."""
+    directories = Directories()
+    socket_path = directories.socket_dir / SOCKET_FILENAME
+    if not probe_socket_reachable(socket_path):
+        pytest.skip(
+            f"no local aprilcam daemon reachable at {socket_path} -- "
+            "this test drives `camera locate` through the daemon's "
+            "GetTag RPC and needs a real daemon already running "
+            "(`aprilcam daemon start`)"
         )
 
 
@@ -211,6 +266,12 @@ def test_locate_reports_missing_references_or_reproduces_the_documented_fixture(
     sandbox -- this is read-only and ``--dry-run``, so it is safe to
     point at real state).
 
+    If no local daemon is reachable at all, this test skips cleanly
+    (``_skip_if_no_local_daemon_reachable``, ticket 030-005) rather than
+    failing hard on ``camera locate``'s own ``no local daemon answered``
+    -- see the module docstring's "deliberate non-isolation decision"
+    for why this test does not stand up its own isolated daemon instead.
+
     If tags 14/15 are not physically staged (the expected, current
     state -- the stakeholder removed the stands), ``camera locate``
     itself reports "not detected" and this test skips cleanly, recording
@@ -219,6 +280,7 @@ def test_locate_reports_missing_references_or_reproduces_the_documented_fixture(
     reproduction against the documented tolerance below.
     """
     _skip_if_arducam_not_attached()
+    _skip_if_no_local_daemon_reachable()
     bin_path = _aprilcam_bin()
     env = dict(os.environ)  # the real, already-running production daemon
 

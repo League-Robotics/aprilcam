@@ -254,3 +254,96 @@ def test_set_property_subprocess_timeout_returns_false():
         side_effect=subprocess.TimeoutExpired(cmd="uvc-util", timeout=5.0),
     ):
         assert backend.set_property("gain", 5) is False
+
+
+# ---------------------------------------------------------------------------
+# describe_set_failure -- ticket 030-005's real-cause diagnostic. Real
+# hardware investigation (both this project's real cameras) ruled out
+# all four candidates the issue named for the actual reported failure
+# (test-fixture gap, gate-value semantics, out-of-range value, control
+# genuinely absent) and found it did not reproduce on repeated identical
+# live attempts -- consistent with a transient hardware/driver
+# condition. These tests pin the two causes this method *can* determine
+# from live hardware (out of range; gate control not actually manual)
+# plus its honest fallback when neither applies, headlessly (subprocess
+# mocked throughout, matching this module's own stated convention).
+# ---------------------------------------------------------------------------
+
+
+def test_describe_set_failure_unknown_control_returns_none_without_invoking_subprocess():
+    backend = UvcUtilBackend("cam", binary="/bin/uvc-util")
+    with patch("aprilcam.camera.backends.uvc_util.subprocess.run") as run:
+        assert backend.describe_set_failure("not_a_real_key", 1) is None
+    run.assert_not_called()
+
+
+def test_describe_set_failure_reports_out_of_range_value():
+    backend = UvcUtilBackend("cam", binary="/bin/uvc-util")
+    range_stdout = (
+        "exposure-time-abs {\n"
+        "  minimum: 1\n"
+        "  maximum: 10000\n"
+        "  current-value: 300\n"
+        "}\n"
+    )
+    with patch(
+        "aprilcam.camera.backends.uvc_util.subprocess.run",
+        return_value=_completed(stdout=range_stdout),
+    ) as run:
+        reason = backend.describe_set_failure("exposure", 999999)
+    assert reason is not None
+    assert "999999" in reason
+    assert "1..10000" in reason
+    run.assert_called_once()  # short-circuits before the gate check
+
+
+def test_describe_set_failure_reports_gate_control_not_manual():
+    backend = UvcUtilBackend("cam", binary="/bin/uvc-util")
+    range_stdout = (
+        "exposure-time-abs {\n  minimum: 1\n  maximum: 10000\n  current-value: 300\n}\n"
+    )
+    gate_stdout = "auto-exposure-mode {\n  current-value: 8\n}\n"
+    with patch(
+        "aprilcam.camera.backends.uvc_util.subprocess.run",
+        side_effect=[_completed(stdout=range_stdout), _completed(stdout=gate_stdout)],
+    ) as run:
+        reason = backend.describe_set_failure("exposure", 300)
+    assert reason is not None
+    assert "auto_exposure" in reason
+    assert "8" in reason
+    assert run.call_count == 2
+
+
+def test_describe_set_failure_falls_back_to_transient_when_range_and_gate_are_both_fine():
+    """The exact shape of ticket 030-005's own real finding: the value
+    is in range and the gate control already reads back as manual, so
+    neither determinable cause applies -- the method says so honestly
+    rather than inventing a category or silently returning ``None``."""
+    backend = UvcUtilBackend("cam", binary="/bin/uvc-util")
+    range_stdout = (
+        "exposure-time-abs {\n  minimum: 1\n  maximum: 10000\n  current-value: 300\n}\n"
+    )
+    gate_stdout = "auto-exposure-mode {\n  current-value: 1\n}\n"
+    with patch(
+        "aprilcam.camera.backends.uvc_util.subprocess.run",
+        side_effect=[_completed(stdout=range_stdout), _completed(stdout=gate_stdout)],
+    ):
+        reason = backend.describe_set_failure("exposure", 300)
+    assert reason is not None
+    assert "transient" in reason
+    assert "range" in reason
+
+
+def test_describe_set_failure_ungated_control_in_range_skips_the_gate_check():
+    """``gain`` has no gate in ``_GATE_FOR`` -- only the range call
+    should ever be made."""
+    backend = UvcUtilBackend("cam", binary="/bin/uvc-util")
+    range_stdout = "gain {\n  minimum: 0\n  maximum: 255\n  current-value: 10\n}\n"
+    with patch(
+        "aprilcam.camera.backends.uvc_util.subprocess.run",
+        return_value=_completed(stdout=range_stdout),
+    ) as run:
+        reason = backend.describe_set_failure("gain", 10)
+    assert reason is not None
+    assert "transient" in reason
+    run.assert_called_once()

@@ -661,6 +661,10 @@ def test_apply_config_unknown_key_raises_unsupported_setting():
     with pytest.raises(UnsupportedSetting) as exc_info:
         cam.apply_config(cfg)
     assert exc_info.value.key == "not_a_real_key"
+    # ticket 030-005: an unknown key names its own cause -- distinct
+    # from a *known* key that a live write rejected.
+    assert exc_info.value.reason is not None
+    assert "unsupported or rejected setting: 'not_a_real_key'" in str(exc_info.value)
 
 
 def test_apply_config_applies_gate_keys_before_dependents():
@@ -712,6 +716,47 @@ def test_apply_config_rolls_back_on_mid_push_failure():
     with pytest.raises(UnsupportedSetting):
         cam.apply_config(cfg)
     assert backend.get_property("gain") == 5.0  # rolled back
+
+
+def test_apply_config_gated_key_failure_names_the_missing_gate_when_backend_has_no_diagnostic(
+) -> None:
+    """Ticket 030-005: ``FakeBackend`` has no ``describe_set_failure``
+    (a bare ``CaptureBackend``-shaped double, like ``OpenCVBackend``),
+    so ``Camera._describe_set_failure`` falls back to its own
+    config-shape check -- ``exposure`` is gated by ``auto_exposure``
+    (``_GATED_BY``) and this push never includes it, exactly the
+    real-world "test never sets auto_exposure" candidate the ticket's
+    source issue named as one of four possibilities."""
+    backend = FakeBackend()
+    cam = Camera("cam-a", backend)
+    cam.open()
+
+    def failing_set(name, value):
+        return False
+
+    backend.set_property = failing_set  # type: ignore[method-assign]
+    cfg = CameraConfig(name="cam-a", playfield=None, settings={"exposure": 100})
+    with pytest.raises(UnsupportedSetting) as exc_info:
+        cam.apply_config(cfg)
+    assert exc_info.value.key == "exposure"
+    assert exc_info.value.reason is not None
+    assert "auto_exposure" in exc_info.value.reason
+
+
+def test_apply_config_prefers_the_backends_own_diagnostic_over_the_generic_gate_fallback():
+    """A backend that *can* say more (e.g. ``UvcUtilBackend``, live
+    hardware readback) wins over ``Camera``'s own config-shape-only
+    fallback, even for a key ``_GATED_BY`` also knows about."""
+    backend = FakeControlBackend(names=("exposure", "auto_exposure"))
+    backend.set_property = lambda name, value: False  # type: ignore[method-assign]
+    backend.describe_set_failure = lambda name, value: f"backend says: {name} is doomed"  # type: ignore[attr-defined]
+    cam = Camera("cam-a", FakeBackend(), control_backend=backend)
+    cam.open()
+
+    cfg = CameraConfig(name="cam-a", playfield=None, settings={"exposure": 100, "auto_exposure": 1})
+    with pytest.raises(UnsupportedSetting) as exc_info:
+        cam.apply_config(cfg)
+    assert exc_info.value.reason == "backend says: auto_exposure is doomed"
 
 
 def test_apply_config_backend_without_settings_surface_rejects_any_push():
