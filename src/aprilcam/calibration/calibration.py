@@ -45,6 +45,22 @@ and DLT-solve approach. Not mined: ``_assign_corners_by_position``'s
 canonical upper-left-origin ID tables -- superseded entirely by
 matching detected ids directly against
 ``PlayfieldDefinition.aruco_position``.
+
+**Lens distortion (sprint 030 ticket 001).** ``Calibration`` gains
+optional ``camera_matrix``/``dist_coeffs``; ``to_world``/``to_pixel``
+undistort/redistort via ``geometry.undistort_point``/``distort_point``
+when they are set. ``Calibrator.calibrate`` carries forward whatever
+lens model this camera's prior successful calibration already held
+(Design Rationale Decision 3 -- intrinsics survive a field move without
+being re-estimated) and, when one is known, undistorts every detected
+marker pixel *before* the homography solve and the reprojection-error
+measurement, both fed the identical undistorted point set -- v1's own
+earned lesson (``archive/.../calibration.py:1342-1346``) is that
+solving the homography from undistorted points while measuring RMS
+against a different (still distorted) set silently reports a healthy
+error for a solve that is not. This ticket lands the storage and
+solve-order mechanics only; *producing* intrinsics in the first place
+(``estimate_intrinsics``) is ticket 002.
 """
 
 from __future__ import annotations
@@ -176,6 +192,22 @@ class Calibration(_CalibrationBase):
     step. :meth:`to_world`/:meth:`to_pixel` convert back to an
     ``ndarray`` internally, once per call, before delegating to
     ``calibration/geometry.py``'s pure math.
+
+    ``camera_matrix``/``dist_coeffs`` (sprint 030 ticket 001, Design
+    Rationale Decision 3) are this camera's optional lens model --
+    intrinsic matrix and distortion coefficients, the same shapes
+    ``cv2.calibrateCamera`` produces. Stored as plain tuples for the
+    identical reason ``homography`` is: JSON round-trip with no numpy
+    ``__eq__`` hazard. Both default to ``None`` -- "no lens model
+    known," today's exact behaviour and every ``calibration.json``
+    written before this ticket -- and are carried forward unchanged
+    across an ordinary recalibration rather than re-estimated
+    (:meth:`Calibrator.calibrate`); ticket 002 is what lets an operator
+    populate them in the first place via ``estimate_intrinsics``. They
+    live here, not on ``config.interfaces.CameraConfig``, precisely so
+    :meth:`to_world`/:meth:`to_pixel` stay pure methods over this
+    dataclass's own fields -- see sprint.md's Design Rationale Decision
+    3 for the alternative considered and rejected.
     """
 
     homography: Tuple[_Row3, _Row3, _Row3]
@@ -191,20 +223,66 @@ class Calibration(_CalibrationBase):
     configured with (``MAX_REPROJECTION_ERROR_CM`` by default, ticket
     023-006) -- a solve above the threshold never reaches this
     dataclass at all; see :meth:`Calibrator.calibrate`."""
+    camera_matrix: Optional[Tuple[_Row3, _Row3, _Row3]] = None
+    """This camera's 3x3 intrinsic matrix (``fx``, ``fy``, ``cx``,
+    ``cy``), if known. ``None`` means "no lens model" -- see the class
+    docstring."""
+    dist_coeffs: Optional[Tuple[float, ...]] = None
+    """This camera's distortion coefficients, if known -- ``(k1, k2,
+    p1, p2, k3)`` for the standard 5-coefficient model
+    ``cv2.calibrateCamera`` fits by default (ticket 002), though any
+    length OpenCV's distortion model accepts round-trips here
+    unchanged. ``None`` means "no lens model" -- see the class
+    docstring."""
 
     def to_world(self, pixel: PixelPoint) -> WorldPoint:
+        if self._has_intrinsics():
+            pixel = geometry.undistort_point(
+                pixel, self._camera_matrix_array(), self._dist_coeffs_array()
+            )
         return geometry.pixel_to_world(self._matrix(), pixel)
 
     def to_pixel(self, world: WorldPoint) -> PixelPoint:
-        return geometry.world_to_pixel(self._matrix(), world)
+        pixel = geometry.world_to_pixel(self._matrix(), world)
+        if self._has_intrinsics():
+            pixel = geometry.distort_point(
+                pixel, self._camera_matrix_array(), self._dist_coeffs_array()
+            )
+        return pixel
 
     def _matrix(self) -> np.ndarray:
         return np.array(self.homography, dtype=np.float64)
 
+    def _has_intrinsics(self) -> bool:
+        """Whether both halves of this camera's lens model are known --
+        ``camera_matrix``/``dist_coeffs`` are set (or cleared) together
+        by every producer in this codebase (:meth:`Calibrator.calibrate`,
+        :meth:`from_dict`), but :meth:`to_world`/:meth:`to_pixel` check
+        both rather than assume that invariant, so a hand-constructed
+        :class:`Calibration` with only one set behaves as "no lens
+        model" (today's behaviour) instead of raising."""
+        return self.camera_matrix is not None and self.dist_coeffs is not None
+
+    def _camera_matrix_array(self) -> np.ndarray:
+        assert self.camera_matrix is not None  # guarded by _has_intrinsics
+        return np.array(self.camera_matrix, dtype=np.float64)
+
+    def _dist_coeffs_array(self) -> np.ndarray:
+        assert self.dist_coeffs is not None  # guarded by _has_intrinsics
+        return np.array(self.dist_coeffs, dtype=np.float64)
+
     def to_dict(self) -> Dict[str, Any]:
         """Serialize for ``calibration.json`` (daemon/service.py owns
-        the atomic file write; this is just the shape)."""
-        return {
+        the atomic file write; this is just the shape).
+
+        ``camera_matrix``/``dist_coeffs`` are omitted entirely when
+        ``None`` -- never written as a JSON ``null`` placeholder
+        (mirrors ``config.interfaces.CameraConfig.to_dict``'s identical
+        treatment of its own optional ``camera_position``) -- so a
+        ``calibration.json`` written by a camera with no lens model is
+        byte-for-byte identical to what this method produced before
+        this ticket."""
+        data: Dict[str, Any] = {
             "stale": self.stale,
             "calibrated_at": self.calibrated_at,
             "playfield": self.playfield,
@@ -212,6 +290,11 @@ class Calibration(_CalibrationBase):
             "matched_ids": list(self.matched_ids),
             "reprojection_error_cm": self.reprojection_error_cm,
         }
+        if self.camera_matrix is not None:
+            data["camera_matrix"] = [list(row) for row in self.camera_matrix]
+        if self.dist_coeffs is not None:
+            data["dist_coeffs"] = list(self.dist_coeffs)
+        return data
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Calibration":
@@ -220,8 +303,16 @@ class Calibration(_CalibrationBase):
         ``TypeError`` on a malformed record; the daemon treats a corrupt
         ``calibration.json`` as "no calibration held" rather than
         failing to start (mirrors ``camera.registry.CameraRegistry``'s
-        "a corrupt file must never crash the daemon" stance)."""
+        "a corrupt file must never crash the daemon" stance).
+
+        ``camera_matrix``/``dist_coeffs`` default to ``None`` when
+        absent -- true for every ``calibration.json`` written before
+        this ticket, which loads here unchanged (backward compatibility,
+        sprint.md's Migration Concerns: "no forced conversion, no schema
+        version bump")."""
         homography_raw = data["homography"]
+        camera_matrix_raw = data.get("camera_matrix")
+        dist_coeffs_raw = data.get("dist_coeffs")
         return cls(
             stale=bool(data.get("stale", False)),
             calibrated_at=float(data["calibrated_at"]),
@@ -236,6 +327,18 @@ class Calibration(_CalibrationBase):
                 float(data["reprojection_error_cm"])
                 if data.get("reprojection_error_cm") is not None
                 else None
+            ),
+            camera_matrix=(
+                (
+                    _row3(camera_matrix_raw[0]),
+                    _row3(camera_matrix_raw[1]),
+                    _row3(camera_matrix_raw[2]),
+                )
+                if camera_matrix_raw is not None
+                else None
+            ),
+            dist_coeffs=(
+                tuple(float(c) for c in dist_coeffs_raw) if dist_coeffs_raw is not None else None
             ),
         )
 
@@ -528,9 +631,50 @@ class Calibrator(_CalibratorBase):
                 succeeded=False, matched_ids=matched_ids, missing_ids=missing_ids
             )
 
-        pixel_pts = np.array(
-            [[averaged[i].x, averaged[i].y] for i in matched_ids], dtype=np.float64
-        )
+        # Lens-model carry-forward (sprint 030 ticket 001, Design
+        # Rationale Decision 3): an ordinary recalibration (no
+        # intrinsics estimation of its own -- that is ticket 002's
+        # ``estimate_intrinsics``) neither estimates nor discards
+        # whatever lens model this camera's *prior* successful
+        # calibration already held; it carries it forward unchanged
+        # onto the fresh ``Calibration`` this call produces. ``None``
+        # (never calibrated before, or calibrated with no known lens
+        # model) reproduces exactly today's intrinsics-free behaviour.
+        prior = self.get_calibration(camera_slug)
+        camera_matrix = prior.camera_matrix if prior is not None else None
+        dist_coeffs = prior.dist_coeffs if prior is not None else None
+        intrinsics_known = camera_matrix is not None and dist_coeffs is not None
+
+        # Undistort-before-solve (Design Rationale Decision 1): when
+        # this camera's lens model is known, every detected marker
+        # pixel is undistorted *before* it ever reaches the homography
+        # solve or the reprojection-error measurement below -- both
+        # ``_solve_homography`` and ``_reprojection_error_cm`` are
+        # handed this same already-undistorted ``pixel_pts`` array, per
+        # v1's own earned lesson (``archive/.../calibration.py:1342-
+        # 1346``): pairing the homography solved from undistorted
+        # points with an RMS measured on a *different* (still
+        # distorted) point set silently reports a healthy error for a
+        # solve that is not actually healthy. There is no separate
+        # "undistorted pixel_pts" variable for this reason -- one array
+        # feeds every downstream step, exactly like the intrinsics-free
+        # path already does.
+        if intrinsics_known:
+            camera_matrix_array = np.array(camera_matrix, dtype=np.float64)
+            dist_coeffs_array = np.array(dist_coeffs, dtype=np.float64)
+            undistorted = {
+                tag_id: geometry.undistort_point(
+                    averaged[tag_id], camera_matrix_array, dist_coeffs_array
+                )
+                for tag_id in matched_ids
+            }
+            pixel_pts = np.array(
+                [[undistorted[i].x, undistorted[i].y] for i in matched_ids], dtype=np.float64
+            )
+        else:
+            pixel_pts = np.array(
+                [[averaged[i].x, averaged[i].y] for i in matched_ids], dtype=np.float64
+            )
         world_pts = np.array(
             [[definition.aruco_position(i).x, definition.aruco_position(i).y] for i in matched_ids],
             dtype=np.float64,
@@ -580,6 +724,8 @@ class Calibrator(_CalibratorBase):
             homography=_matrix_to_tuple(homography),
             matched_ids=matched_ids,
             reprojection_error_cm=rms,
+            camera_matrix=camera_matrix,
+            dist_coeffs=dist_coeffs,
         )
         with self._lock:
             self._calibrations[camera_slug] = calibration
