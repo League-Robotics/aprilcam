@@ -38,6 +38,7 @@ from aprilcam.client.guides import Guides
 from aprilcam.config.directories import Directories
 from aprilcam.config.interfaces import CameraConfig, CameraPosition, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
+from aprilcam.daemon.interfaces import MountRegistration
 from aprilcam.daemon.rpc import build_server
 from aprilcam.daemon.service import CALIBRATION_FRAME_COUNT, DaemonService
 from aprilcam.errors import (
@@ -582,9 +583,14 @@ def test_register_tag_then_list_tag_parameters_round_trip_returns_dataclasses(cl
     client.register_tag(tag, params)
     registrations = client.list_tag_parameters()
 
-    assert registrations == {tag: params}
+    # mount_z is 0.0 (default/unset) here, so mount_z_applied is
+    # vacuously True (ticket 030-004, SUC-004) -- nothing for parallax
+    # to withhold with no elevation registered.
+    assert registrations == {tag: MountRegistration(params=params, mount_z_applied=True)}
     assert isinstance(next(iter(registrations)), TagId)
-    assert isinstance(next(iter(registrations.values())), MountParameters)
+    entry = next(iter(registrations.values()))
+    assert isinstance(entry, MountRegistration)
+    assert isinstance(entry.params, MountParameters)
 
 
 def test_register_tag_with_size_cm_round_trips_present(client):
@@ -593,7 +599,9 @@ def test_register_tag_with_size_cm_round_trips_present(client):
 
     client.register_tag(tag, params)
 
-    assert client.list_tag_parameters() == {tag: params}
+    assert client.list_tag_parameters() == {
+        tag: MountRegistration(params=params, mount_z_applied=True)
+    }
 
 
 def test_list_tag_parameters_empty_when_nothing_registered(client):

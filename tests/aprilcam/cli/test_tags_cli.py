@@ -26,6 +26,7 @@ from typing import Dict, List, Optional, Tuple
 import pytest
 
 from aprilcam.cli import tags as tags_cli
+from aprilcam.daemon.interfaces import MountRegistration
 from aprilcam.errors import ConnectionFailed, InvalidTagId, NotCalibrated, UnwritableOutputPath
 from aprilcam.types import MountParameters, TagFamily, TagId
 
@@ -33,23 +34,28 @@ from aprilcam.types import MountParameters, TagFamily, TagId
 @dataclass
 class _FakeDaemon:
     register_tag_raises: Optional[Exception] = None
+    register_tag_returns: Optional[str] = None
+    """Ticket 030-004, SUC-004: the daemon's optional mount_z-inert
+    warning, echoed back from register_tag exactly as the real one
+    would return it."""
     registered: list = field(default_factory=list)
     unregister_tag_raises: Optional[Exception] = None
     unregistered: list = field(default_factory=list)
-    list_tag_parameters_returns: Dict[TagId, MountParameters] = field(default_factory=dict)
+    list_tag_parameters_returns: Dict[TagId, MountRegistration] = field(default_factory=dict)
     list_tag_parameters_raises: Optional[Exception] = None
 
-    def register_tag(self, tag: TagId, params: MountParameters) -> None:
+    def register_tag(self, tag: TagId, params: MountParameters) -> Optional[str]:
         if self.register_tag_raises is not None:
             raise self.register_tag_raises
         self.registered.append((tag, params))
+        return self.register_tag_returns
 
     def unregister_tag(self, tag: TagId) -> None:
         if self.unregister_tag_raises is not None:
             raise self.unregister_tag_raises
         self.unregistered.append(tag)
 
-    def list_tag_parameters(self) -> Dict[TagId, MountParameters]:
+    def list_tag_parameters(self) -> Dict[TagId, MountRegistration]:
         if self.list_tag_parameters_raises is not None:
             raise self.list_tag_parameters_raises
         return self.list_tag_parameters_returns
@@ -207,6 +213,38 @@ def test_register_surfaces_not_calibrated_for_nonzero_z_with_no_calibration(caps
     assert "no calibration" in capsys.readouterr().err
 
 
+def test_register_prints_the_daemons_warning_to_stderr_but_still_exits_zero(capsys):
+    """Ticket 030-004, SUC-004: a nonzero --z registered while no
+    camera is located is non-fatal -- the CLI still succeeds (exit 0,
+    the registration itself still happened) but prints the daemon's
+    warning to stderr so an operator sees it without a second lookup."""
+    daemon = _FakeDaemon(
+        register_tag_returns=(
+            "mount_z=20 for apriltag 7 is currently inert -- ask your operator "
+            "to run `aprilcam camera locate`"
+        )
+    )
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = tags_cli.cmd_register(_args(z=20.0), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    assert len(daemon.registered) == 1  # registration still happened
+    out, err = capsys.readouterr()
+    assert "camera locate" in err
+    assert "registered" in out  # the usual success line still prints too
+
+
+def test_register_prints_no_warning_when_the_daemon_reports_none(capsys):
+    daemon = _FakeDaemon()  # register_tag_returns defaults to None
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = tags_cli.cmd_register(_args(), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    assert capsys.readouterr().err == ""
+
+
 def test_register_passes_the_daemon_flag_through_to_connect():
     daemon = _FakeDaemon()
     discovery = _FakeDiscovery(daemon=daemon)
@@ -287,10 +325,15 @@ def test_list_prints_no_registered_tags_when_the_registry_is_empty(capsys):
 
 def test_list_prints_one_row_per_registration_in_cm_and_degrees(capsys):
     registrations = {
-        TagId(family=TagFamily.APRILTAG, number=7): MountParameters(
-            mount_x=8.0, mount_y=3.0, mount_z=15.0, mount_yaw_rad=math.pi, size_cm=10.0
+        TagId(family=TagFamily.APRILTAG, number=7): MountRegistration(
+            params=MountParameters(
+                mount_x=8.0, mount_y=3.0, mount_z=15.0, mount_yaw_rad=math.pi, size_cm=10.0
+            ),
+            mount_z_applied=False,
         ),
-        TagId(family=TagFamily.ARUCO, number=5): MountParameters(),
+        TagId(family=TagFamily.ARUCO, number=5): MountRegistration(
+            params=MountParameters(), mount_z_applied=True
+        ),
     }
     daemon = _FakeDaemon(list_tag_parameters_returns=registrations)
     discovery = _FakeDiscovery(daemon=daemon)
@@ -319,7 +362,11 @@ def test_list_reports_a_daemon_side_error(capsys):
 
 def test_list_all_fans_out_and_reports_one_unreachable_daemon(capsys):
     good = _FakeDaemon(
-        list_tag_parameters_returns={TagId(family=TagFamily.APRILTAG, number=7): MountParameters()}
+        list_tag_parameters_returns={
+            TagId(family=TagFamily.APRILTAG, number=7): MountRegistration(
+                params=MountParameters(), mount_z_applied=True
+            )
+        }
     )
     discovery = _FakeDiscovery(
         infos=(_Info(host="localhost", is_local=True), _Info(host="unreachable-host", is_local=False)),
