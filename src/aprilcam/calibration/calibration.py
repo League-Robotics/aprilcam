@@ -858,7 +858,12 @@ def _estimate_intrinsics(
         # own docstring).
         flags = cv.CALIB_USE_INTRINSIC_GUESS
         initial_guess = _initial_camera_matrix_guess(image_size)
-        rms, camera_matrix, dist_coeffs, rvecs, tvecs = cv.calibrateCamera(
+        # mypy/cv2-stubs note: the stubs declare cameraMatrix/distCoeffs as
+        # required, non-Optional arrays; distCoeffs=None here is correct OpenCV
+        # usage (self-initializes the distortion coefficients even with an
+        # explicit cameraMatrix guess) -- the stubs are simply narrower than
+        # the real C++ API.
+        rms, camera_matrix, dist_coeffs, rvecs, tvecs = cv.calibrateCamera(  # type: ignore[call-overload]
             [obj_fit], [img_fit], image_size, initial_guess, None, flags=flags
         )
     else:
@@ -899,7 +904,12 @@ def _estimate_intrinsics(
             # true value, confirmed directly) precisely when the
             # underlying fx/depth ridge is genuinely flat, which is
             # exactly the signal :func:`_sanity_check_intrinsics` needs.
-            rms, camera_matrix, dist_coeffs, rvecs, tvecs = cv.calibrateCamera(
+            # mypy/cv2-stubs note: the stubs declare cameraMatrix/distCoeffs as
+            # required, non-Optional arrays; passing None for both here is correct
+            # OpenCV usage requesting full self-initialization for a planar rig
+            # (see the comment above) -- the stubs are simply narrower than the
+            # real C++ API.
+            rms, camera_matrix, dist_coeffs, rvecs, tvecs = cv.calibrateCamera(  # type: ignore[call-overload]
                 [obj_fit], [img_fit], image_size, None, None, flags=flags
             )
         else:
@@ -923,7 +933,12 @@ def _estimate_intrinsics(
             # structure to anchor the fit, unlike the purely-planar case.
             flags |= cv.CALIB_USE_INTRINSIC_GUESS
             initial_guess = _initial_camera_matrix_guess(image_size)
-            rms, camera_matrix, dist_coeffs, rvecs, tvecs = cv.calibrateCamera(
+            # mypy/cv2-stubs note: the stubs declare cameraMatrix/distCoeffs as
+            # required, non-Optional arrays; distCoeffs=None here is correct OpenCV
+            # usage (self-initializes the distortion coefficients even with an
+            # explicit cameraMatrix guess, same as the elevated branch above) --
+            # the stubs are simply narrower than the real C++ API.
+            rms, camera_matrix, dist_coeffs, rvecs, tvecs = cv.calibrateCamera(  # type: ignore[call-overload]
                 [obj_fit], [img_fit], image_size, initial_guess, None, flags=flags
             )
 
