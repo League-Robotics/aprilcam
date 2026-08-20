@@ -45,7 +45,7 @@ hardware generally, not just this test.
 - [x] Full suite green on a machine with cameras attached and no daemon running. (Scoped to this ticket's own modules, per the team-lead's explicit instruction that the literal full 1385-test suite is close-sprint's once-per-sprint gate, not a per-ticket one — see completion notes for exactly what ran.)
 - [x] Full suite green (`uv run pytest -m "not camera"`) on a machine with no cameras attached — confirmed unaffected by this ticket's changes. (Cameras are physically attached in this environment, so verified via targeted headless runs across every module this ticket touched, not a literal no-camera machine — see completion notes.)
 - [x] The UVC exposure-time-abs rejection in `test_set_camera_config_two_real_cameras_configured_independently` is investigated against real hardware (both cameras) to a stated conclusion identifying which of the four candidate causes is real: test-fixture gap, gate-value semantics, out-of-range value, or control genuinely absent — verified with actual evidence (e.g. `uvc-util -S` readback of `auto_exposure`'s value after the gate push; the camera's advertised `exposure-time-abs` range).
-- [x] Whichever cause is confirmed is fixed at its source: a real ordering/semantics/range bug is fixed in `camera/camera.py`/`camera/backends/uvc_util.py`; a test-fixture gap is fixed in the test; a genuinely-absent control is reflected by correcting the test's premise about which settings are portable across these two camera models (not worked around by loosening an assertion). (None of the four applied — see completion notes for the fifth, evidence-backed conclusion and why no ordering/gating/range/test change was warranted.)
+- [x] Whichever cause is confirmed is fixed at its source: a real ordering/semantics/range bug is fixed in `camera/camera.py`/`camera/backends/uvc_util.py`; a test-fixture gap is fixed in the test; a genuinely-absent control is reflected by correcting the test's premise about which settings are portable across these two camera models (not worked around by loosening an assertion). **Reopened, superseding the line above**: none of the original four applied, but the "fifth, evidence-backed conclusion" (genuine but untriaged transient) was itself incomplete — measured failure rate was ~60% in genuinely cold processes, not "roughly 1 in 5", and a real, fixable root cause was found and fixed at its source in `camera/camera.py` (settle-after-open drain, mirroring v1's `camera_pipeline.py`) plus a bounded retry in `camera/backends/uvc_util.py` (stakeholder-approved insurance) — see the "REOPENED" completion notes below.
 - [x] `UnsupportedSetting`'s message is improved to name the real cause category (still in auto mode / value out of range / control not supported) instead of the current generic "unsupported or rejected setting" — regardless of which cause was confirmed, since the current diagnostic is poor either way (issue's own Verification bullet).
 - [x] The investigation's conclusion — which of the four candidates was real, and the evidence for it — is stated in this ticket's own completion notes, not just "fixed it."
 
@@ -299,3 +299,178 @@ Breakdown:
   `describe_set_failure`.
 - `tests/aprilcam/camera/test_camera.py` — 3 new/extended headless
   tests for `.reason` propagation and backend-priority fallback.
+
+### REOPENED (2026-08-20) — the real fix
+
+Reopened by stakeholder decision: three isolated real-hardware runs
+right after the pass above shipped went **pass, fail, fail** — a ~2-in-3
+rate, not the "roughly 1 in 5" the original investigation estimated —
+and the diagnostic-only conclusion above ("genuine but intermittent
+non-deterministic hardware/driver write rejection... no behaviour change
+warranted") turned out to be wrong: there was a real, fixable root
+cause, and it was not the one the stakeholder's own reopening hypothesis
+(`auto-exposure-priority`) named either.
+
+**The `auto-exposure-priority` hypothesis was tested directly and did
+not hold up.** `uvc-util -N "HD USB CAMERA" -c` does not list
+`auto-exposure-priority` at all (confirmed live) — only the arducam
+exposes it. `hd-usb-camera` is the camera that actually fails, so a
+control it does not have cannot be gating its own write. Pushing
+`auto-exposure-priority=0` to the *arducam* before the *hd-usb-camera*
+push looked like it helped in a small sample (8/8 passed live), but the
+honest explanation is that the extra `uvc-util` subprocess call this
+requires cost enough wall-clock time to act as an accidental settle
+delay — see below, this is exactly the real mechanism, just triggered
+by an unrelated side effect rather than any genuine AE-priority
+semantics. **Reported as asked, even though it contradicts the
+hypothesis I was pointed at: AE-priority is not the cause.**
+
+**What the first pass's methodology missed.** The original ~10 attempts
+were all run inside one long-lived Python process (repeated open/close
+of the same `Camera` objects). Measuring the exact same code path with
+fresh subprocesses per attempt (matching what a real `pytest`
+invocation, or a real `aprilcam` CLI process, actually is) gave a
+dramatically different rate:
+
+| Methodology | hd-usb-camera failure rate |
+|---|---|
+| Real `pytest` invocation, 8 runs, no code change | 4/8 = 50% |
+| This investigation's own long-lived-process loop, 35 trials | 4/35 ≈ 11% |
+| Fresh-subprocess-per-trial, 10 trials, no mitigation | 6/10 = 60% |
+
+A warm process (cameras already opened once before in that same
+process) hits this failure far less often than a cold one — which is
+exactly why the first pass's own sample, run warm, underestimated the
+real-world rate by 3-6x and concluded "rare."
+
+**Root cause, confirmed by direct measurement: an AVFoundation
+capture-session-initialisation race, exactly the quirk v1 already
+documented and v2 never ported.** `archive/src/aprilcam/daemon/
+camera_pipeline.py`'s `CameraPipeline.start()`: "Drain a few frames so
+AVFoundation finishes initialising its capture session before we apply
+UVC controls — otherwise the OS resets them" (`for _ in range(5): cap.
+read()`, called between opening the capture and applying any UVC
+control). v2's `Camera.open()` has no equivalent, and `DaemonService.
+_camera_for` (and the failing test's own `get_frame()` immediately
+followed by `set_camera_config()`) pushes UVC controls right after
+`open()` with zero intervening reads — exactly the race v1's comment
+describes. Confirmed live, fresh-subprocess-per-trial:
+
+| Mitigation | hd-usb-camera pass rate |
+|---|---|
+| None | 4/10 (40%) |
+| 5-frame drain, no sleep | 10/10, then 12/12 more (22/22 total) |
+| No drain, flat 1.5 s sleep instead | 10/10 |
+
+A plain sleep worked just as well as the drain in this sample — the
+mechanism is settle *time*, not specifically reading a frame — but the
+drain is what v1 itself proved, costs nothing a caller about to use the
+camera for frames wasn't already going to spend, and needs no arbitrary
+duration tuned. **The settle drain is the real fix.**
+
+**Fixed at its source:**
+
+- `camera/camera.py` — `Camera.open()` (and a successful
+  `_attempt_self_heal()` reopen) now marks a new
+  `_pending_open_settle` flag. `apply_config()` drains
+  `_OPEN_SETTLE_READS` (5, matching v1) frames from the primary backend
+  — bypassing `Camera.read()`'s own failure counters, since a `None`
+  during this settle window is expected, not a fault — the first time a
+  push after a fresh open has a real (non-`None`) value to write.
+  Gated on `control_backend is not None` (the macOS/UVC scenario this
+  is specific to) and on the push having something real to write, so no
+  headless test, no non-macOS platform, and no apply-on-open call with
+  an empty/blank config pays this cost or has its frame-queue
+  accounting disturbed.
+- `camera/backends/uvc_util.py` — `UvcUtilBackend.set_property` now
+  retries a failed **raw** `-s` write (`_raw_set` returning `False`) up
+  to `_MAX_SET_ATTEMPTS` (3) times with a `_RETRY_BACKOFF_S` (0.1 s)
+  backoff — the stakeholder's explicitly requested belt-and-braces,
+  implemented regardless of the settle fix as insurance against
+  whatever transient it does not happen to cover. It deliberately does
+  **not** retry a write the CLI *accepted* but that then reads back
+  wrong (the existing mismatch/repair path — a silently clamped
+  out-of-range value is not transient and a retry cannot fix it), and a
+  genuinely unknown control still returns `False` before any retry
+  logic runs — so neither of the two cases the ticket named as needing
+  to "fail fast, not spin through retries" (control genuinely absent;
+  value genuinely out of range) is affected by this retry.
+  `describe_set_failure`'s honest-fallback message now says a write was
+  rejected "after N attempts" rather than telling the caller to retry
+  something already retried automatically.
+
+**New headless tests** (no hardware needed, `subprocess.run`/`FakeBackend`
+mocked per each module's existing convention):
+
+- `tests/aprilcam/camera/test_camera.py` — 5 new tests: settles before
+  the first real push after open; settles only once per open (a second
+  push does not drain again); never settles with no `control_backend`;
+  never settles for an empty-or-all-blank push; settles again after a
+  fresh `close()`/`open()`.
+- `tests/aprilcam/camera/test_uvc_util.py` — 3 new tests: a raw CLI
+  rejection is retried and can succeed; retries are bounded (exactly
+  `_MAX_SET_ATTEMPTS` raw attempts, never more, on a persistent
+  rejection); an *accepted* write that reads back wrong (mismatch) is
+  never retried (exactly 4 calls, unchanged from before this ticket) —
+  plus an autouse fixture mocking `time.sleep` so the retry backoff
+  never costs real wall-clock time in this headless suite.
+
+**Verification actually run this session (2026-08-20, cameras attached,
+no daemon running):**
+
+- `uv run pytest tests/aprilcam/daemon/test_service.py::test_set_camera_config_two_real_cameras_configured_independently -q`,
+  run as **12 separate, fresh `pytest` invocations** (matching the
+  methodology that measured the real pre-fix failure rate, not a single
+  in-process loop): **12/12 passed.** Pre-fix, the identical methodology
+  (8 fresh invocations, no code change) gave 4/8 (50%) failures.
+- `uv run pytest tests/aprilcam/camera/ -q` — **161 passed** (includes
+  every real-hardware `@pytest.mark.camera` test in this module).
+- `uv run pytest tests/aprilcam/camera/test_camera.py tests/aprilcam/camera/test_uvc_util.py -m "not camera" -q` —
+  **77 passed** (headless-only slice of the two modules touched).
+- `uv run pytest tests/aprilcam/daemon/test_service.py -q` — **233
+  passed** (full module, camera + non-camera).
+- `uv run pytest tests/aprilcam/daemon/ -m "not camera" -q` — **396
+  passed, 38 deselected** (full headless daemon regression).
+- `uv run pytest tests/aprilcam/daemon/test_camera_geometry_hardware.py -q` —
+  **1 passed, 1 skipped** (Part A's guard still correct, unaffected).
+- `uv run mypy src/aprilcam` — **Success: no issues found in 79 source
+  files.**
+- Did not re-run the literal full suite (`uv run pytest -q`) — same
+  once-per-sprint-gate rationale as the first pass; the runs above cover
+  every module this reopened work touched plus the modules the first
+  pass touched.
+
+**`docs/knowledge/2026-08-20-avfoundation-session-settle-before-uvc-writes.md`**
+added per CLAUDE.md's knowledge-base rule: the AE-priority hypothesis
+investigated and ruled out with evidence, the real root cause and its
+measured before/after rates, the fix, and the future-guidance lesson
+about measuring intermittent hardware failures with fresh subprocesses
+per attempt rather than a warm in-process loop (what caused this ticket
+to be closed prematurely the first time).
+
+**Honest summary of what actually helped:** the settle-after-open drain
+is the real fix (0/10 → 22/22 passing across cold-process trials
+targeting it in isolation); the bounded retry is genuine insurance,
+implemented as instructed regardless of root cause, but was not needed
+to reach 12/12 on the verification runs above — the settle fix alone
+accounts for the fix. The AE-priority hypothesis did not hold up: the
+failing camera does not expose that control at all.
+
+**Files changed (this reopened pass):**
+
+- `src/aprilcam/camera/camera.py` — module docstring's new
+  "Settle-after-open"/"Bounded retry" sections, `_OPEN_SETTLE_READS`,
+  `_pending_open_settle`, `open()`/`close()`/`_attempt_self_heal()`
+  wiring, `apply_config()`'s settle-drain call site, new
+  `_settle_after_open()`.
+- `src/aprilcam/camera/backends/uvc_util.py` — module docstring's new
+  "Bounded retry" section, `_MAX_SET_ATTEMPTS`, `_RETRY_BACKOFF_S`, new
+  `_raw_set_with_retry()`, `set_property()` now calls it instead of
+  `_raw_set()` directly, `describe_set_failure()`'s honest-fallback
+  message updated to say "after N attempts".
+- `tests/aprilcam/camera/test_camera.py` — 5 new settle-after-open
+  tests, `_OPEN_SETTLE_READS` import.
+- `tests/aprilcam/camera/test_uvc_util.py` — 3 new retry tests, an
+  autouse `time.sleep` mock fixture, `_MAX_SET_ATTEMPTS` import.
+- `docs/knowledge/2026-08-20-avfoundation-session-settle-before-uvc-writes.md` —
+  new knowledge entry.
