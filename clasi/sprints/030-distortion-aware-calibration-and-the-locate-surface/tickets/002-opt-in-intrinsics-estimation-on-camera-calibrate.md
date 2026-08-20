@@ -262,6 +262,29 @@ synthetic unit tests described above (`_estimate_intrinsics`/
 with genuine 3D structure) — never against real elevated ground truth.
 No accuracy claim is made for it beyond what those synthetic tests show.
 
+**Reopen — typing regression fix (2026-08-20).** The sprint's pre-close
+full-suite run caught `tests/test_typing.py::test_mypy_passes_over_src_aprilcam`
+failing: `uv run mypy src/aprilcam` reported 3 `[call-overload]` errors, all
+in `calibration/calibration.py`'s `_estimate_intrinsics`, at the three
+`cv.calibrateCamera(...)` call sites this ticket added (elevated-mode branch,
+coplanar-constrained branch, and the graded-threshold/sub-threshold-elevation
+edge-case branch). Cause: the installed cv2 stubs declare `cameraMatrix`/
+`distCoeffs` as required, non-Optional arrays, but two of the three sites pass
+`None` for `distCoeffs` (and the coplanar branch passes `None` for both) to
+request OpenCV's real self-initialization behaviour — correct runtime usage
+that the stubs are simply too narrow to accept. Fixed by adding a scoped
+`# type: ignore[call-overload]` on each of the three call lines (now at
+lines 866, 912, 941), each preceded by a short comment explaining that the
+stubs are narrower than OpenCV's real signature and that `None` is the
+documented way to request self-initialization — not a blanket or file-level
+ignore, and no change to what is passed to OpenCV or to any other type
+annotation in the file. Verified: `uv run mypy src/aprilcam` → 0 errors;
+`uv run pytest tests/test_typing.py -v` → passes; `uv run pytest
+tests/aprilcam/calibration/ -q` → 122 passed (unchanged from ticket 003's
+run, confirming no behaviour change). The 15 hardware-test failures from the
+same full-suite run (arducam seeing only 8/10 ArUco markers) are environmental,
+already filed as a separate issue, and untouched by this reopen.
+
 **Testing performed.** `uv run pytest tests/aprilcam/config/
 tests/aprilcam/calibration/ tests/aprilcam/daemon/ tests/aprilcam/mcp/
 tests/aprilcam/cli/ -m "not camera"` — 1001 passed. Every
