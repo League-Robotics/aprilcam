@@ -97,7 +97,7 @@ from aprilcam.config.interfaces import ConfigLoader as ConfigLoaderIface
 from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitionIface
 from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
 from aprilcam.daemon.detection import DetectionEngine
-from aprilcam.daemon.interfaces import Daemon, DaemonStatus, ImageStream, TagStream
+from aprilcam.daemon.interfaces import Daemon, DaemonStatus, ImageStream, MountRegistration, TagStream
 from aprilcam.daemon.streaming import (
     BroadcasterImageStream,
     BroadcasterTagStream,
@@ -1210,7 +1210,7 @@ class DaemonService(Daemon):
     # ``DetectionEngine`` -- :meth:`_mount_lookup`/:meth:`_camera_geometry_for`
     # below -- so it never duplicates that math itself).
 
-    def register_tag(self, tag: TagId, params: MountParameters) -> None:
+    def register_tag(self, tag: TagId, params: MountParameters) -> Optional[str]:
         """See ``daemon.interfaces.Daemon.register_tag``.
 
         Upserts by *tag* -- a second registration for the same tag
@@ -1242,6 +1242,19 @@ class DaemonService(Daemon):
         own failure-mode table) -- and takes effect the moment
         ``DetectionEngine.run_burst`` next asks :meth:`_mount_lookup`
         about it.
+
+        **Ticket 030-004, SUC-004**: this guard is deliberately left
+        exactly as it was (sprint.md's Architecture, Design Rationale
+        Decision 4) -- registering a mount before running ``camera
+        locate`` on the camera that will observe it is a legitimate,
+        order-independent workflow (UC-12) and must keep working. What
+        changed is the *return value*: when a nonzero ``mount_z`` was
+        just accepted but no camera this daemon knows about has been
+        located yet (:meth:`_any_camera_located`), a warning string
+        naming ``aprilcam camera locate`` as the fix is returned --
+        purely informational, never raised, never blocking. ``None``
+        means either ``mount_z`` was zero or at least one camera is
+        already located.
         """
         with self._lock:
             if params.mount_z != 0.0 and not self._calibrations:
@@ -1251,6 +1264,18 @@ class DaemonService(Daemon):
                     "would be meaningless -- calibrate a camera first"
                 )
             self._mount_params[tag] = params
+
+        if params.mount_z > 0.0 and not self._any_camera_located():
+            return (
+                f"mount_z={params.mount_z:g} for {tag.family.value} {tag.number} is "
+                "currently inert: no camera this daemon knows about has been "
+                "located yet (CameraConfig.camera_position), so the parallax "
+                "correction has nowhere to apply -- mount_x/mount_y/mount_yaw_rad "
+                "still apply normally. Ask your operator to run `aprilcam camera "
+                "locate` against the camera(s) that will observe this tag, then "
+                "re-check with list_tag_parameters (mount_z_applied)."
+            )
+        return None
 
     def unregister_tag(self, tag: TagId) -> None:
         """See ``daemon.interfaces.Daemon.unregister_tag``.
@@ -1263,17 +1288,29 @@ class DaemonService(Daemon):
         with self._lock:
             self._mount_params.pop(tag, None)
 
-    def list_tag_parameters(self) -> Dict[TagId, MountParameters]:
+    def list_tag_parameters(self) -> Dict[TagId, MountRegistration]:
         """See ``daemon.interfaces.Daemon.list_tag_parameters``.
 
-        A snapshot ``dict`` copy, safe for a caller to mutate freely
-        without touching this service's own store -- the same
-        snapshot-not-live-reference discipline every other collection
-        this class hands back (``list_cameras``, ``list_playfields``)
-        already follows.
+        A snapshot, safe for a caller to mutate freely without touching
+        this service's own store -- the same snapshot-not-live-reference
+        discipline every other collection this class hands back
+        (``list_cameras``, ``list_playfields``) already follows.
+
+        **Ticket 030-004, SUC-004**: each entry now pairs its stored
+        ``MountParameters`` with a computed ``mount_z_applied`` (see
+        :meth:`_mount_z_applied`) -- the observable flag this ticket
+        exists to add, so a stored-but-inert ``mount_z`` (a calibrated
+        but never-``locate``\\ d camera) is discoverable here instead of
+        only by cross-referencing ``get_camera_config`` by hand.
         """
         with self._lock:
-            return dict(self._mount_params)
+            snapshot = dict(self._mount_params)
+        return {
+            tag: MountRegistration(
+                params=params, mount_z_applied=self._mount_z_applied(params.mount_z)
+            )
+            for tag, params in snapshot.items()
+        }
 
     def _mount_lookup(self, tag: TagId) -> Optional[MountParameters]:
         """``DetectionEngine``'s ``mount_lookup`` callable (ticket
@@ -1324,6 +1361,43 @@ class DaemonService(Daemon):
         if config is None or config.camera_position is None:
             return WorldPoint(x=0.0, y=0.0), 0.0
         return config.camera_position.nadir, config.camera_position.height_cm
+
+    def _any_camera_located(self) -> bool:
+        """Whether **any** camera this service knows about currently
+        has real, solved geometry rather than :meth:`_camera_geometry_for`'s
+        pre-029 stopgap (ticket 030-004, SUC-004).
+
+        Reuses :meth:`_camera_geometry_for` itself, once per configured
+        camera -- no new guard logic, just the same "known vs. stopgap"
+        read :meth:`_camera_geometry_for`'s own docstring already
+        documents (height strictly positive means real; ``0.0`` is the
+        stopgap sentinel, matching
+        ``calibration.geometry.project_tag_to_field_plane``'s own
+        ``camera_height_cm <= 0.0`` identity short-circuit).
+
+        Deliberately "any camera," not one specific camera -- the same
+        scope :meth:`register_tag`'s ``NotCalibrated`` guard already
+        uses (Decision 4, sprint.md's Architecture): a mobile tag is
+        not bound to a single observing camera, so this asks whether
+        *any* camera in the fleet is located, not whether one
+        particular camera is.
+        """
+        with self._lock:
+            slugs = tuple(self._camera_configs.keys())
+        return any(self._camera_geometry_for(slug)[1] > 0.0 for slug in slugs)
+
+    def _mount_z_applied(self, mount_z: float) -> bool:
+        """Whether a registered ``mount_z`` of this magnitude is
+        currently being applied by the parallax correction (ticket
+        030-004, SUC-004; see :class:`~aprilcam.daemon.interfaces.
+        MountRegistration`). ``mount_z <= 0.0`` is vacuously ``True`` --
+        there is nothing for parallax to project, so nothing is being
+        withheld; the check otherwise mirrors :meth:`_any_camera_located`
+        exactly, matching ``project_tag_to_field_plane``'s own
+        ``mount_z_cm <= 0.0`` no-op sentinel."""
+        if mount_z <= 0.0:
+            return True
+        return self._any_camera_located()
 
     # -- calibration (ticket 022-003) --------------------------------------
 

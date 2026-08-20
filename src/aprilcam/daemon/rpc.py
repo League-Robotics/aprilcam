@@ -990,11 +990,18 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
         tag = _tag_id_from_proto(request.tag)
         params = _mount_parameters_from_proto(request.params)
         try:
-            self._service.register_tag(tag, params)
+            warning = self._service.register_tag(tag, params)
         except Exception as exc:  # noqa: BLE001
             _abort(context, exc)
             return aprilcam_v2_pb2.RegisterTagResponse()
-        return aprilcam_v2_pb2.RegisterTagResponse()
+        response = aprilcam_v2_pb2.RegisterTagResponse()
+        # Ticket 030-004, SUC-004: HasField-guarded exactly like every
+        # other optional scalar in this module -- absent (never a
+        # fabricated empty string) means either mount_z was zero or a
+        # camera is already located, not "no opinion."
+        if warning is not None:
+            response.warning = warning
+        return response
 
     def UnregisterTag(self, request, context):  # noqa: N802
         tag = _tag_id_from_proto(request.tag)
@@ -1014,9 +1021,11 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
         return aprilcam_v2_pb2.ListTagParametersResponse(
             entries=[
                 aprilcam_v2_pb2.TagMountEntry(
-                    tag=_tag_id_to_proto(tag), params=_mount_parameters_to_proto(params)
+                    tag=_tag_id_to_proto(tag),
+                    params=_mount_parameters_to_proto(registration.params),
+                    mount_z_applied=registration.mount_z_applied,
                 )
-                for tag, params in registrations.items()
+                for tag, registration in registrations.items()
             ]
         )
 

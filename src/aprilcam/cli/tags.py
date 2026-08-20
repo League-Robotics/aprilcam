@@ -93,6 +93,7 @@ from aprilcam.cli._common import (
     report_error,
 )
 from aprilcam.client.discovery import Discovery
+from aprilcam.daemon.interfaces import MountRegistration
 from aprilcam.errors import AprilCamError
 from aprilcam.tags.generator import TagGenerator
 from aprilcam.types import MountParameters, TagFamily, TagId
@@ -131,6 +132,15 @@ def cmd_register(
     :class:`~aprilcam.errors.NotCalibrated` (UC-12.S-5) --
     surfaced here exactly like any other typed error, via
     :func:`~aprilcam.cli._common.report_error`.
+
+    A nonzero ``--z`` registered while no camera this daemon knows
+    about has been located yet (calibration alone is not sufficient --
+    see ``AGENT_GUIDE.md`` §6) does **not** fail this command --
+    registration still succeeds and this still exits ``0`` -- but
+    ``Daemon.register_tag``'s optional warning (ticket 030-004,
+    SUC-004) is printed to stderr, non-fatally, so an operator sees the
+    mount is currently inert without having to separately check
+    ``tags mount list``/``list_tag_parameters``.
     """
     if args.all:
         print(
@@ -152,9 +162,12 @@ def cmd_register(
     )
 
     try:
-        discovery_factory().connect(args.daemon).register_tag(tag, params)
+        warning = discovery_factory().connect(args.daemon).register_tag(tag, params)
     except AprilCamError as exc:
         return report_error(exc)
+
+    if warning is not None:
+        print(f"warning: {warning}", file=sys.stderr)
 
     size = f"{args.size:g}cm" if args.size is not None else "(default)"
     print(
@@ -208,16 +221,21 @@ def _format_registration_row(tag: TagId, params: MountParameters) -> str:
     )
 
 
-def _print_registrations(registrations: Dict[TagId, MountParameters]) -> None:
+def _print_registrations(registrations: Dict[TagId, MountRegistration]) -> None:
     """A ``list_tag_parameters`` result, printed verbatim. An empty
     registry prints an explicit ``(no registered tags)`` rather than
     nothing at all, matching this codebase's established ``(no X)``
-    convention (see the module docstring)."""
+    convention (see the module docstring). Each entry's value is a
+    :class:`~aprilcam.daemon.interfaces.MountRegistration` (ticket
+    030-004, SUC-004) -- only ``.params`` is printed here; the
+    computed ``mount_z_applied`` flag is exposed via ``register_tag``'s
+    own warning (above) and the ``list_tag_parameters`` MCP tool, not
+    this row."""
     if not registrations:
         print("  (no registered tags)")
         return
     for tag in sorted(registrations, key=lambda t: (t.family.value, t.number)):
-        print(_format_registration_row(tag, registrations[tag]))
+        print(_format_registration_row(tag, registrations[tag].params))
 
 
 def cmd_list(
@@ -230,7 +248,7 @@ def cmd_list(
     """
     discovery = discovery_factory()
     if args.all:
-        def render(label: str, registrations: Dict[TagId, MountParameters]) -> None:
+        def render(label: str, registrations: Dict[TagId, MountRegistration]) -> None:
             print(f"{label}:")
             _print_registrations(registrations)
 

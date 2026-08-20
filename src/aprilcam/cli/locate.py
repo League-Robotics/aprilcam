@@ -265,12 +265,16 @@ def cmd_locate(
     # sentinel (calibration/geometry.py) -- identical to "unregistered"
     # for this purpose, so only mount_z > 0 is refused.
     try:
-        mount_parameters = daemon.list_tag_parameters()
+        # Values are MountRegistration (ticket 030-004, SUC-004) -- this
+        # guard only needs .params.mount_z, never the paired
+        # mount_z_applied flag.
+        mount_registrations = daemon.list_tag_parameters()
     except AprilCamError as exc:
         return report_error(exc)
 
     for spec in specs:
-        params = mount_parameters.get(TagId(TagFamily.APRILTAG, spec.tag))
+        registration = mount_registrations.get(TagId(TagFamily.APRILTAG, spec.tag))
+        params = registration.params if registration is not None else None
         if params is not None and params.mount_z > 0.0:
             print(
                 f"error: reference tag {spec.tag} (AprilTag) is currently "

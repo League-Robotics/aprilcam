@@ -40,7 +40,7 @@ from typing import Dict, Optional, Tuple
 from aprilcam.calibration.interfaces import Calibration, CalibrationResult
 from aprilcam.config.interfaces import CameraConfig, CameraPosition, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
-from aprilcam.daemon.interfaces import DaemonStatus
+from aprilcam.daemon.interfaces import DaemonStatus, MountRegistration
 from aprilcam.playfield.playfield import Playfield
 from aprilcam.proto import aprilcam_v2_pb2
 from aprilcam.types import (
@@ -395,16 +395,22 @@ def mount_parameters_from_proto(msg: aprilcam_v2_pb2.MountParameters) -> MountPa
 
 def tag_parameters_from_proto(
     msg: aprilcam_v2_pb2.ListTagParametersResponse,
-) -> Dict[TagId, MountParameters]:
+) -> Dict[TagId, MountRegistration]:
     """See ``daemon.interfaces.Daemon.list_tag_parameters``. Each
     ``TagMountEntry`` pairs a ``TagId`` with its ``MountParameters`` --
     proto3 disallows message-typed map keys, so the wire carries a
     repeated pair message instead of a native map (``aprilcam_v2.proto``'s
     header comment); this rebuilds the same ``Dict[TagId,
-    MountParameters]`` shape :meth:`~aprilcam.daemon.service.
-    DaemonService.list_tag_parameters` returns same-process."""
+    MountRegistration]`` shape :meth:`~aprilcam.daemon.service.
+    DaemonService.list_tag_parameters` returns same-process (ticket
+    030-004, SUC-004 -- ``mount_z_applied`` rides along on
+    ``TagMountEntry`` additively, read back here via the plain
+    ``bool`` field, never absent on the wire)."""
     return {
-        tag_id_from_proto(entry.tag): mount_parameters_from_proto(entry.params)
+        tag_id_from_proto(entry.tag): MountRegistration(
+            params=mount_parameters_from_proto(entry.params),
+            mount_z_applied=entry.mount_z_applied,
+        )
         for entry in msg.entries
     }
 

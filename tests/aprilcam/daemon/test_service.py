@@ -53,7 +53,7 @@ from aprilcam.config.interfaces import CameraConfig, CameraPosition
 from aprilcam.config.loader import ConfigLoader, PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon import __main__ as daemon_main
 from aprilcam.daemon.detection import CONFIRMATION_STREAK, DetectionEngine
-from aprilcam.daemon.interfaces import Daemon
+from aprilcam.daemon.interfaces import Daemon, MountRegistration
 from aprilcam.daemon.lifecycle import DaemonLifecycle
 from aprilcam.daemon.rpc import build_server
 from aprilcam.daemon.service import CALIBRATION_FRAME_COUNT, VALID_ENCODINGS, DaemonService
@@ -1611,6 +1611,68 @@ def test_camera_geometry_for_configured_camera_returns_its_real_nadir_and_height
     assert height_cm == 128.25
 
 
+# ---------------------------------------------------------------------------
+# _any_camera_located / _mount_z_applied (ticket 030-004, SUC-004) -- pure,
+# hand-picked-geometry unit tests of the two new reads register_tag's
+# warning and list_tag_parameters' mount_z_applied both share, exercised
+# directly against the service fixture's own camera-config store (no
+# calibration or detection needed -- these are plain reads of
+# _camera_configs, mirroring _camera_geometry_for's own tests just above).
+# ---------------------------------------------------------------------------
+
+
+def test_any_camera_located_false_with_no_camera_configured_at_all(service):
+    assert service._any_camera_located() is False
+
+
+def test_any_camera_located_false_when_configured_but_never_located(service, held_camera):
+    _, slug, _ = held_camera
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+
+    assert service._any_camera_located() is False
+
+
+def test_any_camera_located_true_once_one_camera_has_camera_position(service, held_camera):
+    _, slug, _ = held_camera
+    service.set_camera_config(
+        CameraConfig(
+            name=slug,
+            playfield="main-playfield",
+            settings={},
+            camera_position=CameraPosition(nadir=WorldPoint(x=0.0, y=0.0), height_cm=100.0),
+        )
+    )
+
+    assert service._any_camera_located() is True
+
+
+def test_mount_z_applied_is_vacuously_true_for_zero_or_negative_mount_z(service):
+    """No elevation to project -- True regardless of any camera's
+    located state (mirrors project_tag_to_field_plane's own
+    mount_z_cm <= 0.0 no-op sentinel)."""
+    assert service._mount_z_applied(0.0) is True
+    assert service._mount_z_applied(-5.0) is True
+
+
+def test_mount_z_applied_false_then_true_as_the_observing_camera_is_located(
+    service, held_camera
+):
+    _, slug, _ = held_camera
+
+    assert service._mount_z_applied(15.0) is False
+
+    service.set_camera_config(
+        CameraConfig(
+            name=slug,
+            playfield="main-playfield",
+            settings={},
+            camera_position=CameraPosition(nadir=WorldPoint(x=0.0, y=0.0), height_cm=100.0),
+        )
+    )
+
+    assert service._mount_z_applied(15.0) is True
+
+
 def test_get_camera_config_by_persistent_number_reaches_the_same_config_as_by_slug(
     service, held_camera, registry
 ):
@@ -2897,7 +2959,11 @@ def test_register_tag_then_list_tag_parameters_round_trips(service):
 
     service.register_tag(tag, params)
 
-    assert service.list_tag_parameters() == {tag: params}
+    # mount_z is 0.0 (unset) -- mount_z_applied is vacuously True
+    # (ticket 030-004, SUC-004): nothing for parallax to withhold.
+    assert service.list_tag_parameters() == {
+        tag: MountRegistration(params=params, mount_z_applied=True)
+    }
 
 
 def test_register_tag_upserts_replacing_a_prior_registration_outright(service):
@@ -2906,7 +2972,9 @@ def test_register_tag_upserts_replacing_a_prior_registration_outright(service):
 
     service.register_tag(tag, MountParameters(mount_x=2.0))
 
-    assert service.list_tag_parameters() == {tag: MountParameters(mount_x=2.0)}
+    assert service.list_tag_parameters() == {
+        tag: MountRegistration(params=MountParameters(mount_x=2.0), mount_z_applied=True)
+    }
 
 
 def test_unregister_tag_removes_the_registration(service):
@@ -2933,9 +3001,13 @@ def test_list_tag_parameters_returns_a_snapshot_not_a_live_reference(service):
     service.register_tag(tag, MountParameters(mount_x=1.0))
 
     snapshot = service.list_tag_parameters()
-    snapshot[TagId(family=TagFamily.ARUCO, number=1)] = MountParameters()
+    snapshot[TagId(family=TagFamily.ARUCO, number=1)] = MountRegistration(
+        params=MountParameters(), mount_z_applied=True
+    )
 
-    assert service.list_tag_parameters() == {tag: MountParameters(mount_x=1.0)}
+    assert service.list_tag_parameters() == {
+        tag: MountRegistration(params=MountParameters(mount_x=1.0), mount_z_applied=True)
+    }
 
 
 def test_register_tag_mount_z_with_no_calibration_anywhere_is_rejected(service):
@@ -2953,13 +3025,17 @@ def test_register_tag_mount_z_with_no_calibration_anywhere_is_rejected(service):
 def test_register_tag_zero_mount_z_is_accepted_even_uncalibrated(service):
     """A *zero* mount_z (``MountParameters``' own default) never
     triggers the uncalibrated-rejection -- there is nothing for
-    parallax to project in that case."""
+    parallax to project in that case. ``mount_z_applied`` is vacuously
+    True for the same reason (ticket 030-004, SUC-004)."""
     tag = TagId(family=TagFamily.APRILTAG, number=7)
     params = MountParameters(mount_x=8.0, mount_y=3.0, mount_z=0.0)
 
-    service.register_tag(tag, params)
+    warning = service.register_tag(tag, params)
 
-    assert service.list_tag_parameters() == {tag: params}
+    assert warning is None
+    assert service.list_tag_parameters() == {
+        tag: MountRegistration(params=params, mount_z_applied=True)
+    }
 
 
 def test_register_tag_partial_spec_mount_z_set_xy_unset_is_accepted_as_zero_offset(
@@ -2968,7 +3044,17 @@ def test_register_tag_partial_spec_mount_z_set_xy_unset_is_accepted_as_zero_offs
     """Partial mount spec (``mount_z`` set, ``mount_x``/``mount_y``
     unset) is accepted, treated as zero offset, not an error -- once a
     calibration exists to make ``mount_z`` meaningful in the first
-    place (UC-12.S-5 is the only thing that can reject this spec)."""
+    place (UC-12.S-5 is the only thing that can reject this spec).
+
+    Ticket 030-004, SUC-004: this camera is calibrated but never
+    ``locate``\\ d (no ``camera_position`` ever set) -- the exact
+    calibrated-but-unlocated scenario this ticket's acceptance criteria
+    ask for. Registration must still succeed with no error (no
+    regression from tightening anything, per Decision 4), but the
+    response now carries a non-``None`` warning, and a subsequent
+    ``list_tag_parameters`` call reports ``mount_z_applied=False`` for
+    this registration.
+    """
     frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
     identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
     calibrated_service = _service_with_camera(directories, registry, identity, slug, cam)
@@ -2982,9 +3068,107 @@ def test_register_tag_partial_spec_mount_z_set_xy_unset_is_accepted_as_zero_offs
     tag = TagId(family=TagFamily.APRILTAG, number=7)
     params = MountParameters(mount_z=15.0)  # mount_x/mount_y left at their own 0.0 default
 
-    calibrated_service.register_tag(tag, params)  # must not raise
+    warning = calibrated_service.register_tag(tag, params)  # must not raise
 
-    assert calibrated_service.list_tag_parameters() == {tag: params}
+    assert warning is not None
+    assert "camera locate" in warning
+    assert calibrated_service.list_tag_parameters() == {
+        tag: MountRegistration(params=params, mount_z_applied=False)
+    }
+
+
+def test_mount_z_applied_flips_to_true_once_the_observing_camera_is_located(
+    directories, registry
+):
+    """Mirrors ``test_mount_z_is_a_noop_until_camera_position_is_pushed_then_engages_with_no_restart``'s
+    existing live-mechanism-proof shape (ticket 029-001/003), at this
+    ticket's own unit/headless level (ticket 030-004, SUC-004): a
+    registration made while calibrated-but-unlocated reports
+    ``mount_z_applied=False`` and a warning; once the observing
+    camera's ``camera_position`` is pushed (no re-registration, no
+    daemon restart needed -- ``_camera_geometry_for`` is read live per
+    call), the same registration's ``mount_z_applied`` flips to
+    ``True`` with no further action.
+    """
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    calibrated_service = _service_with_camera(directories, registry, identity, slug, cam)
+    calibrated_service.set_playfield(main_playfield_definition())
+    calibrated_service.set_camera_config(
+        CameraConfig(name=slug, playfield="main-playfield", settings={})
+    )
+    result = calibrated_service.calibrate(slug)
+    assert result.succeeded is True
+
+    tag = TagId(family=TagFamily.APRILTAG, number=7)
+    params = MountParameters(mount_z=15.0)
+    calibrated_service.register_tag(tag, params)
+    assert calibrated_service.list_tag_parameters()[tag].mount_z_applied is False
+
+    calibrated_service.set_camera_config(
+        CameraConfig(
+            name=slug,
+            playfield="main-playfield",
+            settings={},
+            camera_position=CameraPosition(nadir=WorldPoint(x=0.0, y=0.0), height_cm=128.25),
+        )
+    )
+
+    assert calibrated_service.list_tag_parameters() == {
+        tag: MountRegistration(params=params, mount_z_applied=True)
+    }
+    # register_tag's own warning is also gone now, for a fresh registration.
+    assert calibrated_service.register_tag(tag, params) is None
+
+
+def test_register_tag_warning_absent_when_a_different_unrelated_camera_is_located(
+    directories, registry
+):
+    """The 'any camera' scope (ticket 030-004, SUC-004, Decision 4):
+    the *observing* camera (``slug``) is calibrated but never
+    ``locate``\\ d, yet a wholly different, never-opened camera slug
+    has a ``camera_position`` pushed for it -- mirrors
+    ``NotCalibrated``'s own "any camera" precedent exactly (a mobile
+    tag is not bound to one specific camera), so no warning is
+    returned."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    calibrated_service = _service_with_camera(directories, registry, identity, slug, cam)
+    calibrated_service.set_playfield(main_playfield_definition())
+    calibrated_service.set_camera_config(
+        CameraConfig(name=slug, playfield="main-playfield", settings={})
+    )
+    result = calibrated_service.calibrate(slug)
+    assert result.succeeded is True
+
+    # An unrelated camera slug this service has never even opened.
+    calibrated_service.set_camera_config(
+        CameraConfig(
+            name="some-other-camera",
+            playfield="main-playfield",
+            settings={},
+            camera_position=CameraPosition(nadir=WorldPoint(x=1.0, y=2.0), height_cm=100.0),
+        )
+    )
+
+    tag = TagId(family=TagFamily.APRILTAG, number=7)
+    warning = calibrated_service.register_tag(tag, MountParameters(mount_z=15.0))
+
+    assert warning is None
+    assert calibrated_service.list_tag_parameters()[tag].mount_z_applied is True
+
+
+def test_register_tag_zero_mount_z_never_warns_regardless_of_located_state(service):
+    """Mirrors ``register_tag``'s existing ``NotCalibrated`` scoping
+    (ticket 030-004, SUC-004): a zero ``mount_z`` (the default) never
+    produces a warning, even against this fixture's fully uncalibrated,
+    unlocated daemon -- there is nothing for parallax to project in
+    that case."""
+    tag = TagId(family=TagFamily.APRILTAG, number=7)
+
+    warning = service.register_tag(tag, MountParameters())
+
+    assert warning is None
 
 
 def test_register_tag_for_a_tag_not_currently_visible_is_accepted(service):
@@ -3124,9 +3308,15 @@ def test_rpc_register_tag_then_list_tag_parameters_round_trips(stub):
         mount_x=8.0, mount_y=3.0, mount_z=0.0, mount_yaw_rad=0.5
     )
 
-    stub.RegisterTag(aprilcam_v2_pb2.RegisterTagRequest(tag=tag_msg, params=params_msg))
+    register_response = stub.RegisterTag(
+        aprilcam_v2_pb2.RegisterTagRequest(tag=tag_msg, params=params_msg)
+    )
     response = stub.ListTagParameters(aprilcam_v2_pb2.ListTagParametersRequest())
 
+    # mount_z == 0.0 -- no warning on RegisterTagResponse (ticket
+    # 030-004, SUC-004), and mount_z_applied rides the wire additively
+    # on TagMountEntry, vacuously True.
+    assert not register_response.HasField("warning")
     assert len(response.entries) == 1
     entry = response.entries[0]
     assert entry.tag.family == aprilcam_v2_pb2.APRILTAG
@@ -3135,6 +3325,40 @@ def test_rpc_register_tag_then_list_tag_parameters_round_trips(stub):
     assert entry.params.mount_y == pytest.approx(3.0)
     assert entry.params.mount_yaw_rad == pytest.approx(0.5)
     assert not entry.params.HasField("size_cm")
+    assert entry.mount_z_applied is True
+
+
+def test_rpc_register_tag_warning_round_trips_present_when_calibrated_but_unlocated(
+    directories, registry
+):
+    """Wire round trip of the new additive ``RegisterTagResponse.warning``
+    field (ticket 030-004, SUC-004): a calibrated-but-never-``locate``\\ d
+    camera's nonzero ``mount_z`` registration comes back over gRPC with
+    a present, non-empty warning naming ``camera locate``."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    calibrated_service = _service_with_camera(directories, registry, identity, slug, cam)
+    calibrated_service.set_playfield(main_playfield_definition())
+    calibrated_service.set_camera_config(
+        CameraConfig(name=slug, playfield="main-playfield", settings={})
+    )
+    assert calibrated_service.calibrate(slug).succeeded is True
+
+    with _bind_stub(calibrated_service) as calibrated_stub:
+        tag_msg = aprilcam_v2_pb2.TagId(family=aprilcam_v2_pb2.APRILTAG, number=7)
+        params_msg = aprilcam_v2_pb2.MountParameters(mount_z=15.0)
+
+        response = calibrated_stub.RegisterTag(
+            aprilcam_v2_pb2.RegisterTagRequest(tag=tag_msg, params=params_msg)
+        )
+
+        assert response.HasField("warning")
+        assert "camera locate" in response.warning
+
+        entries = calibrated_stub.ListTagParameters(
+            aprilcam_v2_pb2.ListTagParametersRequest()
+        ).entries
+        assert entries[0].mount_z_applied is False
 
 
 def test_rpc_register_tag_with_size_cm_round_trips_present(stub):
