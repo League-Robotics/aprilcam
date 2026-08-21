@@ -1,7 +1,7 @@
 ---
 id: '030'
 title: Distortion-aware calibration and the locate surface
-status: planning-docs
+status: closed
 branch: sprint/030-distortion-aware-calibration-and-the-locate-surface
 worktree: false
 use-cases: []
