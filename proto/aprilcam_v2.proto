@@ -185,6 +185,22 @@
 // `aprilcam.config.interfaces.Feature.height_cm`'s own non-Optional
 // `float = 0.0` shape.
 //
+// Sprint 031 ticket 001 is the twelfth: `GetStatusResponse` gains a plain
+// `int32 protocol_version = 5` (`running`/`cameras`/`config_dir`/
+// `state_dir` already occupy 1-4). Exists so a v2 client can distinguish
+// "reached an incompatible daemon" from a generic connection failure: a
+// v1 daemon shares this project's conventional control-plane socket path
+// but has no `GetStatus` RPC (or any of this file's service) at all, so
+// `GetStatus` comes back `UNIMPLEMENTED` with no `aprilcam-error-type`
+// trailing metadata -- indistinguishable, before this ticket, from
+// "nothing is listening." A compatible v2 daemon now echoes
+// `daemon.rpc.PROTOCOL_VERSION` on every `GetStatus` response, the first
+// RPC any fresh client connection makes (`client/lifecycle.py`'s own
+// `status()`); no new RPC and no extra round trip on the common path.
+// Purely additive -- a pre-031 client reading an unfamiliar field from a
+// post-031 daemon ignores it per protobuf's normal forward-compatibility
+// rules.
+//
 // Wire conventions this file follows (docs/design/design.md §6):
 //   - World-cm coordinates cross this boundary only inside `TagRecord`
 //     (`world`, `world_velocity`, `world_corners`), and every camera
@@ -594,6 +610,12 @@ message GetStatusResponse {
   repeated CameraState cameras = 2;
   string config_dir = 3;
   string state_dir = 4;
+  // This codebase's wire protocol version (`daemon.rpc.PROTOCOL_VERSION`,
+  // ticket 031-001) -- always set by a compatible v2 daemon; absent only
+  // when a v1 daemon or other incompatible responder fails the RPC
+  // outright (see the ticket-031-001 changelog note above `GetStatus`'s
+  // "---" banner for the full detection story).
+  int32 protocol_version = 5;
 }
 
 // ---------------------------------------------------------------------------

@@ -47,12 +47,21 @@ the exact trailing-metadata contract this reconstructs from
 (``aprilcam-error-type`` plus per-type extra fields). An ``RpcError``
 whose metadata names a known ``aprilcam.errors`` type is rebuilt as
 that exact type -- callers catch types, not strings, on this side of
-the wire too. Anything else (no metadata at all, or a type this map
-does not yet know) is :class:`~aprilcam.errors.ConnectionFailed`: "a
-named daemon did not answer" is the most honest thing an unclassified
-RPC failure can mean from here -- the daemon crashing mid-call, the
-socket going away, or a status this client has no typed name for all
-look the same from outside.
+the wire too. One shape gets a second, narrower classification before
+the catch-all (ticket 031-001): no recognised metadata *and* status
+code ``UNIMPLEMENTED`` is the exact signature of a v1 daemon sharing
+this project's conventional control-plane socket path with a v2
+daemon (v1 implements none of this file's RPCs, so the first one a
+fresh connection makes -- ``GetStatus`` -- is always the one that
+fails this way) -- reconstructed as
+:class:`~aprilcam.errors.DaemonVersionMismatch`, not
+``ConnectionFailed``, since something *did* answer. Everything else
+(no metadata and any other code, or a type this map does not yet know)
+is :class:`~aprilcam.errors.ConnectionFailed`: "a named daemon did not
+answer" is the most honest thing that residual, truly unclassified
+case can mean from here -- the daemon crashing mid-call, the socket
+going away, or a status this client has no typed name for all look the
+same from outside.
 """
 
 from __future__ import annotations
@@ -88,6 +97,7 @@ from aprilcam.errors import (
     AlreadyRunning,
     CameraNotPresent,
     ConnectionFailed,
+    DaemonVersionMismatch,
     NoPlayfieldLinked,
     NotCalibrated,
     UnknownCamera,
@@ -291,9 +301,29 @@ def _reconstruct_error(exc: grpc.RpcError, target: str) -> Exception:
     """Rebuild the typed ``aprilcam.errors`` exception *exc* carries in
     its trailing metadata, per ``daemon/rpc.py``'s ``_abort`` contract.
     Falls back to :class:`ConnectionFailed` naming *target* for
-    anything unrecognised."""
+    anything unrecognised -- **except** ``UNIMPLEMENTED`` with no
+    recognised metadata, which is not "unclassified": it is the exact
+    shape a v1 daemon sharing this project's conventional control-plane
+    socket path produces (v1 implements none of ``aprilcam_v2.proto``'s
+    RPCs, so the *first* one a fresh connection calls -- ``GetStatus``
+    -- comes back ``UNIMPLEMENTED``/``Method not found!`` with no
+    ``aprilcam-error-type`` trailing metadata, since v1 never adopted
+    that contract). No response is ever deserialized on this path either
+    (the call itself failed), so there is no ``protocol_version`` to
+    read -- both halves of ticket 031-001's detection condition
+    ("no recognised metadata" and "no valid protocol_version") hold by
+    construction whenever this branch is reached. Raised as
+    :class:`~aprilcam.errors.DaemonVersionMismatch` instead of
+    :class:`ConnectionFailed`, since "something answered, but not as a
+    compatible daemon" is a different, more actionable diagnosis than
+    "nothing answered." Other unclassified codes (``UNAVAILABLE`` from a
+    dead socket or a crashed process mid-call, for instance) still fall
+    through to :class:`ConnectionFailed` below, unchanged -- this branch
+    narrows the fallback, it does not replace it."""
     metadata = dict(exc.trailing_metadata() or ())
     error_type = metadata.get("aprilcam-error-type")
+    if error_type is None and exc.code() == grpc.StatusCode.UNIMPLEMENTED:
+        return DaemonVersionMismatch(target)
     if error_type == "AlreadyRunning":
         return AlreadyRunning(metadata.get("aprilcam-holder", "unknown holder"))
     if error_type == "UnknownCamera":

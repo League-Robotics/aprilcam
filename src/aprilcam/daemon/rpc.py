@@ -120,9 +120,23 @@ from aprilcam.types import (
     WorldPoint,
 )
 
-__all__ = ["build_server", "build_stream_transport"]
+__all__ = ["build_server", "build_stream_transport", "PROTOCOL_VERSION"]
 
 logger = logging.getLogger(__name__)
+
+#: This codebase's wire protocol version (ticket 031-001) -- echoed on
+#: every ``GetStatusResponse`` so a v2 client can positively confirm it
+#: reached a compatible daemon on the first RPC any fresh connection
+#: makes (``GetStatus``, via ``client/lifecycle.py``'s own ``status()``).
+#: Deliberately independent of ``aprilcam.__version__``: the package
+#: version bumps once per sprint close regardless of whether the wire
+#: protocol changed at all, so tying this to it would make an unrelated
+#: release look like a protocol change. Bump only when
+#: ``aprilcam_v2.proto``'s existing fields are renumbered or removed --
+#: purely additive growth (the only kind this file's evolution rule
+#: allows, per its own module docstring) never requires a bump, since an
+#: older client already reads an additive field's absence correctly.
+PROTOCOL_VERSION = 1
 
 #: exception type -> gRPC status code. Anything not listed (including
 #: an ``AprilCamError`` subtype added by a later sprint before this map
@@ -231,6 +245,10 @@ def _status_to_proto(status: DaemonStatus) -> aprilcam_v2_pb2.GetStatusResponse:
         cameras=_camera_states_to_proto(status.cameras),
         config_dir=status.config_dir,
         state_dir=status.state_dir,
+        # Ticket 031-001: always set, not `DaemonStatus`-derived -- this
+        # codebase's protocol version is a constant of the running code,
+        # not a property of any particular daemon's runtime state.
+        protocol_version=PROTOCOL_VERSION,
     )
 
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+from concurrent import futures
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterator
@@ -39,17 +40,18 @@ from aprilcam.config.directories import Directories
 from aprilcam.config.interfaces import CameraConfig, CameraPosition, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import MountRegistration
-from aprilcam.daemon.rpc import build_server
+from aprilcam.daemon.rpc import PROTOCOL_VERSION, build_server
 from aprilcam.daemon.service import CALIBRATION_FRAME_COUNT, DaemonService
 from aprilcam.errors import (
     CameraNotPresent,
     ConnectionFailed,
+    DaemonVersionMismatch,
     NotCalibrated,
     UnknownCamera,
     UnknownGuide,
     UnknownPlayfield,
 )
-from aprilcam.proto import aprilcam_v2_pb2_grpc
+from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
 from aprilcam.types import (
     Annotation,
     AnnotationSet,
@@ -295,6 +297,54 @@ def test_status_round_trip(client, directories, held_camera):
     assert status.state_dir == str(directories.state_dir)
 
 
+def test_get_status_response_carries_protocol_version_on_the_wire(service):
+    """Ticket 031-001, SUC-001 main flow step 2: a compatible v2 daemon's
+    ``GetStatus`` response always carries ``protocol_version`` set to
+    ``daemon.rpc.PROTOCOL_VERSION`` -- a plain protobuf serialization
+    round trip through the real server (``daemon/rpc.py``'s
+    ``_status_to_proto``), not just a Python-level dataclass check.
+    Deliberately drives the raw generated stub, not ``GrpcDaemon`` --
+    ``daemon.interfaces.DaemonStatus`` does not carry this field (it is
+    a protocol-level fact about the daemon build, not part of the
+    business-level status this ticket's plan scopes it to), so the field
+    is only observable on the wire message itself."""
+    socket_dir = Path(tempfile.mkdtemp(prefix="ac-dc-pv-", dir="/tmp"))
+    socket_path = socket_dir / "control.sock"
+    try:
+        listener = build_server(service, socket_path)
+        listener.start()
+        channel = grpc.insecure_channel(f"unix:{socket_path}")
+        try:
+            grpc.channel_ready_future(channel).result(timeout=5)
+            stub = aprilcam_v2_pb2_grpc.AprilCamV2Stub(channel)
+
+            response = stub.GetStatus(aprilcam_v2_pb2.GetStatusRequest())
+
+            assert response.protocol_version == PROTOCOL_VERSION
+        finally:
+            channel.close()
+            listener.stop(1.0)
+    finally:
+        shutil.rmtree(socket_dir, ignore_errors=True)
+
+
+def test_status_round_trip_unaffected_by_protocol_version_field(client, directories, held_camera):
+    """SUC-001's third acceptance bullet: a v2 client talking to a
+    compatible v2 daemon is unaffected by the new field -- no new
+    failure mode, ``client.status()`` still returns the same
+    ``DaemonStatus`` shape it always did, in one round trip. (The
+    positive-path counterpart to
+    ``test_get_status_response_carries_protocol_version_on_the_wire``
+    above, driven through the full client stack instead of the raw
+    stub.)"""
+    _, slug, _ = held_camera
+
+    status = client.status()
+
+    assert status.running is True
+    assert [c.name for c in status.cameras] == [slug]
+
+
 # ---------------------------------------------------------------------------
 # Typed errors survive the round trip as the right exception classes
 # ---------------------------------------------------------------------------
@@ -366,6 +416,49 @@ def test_rpc_failure_after_server_shutdown_raises_connection_failed(service):
 
         channel.close()
     finally:
+        shutil.rmtree(socket_dir, ignore_errors=True)
+
+
+def test_status_against_daemon_with_no_v2_service_raises_daemon_version_mismatch():
+    """Ticket 031-001, SUC-001 main flow steps 3-4: a daemon that
+    implements none of ``aprilcam_v2.proto``'s RPCs -- exactly what a v1
+    daemon (from a sibling checkout) sharing this project's conventional
+    control-plane socket path looks like -- fails ``GetStatus``, the
+    first RPC any fresh connection makes, with ``UNIMPLEMENTED`` and no
+    ``aprilcam-error-type`` trailing metadata. This is deliberately *not*
+    the ``service``/``build_server`` fixture: binding a bare ``grpc.
+    server()`` with no servicer registered at all is the most faithful
+    simulation of "the responder does not speak this protocol," since
+    grpc-python's own UNIMPLEMENTED-for-unregistered-method behavior is
+    exactly what produces v1's real-world ``Method not found!``. The
+    client raises the new, distinctly-named ``DaemonVersionMismatch`` --
+    not the generic ``ConnectionFailed`` a "nothing is listening" failure
+    would produce (see ``test_rpc_failure_after_server_shutdown_raises_
+    connection_failed`` above for that contrasting case, which must stay
+    ``ConnectionFailed`` after this ticket, not be swept into this new
+    branch)."""
+    socket_dir = Path(tempfile.mkdtemp(prefix="ac-dc-v1sim-", dir="/tmp"))
+    socket_path = socket_dir / "control.sock"
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    server.add_insecure_port(f"unix:{socket_path}")
+    server.start()
+    try:
+        channel = grpc.insecure_channel(f"unix:{socket_path}")
+        try:
+            grpc.channel_ready_future(channel).result(timeout=5)
+            stub = aprilcam_v2_pb2_grpc.AprilCamV2Stub(channel)
+            client = GrpcDaemon(stub, target="localhost")
+
+            with pytest.raises(DaemonVersionMismatch) as excinfo:
+                client.status()
+
+            assert excinfo.value.target == "localhost"
+            assert "localhost" in str(excinfo.value)
+            assert "incompatible protocol" in str(excinfo.value)
+        finally:
+            channel.close()
+    finally:
+        server.stop(0)
         shutil.rmtree(socket_dir, ignore_errors=True)
 
 

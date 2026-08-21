@@ -49,6 +49,33 @@ class ConnectionFailed(AprilCamError):
                          + (f": {reason}" if reason else ""))
 
 
+class DaemonVersionMismatch(AprilCamError):
+    """A daemon answered, but does not speak this client's wire protocol
+    (UC-13, SUC-001, ticket 031-001).
+
+    Distinct from :class:`ConnectionFailed`: something *is* listening at
+    *target* -- it just is not a compatible v2 daemon. Observed
+    concretely when a v1 daemon (from a sibling checkout) shares this
+    project's conventional control-plane socket path with a v2 daemon --
+    a v2 client's first RPC against it (``GetStatus``) comes back
+    ``UNIMPLEMENTED`` with no ``aprilcam-error-type`` trailing metadata,
+    since v1 never implemented ``GetStatus`` -- or any RPC in
+    ``aprilcam_v2.proto`` -- at all. Raised instead of the generic
+    ``ConnectionFailed`` so the operator sees "wrong protocol," not the
+    indistinguishable-from-nothing-listening message that used to reach
+    them.
+    """
+
+    def __init__(self, target: str) -> None:
+        self.target = target
+        super().__init__(
+            f"daemon at {target!r} speaks an incompatible protocol "
+            "-- this looks like a v1 aprilcam daemon (or another "
+            "process) sharing the control-plane socket, not a "
+            "compatible v2 daemon"
+        )
+
+
 class UnknownTarget(AprilCamError):
     """A name the daemon does not know, with the names it does.
 
