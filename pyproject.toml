@@ -102,6 +102,7 @@ dev = [
     "pandas>=2.3.3",
     "pytest>=9.0.2",
     "pytest-asyncio>=0.24",
+    "types-PyYAML>=6.0",
 ]
 
 # Pragmatic strictness: catches real bugs (unreachable code, bad
