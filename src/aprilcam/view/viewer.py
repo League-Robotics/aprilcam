@@ -487,8 +487,17 @@ def run_raw_view(
     UC-16.S-3 message pointing at ``camera image``. Any
     ``aprilcam.errors.AprilCamError`` raised mid-view (e.g. the camera
     disconnects) propagates the same way, after the window is closed.
+
+    The window title carries an explicit ``[RAW]`` marker for the whole
+    session (sprint 031 ticket 004, SUC-004) -- UC-16's "raw means raw"
+    guarantee is a deliberate diagnostic tool (how an operator tells a
+    camera problem from a geometry problem apart from ``playfield
+    view``), and the stakeholder hit exactly this confusion in practice
+    expecting deskew from this command. This is signposting only: the
+    stream subscription and every byte handed to the window are
+    unchanged from before this ticket.
     """
-    window = window_factory(f"aprilcam camera view -- {camera}")
+    window = window_factory(f"aprilcam camera view [RAW] -- {camera}")
     try:
         stream = daemon.stream_images(camera, deskewed=False)
         StreamLoop(window, stream, _convert_raw_frame).run()

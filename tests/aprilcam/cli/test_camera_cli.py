@@ -1066,6 +1066,59 @@ def test_view_refuses_all_before_ever_connecting(capsys):
     assert "single" in err.lower()
 
 
+def test_view_prints_a_raw_signposting_line_before_connecting(capsys):
+    """Sprint 031 ticket 004 (SUC-004): the startup line names the view
+    raw and points at ``playfield view`` as the deskewed alternative,
+    printed before any daemon connection is attempted."""
+    calls = []
+
+    class _OrderRecordingDiscovery:
+        def connect(self, host=None):
+            calls.append("connect")
+            return _FakeDaemon()
+
+    code = camera_cli.cmd_view(
+        _args(camera="arducam-ov9782-usb-camera"),
+        discovery_factory=lambda: _OrderRecordingDiscovery(),
+        run_view=lambda camera, connected: calls.append("run_view"),
+    )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "raw" in out.lower()
+    assert "playfield view" in out
+    assert "arducam-ov9782-usb-camera" in out
+    assert calls == ["connect", "run_view"]
+
+
+def test_view_prints_the_raw_signposting_line_even_when_connection_fails(capsys):
+    """The startup line must appear even if the subsequent connection
+    fails -- an operator who saw the raw-ness warning and then hit a
+    connection error still saw the warning."""
+    discovery = _FakeDiscovery(connect_raises=ConnectionFailed("pi-field.local", reason="refused"))
+
+    code = camera_cli.cmd_view(
+        _args(camera="arducam-ov9782-usb-camera", daemon="pi-field.local"),
+        discovery_factory=lambda: discovery,
+    )
+
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "raw" in out.lower()
+    assert "playfield view" in out
+
+
+def test_view_does_not_print_the_raw_signposting_line_when_all_is_refused(capsys):
+    """``--all`` is refused before the view is ever attempted, so the
+    raw-ness signpost (which only makes sense for a view that is about
+    to open) should not print either."""
+    code = camera_cli.cmd_view(_args(all=True), discovery_factory=lambda: _FakeDiscovery())
+
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "playfield view" not in out
+
+
 def test_view_connects_and_hands_the_connected_daemon_to_run_view():
     daemon = _FakeDaemon()
     discovery = _FakeDiscovery(daemon=daemon)

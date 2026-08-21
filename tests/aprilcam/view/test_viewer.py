@@ -433,6 +433,27 @@ def test_run_raw_view_subscribes_to_the_raw_stream_and_shows_bytes_unchanged():
     assert _no_reader_thread_alive()
 
 
+def test_run_raw_view_window_title_carries_an_explicit_raw_marker():
+    """Sprint 031 ticket 004 (SUC-004): the window title must state
+    RAW explicitly, visible for the whole session -- not just the CLI's
+    startup line. Captured via the ``window_factory`` injection seam,
+    no real display needed."""
+    stream = _ScriptedImageStream([_image_frame(data=b"raw-1")])
+    daemon = _FakeStreamDaemon(stream=stream)
+    window = _FakeWindow(close_after_frames=1)
+    captured_titles: List[str] = []
+
+    def capturing_factory(title: str) -> viewer.Window:
+        captured_titles.append(title)
+        return window
+
+    viewer.run_raw_view("arducam-ov9782-usb-camera", daemon, window_factory=capturing_factory)
+
+    assert len(captured_titles) == 1
+    assert "RAW" in captured_titles[0]
+    assert "arducam-ov9782-usb-camera" in captured_titles[0]
+
+
 def test_run_raw_view_ignores_embedded_tags_even_when_detection_is_active():
     """UC-16 'raw means raw', taken literally: an embedded ``TagFrame``
     (an active, recently-queried ring buffer) must not change what

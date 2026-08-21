@@ -384,6 +384,15 @@ def cmd_view(
     --all`` gets in ticket 003. A headless host (no display) fails with
     a message pointing at ``camera image`` instead of a GUI-toolkit
     backtrace (UC-16.S-3).
+
+    Prints a startup line naming the view raw (no deskew/homography)
+    and pointing at ``playfield view`` as the deskewed alternative
+    (sprint 031 ticket 004, SUC-004) -- before the daemon connection is
+    attempted, so the signposting is seen even if the connection
+    subsequently fails. UC-16's "raw means raw" guarantee itself is
+    unchanged by this ticket; only the visibility of that fact is new
+    (see ``view/viewer.py``'s ``run_raw_view`` for the window-title
+    half of the same signposting).
     """
     if args.all:
         print(
@@ -393,6 +402,12 @@ def cmd_view(
             file=sys.stderr,
         )
         return EXIT_ERROR
+
+    print(
+        f"aprilcam camera view: RAW feed for {args.camera!r} -- no deskew "
+        "or homography applied. For the deskewed, calibrated view, use "
+        "'aprilcam playfield view' instead (UC-16)."
+    )
 
     try:
         daemon = discovery_factory().connect(args.daemon)
