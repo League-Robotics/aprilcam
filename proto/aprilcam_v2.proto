@@ -166,6 +166,25 @@
 // is `false` on the wire until an operator (or `aprilcam camera locate`,
 // ticket 003) sets one.
 //
+// Sprint 030 ticket 002 is the eleventh: opt-in intrinsics estimation on
+// `Calibrate`, and `height_cm` on surveyed features. `CalibrateRequest`
+// gains `bool estimate_intrinsics = 2` (plain -- false already means "not
+// requested"). `CalibrationResult` gains `intrinsics_estimated`/
+// `intrinsics_mode`/`elevated_features_used`, mirroring
+// `aprilcam.calibration.interfaces.CalibrationResult`'s own three new
+// fields -- an operator/agent-visible report of what a calibration call
+// actually did, never the fitted numbers themselves. `Calibration` gains
+// `camera_matrix`/`dist_coeffs` (empty `repeated double` means "no lens
+// model", mirroring `homography`'s own flattened-matrix convention) for
+// daemon-internal round-tripping only -- `client/models.py`'s
+// `calibration_from_proto` deliberately does not surface them, the same
+// "reports what the interface promises, never the internal homography
+// matrix" precedent `homography`/`matched_ids` already set. `Playfield
+// FeatureEntry`/`FeatureMatch` both gain a plain `double height_cm = ...`
+// (never `optional` -- `0.0` already means "on the field plane"), mirroring
+// `aprilcam.config.interfaces.Feature.height_cm`'s own non-Optional
+// `float = 0.0` shape.
+//
 // Wire conventions this file follows (docs/design/design.md §6):
 //   - World-cm coordinates cross this boundary only inside `TagRecord`
 //     (`world`, `world_velocity`, `world_corners`), and every camera
@@ -638,6 +657,12 @@ message PlayfieldFeatureEntry {
   double y = 3;
   optional int32 id = 4;
   optional string colour = 5;
+  // How far this feature sits above the field plane, cm (sprint 030
+  // ticket 002). Plain (not `optional`) -- 0.0 already means "on the
+  // field plane" unambiguously, matching
+  // aprilcam.config.interfaces.Feature.height_cm's own `float = 0.0`
+  // (never Optional[float]) shape.
+  double height_cm = 6;
 }
 
 // A whole playfield definition document. Mirrors aprilcam.config.
@@ -743,6 +768,20 @@ message CalibrationResult {
   // singular homography) -- absent when `missing_ids` alone explains
   // the failure, or on success.
   optional string reason = 5;
+  // sprint 030 ticket 002: whether *this call* estimated a lens model
+  // -- absent means the concept did not apply (the attempt failed
+  // before reaching that decision). Mirrors
+  // aprilcam.calibration.interfaces.CalibrationResult.intrinsics_estimated.
+  optional bool intrinsics_estimated = 6;
+  // Which intrinsics-estimation model ran this call
+  // ("coplanar-constrained" or "elevated") -- absent whenever
+  // intrinsics_estimated is not true. Mirrors
+  // CalibrationResult.intrinsics_mode.
+  optional string intrinsics_mode = 7;
+  // How many surveyed-and-detected elevated features contributed --
+  // absent under the same condition as intrinsics_mode. Mirrors
+  // CalibrationResult.elevated_features_used.
+  optional int32 elevated_features_used = 8;
 }
 
 // A camera's established pixel<->world mapping. Mirrors
@@ -758,10 +797,29 @@ message Calibration {
   repeated double homography = 4;
   repeated int32 matched_ids = 5;
   optional double reprojection_error_cm = 6;
+  // sprint 030 ticket 002: this camera's optional lens model, for
+  // daemon-internal round-tripping -- 9 row-major doubles when known
+  // (mirrors `homography`'s own flattening), empty when not (a valid
+  // 3x3 matrix is never empty, so "empty repeated" is the unambiguous
+  // absence encoding, matching e.g. TagRecord.world_corners above).
+  // client/models.py's calibration_from_proto deliberately does not
+  // surface this to callers -- same precedent as `homography`/
+  // `matched_ids` today (mcp/tools/configuration.py's own "reports
+  // what the interface promises, never the internal homography
+  // matrix" rule).
+  repeated double camera_matrix = 7;
+  // This camera's distortion coefficients, if known -- empty means
+  // "no lens model", same discipline as `camera_matrix` above.
+  repeated double dist_coeffs = 8;
 }
 
 message CalibrateRequest {
   string camera = 1;
+  // sprint 030 ticket 002: opt into also estimating this camera's lens
+  // model from this call's detection burst (Daemon.calibrate's
+  // estimate_intrinsics). Plain bool -- false already means "not
+  // requested", matching the Python default.
+  bool estimate_intrinsics = 2;
 }
 
 message CalibrateResponse {
@@ -940,6 +998,10 @@ message FeatureMatch {
   string kind = 2;
   WorldPoint position = 3;
   optional string colour = 4;
+  // Mirrors aprilcam.config.interfaces.Feature.height_cm (sprint 030
+  // ticket 002) -- see PlayfieldFeatureEntry.height_cm's own comment
+  // for why this is plain, not `optional`.
+  double height_cm = 5;
 }
 
 message FindFeatureRequest {
@@ -979,7 +1041,16 @@ message RegisterTagRequest {
   MountParameters params = 2;
 }
 
-message RegisterTagResponse {}
+message RegisterTagResponse {
+  // Non-blocking, informational only (ticket 030-004, SUC-004):
+  // present when a nonzero mount_z was just registered while no
+  // camera this daemon knows about has been located
+  // (CameraConfig.camera_position), so the parallax correction has
+  // nowhere to apply yet -- registration itself always succeeds
+  // regardless. Absent means either mount_z was zero (nothing for
+  // parallax to project) or at least one camera is already located.
+  optional string warning = 1;
+}
 
 message UnregisterTagRequest {
   TagId tag = 1;
@@ -994,6 +1065,13 @@ message UnregisterTagResponse {}
 message TagMountEntry {
   TagId tag = 1;
   MountParameters params = 2;
+  // Ticket 030-004, SUC-004: whether this registration's mount_z is
+  // currently being applied by the parallax correction, computed the
+  // same way as RegisterTagResponse.warning above -- false only when
+  // mount_z > 0 and no camera this daemon knows about has been
+  // located; true otherwise (including mount_z == 0, vacuously --
+  // there is nothing for parallax to withhold in that case).
+  bool mount_z_applied = 3;
 }
 
 message ListTagParametersRequest {}

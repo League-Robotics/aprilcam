@@ -64,6 +64,59 @@ adapter) — that, when given, becomes the **exclusive** source for
 ``settable_names``) in place of the primary capture backend, for every
 key except resolution (below).
 
+**Settle-after-open, before the first real UVC push (ticket 030-005,
+reopened).** A hardware defect reopened this ticket: ``uvc-util``
+writes against a *freshly opened* macOS camera (``_camera_for``'s
+apply-on-open path, and any caller that opens a camera and immediately
+pushes settings — exactly what ``get_frame`` followed by
+``set_camera_config`` does) failed intermittently, at a real-world rate
+this investigation measured at roughly 60% in genuinely cold processes
+(matching a real ``pytest`` invocation or a real ``aprilcam`` CLI
+process, each a fresh interpreter) — far worse than the "rare, ~1-in-5"
+conclusion the ticket's first pass reached from a smaller, warm-process
+sample. The stakeholder's own hypothesis for the cause
+(``auto-exposure-priority``, a control v2 did not know existed) did
+**not** hold up: live re-investigation found ``hd-usb-camera`` — the
+camera that actually failed — does not expose that control at all
+(``uvc-util -c`` lists it only on the arducam), so it cannot be what
+gates a write on the camera that fails. The real cause, confirmed by
+direct measurement, is v1's own already-documented quirk
+(``archive/src/aprilcam/daemon/camera_pipeline.py``'s ``start()``:
+"Drain a few frames so AVFoundation finishes initialising its capture
+session before we apply UVC controls — otherwise the OS resets them"),
+which v2 never ported: pushing UVC controls immediately after
+``backend.open()``, before AVFoundation's capture session has finished
+its own asynchronous initialisation, races that initialisation —
+observed failing 6/10 genuinely-cold trials with no drain, 0/22 with
+one. :meth:`open` (and a successful :meth:`_attempt_self_heal` reopen)
+now marks :attr:`_pending_open_settle`; :meth:`apply_config` drains
+:data:`_OPEN_SETTLE_READS` frames from *backend* the first time a push
+after a fresh open actually has something to write, mirroring v1's own
+mechanism exactly (plain frame reads, no explicit sleep — a sleep alone
+also worked in this investigation's trials, but reads cost nothing a
+caller wasn't already going to spend and match the one v1 itself
+proved). A no-op whenever *control_backend* is ``None`` (every non-macOS
+platform, every headless test that does not wire one) or the push has
+nothing real to write (an empty or all-blank ``settings`` dict, e.g.
+``DaemonService``'s own apply-on-open call with a config the camera
+never actually needs to touch hardware for) — so no existing headless
+test's frame-queue accounting is disturbed by this change.
+
+**Bounded retry, belt-and-braces (ticket 030-005, reopened).**
+Independently of the settle fix above — approved by the stakeholder
+regardless of root cause, as insurance against whatever residual
+transient the settle fix does not happen to cover —
+``camera.backends.uvc_util.UvcUtilBackend`` now retries a failed *raw*
+CLI write (``uvc-util -s ... exited nonzero``) a small bounded number of
+times with a brief backoff before giving up. It deliberately does
+**not** retry a write the CLI accepted but that then reads back wrong
+(a mismatch — including the documented "silently clamped an
+out-of-range value" case): that outcome is not transient, retrying it
+cannot change it, and repeating it would only delay the honest
+``UnsupportedSetting`` an out-of-range value or a genuinely absent
+control still needs to raise promptly. See that module's docstring for
+the mechanism.
+
 **Self-describing template + resolution key (ticket 023-002).**
 ``effective_config`` reports the real, per-camera settable-key set —
 the union of whichever backend :meth:`Camera._settable_names` resolves
@@ -120,6 +173,29 @@ MAX_REOPENS = 10
 #: must be switched to manual before an exposure value will stick, and
 #: auto-white-balance off before WB temperature").
 _GATE_KEYS = ("auto_exposure", "auto_white_balance")
+
+#: The inverse relationship, key -> the gate that must be manual before
+#: *key* can be expected to stick -- diagnostic-only (ticket 030-005).
+#: Never used to block, reorder, or validate a push -- ``_GATE_KEYS``/
+#: ``ordered`` above already handle ordering unconditionally regardless
+#: of this map. Feeds :meth:`Camera._describe_set_failure`'s fallback
+#: when a backend has no ``describe_set_failure`` of its own (e.g. a
+#: bare ``FakeBackend``/``OpenCVBackend``) and can only report "the gate
+#: this key needs was not part of this push" from the config's own
+#: shape, not a live hardware readback.
+_GATED_BY = {
+    "exposure": "auto_exposure",
+    "white_balance_temperature": "auto_white_balance",
+}
+
+#: Frames to read-and-discard from *backend* immediately before the
+#: first real UVC control push following a fresh open (ticket 030-005,
+#: reopened) -- see the module docstring's "Settle-after-open" section.
+#: v1's own proven number (``archive/src/aprilcam/daemon/
+#: camera_pipeline.py``'s ``for _ in range(5): cap.read()``), re-confirmed
+#: live against this project's own two real cameras: 0 with no drain
+#: failed 6/10 genuinely-cold trials, 5 passed 22/22.
+_OPEN_SETTLE_READS = 5
 
 #: Keys that are a capture property, not a UVC control (ticket 023-002).
 #: Always routed through *backend* (the primary capture backend) for
@@ -224,6 +300,12 @@ class Camera(_CameraBase):
         self._consecutive_failures = 0
         self._reopens = 0
         self._exhausted = False
+        #: Ticket 030-005 (reopened) -- set whenever *backend* was just
+        #: (re)opened and has not yet had :meth:`apply_config` drain
+        #: :data:`_OPEN_SETTLE_READS` frames from it before its first
+        #: real push; see the module docstring's "Settle-after-open"
+        #: section. Never true before the first :meth:`open`.
+        self._pending_open_settle = False
         #: Guards the entire body of :meth:`read` -- including any
         #: self-heal reopen it triggers -- so a background stream
         #: producer (ticket 027-003/004) and a one-shot RPC read
@@ -285,6 +367,7 @@ class Camera(_CameraBase):
         self._consecutive_failures = 0
         self._reopens = 0
         self._exhausted = False
+        self._pending_open_settle = True
 
     def close(self) -> None:
         self._backend.close()
@@ -292,6 +375,7 @@ class Camera(_CameraBase):
         self._consecutive_failures = 0
         self._reopens = 0
         self._exhausted = False
+        self._pending_open_settle = False
 
     def read(self) -> Optional[np.ndarray]:
         """See ``camera.interfaces.Camera.read``.
@@ -374,6 +458,7 @@ class Camera(_CameraBase):
         try:
             self._backend.open()
             self._present = True
+            self._pending_open_settle = True  # ticket 030-005: a fresh session again
         except Exception as exc:
             logger.warning("%s: reopen failed: %s", self._slug, exc)
             return
@@ -432,7 +517,7 @@ class Camera(_CameraBase):
         settable = self._settable_names()
         for key in config.settings:
             if key not in settable:
-                raise UnsupportedSetting(key)
+                raise UnsupportedSetting(key, reason="not a setting this camera's backend(s) expose")
 
         # Resolve each key's get/set pair up front. A key whose backend
         # exposes no settings surface at all (e.g. v4l2 loopback -- the
@@ -441,17 +526,19 @@ class Camera(_CameraBase):
         # per-camera -- unchanged in effect from the prior whole-backend
         # check for every case this codebase actually exercises, since a
         # key can only be in *settable* if its own backend advertised it.
-        accessors: Dict[str, Tuple[Any, Any]] = {}
+        accessors: Dict[str, Tuple[Any, Any, Any]] = {}
         for key in config.settings:
             backend = self._backend_for_key(key)
             get_property = getattr(backend, "get_property", None)
             set_property = getattr(backend, "set_property", None)
             if get_property is None or set_property is None:
-                raise UnsupportedSetting(key)
-            accessors[key] = (get_property, set_property)
+                raise UnsupportedSetting(
+                    key, reason="this camera's backend exposes no settings control surface"
+                )
+            accessors[key] = (backend, get_property, set_property)
 
         previous: Dict[str, float] = {}
-        for key, (get_property, _set_property) in accessors.items():
+        for key, (_backend, get_property, _set_property) in accessors.items():
             value = get_property(key)
             if value is not None:
                 previous[key] = value
@@ -459,22 +546,85 @@ class Camera(_CameraBase):
         ordered = [k for k in _GATE_KEYS if k in config.settings]
         ordered += [k for k in config.settings if k not in _GATE_KEYS]
 
+        # Ticket 030-005 (reopened): the first real write following a
+        # fresh open gets a settle drain first -- see the module
+        # docstring's "Settle-after-open" section. Gated on there being
+        # at least one real (non-None) value to push so an empty/blank
+        # push (e.g. DaemonService._camera_for's apply-on-open call with
+        # nothing stored yet) never pays this cost or disturbs a
+        # headless test's frame-queue accounting for no reason.
+        if (
+            self._pending_open_settle
+            and self._control_backend is not None
+            and any(config.settings.get(k) is not None for k in ordered)
+        ):
+            self._settle_after_open()
+            self._pending_open_settle = False
+
         applied: list = []
         for key in ordered:
             value = config.settings[key]
             if value is None:
                 continue  # blank -- nothing to push for this key
-            _get_property, set_property = accessors[key]
+            backend, _get_property, set_property = accessors[key]
             if not set_property(key, float(value)):
                 # Whole push fails; undo everything already applied
                 # this call, each key through its own backend, so the
                 # camera is left exactly as it was (interfaces.py's
                 # Camera.apply_config contract).
                 for applied_key in applied:
-                    _, applied_set_property = accessors[applied_key]
+                    _, _, applied_set_property = accessors[applied_key]
                     applied_set_property(applied_key, previous.get(applied_key, 0.0))
-                raise UnsupportedSetting(key)
+                raise UnsupportedSetting(key, reason=self._describe_set_failure(key, value, backend))
             applied.append(key)
+
+    def _settle_after_open(self) -> None:
+        """Read-and-discard :data:`_OPEN_SETTLE_READS` frames from
+        *backend* (ticket 030-005, reopened) -- see the module
+        docstring's "Settle-after-open" section for the real-hardware
+        finding this exists to fix. Calls *backend* directly, never
+        :meth:`read` -- this deliberately bypasses :attr:`_read_lock`
+        and the consecutive-failure/self-heal counters: a frame that
+        comes back ``None`` while the capture session is still settling
+        is expected here, not a fault to count towards :data:
+        `FAILURE_THRESHOLD`, and :meth:`apply_config` (this method's
+        only caller) is documented as not running concurrently with a
+        background reader in the first place (see :meth:`read`'s own
+        docstring)."""
+        for _ in range(_OPEN_SETTLE_READS):
+            self._backend.read()
+
+    def _describe_set_failure(self, key: str, value: float, backend: Any) -> Optional[str]:
+        """Best-effort real cause behind ``set_property(key, value)``
+        just returning ``False`` (ticket 030-005's investigation into
+        ``UnsupportedSetting``'s previously-generic message).
+
+        Prefers *backend*'s own :meth:`~camera.backends.ControlBackend.
+        describe_set_failure` -- e.g. ``UvcUtilBackend``'s live
+        readback of the control's hardware-advertised range and any
+        gate control's current value, the most direct evidence
+        available. Falls back to a config-shape-only check this class
+        can make with no backend cooperation at all: whether *key* is
+        one this codebase knows is gated by another key (:data:`
+        _GATED_BY`) that this same push never included -- the one
+        cause a bare ``FakeBackend``/``OpenCVBackend`` (no hardware
+        readback) can still be right about. Returns ``None`` (today's
+        plain ``UnsupportedSetting`` message, unchanged) only when
+        neither source has anything more specific to add.
+        """
+        describe = getattr(backend, "describe_set_failure", None)
+        if describe is not None:
+            reason = describe(key, value)
+            if reason is not None:
+                return reason
+        gate = _GATED_BY.get(key)
+        if gate is not None:
+            return (
+                f"gate control {gate!r} was not part of this push -- if the "
+                f"camera is currently in an automatic mode, {key!r} cannot "
+                f"be written until {gate!r} is pushed to a manual value first"
+            )
+        return None
 
     def _settings_backend(self) -> Any:
         """The backend ordinary (non-resolution) settings are read and

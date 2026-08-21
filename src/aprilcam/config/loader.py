@@ -40,9 +40,11 @@ filename), missing/invalid field geometry, a feature entry missing
 ``slug``/``x``/``y`` (or ``id`` for a tag entry), a feature positioned
 outside the declared field's half-extents ("field-size/corner
 inconsistency"), an ArUco or AprilTag id repeated at two different
-coordinates within its own family, and (sprint 029 ticket 001) a camera
+coordinates within its own family, (sprint 029 ticket 001) a camera
 config's optional ``camera_position.height_cm`` that is not strictly
-positive -- see :func:`_parse_camera_position`.
+positive -- see :func:`_parse_camera_position` -- and (sprint 030 ticket
+002) a feature entry's optional ``height_cm`` that is negative -- see
+:func:`_parse_feature_height_cm`.
 
 **Dict-based entry points (ticket 026-003).** ``parse_camera_config``/
 ``parse_playfield`` run the exact same whole-document validation as
@@ -121,6 +123,12 @@ class PlayfieldFeatureEntry:
     y: float
     tag_id: Optional[int] = None
     colour: Optional[str] = None
+    height_cm: float = 0.0
+    """How far this entry sits above the field plane, cm (sprint 030
+    ticket 002) -- mirrors ``config.interfaces.Feature.height_cm``.
+    ``0.0`` (the default) round-trips identically to every entry parsed
+    before this ticket, whether or not the on-disk JSON carries a
+    ``height_cm`` key at all (:func:`_parse_section`)."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -154,6 +162,7 @@ class PlayfieldDefinition(_PlayfieldDefinitionBase):
                 kind=_KIND_BY_SECTION[section],
                 position=WorldPoint(x=entry.x, y=entry.y),
                 colour=entry.colour,
+                height_cm=entry.height_cm,
             )
             for section in _ALL_SECTIONS
             for entry in getattr(self, section)
@@ -202,6 +211,8 @@ class PlayfieldDefinition(_PlayfieldDefinitionBase):
                     item["id"] = entry.tag_id
                 if entry.colour is not None:
                     item["color"] = entry.colour
+                if entry.height_cm != 0.0:
+                    item["height_cm"] = entry.height_cm
                 out.append(item)
             return out
 
@@ -524,9 +535,65 @@ def _parse_section(
                 f"declared {width_cm}x{height_cm} cm field -- field-size/corner inconsistency"
             )
 
+        # height_cm (elevation) is meaningful only for the two id
+        # sections -- calibration ground truth, ticket 002's whole
+        # point. rectangles/dots entries never gain it: their own
+        # "height_cm" (and "width_cm") keys already mean the shape's
+        # own physical dimension in main-playfield.json today (e.g.
+        # "rect-northwest-purple"'s "width_cm": 5, "height_cm": 4), a
+        # key this schema has never modelled and does not start
+        # modelling now -- interpreting it as elevation instead would
+        # silently corrupt that value and violate "every playfield file
+        # on disk today loads and behaves identically" (this ticket's
+        # own schema acceptance criterion).
+        entry_height_cm = (
+            _parse_feature_height_cm(raw, slug=slug, section=section, source=source)
+            if with_id
+            else 0.0
+        )
+
         colour = raw.get("color")
-        entries.append(PlayfieldFeatureEntry(slug=slug, x=x, y=y, tag_id=tag_id, colour=colour))
+        entries.append(
+            PlayfieldFeatureEntry(
+                slug=slug, x=x, y=y, tag_id=tag_id, colour=colour, height_cm=entry_height_cm
+            )
+        )
     return tuple(entries)
+
+
+def _parse_feature_height_cm(raw: Dict[str, Any], *, slug: str, section: str, source: str) -> float:
+    """Parse one *id-section* (``april_tags``/``aruco_tags``) entry's
+    optional ``height_cm`` key (sprint 030 ticket 002) -- "how far this
+    feature sits above the field plane." **Callers must not call this
+    for ``rectangles``/``dots``** -- see :func:`_parse_section`'s own
+    comment: those sections' ``"height_cm"`` key already means the
+    shape's own physical dimension (``main-playfield.json``'s
+    ``rect-northwest-purple`` has ``"width_cm": 5, "height_cm": 4``
+    today), a different, pre-existing meaning this ticket must not
+    collide with.
+
+    Absent means ``0.0``, true for every playfield file on disk today
+    (:class:`config.interfaces.Feature`'s own docstring), so every
+    existing entry keeps loading and behaving identically. Rejected if
+    negative: a feature cannot sit *below* the field plane in this
+    schema (there is no use case for it, and ``Calibrator``'s z-spread
+    math assumes every height is at or above 0), mirroring
+    :func:`_parse_camera_position`'s identical positivity stance on
+    ``camera_position.height_cm``."""
+    raw_height = raw.get("height_cm", 0.0)
+    try:
+        height_cm = float(raw_height)
+    except (TypeError, ValueError) as exc:
+        raise MalformedDocument(
+            f"playfield definition in {source}: {slug!r} in {section!r} has an invalid "
+            f"'height_cm': {exc}"
+        ) from exc
+    if height_cm < 0:
+        raise MalformedDocument(
+            f"playfield definition in {source}: {slug!r} in {section!r} has a negative "
+            f"'height_cm' ({height_cm}) -- a feature cannot sit below the field plane"
+        )
+    return height_cm
 
 
 def _reject_duplicate_ids(

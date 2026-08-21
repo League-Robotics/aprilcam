@@ -215,13 +215,60 @@ directly root-caused, so treat this as a correlation worth knowing
 rather than a settled fix: **if the streaming detection thread starts
 aborting during GC, check whether a camera is failing to open first.**
 
+## Update 2026-08-20 — the v1 file finally got replaced, and it took two problems to get there
+
+The `arducam-ov9782-usb-camera` v1-shaped `calibration.json` this entry
+describes was still on disk as of sprint 030 ticket 002 — recalibrating
+was never actually done after this entry's original fix, apparently
+because the camera stayed hard to get a clean detection burst from
+(see the two problems below). Sprint 030 ticket 003 finally replaced it
+with a real v2 calibration, **with** an estimated lens model
+(`camera_matrix`/`dist_coeffs`, sprint 030 tickets 001/002):
+`aprilcam camera calibrate arducam-ov9782-usb-camera --with-intrinsics`
+now succeeds, all 10 ArUco ids matched, reprojection error ~0.18cm.
+
+Two independent problems had to clear before that worked, neither of
+them the v1-shape issue this entry is about:
+
+1. **A live v1 daemon from a sibling checkout was holding the same
+   shared arducam and the same shared control socket all day**,
+   applying its own capture settings underneath v2's. See
+   `clasi/issues/camera-marked-tests-failing-en-masse-suspected-v1-daemon-contention.md`
+   for the full measured before/after (19 failed -> 1 failed on the
+   same `-m camera` sweep once it was stopped).
+2. **After that, the arducam's exposure setting no longer matched the
+   room's lighting** and blew every frame to solid white (0-1 tags
+   detected) — the same class of problem as this file's own "Gotcha:
+   exposure is lighting-dependent" section below, just a fresh instance
+   of it. A fresh `uvc-util -I 1 -s exposure-time-abs=$e` sweep found
+   `exposure=11-13` gave full 11/11 detection where the stored
+   `exposure=100` gave zero; the corrected value was pushed both live
+   and to `~/.config/aprilcam/cameras/arducam-ov9782-usb-camera/config.json`
+   via `aprilcam camera config <file>` (no daemon restart needed).
+
+The removed v1 `calibration.json` was preserved (not deleted) at
+`clasi/sprints/030-distortion-aware-calibration-and-the-locate-surface/v1-format-calibration-backup-arducam.json`
+before being overwritten — it is the concrete evidence cited by sprint
+030 for what an unconstrained single-plane `cv2.calibrateCamera` fit
+produces (`dist_coeffs [0.42, -2.43, ...]`, a `k2` no real lens has).
+
+Full re-verification methodology and results (the falsifiable radial-
+consistency and optical-height checks sprint 029/030 chartered):
+`docs/knowledge/2026-08-20-camera-3-distortion-reverification.md`.
+
 ## Related
 
 - `docs/knowledge/2026-08-01-uvc-util-camera-control-macos.md` — why
   `uvc-util` exists at all, and the control-ordering rule.
+- `docs/knowledge/2026-08-20-camera-3-distortion-reverification.md` —
+  the sprint 030 ticket 003 re-verification this camera's calibration
+  finally unblocked, and the exposure re-sweep above in full.
 - `clasi/issues/hardening-cleanup-and-the-design-doc-set.md` — records
   the v1/v2 control-socket collision, the sibling problem to this one:
   a running v1 daemon shares the conventional socket path, so a v2
   client can reach a v1 daemon and get `Method not found!`.
+- `clasi/issues/camera-marked-tests-failing-en-masse-suspected-v1-daemon-contention.md`
+  — the specific, confirmed instance of that collision that blocked
+  this file's replacement for so long.
 - `clasi/issues/camera-geometry-for-real-parallax-correction.md` — why
   `camera_position` is currently inert.

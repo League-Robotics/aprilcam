@@ -146,6 +146,35 @@ class TagStream:
         raise NotImplementedError(f"{type(self).__name__} does not implement TagStream.close")
 
 
+@dataclass(frozen=True)
+class MountRegistration:
+    """One :meth:`Daemon.list_tag_parameters` entry (ticket 030-004,
+    SUC-004): a tag's registered :class:`~aprilcam.types.MountParameters`
+    paired with whether its ``mount_z`` is currently being *applied* —
+    computed, not stored, alongside every read of the registry.
+
+    ``mount_z_applied`` is ``False`` only when ``params.mount_z > 0``
+    and no camera this daemon knows about has been located yet (no
+    ``CameraConfig.camera_position`` anywhere — the same "any camera"
+    scope :meth:`Daemon.register_tag`'s ``NotCalibrated`` guard already
+    uses; a mobile tag is not bound to one specific camera). It is
+    ``True`` in every other case, including ``mount_z <= 0`` — there is
+    nothing for the parallax correction to withhold when there is no
+    elevation to project in the first place.
+
+    Sprint 029 shipped the parallax math with this precondition
+    unannounced: a calibrated-but-never-``locate``\\ d camera silently
+    served the raw tag position while ``mount_x``/``mount_y``/
+    ``mount_yaw_rad`` kept applying normally. This field, plus
+    :attr:`Daemon.register_tag`'s own returned warning, is sprint
+    030's fix — see sprint.md's Architecture, Design Rationale
+    Decision 4 (why the fix is observability, not a stricter guard).
+    """
+
+    params: MountParameters
+    mount_z_applied: bool
+
+
 class Daemon:
     """The control plane every client talks to.
 
@@ -237,10 +266,18 @@ class Daemon:
 
     # -- calibration -----------------------------------------------------
 
-    def calibrate(self, camera: str) -> CalibrationResult:
+    def calibrate(self, camera: str, *, estimate_intrinsics: bool = False) -> CalibrationResult:
         """Run calibration in the daemon (UC-04).
 
         All vision happens here; the caller sends a command, not pixels.
+
+        *estimate_intrinsics* (sprint 030 ticket 002, SUC-002) opts into
+        also estimating this camera's lens model (``camera_matrix``/
+        ``dist_coeffs``) from the same detection burst, over whatever
+        ArUco+AprilTag ground truth the linked playfield surveys --
+        never re-estimated on an ordinary (``False``, the default) call,
+        which instead carries forward whatever lens model this camera's
+        prior successful calibration already held.
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.calibrate")
 
@@ -340,7 +377,7 @@ class Daemon:
 
     # -- tag parameters --------------------------------------------------
 
-    def register_tag(self, tag: TagId, params: MountParameters) -> None:
+    def register_tag(self, tag: TagId, params: MountParameters) -> Optional[str]:
         """Describe how a tag is mounted on its robot (UC-12).
 
         Applied per frame so queries and streams report **the robot's**
@@ -352,10 +389,27 @@ class Daemon:
         have a height or mount orientation calls this **at session
         start, every session** — the same reconnect ritual as
         re-drawing annotations (UC-28.S-4).
+
+        **Returns an optional warning string** (ticket 030-004,
+        SUC-004; formerly always ``None``) — non-``None`` exactly when
+        a nonzero ``params.mount_z`` was just accepted while no camera
+        this daemon knows about has been located, meaning the parallax
+        correction has nowhere to apply yet (see
+        :class:`MountRegistration`'s ``mount_z_applied`` for the same
+        condition, read back later via :meth:`list_tag_parameters`).
+        This is purely informational — registration always succeeds
+        and never raises for this reason; only the pre-existing
+        ``NotCalibrated`` precondition (no calibration anywhere) still
+        raises, unchanged.
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.register_tag")
 
-    def list_tag_parameters(self) -> dict[TagId, MountParameters]:
+    def list_tag_parameters(self) -> dict[TagId, MountRegistration]:
+        """Every currently registered tag's mount parameters, paired
+        with whether ``mount_z`` is currently applied (ticket 030-004;
+        see :class:`MountRegistration`). Returned value type widened
+        from ``MountParameters`` alone -- every existing caller reads
+        ``entry.params`` for what it held directly before."""
         raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.list_tag_parameters")
 
     def unregister_tag(self, tag: TagId) -> None:

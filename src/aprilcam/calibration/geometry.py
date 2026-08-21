@@ -43,6 +43,19 @@ mount-correction functions (ticket 025-003,
 ``correct_tag_pose``) -- same "pure function, no daemon state, no I/O"
 shape, just a different pair of conversions (deskewed-pixel<->world,
 tag-pose->robot-pose) than the pixel<->world pair above.
+
+**Lens distortion (sprint 030 ticket 001):** ``undistort_point``/
+``distort_point`` below are the point-level half of Design Rationale
+Decision 1 -- v2 undistorts/redistorts single pixels at the two places
+that need it (``calibration.calibration.Calibration.to_world``/
+``to_pixel``, and the homography solve inside ``Calibrator.calibrate``),
+never a whole captured frame the way v1 did
+(``archive/src/aprilcam/stream.py:433``). This keeps every line of
+distortion-aware code inside this module and ``calibration.py`` --
+``vision/``, ``daemon/detection.py``, and ``calibration/deskew.py`` need
+no changes, since they only ever call the still-pure ``to_world``/
+``to_pixel`` methods, whose *internals* now optionally undistort/
+redistort but whose signatures are unchanged.
 """
 
 from __future__ import annotations
@@ -51,6 +64,7 @@ import math
 from dataclasses import dataclass
 from typing import Sequence, Tuple
 
+import cv2 as cv
 import numpy as np
 
 from aprilcam.types import MountParameters, PixelPoint, WorldPoint
@@ -60,6 +74,8 @@ __all__ = [
     "invert_homography",
     "pixel_to_world",
     "world_to_pixel",
+    "undistort_point",
+    "distort_point",
     "deskewed_output_size",
     "world_to_deskewed_pixel",
     "project_tag_to_field_plane",
@@ -122,6 +138,137 @@ def world_to_pixel(homography: np.ndarray, world: WorldPoint) -> PixelPoint:
     inverse = invert_homography(homography)
     x, y = apply_homography(inverse, world.x, world.y)
     return PixelPoint(x=x, y=y)
+
+
+# ---------------------------------------------------------------------------
+# Lens distortion (sprint 030 ticket 001): point-level undistort/redistort.
+# See the module docstring's "Lens distortion" section for why this is
+# point-level, confined to this module and calibration.py, and never a
+# whole-frame undistort.
+# ---------------------------------------------------------------------------
+
+#: :func:`distort_point`'s fixed-point iteration cap -- generous for a
+#: function only ever called on a handful of points per use (a query's
+#: single world point, or ``Deskewer``'s 4 corners), never per-frame at
+#: scale, so a large cap costs nothing in practice. Mild distortion
+#: (a few percent correction, most of the frame near the principal
+#: point) converges in a handful of iterations; a strong, wide-angle-
+#: lens-style fit (``|k1|`` around 0.5, a large-radius off-centre
+#: point) measurably slower -- around 55 iterations for the
+#: regression case ``test_calibration.py``'s solve-order test exercises
+#: -- because the plain ``guess += residual`` update is a Picard
+#: iteration whose convergence *rate*, not just whether it converges,
+#: degrades as the distortion strengthens (see the function's own
+#: "Convergence assumption" docstring section). This cap gives several
+#: multiples of headroom above that measured worst case.
+_DISTORT_POINT_MAX_ITERATIONS = 200
+
+#: :func:`distort_point` stops iterating once its current guess's
+#: undistorted image lands within this many pixels of the true target --
+#: far tighter than any calibration or detection noise floor in this
+#: project (:data:`~aprilcam.calibration.calibration.DRIFT_TOLERANCE_CM`
+#: is 2 cm, orders of magnitude coarser once converted through any
+#: realistic px-per-cm scale), so this tolerance is never the limiting
+#: source of error in a distortion-aware round trip.
+_DISTORT_POINT_TOLERANCE_PX = 1e-6
+
+
+def undistort_point(
+    pixel: PixelPoint, camera_matrix: np.ndarray, dist_coeffs: np.ndarray
+) -> PixelPoint:
+    """Remove lens distortion from one *pixel*, reprojected back into
+    **pixel space** (not OpenCV's intermediate normalized-image-plane
+    coordinates) via *camera_matrix* passed as ``cv2.undistortPoints``'s
+    own ``P`` argument -- matching the "always pixel or world space,
+    never OpenCV's normalized coordinates" convention every other
+    function in this module follows (:func:`pixel_to_world`/
+    :func:`world_to_pixel` and the deskew/mount-correction functions
+    below all take and return pixel or world points).
+
+    A thin wrapper: ``cv2.undistortPoints`` already implements the
+    (OpenCV-internal, iterative) inverse of a lens's forward distortion
+    model -- this function adds no numerics of its own beyond the
+    single-point ``(1, 1, 2)`` array marshalling ``cv2.undistortPoints``
+    expects. *camera_matrix* is a 3x3 array, *dist_coeffs* whatever
+    length OpenCV's distortion model accepts (4, 5, 8, 12, or 14
+    coefficients; this project stores the standard 5,
+    ``(k1, k2, p1, p2, k3)``, per :func:`cv2.calibrateCamera`'s own
+    default).
+
+    See :func:`distort_point` for this function's own inverse --
+    needed because OpenCV has no ``distortPoints`` counterpart.
+    """
+    src = np.array([[[float(pixel.x), float(pixel.y)]]], dtype=np.float64)
+    dst = cv.undistortPoints(src, camera_matrix, dist_coeffs, P=camera_matrix)
+    x, y = dst[0, 0]
+    return PixelPoint(x=float(x), y=float(y))
+
+
+def distort_point(
+    pixel: PixelPoint, camera_matrix: np.ndarray, dist_coeffs: np.ndarray
+) -> PixelPoint:
+    """Re-apply lens distortion to one already-undistorted *pixel* --
+    the inverse of :func:`undistort_point`. OpenCV has no
+    ``distortPoints`` counterpart to ``undistortPoints``, so this
+    function finds it with a short fixed-point iteration seeded at
+    *pixel* itself: repeatedly undistort the current guess and correct
+    it by the residual between the guess's undistorted image and the
+    true target::
+
+        guess_0 = pixel
+        guess_{k+1} = guess_k + (pixel - undistort_point(guess_k))
+
+    stopping once ``undistort_point(guess)`` reproduces *pixel* to
+    within :data:`_DISTORT_POINT_TOLERANCE_PX`, or after
+    :data:`_DISTORT_POINT_MAX_ITERATIONS` iterations, whichever comes
+    first.
+
+    **Convergence assumption**: this is a Picard/fixed-point iteration,
+    not a globally-convergent solve -- it converges whenever
+    :func:`undistort_point` behaves as a contraction mapping near the
+    fixed point, true for the radial/tangential distortion an ordinary
+    camera lens produces, which covers every camera this project
+    targets (including a deliberately strong, wide-angle-style fit --
+    see :data:`_DISTORT_POINT_MAX_ITERATIONS`'s own docstring for the
+    measured iteration count that case needs). The convergence *rate*
+    is not uniform, though: it is fast (a handful of iterations) near
+    the principal point and for mild distortion, and measurably slower
+    -- tens of iterations, still well inside the cap -- for a point far
+    off-centre under strong distortion, since the plain ``guess +=
+    residual`` update implicitly assumes the local Jacobian is close to
+    identity, an assumption that weakens as the correction grows. It is
+    not guaranteed to converge at all for pathological, large-magnitude
+    distortion coefficients (well outside what a real lens fit ever
+    produces, and outside the sanity bound ticket 002's intrinsics
+    estimation enforces on any coefficients it stores).
+
+    Deliberately expressed in terms of :func:`undistort_point` itself
+    -- whatever ``cv2.undistortPoints`` actually computes for the given
+    *dist_coeffs*, rational/tangential/thin-prism terms included --
+    rather than re-deriving OpenCV's forward distortion polynomial by
+    hand. This guarantees ``undistort_point(distort_point(p)) == p`` by
+    construction, to iteration tolerance, for whatever *dist_coeffs*
+    shape is in play, rather than risking a hand-derived forward
+    formula silently diverging from what ``cv2.undistortPoints`` itself
+    implements.
+
+    Only ever called on a handful of points per use (one query point at
+    a time from :meth:`~aprilcam.calibration.calibration.Calibration.to_pixel`,
+    or ``Deskewer``'s 4 corners) -- never per-frame at scale, so a
+    handful of extra ``cv2.undistortPoints`` calls per invocation is an
+    acceptable cost.
+    """
+    target = np.array([float(pixel.x), float(pixel.y)], dtype=np.float64)
+    guess = target.copy()
+    for _ in range(_DISTORT_POINT_MAX_ITERATIONS):
+        undistorted = undistort_point(
+            PixelPoint(x=float(guess[0]), y=float(guess[1])), camera_matrix, dist_coeffs
+        )
+        residual = target - np.array([undistorted.x, undistorted.y], dtype=np.float64)
+        guess = guess + residual
+        if float(np.hypot(residual[0], residual[1])) < _DISTORT_POINT_TOLERANCE_PX:
+            break
+    return PixelPoint(x=float(guess[0]), y=float(guess[1]))
 
 
 # ---------------------------------------------------------------------------

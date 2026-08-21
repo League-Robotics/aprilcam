@@ -118,13 +118,44 @@ trusting a reported position.
 
 > Per-session rule: mount registrations (UC-12) and annotations (UC-28) do not survive a daemon restart -- re-register and re-draw them at the start of every session that needs them.
 
+**A second, independent precondition — calibrated is not the same as
+located.** A nonzero `mount_z` (the tag's height above the field,
+driving the parallax correction) needs the *observing* camera to have
+been **located**, not merely calibrated. `register_tag` only refuses a
+nonzero `mount_z` outright when the daemon holds no calibration for
+*any* camera at all — a calibrated-but-never-located camera passes
+that check and accepts the registration, but silently keeps reporting
+the tag's raw, unelevated position: `mount_x`/`mount_y`/
+`mount_yaw_rad` still apply normally, only the height correction is
+inert. This is a plausible-looking number that will not announce
+itself as wrong unless you check for it.
+
+Two ways to check: `register_tag`'s own response carries a warning at
+the moment of registration when this precondition is not met, and
+`list_tag_parameters` reports a `mount_z_applied` flag per
+registration so you can check afterward too, without cross-referencing
+camera config by hand. Both are informational only — registration
+always succeeds either way.
+
+**There is no MCP tool for locating a camera.** Locating
+(`aprilcam camera locate`) is CLI-only, by design (physically placing
+elevated reference tags on stands at surveyed positions is a hands-on
+operator task, not something an agent can do remotely). If you need
+`mount_z` to actually apply and are not sure the observing camera has
+been located, **ask your operator to run `aprilcam camera locate`**
+against it — you cannot do this yourself over MCP. Locating is also
+not guaranteed to succeed on the first try: a camera mounted very
+close to straight-down (near-nadir) can make the solve numerically
+ill-conditioned, so do not assume it always just works.
+
 ## 7. Command / Capability Overview
 
 Every capability below is reachable identically from the CLI, from the
 Python client library (`aprilcam.client.discovery.Discovery().connect()`
 returns a `Daemon`), and from the MCP server (`aprilcam mcp [-d HOST]`)
 — an MCP tool call for each CLI command below, same behaviour, same
-world-frame and staleness rules as everywhere else in this guide.
+world-frame and staleness rules as everywhere else in this guide —
+**except `camera locate`, marked below, which is CLI-only** (§6).
 
 | Area | Command | What it does |
 |---|---|---|
@@ -134,6 +165,7 @@ world-frame and staleness rules as everywhere else in this guide.
 | | `aprilcam camera image <camera>` | capture one raw frame |
 | | `aprilcam camera tags <camera>` | current tag detections |
 | | `aprilcam camera calibrate <camera>` | calibrate against the linked playfield (§3) |
+| | `aprilcam camera locate <camera> --reference TAG:SLUG:HEIGHT_CM ...` | solve real ground position + height from staged elevated references — **CLI-only, no MCP tool** (§6) |
 | | `aprilcam camera config <file>` | push a camera config document |
 | | `aprilcam camera config <camera> --dump\|--reset` | read the live config, or discard the pushed override |
 | | `aprilcam camera view <camera>` | live raw view |

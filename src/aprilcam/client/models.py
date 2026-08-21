@@ -40,7 +40,7 @@ from typing import Dict, Optional, Tuple
 from aprilcam.calibration.interfaces import Calibration, CalibrationResult
 from aprilcam.config.interfaces import CameraConfig, CameraPosition, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
-from aprilcam.daemon.interfaces import DaemonStatus
+from aprilcam.daemon.interfaces import DaemonStatus, MountRegistration
 from aprilcam.playfield.playfield import Playfield
 from aprilcam.proto import aprilcam_v2_pb2
 from aprilcam.types import (
@@ -284,6 +284,7 @@ def _playfield_feature_entry_from_proto(
         y=msg.y,
         tag_id=msg.id if msg.HasField("id") else None,
         colour=msg.colour if msg.HasField("colour") else None,
+        height_cm=msg.height_cm,
     )
 
 
@@ -343,6 +344,7 @@ def feature_from_proto(msg: aprilcam_v2_pb2.FeatureMatch) -> Feature:
         kind=msg.kind,
         position=_world_point_from_proto(msg.position),
         colour=msg.colour if msg.HasField("colour") else None,
+        height_cm=msg.height_cm,
     )
 
 
@@ -393,16 +395,22 @@ def mount_parameters_from_proto(msg: aprilcam_v2_pb2.MountParameters) -> MountPa
 
 def tag_parameters_from_proto(
     msg: aprilcam_v2_pb2.ListTagParametersResponse,
-) -> Dict[TagId, MountParameters]:
+) -> Dict[TagId, MountRegistration]:
     """See ``daemon.interfaces.Daemon.list_tag_parameters``. Each
     ``TagMountEntry`` pairs a ``TagId`` with its ``MountParameters`` --
     proto3 disallows message-typed map keys, so the wire carries a
     repeated pair message instead of a native map (``aprilcam_v2.proto``'s
     header comment); this rebuilds the same ``Dict[TagId,
-    MountParameters]`` shape :meth:`~aprilcam.daemon.service.
-    DaemonService.list_tag_parameters` returns same-process."""
+    MountRegistration]`` shape :meth:`~aprilcam.daemon.service.
+    DaemonService.list_tag_parameters` returns same-process (ticket
+    030-004, SUC-004 -- ``mount_z_applied`` rides along on
+    ``TagMountEntry`` additively, read back here via the plain
+    ``bool`` field, never absent on the wire)."""
     return {
-        tag_id_from_proto(entry.tag): mount_parameters_from_proto(entry.params)
+        tag_id_from_proto(entry.tag): MountRegistration(
+            params=mount_parameters_from_proto(entry.params),
+            mount_z_applied=entry.mount_z_applied,
+        )
         for entry in msg.entries
     }
 
@@ -420,6 +428,13 @@ def calibration_result_from_proto(msg: aprilcam_v2_pb2.CalibrationResult) -> Cal
             msg.reprojection_error_cm if msg.HasField("reprojection_error_cm") else None
         ),
         reason=msg.reason if msg.HasField("reason") else None,
+        intrinsics_estimated=(
+            msg.intrinsics_estimated if msg.HasField("intrinsics_estimated") else None
+        ),
+        intrinsics_mode=msg.intrinsics_mode if msg.HasField("intrinsics_mode") else None,
+        elevated_features_used=(
+            msg.elevated_features_used if msg.HasField("elevated_features_used") else None
+        ),
     )
 
 
@@ -427,8 +442,10 @@ def calibration_from_proto(msg: aprilcam_v2_pb2.Calibration) -> Calibration:
     """The client-side mirror of ``daemon/rpc.py``'s
     ``_calibration_to_proto`` -- but deliberately a narrowing mirror, not
     a field-for-field one. The wire message also carries ``homography``/
-    ``matched_ids``/``reprojection_error_cm`` (the daemon-internal solve
-    detail persisted alongside a calibration), but nothing on this side
+    ``matched_ids``/``reprojection_error_cm``/``camera_matrix``/
+    ``dist_coeffs`` (sprint 030 ticket 002 adds the latter two, for
+    daemon-internal round-tripping only) -- the daemon-internal solve
+    detail persisted alongside a calibration -- but nothing on this side
     of the wire ever reads them -- every ``client``/``mcp`` consumer of
     ``get_calibration`` only ever needs ``stale``/``calibrated_at``/
     ``playfield``, "the ones an agent actually needs to reason about

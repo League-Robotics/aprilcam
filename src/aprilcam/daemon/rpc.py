@@ -357,7 +357,9 @@ def _stream_endpoint_to_proto(endpoint: StreamEndpoint) -> aprilcam_v2_pb2.Strea
 def _playfield_feature_entry_to_proto(
     entry: PlayfieldFeatureEntry,
 ) -> aprilcam_v2_pb2.PlayfieldFeatureEntry:
-    msg = aprilcam_v2_pb2.PlayfieldFeatureEntry(slug=entry.slug, x=entry.x, y=entry.y)
+    msg = aprilcam_v2_pb2.PlayfieldFeatureEntry(
+        slug=entry.slug, x=entry.x, y=entry.y, height_cm=entry.height_cm
+    )
     if entry.tag_id is not None:
         msg.id = entry.tag_id
     if entry.colour is not None:
@@ -374,6 +376,7 @@ def _playfield_feature_entry_from_proto(
         y=msg.y,
         tag_id=msg.id if msg.HasField("id") else None,
         colour=msg.colour if msg.HasField("colour") else None,
+        height_cm=msg.height_cm,
     )
 
 
@@ -438,7 +441,10 @@ def _feature_match_to_proto(feature: Feature) -> aprilcam_v2_pb2.FeatureMatch:
     shape, which carries an optional numeric ``id`` and no ``kind``
     (this file's header comment)."""
     msg = aprilcam_v2_pb2.FeatureMatch(
-        slug=feature.slug, kind=feature.kind, position=_world_point_to_proto(feature.position)
+        slug=feature.slug,
+        kind=feature.kind,
+        position=_world_point_to_proto(feature.position),
+        height_cm=feature.height_cm,
     )
     if feature.colour is not None:
         msg.colour = feature.colour
@@ -524,7 +530,12 @@ def _camera_config_from_proto(msg: aprilcam_v2_pb2.CameraConfig) -> CameraConfig
 
 def _calibration_result_to_proto(result: CalibrationResult) -> aprilcam_v2_pb2.CalibrationResult:
     """Python -> proto, for a ``Calibrate`` response. ``missing_ids``
-    always carries the exact ids (never a count, UC-04.S-2)."""
+    always carries the exact ids (never a count, UC-04.S-2).
+    ``intrinsics_estimated``/``intrinsics_mode``/``elevated_features_used``
+    (sprint 030 ticket 002) are ``HasField``-guarded exactly like
+    ``reprojection_error_cm``/``reason`` above: ``None`` means "the
+    concept did not apply this call," never a fabricated ``False``/
+    empty-string/``0``."""
     msg = aprilcam_v2_pb2.CalibrationResult(
         succeeded=result.succeeded,
         matched_ids=list(result.matched_ids),
@@ -534,13 +545,23 @@ def _calibration_result_to_proto(result: CalibrationResult) -> aprilcam_v2_pb2.C
         msg.reprojection_error_cm = result.reprojection_error_cm
     if result.reason is not None:
         msg.reason = result.reason
+    if result.intrinsics_estimated is not None:
+        msg.intrinsics_estimated = result.intrinsics_estimated
+    if result.intrinsics_mode is not None:
+        msg.intrinsics_mode = result.intrinsics_mode
+    if result.elevated_features_used is not None:
+        msg.elevated_features_used = result.elevated_features_used
     return msg
 
 
 def _calibration_to_proto(calibration: Calibration) -> aprilcam_v2_pb2.Calibration:
     """Python -> proto, for a ``GetCalibration`` response. ``homography``
     flattens the 3x3 matrix into 9 row-major ``double``s -- see
-    ``aprilcam_v2.proto``'s ``Calibration`` message comment."""
+    ``aprilcam_v2.proto``'s ``Calibration`` message comment.
+    ``camera_matrix``/``dist_coeffs`` (sprint 030 ticket 002) are
+    ``None``-guarded the same way -- an empty ``repeated double`` is
+    the unambiguous "no lens model" encoding (a real 3x3 matrix is
+    never empty), so nothing is set at all when either is ``None``."""
     msg = aprilcam_v2_pb2.Calibration(
         stale=calibration.stale,
         calibrated_at=calibration.calibrated_at,
@@ -550,6 +571,10 @@ def _calibration_to_proto(calibration: Calibration) -> aprilcam_v2_pb2.Calibrati
     )
     if calibration.reprojection_error_cm is not None:
         msg.reprojection_error_cm = calibration.reprojection_error_cm
+    if calibration.camera_matrix is not None:
+        msg.camera_matrix.extend(v for row in calibration.camera_matrix for v in row)
+    if calibration.dist_coeffs is not None:
+        msg.dist_coeffs.extend(calibration.dist_coeffs)
     return msg
 
 
@@ -861,7 +886,9 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
 
     def Calibrate(self, request, context):  # noqa: N802
         try:
-            result = self._service.calibrate(request.camera)
+            result = self._service.calibrate(
+                request.camera, estimate_intrinsics=request.estimate_intrinsics
+            )
         except Exception as exc:  # noqa: BLE001
             _abort(context, exc)
             return aprilcam_v2_pb2.CalibrateResponse()
@@ -963,11 +990,18 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
         tag = _tag_id_from_proto(request.tag)
         params = _mount_parameters_from_proto(request.params)
         try:
-            self._service.register_tag(tag, params)
+            warning = self._service.register_tag(tag, params)
         except Exception as exc:  # noqa: BLE001
             _abort(context, exc)
             return aprilcam_v2_pb2.RegisterTagResponse()
-        return aprilcam_v2_pb2.RegisterTagResponse()
+        response = aprilcam_v2_pb2.RegisterTagResponse()
+        # Ticket 030-004, SUC-004: HasField-guarded exactly like every
+        # other optional scalar in this module -- absent (never a
+        # fabricated empty string) means either mount_z was zero or a
+        # camera is already located, not "no opinion."
+        if warning is not None:
+            response.warning = warning
+        return response
 
     def UnregisterTag(self, request, context):  # noqa: N802
         tag = _tag_id_from_proto(request.tag)
@@ -987,9 +1021,11 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
         return aprilcam_v2_pb2.ListTagParametersResponse(
             entries=[
                 aprilcam_v2_pb2.TagMountEntry(
-                    tag=_tag_id_to_proto(tag), params=_mount_parameters_to_proto(params)
+                    tag=_tag_id_to_proto(tag),
+                    params=_mount_parameters_to_proto(registration.params),
+                    mount_z_applied=registration.mount_z_applied,
                 )
-                for tag, params in registrations.items()
+                for tag, registration in registrations.items()
             ]
         )
 

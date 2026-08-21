@@ -115,11 +115,26 @@ class UnsupportedSetting(AprilCamError):
 
     The **whole push** fails with this, naming the offending key; the
     camera is left exactly as it was. Never a partial apply.
+
+    **``reason`` (ticket 030-005).** The bare "unsupported or rejected
+    setting" message is a poor diagnostic on its own -- it cannot tell
+    a caller whether the key is simply not a setting this camera
+    exposes, the value it was given is out of the control's supported
+    range, or the control is still gated by an auto-mode setting that
+    was never switched to manual. ``camera.camera.Camera.apply_config``
+    now determines which of those (when it can) and passes it here;
+    *reason* is optional and additive -- every existing raise site and
+    every existing ``UnsupportedSetting(key)`` call keeps working
+    unchanged, and ``.key`` is unaffected either way.
     """
 
-    def __init__(self, key: str) -> None:
+    def __init__(self, key: str, reason: Optional[str] = None) -> None:
         self.key = key
-        super().__init__(f"unsupported or rejected setting: {key!r}")
+        self.reason = reason
+        message = f"unsupported or rejected setting: {key!r}"
+        if reason:
+            message += f" -- {reason}"
+        super().__init__(message)
 
 
 class MalformedDocument(AprilCamError):

@@ -31,6 +31,7 @@ from aprilcam.cli import locate as locate_cli
 from aprilcam.cli import playfield as playfield_cli
 from aprilcam.config.interfaces import CameraConfig, CameraPosition
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
+from aprilcam.daemon.interfaces import MountRegistration
 from aprilcam.errors import ConnectionFailed, NoPlayfieldLinked, UnknownCamera
 from aprilcam.playfield.playfield import Playfield
 from aprilcam.types import MountParameters, TagFamily, TagId, TagRecord, WorldPoint
@@ -96,7 +97,7 @@ class _FakeDaemon:
     get_playfield_called: bool = False
     requested_playfield: Optional[str] = None
 
-    mount_parameters: Dict[TagId, MountParameters] = field(default_factory=dict)
+    mount_parameters: Dict[TagId, MountRegistration] = field(default_factory=dict)
     list_tag_parameters_raises: Optional[Exception] = None
     list_tag_parameters_called: bool = False
 
@@ -122,7 +123,7 @@ class _FakeDaemon:
         assert self.playfield is not None, "test forgot to set playfield"
         return self.playfield
 
-    def list_tag_parameters(self) -> Dict[TagId, MountParameters]:
+    def list_tag_parameters(self) -> Dict[TagId, MountRegistration]:
         self.list_tag_parameters_called = True
         if self.list_tag_parameters_raises is not None:
             raise self.list_tag_parameters_raises
@@ -510,7 +511,11 @@ def test_locate_refuses_a_reference_registered_with_nonzero_mount_z(capsys):
     daemon = _FakeDaemon(
         camera_config=_camera_config(),
         playfield=_playfield(),
-        mount_parameters={_TAG_15: MountParameters(mount_z=5.0)},
+        mount_parameters={
+            _TAG_15: MountRegistration(
+                params=MountParameters(mount_z=5.0), mount_z_applied=True
+            )
+        },
     )
     loader = _FakeCameraConfigLoader(config=_camera_config())
 
@@ -532,7 +537,11 @@ def test_locate_allows_a_reference_registered_with_zero_mount_z(capsys):
     daemon = _FakeDaemon(
         camera_config=_camera_config(),
         playfield=_playfield(),
-        mount_parameters={_TAG_15: MountParameters(mount_x=1.0, mount_z=0.0)},
+        mount_parameters={
+            _TAG_15: MountRegistration(
+                params=MountParameters(mount_x=1.0, mount_z=0.0), mount_z_applied=True
+            )
+        },
         tag_records={_TAG_15: _record(_TAG_15, _TAG_15_OBSERVED), _TAG_14: _record(_TAG_14, _TAG_14_OBSERVED)},
     )
     loader = _FakeCameraConfigLoader(config=_camera_config())

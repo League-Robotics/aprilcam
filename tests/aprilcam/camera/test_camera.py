@@ -21,7 +21,7 @@ import pytest
 
 from aprilcam.camera.backends import ControlBackend
 from aprilcam.camera.backends.opencv_backend import property_map
-from aprilcam.camera.camera import FAILURE_THRESHOLD, MAX_REOPENS, Camera
+from aprilcam.camera.camera import _OPEN_SETTLE_READS, FAILURE_THRESHOLD, MAX_REOPENS, Camera
 from aprilcam.camera.interfaces import Camera as CameraProtocol
 from aprilcam.config.interfaces import CameraConfig, CameraPosition
 from aprilcam.errors import UnsupportedSetting
@@ -661,6 +661,10 @@ def test_apply_config_unknown_key_raises_unsupported_setting():
     with pytest.raises(UnsupportedSetting) as exc_info:
         cam.apply_config(cfg)
     assert exc_info.value.key == "not_a_real_key"
+    # ticket 030-005: an unknown key names its own cause -- distinct
+    # from a *known* key that a live write rejected.
+    assert exc_info.value.reason is not None
+    assert "unsupported or rejected setting: 'not_a_real_key'" in str(exc_info.value)
 
 
 def test_apply_config_applies_gate_keys_before_dependents():
@@ -712,6 +716,47 @@ def test_apply_config_rolls_back_on_mid_push_failure():
     with pytest.raises(UnsupportedSetting):
         cam.apply_config(cfg)
     assert backend.get_property("gain") == 5.0  # rolled back
+
+
+def test_apply_config_gated_key_failure_names_the_missing_gate_when_backend_has_no_diagnostic(
+) -> None:
+    """Ticket 030-005: ``FakeBackend`` has no ``describe_set_failure``
+    (a bare ``CaptureBackend``-shaped double, like ``OpenCVBackend``),
+    so ``Camera._describe_set_failure`` falls back to its own
+    config-shape check -- ``exposure`` is gated by ``auto_exposure``
+    (``_GATED_BY``) and this push never includes it, exactly the
+    real-world "test never sets auto_exposure" candidate the ticket's
+    source issue named as one of four possibilities."""
+    backend = FakeBackend()
+    cam = Camera("cam-a", backend)
+    cam.open()
+
+    def failing_set(name, value):
+        return False
+
+    backend.set_property = failing_set  # type: ignore[method-assign]
+    cfg = CameraConfig(name="cam-a", playfield=None, settings={"exposure": 100})
+    with pytest.raises(UnsupportedSetting) as exc_info:
+        cam.apply_config(cfg)
+    assert exc_info.value.key == "exposure"
+    assert exc_info.value.reason is not None
+    assert "auto_exposure" in exc_info.value.reason
+
+
+def test_apply_config_prefers_the_backends_own_diagnostic_over_the_generic_gate_fallback():
+    """A backend that *can* say more (e.g. ``UvcUtilBackend``, live
+    hardware readback) wins over ``Camera``'s own config-shape-only
+    fallback, even for a key ``_GATED_BY`` also knows about."""
+    backend = FakeControlBackend(names=("exposure", "auto_exposure"))
+    backend.set_property = lambda name, value: False  # type: ignore[method-assign]
+    backend.describe_set_failure = lambda name, value: f"backend says: {name} is doomed"  # type: ignore[attr-defined]
+    cam = Camera("cam-a", FakeBackend(), control_backend=backend)
+    cam.open()
+
+    cfg = CameraConfig(name="cam-a", playfield=None, settings={"exposure": 100, "auto_exposure": 1})
+    with pytest.raises(UnsupportedSetting) as exc_info:
+        cam.apply_config(cfg)
+    assert exc_info.value.reason == "backend says: auto_exposure is doomed"
 
 
 def test_apply_config_backend_without_settings_surface_rejects_any_push():
@@ -980,6 +1025,94 @@ def test_apply_config_control_backend_rollback_on_mid_push_failure():
             CameraConfig(name="cam-a", playfield=None, settings={"gain": 9.0, "exposure": 100})
         )
     assert control.get_property("gain") == 5.0  # rolled back
+
+
+# ---------------------------------------------------------------------------
+# Settle-after-open (ticket 030-005, reopened) -- a real-hardware defect:
+# pushing UVC controls immediately after a fresh open raced macOS
+# AVFoundation's own capture-session initialisation and failed
+# intermittently (measured up to ~60% of genuinely cold-process attempts).
+# apply_config() now drains _OPEN_SETTLE_READS frames from the primary
+# backend before the first real push following a fresh open, whenever a
+# control_backend is wired -- mirroring v1's own proven mechanism
+# (archive/src/aprilcam/daemon/camera_pipeline.py's frame drain before
+# applying UVC controls).
+# ---------------------------------------------------------------------------
+
+
+def test_apply_config_settles_before_the_first_real_push_after_open():
+    primary = FakeBackend()
+    control = FakeControlBackend(names=("exposure", "gain"))
+    cam = Camera("cam-a", primary, control_backend=control)
+    cam.open()
+    assert primary.read_calls == 0  # nothing drained yet -- no push has happened
+
+    cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"exposure": 6}))
+
+    assert primary.read_calls == _OPEN_SETTLE_READS
+    assert control.set_calls == [("exposure", 6.0)]  # the real push still happened
+
+
+def test_apply_config_settles_only_once_per_open():
+    primary = FakeBackend()
+    control = FakeControlBackend(names=("exposure", "gain"))
+    cam = Camera("cam-a", primary, control_backend=control)
+    cam.open()
+
+    cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"exposure": 6}))
+    assert primary.read_calls == _OPEN_SETTLE_READS
+
+    cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"gain": 2}))
+    assert primary.read_calls == _OPEN_SETTLE_READS  # unchanged -- no second drain
+
+
+def test_apply_config_does_not_settle_without_a_control_backend():
+    """No regression: a ``Camera`` built with no ``control_backend``
+    (every non-macOS platform) never pays this cost -- there is no
+    macOS-AVFoundation-session quirk to settle for on that path."""
+    primary = FakeBackend()
+    cam = Camera("cam-a", primary)
+    cam.open()
+
+    cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"gain": 7}))
+
+    assert primary.read_calls == 0
+
+
+def test_apply_config_does_not_settle_for_an_empty_or_blank_push():
+    """An apply-on-open call with nothing real to write (``DaemonService.
+    _camera_for``'s own pattern when no config is stored yet) never
+    drains -- the drain is reserved for a push that actually touches
+    hardware, so it never disturbs a headless test's frame-queue
+    accounting for a push that was never going to write anything."""
+    primary = FakeBackend()
+    control = FakeControlBackend(names=("exposure", "gain"))
+    cam = Camera("cam-a", primary, control_backend=control)
+    cam.open()
+
+    cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={}))
+    assert primary.read_calls == 0
+
+    cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"gain": None}))
+    assert primary.read_calls == 0  # blank value -- still nothing real to push
+
+    cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"gain": 5}))
+    assert primary.read_calls == _OPEN_SETTLE_READS  # the first *real* push settles
+
+
+def test_apply_config_settles_again_after_a_fresh_reopen():
+    primary = FakeBackend()
+    control = FakeControlBackend(names=("exposure", "gain"))
+    cam = Camera("cam-a", primary, control_backend=control)
+    cam.open()
+    cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"exposure": 6}))
+    assert primary.read_calls == _OPEN_SETTLE_READS
+
+    cam.close()
+    cam.open()  # a fresh capture session -- the quirk this settle exists for again applies
+    cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"exposure": 6}))
+
+    assert primary.read_calls == 2 * _OPEN_SETTLE_READS
 
 
 # ---------------------------------------------------------------------------

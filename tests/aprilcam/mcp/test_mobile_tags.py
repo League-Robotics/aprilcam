@@ -17,6 +17,7 @@ from typing import Dict, Optional
 
 from mcp import types
 
+from aprilcam.daemon.interfaces import MountRegistration
 from aprilcam.errors import NotCalibrated
 from aprilcam.mcp.connection import ConnectionManager
 from aprilcam.mcp.server import build_server
@@ -33,18 +34,28 @@ class _FakeDaemon:
     register_tag_raises: Optional[Exception] = None
     unregister_tag_raises: Optional[Exception] = None
     list_tag_parameters_raises: Optional[Exception] = None
+    register_tag_warning: Optional[str] = None
+    """Stand-in for a nonzero mount_z registered while no camera is
+    located (ticket 030-004, SUC-004) -- the fake returns this verbatim
+    from register_tag, mirroring Daemon.register_tag's real optional
+    warning return."""
+    mount_z_applied_by_tag: Dict[TagId, bool] = field(default_factory=dict)
+    """Per-tag override for list_tag_parameters' computed
+    mount_z_applied; a tag absent here defaults to True (vacuous case:
+    no elevation registered, or nothing to test)."""
 
     registered_tag: Optional[TagId] = None
     registered_params: Optional[MountParameters] = None
     unregistered_tag: Optional[TagId] = None
     unregister_calls: int = 0
 
-    def register_tag(self, tag: TagId, params: MountParameters) -> None:
+    def register_tag(self, tag: TagId, params: MountParameters) -> Optional[str]:
         self.registered_tag = tag
         self.registered_params = params
         if self.register_tag_raises is not None:
             raise self.register_tag_raises
         self.tag_parameters[tag] = params
+        return self.register_tag_warning
 
     def unregister_tag(self, tag: TagId) -> None:
         self.unregistered_tag = tag
@@ -53,10 +64,15 @@ class _FakeDaemon:
             raise self.unregister_tag_raises
         self.tag_parameters.pop(tag, None)
 
-    def list_tag_parameters(self) -> Dict[TagId, MountParameters]:
+    def list_tag_parameters(self) -> Dict[TagId, MountRegistration]:
         if self.list_tag_parameters_raises is not None:
             raise self.list_tag_parameters_raises
-        return dict(self.tag_parameters)
+        return {
+            tag: MountRegistration(
+                params=params, mount_z_applied=self.mount_z_applied_by_tag.get(tag, True)
+            )
+            for tag, params in self.tag_parameters.items()
+        }
 
 
 @dataclass
@@ -154,6 +170,42 @@ async def test_register_tag_nonzero_mount_z_uncalibrated_surfaces_not_calibrated
 
 
 # ---------------------------------------------------------------------------
+# register_tag -- AC (ticket 030-004, SUC-004): the daemon's optional
+# mount_z-inert warning is surfaced in the tool's own response, not
+# swallowed as bare None.
+# ---------------------------------------------------------------------------
+
+
+async def test_register_tag_surfaces_the_daemons_warning_when_present(tmp_path):
+    daemon = _FakeDaemon(
+        register_tag_warning=(
+            "mount_z=15 for apriltag 7 is currently inert: no camera this "
+            "daemon knows about has been located yet -- ask your operator to "
+            "run `aprilcam camera locate`"
+        )
+    )
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(
+        server, "register_tag", {"family": "apriltag", "number": 7, "mount_z": 15.0}
+    )
+
+    assert result.root.isError is False
+    assert result.root.structuredContent["result"] == daemon.register_tag_warning
+    assert "camera locate" in result.root.structuredContent["result"]
+
+
+async def test_register_tag_returns_no_warning_when_the_daemon_reports_none(tmp_path):
+    daemon = _FakeDaemon()  # register_tag_warning defaults to None
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(server, "register_tag", {"family": "apriltag", "number": 7})
+
+    assert result.root.isError is False
+    assert result.root.structuredContent["result"] is None
+
+
+# ---------------------------------------------------------------------------
 # unregister_tag -- AC: calls Daemon.unregister_tag; absent tag is a no-op
 # ---------------------------------------------------------------------------
 
@@ -190,7 +242,12 @@ async def test_list_tag_parameters_round_trips_registered_entries(tmp_path):
     tag2 = TagId(TagFamily.ARUCO, 5)
     params1 = MountParameters(mount_x=8.0, mount_y=3.0, mount_z=15.0)
     params2 = MountParameters(size_cm=6.0)
-    daemon = _FakeDaemon(tag_parameters={tag1: params1, tag2: params2})
+    daemon = _FakeDaemon(
+        tag_parameters={tag1: params1, tag2: params2},
+        # tag1's mount_z is elevated but not yet applied (ticket
+        # 030-004, SUC-004); tag2's mount_z is 0, always vacuously True.
+        mount_z_applied_by_tag={tag1: False},
+    )
     server, _ = _build(daemon, tmp_path)
 
     result = await _call(server, "list_tag_parameters")
@@ -198,13 +255,15 @@ async def test_list_tag_parameters_round_trips_registered_entries(tmp_path):
     assert result.root.isError is False
     entries = result.root.structuredContent["result"]
     assert len(entries) == 2
-    by_tag = {(e["tag"]["family"], e["tag"]["number"]): e["params"] for e in entries}
-    assert by_tag[("apriltag", 7)] == {
+    by_tag = {(e["tag"]["family"], e["tag"]["number"]): e for e in entries}
+    assert by_tag[("apriltag", 7)]["params"] == {
         "size_cm": None, "mount_x": 8.0, "mount_y": 3.0, "mount_z": 15.0, "mount_yaw_rad": 0.0
     }
-    assert by_tag[("aruco", 5)] == {
+    assert by_tag[("apriltag", 7)]["mount_z_applied"] is False
+    assert by_tag[("aruco", 5)]["params"] == {
         "size_cm": 6.0, "mount_x": 0.0, "mount_y": 0.0, "mount_z": 0.0, "mount_yaw_rad": 0.0
     }
+    assert by_tag[("aruco", 5)]["mount_z_applied"] is True
 
 
 async def test_list_tag_parameters_empty_registry_returns_empty_tuple(tmp_path):

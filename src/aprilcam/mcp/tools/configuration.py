@@ -198,7 +198,9 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
 
     @mcp.tool()
     @handle_tool_errors
-    def calibrate(camera: str, daemon: Optional[str] = None) -> CalibrationResult:
+    def calibrate(
+        camera: str, estimate_intrinsics: bool = False, daemon: Optional[str] = None
+    ) -> CalibrationResult:
         """Run calibration for *camera* against its linked playfield
         (UC-04, UC-15) -- all vision happens in the daemon; this sends a
         command and reports the result. There is no partial success:
@@ -213,8 +215,22 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         this tool does nothing beyond forwarding to ``Daemon.calibrate``,
         so that ordering is the daemon's own guarantee, not something
         reimplemented here.
+
+        *estimate_intrinsics* (sprint 030 ticket 002, SUC-002) opts into
+        also estimating this camera's lens model from this call's
+        detection burst, over whatever ArUco+AprilTag ground truth the
+        linked playfield surveys -- ``False`` (the default) leaves any
+        previously-estimated lens model exactly as it was.
+        ``CalibrationResult.intrinsics_estimated``/``intrinsics_mode``/
+        ``elevated_features_used`` report what happened; the fitted
+        ``camera_matrix``/``dist_coeffs`` values themselves are
+        deliberately never returned here, mirroring
+        ``get_calibration``'s existing "reports what the interface
+        promises, never the internal homography matrix" precedent.
         """
-        return connection.call(lambda d: d.calibrate(camera), host=daemon)
+        return connection.call(
+            lambda d: d.calibrate(camera, estimate_intrinsics=estimate_intrinsics), host=daemon
+        )
 
     @mcp.tool()
     @handle_tool_errors

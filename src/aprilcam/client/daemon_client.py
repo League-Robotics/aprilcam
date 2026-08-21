@@ -83,7 +83,7 @@ from aprilcam.client.streams import SocketImageStream, SocketTagStream
 from aprilcam.config.interfaces import CameraConfig, CameraPosition, Feature
 from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitionIface
 from aprilcam.config.loader import PlayfieldDefinition
-from aprilcam.daemon.interfaces import Daemon, DaemonStatus, ImageStream, TagStream
+from aprilcam.daemon.interfaces import Daemon, DaemonStatus, ImageStream, MountRegistration, TagStream
 from aprilcam.errors import (
     AlreadyRunning,
     CameraNotPresent,
@@ -136,7 +136,9 @@ def _tag_id_to_proto(tag: TagId) -> aprilcam_v2_pb2.TagId:
 
 
 def _playfield_feature_entry_to_proto(entry) -> aprilcam_v2_pb2.PlayfieldFeatureEntry:
-    msg = aprilcam_v2_pb2.PlayfieldFeatureEntry(slug=entry.slug, x=entry.x, y=entry.y)
+    msg = aprilcam_v2_pb2.PlayfieldFeatureEntry(
+        slug=entry.slug, x=entry.x, y=entry.y, height_cm=entry.height_cm
+    )
     if entry.tag_id is not None:
         msg.id = entry.tag_id
     if entry.colour is not None:
@@ -452,15 +454,21 @@ class GrpcDaemon(Daemon):
         response = self._call(self._stub.FindFeature, request)
         return features_from_proto(response.features)
 
-    def register_tag(self, tag: TagId, params: MountParameters) -> None:
+    def register_tag(self, tag: TagId, params: MountParameters) -> Optional[str]:
         """See ``daemon.interfaces.Daemon.register_tag`` (ticket
         025-004, UC-12). Upserts by *tag* -- takes effect on the next
         detection burst for that tag; does not survive a daemon
-        restart."""
+        restart.
+
+        Returns the daemon's optional ``mount_z``-inert warning (ticket
+        030-004, SUC-004) -- ``None`` when absent on the wire, mirroring
+        every other ``HasField``-guarded optional scalar this client
+        reads back (e.g. ``CalibrationResult.reason``)."""
         request = aprilcam_v2_pb2.RegisterTagRequest(
             tag=_tag_id_to_proto(tag), params=_mount_parameters_to_proto(params)
         )
-        self._call(self._stub.RegisterTag, request)
+        response = self._call(self._stub.RegisterTag, request)
+        return response.warning if response.HasField("warning") else None
 
     def unregister_tag(self, tag: TagId) -> None:
         """See ``daemon.interfaces.Daemon.unregister_tag``. An absent
@@ -468,9 +476,11 @@ class GrpcDaemon(Daemon):
         request = aprilcam_v2_pb2.UnregisterTagRequest(tag=_tag_id_to_proto(tag))
         self._call(self._stub.UnregisterTag, request)
 
-    def list_tag_parameters(self) -> Dict[TagId, MountParameters]:
+    def list_tag_parameters(self) -> Dict[TagId, MountRegistration]:
         """See ``daemon.interfaces.Daemon.list_tag_parameters``. A
-        snapshot of every currently registered tag's mount parameters."""
+        snapshot of every currently registered tag's mount parameters,
+        each paired with its computed ``mount_z_applied`` (ticket
+        030-004, SUC-004; see ``daemon.interfaces.MountRegistration``)."""
         response = self._call(
             self._stub.ListTagParameters, aprilcam_v2_pb2.ListTagParametersRequest()
         )
@@ -495,8 +505,10 @@ class GrpcDaemon(Daemon):
         response = self._call(self._stub.GetCameraConfig, request)
         return camera_config_from_proto(response.config)
 
-    def calibrate(self, camera: str) -> CalibrationResult:
-        request = aprilcam_v2_pb2.CalibrateRequest(camera=camera)
+    def calibrate(self, camera: str, *, estimate_intrinsics: bool = False) -> CalibrationResult:
+        request = aprilcam_v2_pb2.CalibrateRequest(
+            camera=camera, estimate_intrinsics=estimate_intrinsics
+        )
         response = self._call(self._stub.Calibrate, request)
         return calibration_result_from_proto(response.result)
 
