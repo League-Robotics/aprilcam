@@ -14,7 +14,13 @@ Before writing code:
    said "out of process".
 3. If you have a ticket, follow the execute-ticket skill — call
    `get_skill_definition("execute-ticket")` if unsure of the steps.
-4. Run the project's test suite after changes.
+4. Run tests after changes, in the foreground (never
+   `run_in_background: true`). If working a ticket, scope the run to
+   the modules the ticket touches — the full suite is a once-per-sprint
+   gate owned by execute-sprint/close-sprint, not a per-ticket step. If
+   working out-of-process (no sprint), run the full test suite, since
+   there is no later sprint-close gate to catch what a scoped run
+   would miss.
 5. A commit message is not a process action. Only an MCP call (e.g.
    `update_ticket_status`, `move_ticket_to_done`) moves a ticket —
    writing "closes 005" or similar in a commit message does not.

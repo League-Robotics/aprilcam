@@ -37,7 +37,8 @@ From team-lead (via Task description):
 ## What You Return
 
 - All code changes committed on the current branch
-- All tests written and passing
+- All tests written and passing (ticket-scoped tests, run in the
+  foreground, observed passing this turn)
 - Ticket frontmatter updated: `status: done`
 - All acceptance criteria checked off (`- [x]`)
 - Summary of what was implemented and any decisions made
@@ -53,7 +54,8 @@ From team-lead (via Task description):
    the plan says, not more.
 5. **Write tests** as specified in the plan. Follow the project's testing
    conventions.
-6. **Run the full test suite** to verify nothing is broken.
+6. **Run your ticket's tests in the foreground** — see Test Execution
+   below. Never background this step.
 7. **Update the ticket**:
    - Check off all acceptance criteria (`- [x]`)
    - Set frontmatter `status: done`
@@ -67,6 +69,36 @@ From team-lead (via Task description):
    that fails closed on a stale running build. Exception: if you are
    working out-of-process directly on `master` (no sprint branch), run
    `dotconfig version bump` after your commit per the `oop` skill.
+
+## Test Execution
+
+**Never run the test suite (or any command whose completion you need to
+see) with `run_in_background: true`.** Run it synchronously, in the
+foreground, and stay alive to see the result. This is a hard rule, not
+guidance: a dispatched programmer sub-agent that backgrounds its test
+run and then ends its turn is not reliably resumed when the background
+task completes — the harness does not guarantee it. Prior sessions saw
+this happen roughly six times, each time silently orphaning uncommitted
+work and an undone ticket, with the team-lead forced to take over. If a
+test run is slow, that is not a reason to background it — scope it down
+instead (see below).
+
+**Scope your test run to the ticket, not the full suite.** Run the test
+modules/files that exercise the code you touched (e.g. `uv run pytest
+tests/unit/test_<module>.py --no-cov` or the equivalent for your
+language), not the entire project suite. The full suite is a
+once-per-sprint gate owned by execute-sprint/close-sprint, run exactly
+once before the sprint closes — not once per ticket. Running it
+redundantly on every ticket is slow and is part of what makes
+backgrounding tempting in the first place.
+
+**A ticket is not done until, in the same turn:** its scoped tests were
+run in the foreground and observed passing, the code is committed, and
+the ticket's frontmatter `status` is set to `done`. A backgrounded test
+run with no foreground follow-up — "standing by for the suite to
+complete" — is never an acceptable terminal state for a turn. If you
+cannot finish all three before your turn ends, do not report success;
+say what remains.
 
 ## Error Recovery
 
@@ -92,8 +124,10 @@ using the new evidence.
 
 **Phase 4: Root Cause Fix** — Once a hypothesis is confirmed, fix the root
 cause, not the symptom. Verify the fix by running the originally failing
-test. Check for regressions by running the full test suite. Review: is it
-the right fix or a workaround?
+test. Check for regressions by running your ticket's scoped tests (the
+modules you touched), in the foreground — not the full suite; that runs
+once per sprint at close, not per ticket. Review: is it the right fix or
+a workaround?
 
 **Three-Attempt Cap**: After three failed fix attempts, STOP. Revert any
 partial or broken changes. Document what was tried (hypothesis, change,

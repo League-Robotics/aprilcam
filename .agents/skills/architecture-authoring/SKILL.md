@@ -15,8 +15,10 @@ architecture from scratch or a sprint update.
 Design the system architecture from scratch when no architecture document
 exists yet.
 
-Given `.clasi/design/overview.md` and `.clasi/design/usecases.md`, produce
-the first architecture document following steps 1-7 below.
+Given `overview.md` and `usecases.md` in the project's configured
+design directory (`paths.design` in `.clasi/config.yaml`, default
+`docs/design/`), produce the first architecture document following
+steps 1-7 below.
 
 This mode is superseded, for a project that has opted into the persistent
 per-subsystem design-doc set (`Project.design_docs_opt_in` is `True`), by
@@ -129,15 +131,31 @@ as Mode 2's timing rule.
    lifecycle diffs *content* against a pristine baseline at a fixed
    path, not a path change.
 
-2. **Seed the overlay.** Call `seed_sprint_design_overlay(sprint_id,
-   doc_names)` with the filenames identified in step 1 (e.g.
-   `["design.md", "DESIGN.md"]` — note that `DESIGN.md` is not a unique
-   name across subsystems; the seed step records each seeded file's full
+2. **Seed the overlay — every affected doc, one call.** Call
+   `seed_sprint_design_overlay(sprint_id, doc_names)` **exactly once**,
+   passing *every* canonical doc identified in step 1 in a single
+   `doc_names` list — never one call per doc, and never only the first
+   doc found. `doc_names` accepts two forms per entry: a bare filename
+   with no path separator (e.g. `"design.md"`), resolved relative to
+   `docs/design/` — the system doc; or a path containing a separator
+   (e.g. `"src/clasi/tools/DESIGN.md"`), resolved relative to the repo
+   root with no `../../` escape — a subsystem's co-located canonical
+   doc. A bare `"DESIGN.md"` with no separator does **not** reach a
+   subsystem's doc (it resolves to `docs/design/DESIGN.md` instead) —
+   always give the co-located path when the sprint touches a subsystem
+   doc, e.g. `["design.md", "src/clasi/tools/DESIGN.md",
+   "src/clasi/design/DESIGN.md"]` to seed the system doc plus two
+   subsystem docs in one call. Since every co-located subsystem doc
+   shares the bare basename `DESIGN.md`, the tool derives a unique
+   overlay slug per doc from its path relative to its enclosing source
+   root (see `_derive_overlay_slug` in `clasi.tools.artifact_tools`) so
+   multiple `DESIGN.md` files seeded in the same call land under
+   distinct filenames in the flat `design/` overlay directory rather
+   than colliding; the seed step records each seeded file's full
    canonical source path in the overlay directory's `_sources.json`
-   manifest so `apply` can resolve it back to the right subsystem later,
-   even when multiple overlay files share the `DESIGN.md` basename).
-   This copies each named canonical doc verbatim into
-   `clasi/sprints/NNN-slug/design/` and commits the pristine copies
+   manifest, keyed by that slug, so `apply` can resolve it back to the
+   right subsystem later. This copies each named canonical doc verbatim
+   into `clasi/sprints/NNN-slug/design/` and commits the pristine copies
    immediately, before any edits — do not skip this step or edit a file
    that hasn't been seeded first; the diff-generation step below depends
    on a committed pristine baseline existing. This call is a no-op if

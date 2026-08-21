@@ -319,12 +319,20 @@ leave the sprint open — the ticket itself must still be marked done.
 After all tickets are `done`:
 
 1. Verify all tickets have `status: done`.
-2. Run the full test suite on the sprint branch.
+2. Run the full test suite on the sprint branch. **This is the sprint's
+   single full-suite run.** Each programmer agent ran only its own
+   ticket's scoped tests during execution (see the programmer agent
+   definition) — the full suite is not run once per ticket, only once
+   here, before close. `close_sprint` also runs the full suite itself
+   (via `test_command`, default `uv run pytest`) as one of its
+   preconditions, so this step and the close-sprint gate together are
+   the sprint's only full-suite runs.
 3. Present sprint summary to stakeholder.
 4. Invoke the `close-sprint` skill.
 
 ## Output
 
 - All tickets implemented and marked done
-- All tests passing on sprint branch
+- All tests passing on sprint branch (the sprint's one full-suite run,
+  not a per-ticket run)
 - Sprint ready for review and close
