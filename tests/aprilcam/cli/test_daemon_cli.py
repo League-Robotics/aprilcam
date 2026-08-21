@@ -58,6 +58,7 @@ class _FakeStatus:
     cameras: Tuple[CameraState, ...] = ()
     config_dir: str = "/config"
     state_dir: str = "/state"
+    other_daemon_processes: Tuple[int, ...] = ()
 
 
 @dataclass
@@ -69,6 +70,10 @@ class _FakeLifecycle:
 
     _running: bool = False
     _cameras: Tuple[CameraState, ...] = ()
+    # Ticket 031-002: the local orphan-process report -- unlike `_cameras`
+    # above, not gated on `_running` (SUC-002's main flow: a candidate
+    # orphan can exist whether or not the real daemon is currently up).
+    _other_daemon_processes: Tuple[int, ...] = ()
     start_raises: Optional[Exception] = None
     stop_raises: Optional[Exception] = None
     start_calls: int = field(default=0)
@@ -87,7 +92,11 @@ class _FakeLifecycle:
         self._running = False
 
     def status(self) -> _FakeStatus:
-        return _FakeStatus(running=self._running, cameras=self._cameras if self._running else ())
+        return _FakeStatus(
+            running=self._running,
+            cameras=self._cameras if self._running else (),
+            other_daemon_processes=self._other_daemon_processes,
+        )
 
 
 @dataclass
@@ -314,6 +323,48 @@ def test_status_not_running_before_any_start(capsys):
     out = capsys.readouterr().out
     assert "local: not running" in out
     assert "cameras: 0" in out
+
+
+def test_status_prints_orphan_processes_distinctly_when_present(capsys):
+    """Ticket 031-002, SUC-002: an orphan candidate is reported
+    distinctly from the lock holder, not conflated with "running"."""
+    lifecycle = _FakeLifecycle(_running=True, _other_daemon_processes=(4242,))
+
+    code = daemon_cli.cmd_status(_args(), lifecycle_factory=lambda: lifecycle)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "local: running" in out
+    assert "orphan processes" in out
+    assert "4242" in out
+
+
+def test_status_omits_orphan_line_when_none_found(capsys):
+    """AC2/AC3: an empty scan is not itself reported as anything --
+    output matches today's (pre-ticket) shape exactly."""
+    lifecycle = _FakeLifecycle(_running=True, _cameras=(_camera(),))
+
+    code = daemon_cli.cmd_status(_args(), lifecycle_factory=lambda: lifecycle)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "orphan" not in out
+
+
+def test_status_with_daemon_flag_never_prints_an_orphan_line(capsys):
+    """AC6: the orphan report is local-only -- a ``-d HOST`` RPC-answered
+    status never carries one, even if (hypothetically) fabricated on the
+    fake, matching real ``daemon_status_from_proto``'s field-for-field
+    reconstruction which never sets it either."""
+    remote_status = _FakeStatus(running=True, other_daemon_processes=())
+    discovery = _FakeDiscovery(daemon=_FakeDaemon(remote_status))
+
+    code = daemon_cli.cmd_status(
+        _args(daemon="pi-field.local"), discovery_factory=lambda: discovery
+    )
+
+    assert code == 0
+    assert "orphan" not in capsys.readouterr().out
 
 
 def test_status_with_daemon_flag_connects_via_discovery_not_lifecycle(capsys):

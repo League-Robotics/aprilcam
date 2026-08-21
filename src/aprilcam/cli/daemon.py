@@ -50,6 +50,18 @@ unmodified and is built entirely on the existing ``Daemon.status()``
 RPC -- no new RPC method, no ``.proto`` change (see ``cmd_list``'s own
 docstring). ``start``/``stop``/``restart``/``status`` above are
 untouched by this addition and keep the reasoning above.
+
+**A bare ``status`` also reports orphaned daemon processes, local-only
+(ticket 031-002, SUC-002).** ``_print_status`` prints a distinct
+"orphan processes" line whenever ``DaemonStatus.other_daemon_processes``
+is non-empty -- see that field's own docstring
+(``daemon/interfaces.py``) for why it is *always* empty for the ``-d
+HOST``/``daemon list`` RPC-answered branches above and only ever
+populated by ``client.lifecycle.DaemonLifecycle.status()``'s local
+process-table scan: a scan has no meaning against a remote host, so
+this is not something ``-d``/``list`` silently lost, it never applied
+to them in the first place. This command never signals or kills a
+reported orphan -- report only, per this sprint's Design Rationale.
 """
 
 from __future__ import annotations
@@ -99,6 +111,22 @@ def _print_status(label: str, status: DaemonStatus) -> None:
         print(f"    {format_camera_row(camera)}")
     print(f"  config_dir: {status.config_dir}")
     print(f"  state_dir: {status.state_dir}")
+    # Ticket 031-002 (SUC-002): printed only when the scan actually found
+    # something -- an empty result is not itself reported as anything
+    # (AC: "output is unchanged from today" with no orphan present), so a
+    # bare `daemon status` against a healthy or absent daemon looks
+    # identical to before this ticket. "local scan" in the label makes
+    # the local-only scope explicit at the point it matters, rather than
+    # only in `-h` help text -- this field is always empty for a `-d
+    # HOST`/`daemon list` RPC-answered status (see `DaemonStatus.
+    # other_daemon_processes`'s own docstring), so this line only ever
+    # appears against the bare, local `daemon status`.
+    if status.other_daemon_processes:
+        pids = ", ".join(str(pid) for pid in status.other_daemon_processes)
+        print(
+            f"  orphan processes (local scan, not the lock holder, not "
+            f"killed): {pids}"
+        )
 
 
 def cmd_start(
@@ -268,7 +296,14 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     add_daemon_option(p_restart)
     p_restart.set_defaults(func=cmd_restart)
 
-    p_status = sub.add_parser("status", help="report daemon readiness")
+    p_status = sub.add_parser(
+        "status",
+        help=(
+            "report daemon readiness (bare status also scans for orphan "
+            "daemon processes, local machine only -- -d HOST gives the "
+            "remote RPC view only, no local scan)"
+        ),
+    )
     add_daemon_option(p_status)
     p_status.set_defaults(func=cmd_status)
 

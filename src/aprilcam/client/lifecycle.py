@@ -97,12 +97,13 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from aprilcam.client.discovery import Discovery, probe_lock_holder, probe_socket_reachable
 from aprilcam.config.directories import Directories
@@ -118,6 +119,71 @@ logger = logging.getLogger(__name__)
 _DEFAULT_START_TIMEOUT = 10.0
 _DEFAULT_STOP_TIMEOUT = 10.0
 _DEFAULT_POLL_INTERVAL = 0.05
+
+#: Wall-clock budget for one ``ps`` invocation in :func:`_list_daemon_processes`
+#: -- a wedged subprocess must not hang ``status()`` (mirrors
+#: ``camera.backends.uvc_util``'s own subprocess-timeout discipline).
+_PROCESS_SCAN_TIMEOUT_S = 5.0
+
+#: Matches the exact argv ``start()`` above spawns
+#: (``[python_executable, "-m", "aprilcam.daemon"]``), against a ``ps``
+#: command-line column that may carry the full interpreter path plus
+#: any trailing arguments a *different* invocation added -- name-
+#: matching only, per this ticket's "report, never auto-kill" design
+#: rationale (sprint.md Design Rationale).
+_DAEMON_SPAWN_RE = re.compile(r"-m\s+aprilcam\.daemon(?:\s|$)")
+
+
+def _list_daemon_processes() -> Tuple[int, ...]:
+    """Real (default) process-table probe for :meth:`DaemonLifecycle.status`'s
+    orphan report (ticket 031-002, SUC-002): every pid in the local
+    process table whose command line matches ``-m aprilcam.daemon``,
+    caller included (:meth:`DaemonLifecycle.status` is what excludes the
+    current lock holder's own pid -- this function reports every match,
+    unfiltered).
+
+    Shells out to ``ps -eo pid=,args=`` -- present on both this
+    project's target platforms (macOS dev machines, Linux/Raspberry Pi
+    deployment) with a stable, headerless, single-line-per-process
+    output, unlike ``/proc`` which only exists on Linux. Mirrors
+    ``camera.backends.uvc_util``'s subprocess conventions: always
+    ``shell=False`` (an argument list, never a shell string), a bounded
+    timeout, and **never raises** -- any subprocess failure, non-zero
+    exit, or unparseable line is skipped or degrades to an empty result,
+    matching ``camera.backends.libcamera.list_loopback_cameras``'s same
+    "never raises" discipline for a platform probe. This is the
+    best-effort half of the ticket's contract; :meth:`DaemonLifecycle.
+    status` adds a second, outer safety net around the *injectable*
+    ``list_daemon_processes`` seam (this function is only its default),
+    so a test double that raises is also tolerated.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid=,args="],
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=_PROCESS_SCAN_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("process-table scan (ps) failed: %s", exc)
+        return ()
+    if result.returncode != 0:
+        return ()
+
+    pids = []
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        pid_str, _, rest = stripped.partition(" ")
+        if not _DAEMON_SPAWN_RE.search(rest):
+            continue
+        try:
+            pids.append(int(pid_str))
+        except ValueError:
+            continue
+    return tuple(pids)
 
 
 def _holder_pid(holder: str) -> Optional[int]:
@@ -170,6 +236,15 @@ class DaemonLifecycle(_DaemonLifecycleBase):
         *fabricated* holder pid never risks signalling a real,
         unrelated process that happens to have that pid on the machine
         running the suite.
+    list_daemon_processes (ticket 031-002):
+        Overridable seam (default :func:`_list_daemon_processes`, a
+        ``ps``-backed process-table scan) feeding :meth:`status`'s
+        orphan report -- same DI style as ``lock_holder``/
+        ``socket_reachable`` above, so a test can fabricate "another
+        daemon-shaped process is running" (or a scan failure) with no
+        real process table involved. :meth:`status` treats this seam as
+        best-effort: any exception it raises is caught and degrades to
+        today's lock-only status rather than propagating.
     start_timeout / stop_timeout / poll_interval:
         How long :meth:`start`/:meth:`stop` wait for the control plane
         to come up / the lock to release, and how often they check.
@@ -185,6 +260,7 @@ class DaemonLifecycle(_DaemonLifecycleBase):
         lock_holder: Callable[[Path], Optional[str]] = probe_lock_holder,
         socket_reachable: Callable[[Path], bool] = probe_socket_reachable,
         kill: Callable[[int, int], None] = os.kill,
+        list_daemon_processes: Callable[[], Tuple[int, ...]] = _list_daemon_processes,
         start_timeout: float = _DEFAULT_START_TIMEOUT,
         stop_timeout: float = _DEFAULT_STOP_TIMEOUT,
         poll_interval: float = _DEFAULT_POLL_INTERVAL,
@@ -198,6 +274,7 @@ class DaemonLifecycle(_DaemonLifecycleBase):
         self._lock_holder = lock_holder
         self._socket_reachable = socket_reachable
         self._kill = kill
+        self._list_daemon_processes = list_daemon_processes
         self._start_timeout = start_timeout
         self._stop_timeout = stop_timeout
         self._poll_interval = poll_interval
@@ -289,6 +366,32 @@ class DaemonLifecycle(_DaemonLifecycleBase):
             self._stop_timeout,
         )
 
+    def _scan_orphan_processes(self, holder_pid: Optional[int]) -> Tuple[int, ...]:
+        """Best-effort orphan-process report for :meth:`status` (ticket
+        031-002, SUC-002): every pid the injected ``list_daemon_processes``
+        seam reports, excluding *holder_pid* (so the daemon's own,
+        lock-holding process is never reported as its own orphan --
+        AC "no false positives against the daemon's own process").
+
+        The seam itself is treated as untrusted: any exception it
+        raises (not only the real implementation's own already-caught
+        ``OSError``/``TimeoutExpired``) is caught here and degrades to
+        an empty result -- "the scan is best-effort... degrades to
+        today's lock-only behavior rather than raising" applies to a
+        fabricated test double exactly as much as to the real ``ps``
+        probe.
+        """
+        try:
+            candidates = self._list_daemon_processes()
+        except Exception:
+            logger.warning(
+                "process-table scan for orphaned daemon processes failed; "
+                "degrading to lock-only status()",
+                exc_info=True,
+            )
+            return ()
+        return tuple(pid for pid in candidates if pid != holder_pid)
+
     def status(self) -> DaemonStatus:
         """See ``daemon.interfaces.DaemonLifecycle.status``. The
         **local process view** (is anything running on *this*
@@ -299,22 +402,49 @@ class DaemonLifecycle(_DaemonLifecycleBase):
         control plane is not (yet, or no longer) answering, reports a
         minimal running status rather than raising -- this method never
         raises for "not answering," only :meth:`start`/:meth:`stop` do.
+
+        **Orphan report (ticket 031-002, SUC-002).** Every branch below
+        also runs a best-effort process-table scan
+        (:meth:`_scan_orphan_processes`) and carries its result in the
+        returned status's ``other_daemon_processes`` -- regardless of
+        whether the lock is held, since the gap this ticket closes
+        (``daemon/interfaces.py``'s ``DaemonStatus.other_daemon_processes``
+        docstring) includes a process that never completed ``start()``'s
+        lock acquisition at all, i.e. one that can be alive with *no*
+        lock holder anywhere. This is the one call site in the codebase
+        that ever populates that field with a real scan -- the RPC-
+        answered ``daemon.status()`` value used two branches below
+        always reports it empty (local-only, never true of a remote
+        daemon), so this method rebuilds the returned ``DaemonStatus``
+        explicitly rather than passing the RPC response through
+        unchanged.
         """
         holder = self._lock_holder(self.lock_path)
+        holder_pid = _holder_pid(holder) if holder is not None else None
+        orphans = self._scan_orphan_processes(holder_pid)
         if holder is None:
             return DaemonStatus(
                 running=False,
                 cameras=(),
                 config_dir=str(self._directories.config_dir),
                 state_dir=str(self._directories.state_dir),
+                other_daemon_processes=orphans,
             )
         try:
             daemon = self._discovery.connect(None)
-            return daemon.status()
+            remote_status = daemon.status()
         except AprilCamError:
             return DaemonStatus(
                 running=True,
                 cameras=(),
                 config_dir=str(self._directories.config_dir),
                 state_dir=str(self._directories.state_dir),
+                other_daemon_processes=orphans,
             )
+        return DaemonStatus(
+            running=remote_status.running,
+            cameras=remote_status.cameras,
+            config_dir=remote_status.config_dir,
+            state_dir=remote_status.state_dir,
+            other_daemon_processes=orphans,
+        )

@@ -569,3 +569,25 @@ class DaemonStatus:
     config_dir: str
     """Resolved config root, reported so the cascade is never a mystery."""
     state_dir: str
+    other_daemon_processes: tuple[int, ...] = ()
+    """Pids of other ``python -m aprilcam.daemon``-shaped processes found
+    in the local process table that are **not** the current lock holder
+    (ticket 031-002, SUC-002) -- an operator-visible symptom of the
+    "alive but not serving" orphan the daemon's own flock mechanism
+    cannot see (a process that released the lock during a slow shutdown
+    without fully exiting, or one that never completed ``start()``'s
+    lock acquisition at all). Best-effort **name-matching, not a proof
+    of identity** -- report only, per this sprint's Design Rationale
+    ("report orphaned daemon processes, never auto-kill them"); nothing
+    in this codebase ever signals a pid found only by this scan.
+
+    Always ``()`` here -- the default, and what every RPC-sourced
+    ``DaemonStatus`` (``daemon.service.DaemonService.status()``,
+    ``client.models.daemon_status_from_proto``) still constructs, since
+    a process-table scan has no meaning against a remote host. The one
+    call site that ever populates this with a real scan result is
+    ``client.lifecycle.DaemonLifecycle.status()`` -- the *local* process
+    view -- which is exactly why ``daemon status -d HOST`` and ``daemon
+    list`` (both RPC-only) always report this field empty, structurally,
+    with no special-casing needed at either call site.
+    """

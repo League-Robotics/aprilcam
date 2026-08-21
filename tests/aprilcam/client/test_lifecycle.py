@@ -26,6 +26,7 @@ Two tiers, matching the module's own fakeable-dependency design (see
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -33,9 +34,11 @@ from typing import Callable, Iterator, List, Optional
 
 import pytest
 
+from aprilcam.client import lifecycle as lifecycle_module
 from aprilcam.client.discovery import Discovery
 from aprilcam.client.lifecycle import DaemonLifecycle
 from aprilcam.config.directories import Directories
+from aprilcam.daemon.interfaces import DaemonStatus
 from aprilcam.daemon.lifecycle import LOCK_FILENAME, SOCKET_FILENAME
 from aprilcam.errors import AlreadyRunning, ConnectionFailed
 
@@ -91,6 +94,12 @@ def _make_lifecycle(tmp_path: Path, **overrides) -> DaemonLifecycle:
         lock_holder=lambda path: None,
         socket_reachable=lambda path: False,
         kill=_never_called,
+        # Ticket 031-002: default to "found nothing" rather than the real
+        # `ps`-backed implementation -- every pre-existing test in this
+        # file constructs a lifecycle with no opinion about the orphan
+        # scan at all, and must not shell out to a real process table
+        # (unpredictable, slow, and irrelevant to what it is testing).
+        list_daemon_processes=lambda: (),
         start_timeout=0.3,
         stop_timeout=0.3,
         poll_interval=0.01,
@@ -257,13 +266,30 @@ class _FakeDiscovery:
 
 
 def test_status_delegates_to_the_rpc_view_when_the_lock_is_held_and_reachable(tmp_path):
-    sentinel_status = object()
-    discovery = _FakeDiscovery(daemon=_FakeDaemon(sentinel_status))
+    # Ticket 031-002: `status()` no longer returns the RPC-answered
+    # `DaemonStatus` by identity -- it rebuilds one (field for field)
+    # so the local-only orphan report can ride along (see
+    # test_status_carries_the_orphan_report_through_the_rpc_answered_branch
+    # below), so this asserts field equality against a real
+    # `DaemonStatus` rather than `is` against an opaque sentinel.
+    rpc_status = DaemonStatus(
+        running=True,
+        cameras=(),
+        config_dir="/etc/aprilcam",
+        state_dir="/var/lib/aprilcam",
+    )
+    discovery = _FakeDiscovery(daemon=_FakeDaemon(rpc_status))
     lifecycle = _make_lifecycle(
         tmp_path, lock_holder=lambda path: "pid 1", discovery=discovery
     )
 
-    assert lifecycle.status() is sentinel_status
+    status = lifecycle.status()
+
+    assert status.running == rpc_status.running
+    assert status.cameras == rpc_status.cameras
+    assert status.config_dir == rpc_status.config_dir
+    assert status.state_dir == rpc_status.state_dir
+    assert status.other_daemon_processes == ()
 
 
 def test_status_reports_running_with_empty_cameras_when_held_but_unreachable(tmp_path):
@@ -276,6 +302,199 @@ def test_status_reports_running_with_empty_cameras_when_held_but_unreachable(tmp
 
     assert status.running is True
     assert status.cameras == ()
+
+
+# ---------------------------------------------------------------------------
+# _list_daemon_processes() -- the real (default) ps-backed process probe
+# (ticket 031-002). Never touches the real process table -- `subprocess.run`
+# itself is monkeypatched, matching this file's existing fake-driven style.
+# ---------------------------------------------------------------------------
+
+
+class _FakeCompletedProcess:
+    def __init__(self, *, returncode: int = 0, stdout: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+def test_list_daemon_processes_matches_the_daemon_spawn_command_line(monkeypatch):
+    def fake_run(argv, **kwargs):
+        assert argv == ["ps", "-eo", "pid=,args="]
+        assert kwargs.get("shell") is False
+        return _FakeCompletedProcess(
+            stdout=(
+                "  100 /usr/bin/python3 -m aprilcam.daemon\n"
+                "  200 /usr/bin/python3 -m http.server 8000\n"
+                "  300 some-other-process --flag\n"
+            )
+        )
+
+    monkeypatch.setattr(lifecycle_module.subprocess, "run", fake_run)
+
+    assert lifecycle_module._list_daemon_processes() == (100,)
+
+
+def test_list_daemon_processes_returns_empty_when_ps_is_unavailable(monkeypatch):
+    def fake_run(argv, **kwargs):
+        raise OSError("ps: command not found")
+
+    monkeypatch.setattr(lifecycle_module.subprocess, "run", fake_run)
+
+    assert lifecycle_module._list_daemon_processes() == ()
+
+
+def test_list_daemon_processes_returns_empty_on_timeout(monkeypatch):
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=5.0)
+
+    monkeypatch.setattr(lifecycle_module.subprocess, "run", fake_run)
+
+    assert lifecycle_module._list_daemon_processes() == ()
+
+
+def test_list_daemon_processes_returns_empty_on_nonzero_exit(monkeypatch):
+    def fake_run(argv, **kwargs):
+        return _FakeCompletedProcess(returncode=1, stdout="")
+
+    monkeypatch.setattr(lifecycle_module.subprocess, "run", fake_run)
+
+    assert lifecycle_module._list_daemon_processes() == ()
+
+
+def test_list_daemon_processes_ignores_unparseable_lines(monkeypatch):
+    def fake_run(argv, **kwargs):
+        return _FakeCompletedProcess(
+            stdout="not-a-pid -m aprilcam.daemon\n\n  400 python -m aprilcam.daemon\n"
+        )
+
+    monkeypatch.setattr(lifecycle_module.subprocess, "run", fake_run)
+
+    assert lifecycle_module._list_daemon_processes() == (400,)
+
+
+# ---------------------------------------------------------------------------
+# status() -- orphan-process report (ticket 031-002, SUC-002)
+# ---------------------------------------------------------------------------
+
+
+def test_status_reports_a_daemon_shaped_process_that_is_not_the_lock_holder(tmp_path):
+    """A process the scan finds that is *not* the current lock holder's
+    pid is reported distinctly (AC1/SUC-002 main flow step 3)."""
+    lifecycle = _make_lifecycle(
+        tmp_path,
+        lock_holder=lambda path: "pid 100",
+        discovery=_FakeDiscovery(error=ConnectionFailed("localhost", reason="not answering yet")),
+        list_daemon_processes=lambda: (100, 4242),
+    )
+
+    status = lifecycle.status()
+
+    assert status.other_daemon_processes == (4242,)
+
+
+def test_status_reports_orphans_even_when_no_lock_is_held(tmp_path):
+    """The gap this ticket closes includes a process that never
+    completed ``start()``'s lock acquisition at all -- alive, with *no*
+    lock holder anywhere -- so the scan must not be skipped just because
+    ``holder is None``."""
+    lifecycle = _make_lifecycle(
+        tmp_path,
+        lock_holder=lambda path: None,
+        list_daemon_processes=lambda: (9999,),
+    )
+
+    status = lifecycle.status()
+
+    assert status.running is False
+    assert status.other_daemon_processes == (9999,)
+
+
+def test_status_reports_no_orphan_with_only_the_real_lock_holding_daemon_present(tmp_path):
+    """AC2: no false positives against the daemon's own process -- a
+    scan that finds only the lock holder's own pid reports no orphan."""
+    lifecycle = _make_lifecycle(
+        tmp_path,
+        lock_holder=lambda path: "pid 100",
+        discovery=_FakeDiscovery(error=ConnectionFailed("localhost", reason="not answering yet")),
+        list_daemon_processes=lambda: (100,),
+    )
+
+    status = lifecycle.status()
+
+    assert status.other_daemon_processes == ()
+
+
+def test_status_reports_no_orphan_with_nothing_running_at_all(tmp_path):
+    """AC3: an empty process-table scan is not itself reported as
+    anything -- output is unchanged from today."""
+    lifecycle = _make_lifecycle(tmp_path)  # default list_daemon_processes -> ()
+
+    status = lifecycle.status()
+
+    assert status.running is False
+    assert status.other_daemon_processes == ()
+
+
+def test_status_degrades_to_lock_only_view_when_the_scan_seam_raises(tmp_path):
+    """AC4: best-effort -- a failing/unavailable scan degrades to
+    today's lock-only behaviour rather than raising out of status()."""
+
+    def _boom():
+        raise RuntimeError("process-table enumeration unavailable on this platform")
+
+    lifecycle = _make_lifecycle(
+        tmp_path,
+        lock_holder=lambda path: "pid 100",
+        discovery=_FakeDiscovery(error=ConnectionFailed("localhost", reason="not answering yet")),
+        list_daemon_processes=_boom,
+    )
+
+    status = lifecycle.status()  # must not raise
+
+    assert status.running is True
+    assert status.other_daemon_processes == ()
+
+
+def test_status_never_signals_a_process_found_only_by_the_orphan_scan(tmp_path):
+    """AC5: no code path introduced by this ticket kills/signals any
+    process -- ``kill`` stays ``_never_called``-safe even when the scan
+    reports a candidate orphan."""
+    lifecycle = _make_lifecycle(
+        tmp_path,
+        lock_holder=lambda path: "pid 100",
+        discovery=_FakeDiscovery(error=ConnectionFailed("localhost", reason="not answering yet")),
+        list_daemon_processes=lambda: (100, 4242),
+        kill=_never_called,
+    )
+
+    status = lifecycle.status()  # kill=_never_called would raise if ever called
+
+    assert status.other_daemon_processes == (4242,)
+
+
+def test_status_carries_the_orphan_report_through_the_rpc_answered_branch(tmp_path):
+    """When the control plane *is* reachable, ``status()`` rebuilds the
+    RPC-answered ``DaemonStatus`` rather than returning it unchanged --
+    the orphan report (local-only) must still ride along."""
+    remote_status = DaemonStatus(
+        running=True,
+        cameras=(),
+        config_dir="/etc/aprilcam",
+        state_dir="/var/lib/aprilcam",
+    )
+    discovery = _FakeDiscovery(daemon=_FakeDaemon(remote_status))
+    lifecycle = _make_lifecycle(
+        tmp_path,
+        lock_holder=lambda path: "pid 100",
+        discovery=discovery,
+        list_daemon_processes=lambda: (100, 4242),
+    )
+
+    status = lifecycle.status()
+
+    assert status.running is True
+    assert status.config_dir == "/etc/aprilcam"
+    assert status.other_daemon_processes == (4242,)
 
 
 # ---------------------------------------------------------------------------
