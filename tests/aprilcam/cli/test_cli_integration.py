@@ -70,9 +70,17 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import grpc
+import numpy as np
 import pytest
 
-from aprilcam.camera.identity import resolve_all
+from aprilcam.camera.camera import Camera
+from aprilcam.camera.discovery import CameraDiscovery
+from aprilcam.camera.identity import CameraIdentity, resolve_all
+from aprilcam.camera.registry import CameraRegistry
+from aprilcam.config.directories import Directories
+from aprilcam.daemon.rpc import build_server
+from aprilcam.daemon.service import DaemonService
+from tests.aprilcam.camera.test_camera import FakeBackend
 
 
 def _aprilcam_bin() -> Path:
@@ -479,3 +487,129 @@ def test_playfield_annotations_subprocess_round_trips_against_a_python_client_pu
     finally:
         result = _run(bin_path, "daemon", "stop", env=env)
         assert result.returncode == 0, result.stderr
+
+
+# ---------------------------------------------------------------------------
+# BrokenPipeError / SIGPIPE handling -- ticket 031-003, SUC-003. Reproduces
+# the issue's own scenario end to end: the real ``aprilcam`` console script,
+# piping ``camera image --base64`` into a truncating reader, against a fake
+# (in-process gRPC) daemon -- no camera hardware needed.
+# ---------------------------------------------------------------------------
+
+
+def _identity(hardware_key: str = "hw:fake-broken-pipe", device_name: str = "Fake Camera") -> CameraIdentity:
+    from aprilcam.camera import identity as identity_module
+
+    return CameraIdentity(
+        slug=identity_module.device_name_slug(device_name),
+        device_name=device_name,
+        hardware_key=hardware_key,
+        source="vid_pid_location",
+        is_fallback=False,
+    )
+
+
+def _bind_daemon_with_one_large_frame_camera(directories: Directories):
+    """A real ``DaemonService``/``grpc.Server`` (matching this module's
+    own ``_bind_zero_camera_daemon`` pattern above), holding one
+    ``FakeBackend``-backed camera whose single queued frame is large,
+    high-entropy noise -- large enough that its base64 encoding
+    (``cli/camera.py``'s ``cmd_image`` ``--base64`` branch) exceeds any
+    platform's pipe buffer capacity. That size is the whole point: it
+    forces the CLI's single ``print()`` call to block partway through
+    an in-flight OS-level write, so closing the reader early reliably
+    produces a genuine ``BrokenPipeError`` inside that write rather than
+    racing against read timing (a small payload could complete a full
+    write before the reader ever closes, never exercising the bug at
+    all -- this is why the issue's own repro needed a real image, not a
+    trivial fixture frame).
+    """
+    registry = CameraRegistry(directories.state_dir / "cameras")
+    identity = _identity()
+    slug = registry.resolve(identity)
+    number = registry.get(slug).number
+    noisy_frame = np.random.default_rng(0).integers(0, 256, size=(480, 640, 3), dtype=np.uint8)
+    camera = Camera(slug, FakeBackend(read_queue=[noisy_frame]), number=number)
+    camera.open()
+    cameras: Dict[str, Camera] = {slug: camera}
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(cameras.keys()),
+        identity_source=lambda: {0: identity},
+        backend_factory=lambda index: FakeBackend(),
+    )
+    service = DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        cameras=cameras,
+        identity_source=lambda: {0: identity},
+    )
+    socket_path = directories.socket_dir / "control.sock"
+    listener = build_server(service, socket_path)
+    listener.start()
+    return listener, slug
+
+
+@pytest.mark.integration
+def test_camera_image_base64_piped_into_a_truncating_reader_exits_without_a_traceback(
+    isolated_env, short_runtime_dir: Path
+):
+    """The exact scenario named in the linked issue (section 2,
+    ``sprint-020-followups-socket-collision-and-cli-polish.md``):
+    ``aprilcam camera image <camera> --base64 | head -c 80``. Run here
+    against a fake daemon (real gRPC server, fake camera backend) so no
+    hardware is required -- ``isolated_env``/``short_runtime_dir``
+    isolate ``socket_dir`` down to a private tmp root exactly as the
+    real-hardware round-trip test above does, so
+    :func:`_bind_daemon_with_one_large_frame_camera`'s server and the
+    subprocess spawned below resolve the *same* control socket.
+
+    This drives the real, installed ``aprilcam`` console script (not
+    ``main()`` in-process) so the assertion covers the whole boundary:
+    argparse dispatch, the real ``BrokenPipeError``, and the real
+    ``SIGPIPE`` disposition CPython/this ticket's fix establish for a
+    genuine subprocess. Rather than shelling out through an actual
+    ``head`` (which would hand back only the *pipeline's* exit code,
+    not ``aprilcam``'s own), this reads exactly 80 bytes from the
+    subprocess's stdout pipe and then closes our end -- precisely what
+    ``head -c 80`` does to the pipe from the writer's point of view --
+    which lets the assertions below inspect ``aprilcam``'s own
+    returncode and stderr directly.
+    """
+    env = isolated_env
+    # ``isolated_env`` already set APRILCAM_CONFIG_DIR/APRILCAM_STATE_DIR/
+    # XDG_RUNTIME_DIR to point at tmp_path/short_runtime_dir for this
+    # process's environment -- a bare ``Directories()`` here resolves
+    # identically to what the subprocess spawned below resolves.
+    directories = Directories()
+    assert directories.socket_dir == short_runtime_dir / "aprilcam"
+    listener, slug = _bind_daemon_with_one_large_frame_camera(directories)
+    try:
+        bin_path = _aprilcam_bin()
+        proc = subprocess.Popen(
+            [str(bin_path), "camera", "image", slug, "--base64"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        stdout = proc.stdout
+        assert stdout is not None
+        try:
+            head = stdout.read(80)
+            assert len(head) == 80  # confirms the payload was actually large
+        finally:
+            stdout.close()  # closes our read end early, like `head -c 80` exiting
+
+        stderr_data = b""
+        stderr = proc.stderr
+        if stderr is not None:
+            stderr_data = stderr.read()
+            stderr.close()
+        returncode = proc.wait(timeout=30)
+
+        assert b"Traceback" not in stderr_data
+        assert b"BrokenPipeError" not in stderr_data
+        assert returncode != 0
+    finally:
+        listener.stop(1.0)

@@ -17,15 +17,36 @@ Each subcommand module owns its own argparse shape and dispatch
 functions; this module only assembles them and routes ``argv`` to
 whichever ``func`` argparse resolved — itself zero business logic, per
 ``adapters.md``'s "adapters hold no authoritative state" rule.
+
+**Pipe safety (ticket 031-003, SUC-003).** ``main()`` is the single
+dispatch seam every subcommand's ``func(args)`` funnels through, so
+``BrokenPipeError`` handling lives here once rather than at each of the
+~20 individual ``print()`` call sites scattered across ``cli/*.py`` --
+see :func:`main`'s own docstring for the mechanism.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
+import signal
 import sys
 from typing import Optional, Sequence
 
 from aprilcam.cli import camera, daemon, guide, mcp, playfield, tags
+
+#: Conventional Unix exit code for a process terminated by ``SIGPIPE``
+#: (128 + signal number) -- used whether the process is actually killed
+#: by the signal itself (see :func:`_reset_sigpipe_to_default`) or a
+#: ``BrokenPipeError`` reaches :func:`main`'s own handling instead
+#: (belt-and-suspenders path, e.g. platforms/contexts where the signal
+#: reset does not apply or the write already raced past it). ``13`` is
+#: ``SIGPIPE``'s POSIX value, used as the literal fallback on platforms
+#: (Windows) that have no ``signal.SIGPIPE`` at all -- this module never
+#: reaches that fallback there, since :func:`_reset_sigpipe_to_default`
+#: is a no-op and a plain ``print()`` to a closed handle raises
+#: ``OSError``, not ``BrokenPipeError``, on Windows anyway.
+_SIGPIPE_EXIT_CODE = 128 + getattr(signal, "SIGPIPE", 13)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -50,6 +71,60 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _reset_sigpipe_to_default() -> None:
+    """Restore ``SIGPIPE``'s default disposition on POSIX, undoing
+    CPython's own startup behaviour of ignoring it (``SIG_IGN``) so
+    that a write to a pipe with no reader raises ``BrokenPipeError``
+    instead of being ignored outright.
+
+    Resetting to ``SIG_DFL`` here gives ``aprilcam`` the conventional
+    Unix-tool behaviour: the OS can kill the process directly on a
+    broken-pipe write, before any Python-level exception machinery (or
+    interpreter-shutdown stdout flush) ever runs -- no traceback is
+    possible in that path because no Python code runs at all. This is
+    belt-and-suspenders alongside :func:`main`'s own ``except
+    BrokenPipeError`` handling, which still catches the case where a
+    ``BrokenPipeError`` reaches Python anyway (e.g. the write races
+    past the signal, or a context that does not deliver the signal the
+    same way). A no-op on Windows, which has no ``SIGPIPE`` at all --
+    hence the ``getattr`` guard rather than a bare ``signal.SIGPIPE``
+    reference.
+    """
+    sigpipe = getattr(signal, "SIGPIPE", None)
+    if sigpipe is not None:
+        signal.signal(sigpipe, signal.SIG_DFL)
+
+
+def _handle_broken_pipe() -> int:
+    """Handle a ``BrokenPipeError`` raised by a subcommand's
+    ``func(args)`` -- the standard Python idiom for a CLI piped into a
+    truncating consumer (``| head``, a killed downstream pipeline, ...).
+
+    Redirects the ``stdout`` file descriptor to ``os.devnull`` before
+    returning: CPython's normal interpreter shutdown flushes
+    ``sys.stdout`` regardless of how ``main()`` returns, and without
+    this redirect that flush would itself raise a second
+    ``BrokenPipeError`` against the still-broken pipe -- which CPython
+    reports as "Exception ignored in: ..." noise on stderr during
+    finalization, exactly the traceback-shaped output this ticket
+    exists to suppress. Best-effort: ``sys.stdout`` may not expose a
+    real file descriptor in some contexts (e.g. a test double standing
+    in for a broken pipe without a real one), in which case there is
+    nothing at the OS level to redirect and this is a no-op.
+    """
+    try:
+        target_fd = sys.stdout.fileno()
+    except (AttributeError, OSError, ValueError):
+        target_fd = None
+    if target_fd is not None:
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull_fd, target_fd)
+        finally:
+            os.close(devnull_fd)
+    return _SIGPIPE_EXIT_CODE
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """CLI entry point: parse *argv* and dispatch to whichever
     subcommand function argparse resolved.
@@ -60,14 +135,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     no ``start``/``stop``/``status``) is handled by that subparser's
     own ``incomplete_command`` default (``cli/_common.py``), which
     returns non-zero.
+
+    Pipe safety (ticket 031-003, SUC-003): every subcommand's
+    ``print()`` calls funnel through this one dispatch point, so a
+    downstream consumer closing its read end early (``camera image
+    <camera> --base64 | head``) is handled once, here -- see
+    :func:`_reset_sigpipe_to_default` and :func:`_handle_broken_pipe`
+    for the two-layer mechanism.
     """
+    _reset_sigpipe_to_default()
     parser = _build_parser()
     args = parser.parse_args(argv)
     func = args.func
     if func is None:
         parser.print_help()
         return 0
-    return func(args)
+    try:
+        return func(args)
+    except BrokenPipeError:
+        return _handle_broken_pipe()
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised via console script
