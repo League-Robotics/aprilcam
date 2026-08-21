@@ -883,7 +883,18 @@ dumped. Nothing is written to disk by the daemon.
 **Open questions.**
 - Does probing re-derive names for cameras already in the registry, and
   what happens if a name comes out different than last time? A changed
-  name silently orphans an installed config.
+  name silently orphans an installed config. *(Resolved 2026-08-21: no
+  — reconnect never renames. `camera/registry.py`'s `resolve()` keeps a
+  camera's persisted `slug` fixed for the life of its `hardware_key`
+  record; a fresh probe only refreshes `device_name`/`last_seen` in
+  place, even when the newly-resolved identity proposes a different
+  slug. This is deliberately the safe answer to the exact risk this
+  question names — never renaming is what *prevents* a name change from
+  silently orphaning an installed config, not a source of that risk.
+  Decision made by ticket 020-002; see `resolve()`'s own docstring
+  ("Reconnect does not rename") for the full rationale and the
+  disambiguation behaviour that still applies on *first sight* of a
+  new `hardware_key`.)*
 - Does the probe report the *ranges* each setting accepts, not just which
   settings exist? Without ranges the edit step in step 3 is guesswork,
   and UC-03's hard-error-on-bad-value rule makes guessing expensive.

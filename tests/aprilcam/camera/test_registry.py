@@ -158,6 +158,35 @@ def test_reconnect_refreshes_device_name_and_last_seen(tmp_path):
     assert updated.last_seen >= first_seen
 
 
+def test_reconnect_keeps_stored_slug_when_identity_proposes_a_different_one(
+    tmp_path,
+):
+    """UC-25's closed "naming on reconnect" open question, exercised
+    directly: the same ``hardware_key`` reconnects with a freshly
+    resolved ``CameraIdentity`` whose *own* ``slug`` differs from what
+    is already stored -- not just a changed ``device_name`` (which
+    ``test_reconnect_refreshes_device_name_and_last_seen`` above already
+    covers, and which does not by itself change the derived slug).
+    ``resolve()`` must return the stored slug unchanged, never the newly
+    proposed one -- this is the "reconnect does not rename" behaviour
+    ``camera/registry.py``'s module and ``resolve()`` docstrings
+    describe, and that ``docs/design/use-cases/cli.md``'s UC-25 now
+    records as resolved rather than open.
+    """
+    reg = CameraRegistry(tmp_path)
+    stored_slug = reg.resolve(_identity("hw:a", "Cam A"))
+    assert stored_slug == "cam-a"
+
+    reconnected_slug = reg.resolve(
+        _identity("hw:a", "Cam A", slug="totally-different-slug")
+    )
+
+    assert reconnected_slug == stored_slug  # stored slug wins, not proposed
+    assert reg.get(stored_slug) is not None
+    assert reg.get("totally-different-slug") is None
+    assert len(reg) == 1  # still one record for this hardware_key
+
+
 def test_resolve_requires_a_slug(tmp_path):
     reg = CameraRegistry(tmp_path)
     empty_identity = CameraIdentity(
