@@ -78,17 +78,25 @@ through the SE process, and there is no open sprint.
 
 1. **Capture issues.** If the stakeholder provides raw ideas, invoke the
    `issue` skill. For GitHub issues, invoke `gh-import`.
-2. **Create the sprint.** Call `create_sprint(title=<title>)`.
+2. **Create the sprint.** `mcp-guard` blocks tier-0 (team-lead) calls to
+   `create_sprint` directly, so dispatch the sprint-planner agent to
+   create it: pass the title and any issue references. The
+   sprint-planner calls `create_sprint(title=<title>)` and reports back
+   the assigned sprint id.
 3. **Link issues to the sprint — required, before dispatching the
-   sprint-planner.** Call `link_sprint_issues(sprint_id, [filenames])` for
-   every issue this sprint claims. Do this yourself, immediately after
-   `create_sprint`, even if the sprint-planner is also expected to check
-   linkage later — do not rely solely on the sprint-planner to remember.
-   Skipping it is the most common way issue linkage silently fails. Note:
-   `create_ticket`'s auto-link only populates a ticket's `issue:` field
-   without an explicit `issue=` when the sprint ends up with **exactly
-   one** linked issue — on any sprint with 2+ linked issues, the
-   sprint-planner must pass `issue=` explicitly per ticket instead.
+   sprint-planner for planning.** Recover the sprint id from the
+   sprint-planner's report in step 2 (you did not call `create_sprint`
+   yourself and cannot observe the id directly). Call
+   `link_sprint_issues(sprint_id, [filenames])` for every issue this
+   sprint claims. This is still your job to do yourself, immediately
+   after the sprint is created, even if the sprint-planner is also
+   expected to check linkage later — do not rely solely on the
+   sprint-planner to remember. Skipping it is the most common way issue
+   linkage silently fails. Note: `create_ticket`'s auto-link only
+   populates a ticket's `issue:` field without an explicit `issue=` when
+   the sprint ends up with **exactly one** linked issue — on any sprint
+   with 2+ linked issues, the sprint-planner must pass `issue=`
+   explicitly per ticket instead.
 4. **Plan the sprint.** Invoke the sprint-planner agent via the Agent
    tool with: sprint ID, directory, TODO references, goals, and path to
    `overview.md` and current architecture. The sprint-planner handles
@@ -169,8 +177,12 @@ Pre-Flight Check below, not only when a stakeholder brings it up.
 
 **When:** The stakeholder wants to plan but not execute yet.
 
-1. Create the sprint. Link any claimed issues via `link_sprint_issues`
-   before invoking the sprint-planner agent.
+1. Create the sprint. `mcp-guard` blocks tier-0 (team-lead) calls to
+   `create_sprint` directly — dispatch the sprint-planner agent to
+   create it (passing the title/issue refs) and report back the
+   assigned sprint id. Recover the sprint id from that report, then link
+   any claimed issues via `link_sprint_issues` before invoking the
+   sprint-planner agent for planning.
 2. Invoke the sprint-planner agent.
 3. Present the plan for stakeholder review.
 4. Stop. Do not execute.
@@ -276,7 +288,10 @@ The team-lead owns the full issue → done lifecycle. At each stage:
 Finishing the code is NOT finishing the ticket. A ticket is done when:
 1. All acceptance criteria are checked off (`- [x]`)
 2. Ticket frontmatter `status` is `done`
-3. All tests pass (`uv run pytest`)
+3. The ticket's scoped tests pass, run in the foreground by the
+   programmer agent (never backgrounded) — not a full `uv run pytest`
+   per ticket. The full suite is a once-per-sprint gate run once by
+   `execute-sprint` before `close-sprint`, not a per-ticket check.
 4. Changes are committed with ticket ID in the message
 5. `move_ticket_to_done(sprint_id, ticket_id)` is called
 

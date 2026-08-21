@@ -147,8 +147,10 @@ When using TDD within a ticket:
 1. Read the ticket's acceptance criteria and testing section.
 2. For each piece of functionality, run one red-green-refactor cycle.
 3. Commit after each green phase (step 5) and after each refactor (step 7).
-4. After all cycles are complete, run the full test suite to verify
-   no regressions.
+4. After all cycles are complete, run your ticket's scoped tests (the
+   modules you touched) in the foreground to verify no regressions --
+   never background this step. The full suite runs once per sprint at
+   close (execute-sprint/close-sprint), not per ticket.
 5. Continue with the remaining execute-ticket steps (code review,
    documentation, completion).
 

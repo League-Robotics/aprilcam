@@ -27,10 +27,12 @@ review, and ticket creation)
 ## Inputs
 
 - Stakeholder conversation describing the work to be done
-- `.clasi/brief.md` or `.clasi/design/overview.md` (must exist)
-- `.clasi/design/usecases.md` (project-level use cases, must exist, or
-  overview covers use cases) — distinct from the sprint-level use cases
-  written into each sprint's own `sprint.md`
+- `.clasi/brief.md` or `overview.md` in the project's configured design
+  directory (`paths.design` in `.clasi/config.yaml`, default
+  `docs/design/`) — must exist
+- `usecases.md` in the same configured design directory (project-level
+  use cases, must exist, or overview covers use cases) — distinct from
+  the sprint-level use cases written into each sprint's own `sprint.md`
 
 ## Critical Rule
 

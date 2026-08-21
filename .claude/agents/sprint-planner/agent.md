@@ -32,7 +32,9 @@ From team-lead (via Agent tool prompt):
 - **High-level goals** describing what the sprint should accomplish
 - **TODO file references** (paths or filenames) identifying the items
   to address — read these yourself to understand the details
-- **`.clasi/design/overview.md`** for project context
+- **`overview.md`** (in the project's configured design directory —
+  `paths.design` in `.clasi/config.yaml`, default `docs/design/`) for
+  project context
 - The latest architecture version for structural context
 - Sprint ID and directory path
 

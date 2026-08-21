@@ -53,6 +53,13 @@ which handles the full lifecycle.
    - Custom string (e.g., `"npm test"`): runs that command
    - Empty string `""`: skips tests entirely (non-Python projects)
 
+   This full-suite run at close, together with the one execute-sprint
+   already performs before invoking this skill, is the sprint's only
+   full-suite test execution. Programmer agents run only their own
+   ticket's scoped tests during execution — the full suite is a
+   once-per-sprint gate owned here (and by execute-sprint), not a
+   once-per-ticket convention.
+
    The tool handles internally, in this exact order:
    - Pre-condition verification with self-repair
    - Run tests (if test_command is provided)

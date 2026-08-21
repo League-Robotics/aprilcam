@@ -112,9 +112,16 @@ agent via the Agent tool to fill in full planning artifacts.
        - **`True`**: after the sprint-planner makes its sizing decision
          (trivial / compact / substantial) and identifies which canonical
          `docs/design/` doc(s) the sprint's changes affect (Mode 2a, Step
-         1 of `architecture-authoring`), it calls
-         `seed_sprint_design_overlay(sprint_id, doc_names)` with those
-         filenames. **This is the sequencing resolution for where the
+         1 of `architecture-authoring`), it makes **one single call** to
+         `seed_sprint_design_overlay(sprint_id, doc_names)`, passing
+         *every* affected doc's name in that one `doc_names` list — not
+         one call per doc, and not just the first doc identified. A
+         sprint that touches the system doc plus two subsystem docs
+         seeds all three in that one call (see `architecture-authoring`
+         Mode 2a Step 2 for the accepted `doc_names` forms and the
+         per-doc overlay-slug mechanics that let multiple co-located
+         `DESIGN.md` files be seeded together without colliding).
+         **This is the sequencing resolution for where the
          seed-and-commit step fires**: it happens here, during Phase 2
          detail planning, once the affected docs are known — not at
          `create_sprint` (Phase 1), which runs before any sprint-planner
