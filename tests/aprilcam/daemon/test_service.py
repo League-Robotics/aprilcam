@@ -300,6 +300,129 @@ def test_get_frame_absent_registered_camera_by_number_raises_camera_not_present(
     assert excinfo.value.slug == slug
 
 
+def _service_for_backend_selection(
+    directories, registry, *, identity, index, backend_factory, list_loopback_cameras=None
+):
+    """A fresh, standalone ``DaemonService`` (not the shared ``service``
+    fixture -- that one's camera is already held open, bypassing
+    ``_camera_for``'s backend construction entirely) whose only
+    enumerated camera is *identity* at *index*, for exercising the
+    libcamera backend-selection branch (ticket 031-006, SUC-006)."""
+    discovery = CameraDiscovery(
+        registry, identity_source=lambda: {}, backend_factory=lambda i: FakeBackend()
+    )
+    return DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        identity_source=lambda: {index: identity},
+        backend_factory=backend_factory,
+        control_backend_factory=lambda device_name: None,
+        list_loopback_cameras=list_loopback_cameras,
+    )
+
+
+class _RecordingV4l2Backend:
+    """Stands in for the real ``V4l2LoopbackBackend`` so this test never
+    shells out to ``v4l2-ctl`` -- records the device path it was
+    constructed with and returns a real frame on ``read()``."""
+
+    def __init__(self, device: str) -> None:
+        self.device = device
+        self._is_open = False
+
+    @property
+    def is_open(self) -> bool:
+        return self._is_open
+
+    def open(self) -> None:
+        self._is_open = True
+
+    def read(self):
+        return _frame()
+
+    def close(self) -> None:
+        self._is_open = False
+
+    def frame_size(self):
+        return (4, 4)
+
+
+def test_get_frame_opens_libcamera_identified_camera_through_v4l2loopback_backend(
+    directories, registry, monkeypatch
+):
+    """AC1 (SUC-006): DaemonService._camera_for constructs
+    V4l2LoopbackBackend at the real /dev/videoN device index for a
+    libcamera-identified camera, not OpenCVBackend(index) -- the second
+    of this ticket's two call sites (``camera/discovery.py`` is the
+    first, covered in ``tests/aprilcam/camera/test_discovery.py``).
+    Deliberately uses index=0 (the enumeration "position") while the
+    loopback device's real device_index is 70, to prove the two are not
+    conflated."""
+    from aprilcam.camera.backends import v4l2_loopback as v4l2_loopback_module
+    from aprilcam.camera.backends.libcamera import LibcameraDevice
+
+    monkeypatch.setattr(v4l2_loopback_module, "V4l2LoopbackBackend", _RecordingV4l2Backend)
+
+    identity = _identity("libcamera:aprilcam-imx296-88000", "imx296 camera")
+    slug = registry.resolve(identity)
+    device = LibcameraDevice(
+        position=0,
+        slug="imx296-88000",
+        model="imx296",
+        device_index=70,
+        camera_id="aprilcam-imx296-88000",
+    )
+    opencv_calls: List[int] = []
+
+    def backend_factory(index):
+        opencv_calls.append(index)
+        return FakeBackend()
+
+    service = _service_for_backend_selection(
+        directories,
+        registry,
+        identity=identity,
+        index=0,
+        backend_factory=backend_factory,
+        list_loopback_cameras=lambda: [device],
+    )
+
+    frame = service.get_frame(slug)
+
+    assert opencv_calls == []  # the OpenCVBackend stand-in was never constructed
+    cam = service._cameras[slug]
+    assert isinstance(cam._backend, _RecordingV4l2Backend)
+    assert cam._backend.device == "/dev/video70"
+    assert frame.width == 4 and frame.height == 4
+
+
+def test_get_frame_uses_opencv_backend_for_non_libcamera_identity_unchanged(
+    directories, registry
+):
+    """AC2 (SUC-006): regression -- a non-libcamera identity source is
+    unaffected by this ticket; backend_factory (OpenCVBackend in
+    production) is invoked exactly as before."""
+    identity = _identity("hw:arducam", "Arducam OV9782 USB Camera")
+    slug = registry.resolve(identity)
+    opencv_calls: List[int] = []
+
+    def backend_factory(index):
+        opencv_calls.append(index)
+        return FakeBackend(read_queue=[_frame()])
+
+    service = _service_for_backend_selection(
+        directories, registry, identity=identity, index=0, backend_factory=backend_factory
+    )
+
+    frame = service.get_frame(slug)
+
+    assert opencv_calls == [0]
+    cam = service._cameras[slug]
+    assert not isinstance(cam._backend, _RecordingV4l2Backend)
+    assert frame.width == 4 and frame.height == 4
+
+
 def test_get_frame_deskewed_raises_not_calibrated(service, held_camera):
     _, slug, _ = held_camera
     with pytest.raises(NotCalibrated):

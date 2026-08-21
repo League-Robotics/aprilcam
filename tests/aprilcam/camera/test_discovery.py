@@ -21,6 +21,8 @@ import numpy as np
 import pytest
 
 from aprilcam.camera import identity as identity_module
+from aprilcam.camera.backends import v4l2_loopback as v4l2_loopback_module
+from aprilcam.camera.backends.libcamera import LibcameraDevice
 from aprilcam.camera.camera import Camera
 from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import CameraIdentity
@@ -252,6 +254,105 @@ def test_stop_watch_joins_the_thread(registry):
     assert discovery._watch_thread is not None
     discovery.stop_watch()
     assert discovery._watch_thread is None
+
+
+# ---------------------------------------------------------------------------
+# Backend selection -- libcamera-identified cameras (ticket 031-006, SUC-006)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingV4l2Backend:
+    """Stands in for the real ``V4l2LoopbackBackend`` so these tests
+    never shell out to ``v4l2-ctl`` -- records the device path it was
+    constructed with and behaves like an always-openable
+    ``CaptureBackend``."""
+
+    def __init__(self, device: str) -> None:
+        self.device = device
+        self._is_open = False
+
+    @property
+    def is_open(self) -> bool:
+        return self._is_open
+
+    def open(self) -> None:
+        self._is_open = True
+
+    def read(self) -> Optional[np.ndarray]:
+        return None
+
+    def close(self) -> None:
+        self._is_open = False
+
+    def frame_size(self):
+        return None
+
+
+def _libcamera_loopback_device(
+    *, position: int = 0, device_index: int = 70, camera_id: str = "aprilcam-imx296-88000"
+) -> LibcameraDevice:
+    return LibcameraDevice(
+        position=position,
+        slug="imx296-88000",
+        model="imx296",
+        device_index=device_index,
+        camera_id=camera_id,
+    )
+
+
+def test_probe_opens_libcamera_identified_camera_through_v4l2loopback_backend(registry, monkeypatch):
+    """AC1 (SUC-006): a libcamera-identified camera's probe openability
+    check constructs V4l2LoopbackBackend at the real /dev/videoN device
+    index, not OpenCVBackend(index) -- even though identity_source's key
+    (the enumeration "position") differs from the loopback device_index
+    this asserts against (0 vs. 70)."""
+    monkeypatch.setattr(v4l2_loopback_module, "V4l2LoopbackBackend", _RecordingV4l2Backend)
+    identity = _identity("libcamera:aprilcam-imx296-88000", "imx296 camera")
+    device = _libcamera_loopback_device(position=0, device_index=70, camera_id="aprilcam-imx296-88000")
+    opencv_calls: List[int] = []
+
+    def backend_factory(index):
+        opencv_calls.append(index)
+        return _FakeBackend()
+
+    discovery = CameraDiscovery(
+        registry,
+        identity_source=lambda: {0: identity},
+        backend_factory=backend_factory,
+        list_loopback_cameras=lambda: [device],
+    )
+    report = discovery.probe()
+
+    assert opencv_calls == []  # the OpenCVBackend stand-in was never constructed
+    assert len(report.cameras) == 1
+    assert report.cameras[0].present is True
+    assert report.cameras[0].usable is True  # _RecordingV4l2Backend.open() always succeeds
+
+
+def test_probe_uses_opencv_backend_for_non_libcamera_identity_unchanged(registry, monkeypatch):
+    """AC2 (SUC-006): regression -- a non-libcamera identity source is
+    unaffected by this ticket; backend_factory (OpenCVBackend in
+    production) is still invoked exactly as before, even with a loopback
+    device present in the (irrelevant) list_loopback_cameras() result."""
+    monkeypatch.setattr(v4l2_loopback_module, "V4l2LoopbackBackend", _RecordingV4l2Backend)
+    identity = _identity("hw:arducam", "Arducam OV9782 USB Camera")
+    opencv_calls: List[int] = []
+
+    def backend_factory(index):
+        opencv_calls.append(index)
+        return _FakeBackend()
+
+    discovery = CameraDiscovery(
+        registry,
+        identity_source=lambda: {0: identity},
+        backend_factory=backend_factory,
+        list_loopback_cameras=lambda: [_libcamera_loopback_device()],
+    )
+    report = discovery.probe()
+
+    assert opencv_calls == [0]
+    assert report.cameras[0].present is True
+    assert report.cameras[0].usable is True
 
 
 # ---------------------------------------------------------------------------

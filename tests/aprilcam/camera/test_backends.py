@@ -10,13 +10,16 @@ can be at all, only through ``OpenCVBackend`` on real hardware
 
 from __future__ import annotations
 
+import logging
 from typing import List, Optional
 
 import numpy as np
 import pytest
 
-from aprilcam.camera.backends import libcamera, v4l2_loopback
+from aprilcam.camera.backends import libcamera, resolve_capture_backend, v4l2_loopback
+from aprilcam.camera.backends.libcamera import LibcameraDevice
 from aprilcam.camera.backends.opencv_backend import default_backend_priority, property_map
+from aprilcam.camera.backends.v4l2_loopback import V4l2LoopbackBackend
 
 
 # ---------------------------------------------------------------------------
@@ -214,3 +217,110 @@ def test_this_macs_probe_libcamera_stays_empty_via_real_wiring():
     from aprilcam.camera import identity
 
     assert identity._probe_libcamera() == {}
+
+
+# ---------------------------------------------------------------------------
+# resolve_capture_backend -- backend selection (ticket 031-006, SUC-006)
+# ---------------------------------------------------------------------------
+
+
+class _FakeOpenCVBackend:
+    """A minimal stand-in the ``backend_factory`` override returns, so
+    these tests never need real ``cv2`` hardware to prove *which* class
+    got constructed."""
+
+    def __init__(self, index: int) -> None:
+        self.index = index
+
+
+def _loopback_device(
+    *, position: int = 0, slug: str = "imx296-88000", model: str = "imx296",
+    device_index: int = 70, camera_id: str = "aprilcam-imx296-88000",
+) -> LibcameraDevice:
+    return LibcameraDevice(
+        position=position, slug=slug, model=model, device_index=device_index, camera_id=camera_id,
+    )
+
+
+def test_resolve_capture_backend_uses_v4l2loopback_for_libcamera_hardware_key():
+    """AC1 (SUC-006): a libcamera-identified camera constructs
+    V4l2LoopbackBackend at the real /dev/videoN device index -- not the
+    enumeration "position" index that flows through identity_source."""
+    device = _loopback_device(position=3, device_index=70, camera_id="aprilcam-imx296-88000")
+    calls: List[int] = []
+
+    backend = resolve_capture_backend(
+        "libcamera:aprilcam-imx296-88000",
+        3,  # the position, deliberately different from device_index=70
+        backend_factory=lambda index: calls.append(index) or _FakeOpenCVBackend(index),
+        list_loopback_cameras=lambda: [device],
+    )
+
+    assert isinstance(backend, V4l2LoopbackBackend)
+    assert backend._device == "/dev/video70"
+    assert calls == []  # backend_factory (OpenCVBackend stand-in) never invoked
+
+
+def test_resolve_capture_backend_matches_by_camera_id_not_position():
+    """Two loopback devices enumerated; the correct one is picked by
+    camera_id, not by list order or position."""
+    devices = [
+        _loopback_device(position=0, device_index=70, camera_id="aprilcam-imx296-88000"),
+        _loopback_device(position=1, device_index=71, camera_id="aprilcam-imx477-abcd"),
+    ]
+
+    backend = resolve_capture_backend(
+        "libcamera:aprilcam-imx477-abcd",
+        1,
+        backend_factory=lambda index: _FakeOpenCVBackend(index),
+        list_loopback_cameras=lambda: devices,
+    )
+
+    assert isinstance(backend, V4l2LoopbackBackend)
+    assert backend._device == "/dev/video71"
+
+
+def test_resolve_capture_backend_falls_through_to_backend_factory_for_other_sources():
+    """AC2 (SUC-006): regression -- a non-libcamera hardware_key is an
+    unchanged pass-through to backend_factory(index), exactly today's
+    OpenCVBackend(index) behaviour."""
+    calls: List[int] = []
+
+    backend = resolve_capture_backend(
+        "vidpid:1234:5678@usb-1",
+        2,
+        backend_factory=lambda index: calls.append(index) or _FakeOpenCVBackend(index),
+        list_loopback_cameras=lambda: [_loopback_device()],  # present but must be ignored
+    )
+
+    assert isinstance(backend, _FakeOpenCVBackend)
+    assert backend.index == 2
+    assert calls == [2]
+
+
+def test_resolve_capture_backend_default_list_loopback_cameras_is_the_real_sys_scan():
+    """No override given -- falls back to the real, subprocess-free /sys
+    scan (empty on this Mac), which then degrades to backend_factory
+    exactly like the "no matching device" case below."""
+    backend = resolve_capture_backend(
+        "libcamera:aprilcam-imx296-88000",
+        0,
+        backend_factory=lambda index: _FakeOpenCVBackend(index),
+    )
+    assert isinstance(backend, _FakeOpenCVBackend)
+
+
+def test_resolve_capture_backend_falls_back_when_no_matching_loopback_device(caplog):
+    """A libcamera-prefixed hardware_key with no matching enumerated
+    device (stale registry entry / enumeration race) logs a warning and
+    degrades to backend_factory rather than raising."""
+    caplog.set_level(logging.WARNING)
+    backend = resolve_capture_backend(
+        "libcamera:aprilcam-gone",
+        0,
+        backend_factory=lambda index: _FakeOpenCVBackend(index),
+        list_loopback_cameras=lambda: [_loopback_device(camera_id="aprilcam-imx296-88000")],
+    )
+
+    assert isinstance(backend, _FakeOpenCVBackend)
+    assert any("no matching loopback device" in rec.message for rec in caplog.records)

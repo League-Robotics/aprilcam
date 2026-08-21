@@ -50,11 +50,23 @@ a client; ``camera.py`` is the only consumer.
 
 from __future__ import annotations
 
-from typing import Optional, Set, Tuple
+import logging
+from typing import Callable, List, Optional, Set, Tuple
 
 import numpy as np
 
-__all__ = ["CaptureBackend", "ControlBackend"]
+from aprilcam.camera.backends.libcamera import LibcameraDevice
+from aprilcam.camera.backends.libcamera import list_loopback_cameras as _list_loopback_cameras
+
+__all__ = ["CaptureBackend", "ControlBackend", "resolve_capture_backend"]
+
+logger = logging.getLogger(__name__)
+
+#: The ``CameraIdentity``/``CameraRecord`` ``hardware_key`` prefix
+#: ``camera/identity.py``'s ``_probe_libcamera`` stamps onto a
+#: libcamera-sourced camera (``f"libcamera:{lc.camera_id}"``). See
+#: :func:`resolve_capture_backend`.
+_LIBCAMERA_HARDWARE_KEY_PREFIX = "libcamera:"
 
 
 class CaptureBackend:
@@ -180,3 +192,84 @@ class ControlBackend:
         (which does not derive from this class -- see the module
         docstring) is called identically to a real subclass."""
         return None
+
+
+def resolve_capture_backend(
+    hardware_key: str,
+    index: int,
+    *,
+    backend_factory: Callable[[int], CaptureBackend],
+    list_loopback_cameras: Optional[Callable[[], List[LibcameraDevice]]] = None,
+) -> CaptureBackend:
+    """Construct the right :class:`CaptureBackend` for a resolved camera
+    (sprint 031 ticket 006, SUC-006).
+
+    The shared branch point both ``camera/discovery.py``'s
+    ``_probe_openable`` and ``daemon/service.py``'s ``_camera_for`` call,
+    so the ``"libcamera:"``-prefix decision lives in exactly one place
+    rather than being duplicated across the two backend-construction call
+    sites.
+
+    *hardware_key* is ``CameraIdentity.hardware_key``/
+    ``CameraRecord.hardware_key`` -- the same field ``camera/identity.py``'s
+    ``_probe_libcamera`` stamps ``f"libcamera:{lc.camera_id}"`` onto for a
+    Raspberry Pi CSI camera reached through a labelled v4l2loopback
+    device. For every other identity source this is a plain pass-through
+    to *backend_factory(index)*, byte-for-byte the call both sites made
+    before this ticket (their own ``_default_backend_factory`` ->
+    ``OpenCVBackend(index)``) -- no behaviour change for any non-libcamera
+    camera.
+
+    For a libcamera-sourced *hardware_key*, *index* is the enumeration
+    "position" ``camera/identity.py``'s ``resolve_all``/``_probe_libcamera``
+    assign (0-based enumeration order -- see ``LibcameraDevice.position``'s
+    own docstring) -- **not** a ``/dev/videoN`` device index, so it is
+    never handed to *backend_factory* in this branch. Instead this
+    re-enumerates ``camera/backends/libcamera.py``'s
+    ``list_loopback_cameras()`` (the same, unmodified function
+    ``_probe_libcamera`` already consumes) and matches on ``camera_id`` --
+    the raw ``/sys`` card label embedded after the ``"libcamera:"``
+    prefix -- to recover the real ``device_index``, then constructs
+    ``V4l2LoopbackBackend(f"/dev/video{device_index}")``: the backend that
+    can actually read a v4l2loopback device reliably (see that class's
+    own module docstring for why ``OpenCVBackend`` cannot -- "every
+    read() reports a stale frame").
+
+    *list_loopback_cameras* is overridable so tests can inject a fixed
+    device list without a real ``/sys/class/video4linux`` tree; defaults
+    to the real, subprocess-free ``/sys`` scan.
+
+    If no enumerated loopback device matches (a stale registry entry, or
+    a race between this call and whatever earlier enumeration pass
+    produced *hardware_key*/*index* -- ``DaemonService._index_for``'s own
+    docstring already documents "explicitly unstable across replugs" as
+    an accepted limitation of *index* generally), this logs a warning and
+    falls back to *backend_factory(index)* rather than raising --
+    consistent with every other function in this identity/discovery
+    family (``_probe_libcamera``, ``CameraDiscovery._safe_identities``)
+    degrading instead of throwing on an enumeration miss. That fallback
+    is not expected to work any better than it does today (the whole
+    reason this ticket exists is that ``OpenCVBackend`` cannot read a
+    loopback device reliably), but it is never silent -- the warning
+    names exactly what happened -- and it is strictly no worse than the
+    unconditional ``OpenCVBackend(index)`` behaviour every camera got
+    before this ticket.
+    """
+    if hardware_key.startswith(_LIBCAMERA_HARDWARE_KEY_PREFIX):
+        camera_id = hardware_key[len(_LIBCAMERA_HARDWARE_KEY_PREFIX) :]
+        lister = list_loopback_cameras or _list_loopback_cameras
+        for device in lister():
+            if device.camera_id == camera_id:
+                from aprilcam.camera.backends.v4l2_loopback import (  # noqa: PLC0415
+                    V4l2LoopbackBackend,
+                )
+
+                return V4l2LoopbackBackend(f"/dev/video{device.device_index}")
+        logger.warning(
+            "resolve_capture_backend: hardware_key %r is libcamera-sourced but no "
+            "matching loopback device was enumerated; falling back to "
+            "backend_factory(%d)",
+            hardware_key,
+            index,
+        )
+    return backend_factory(index)

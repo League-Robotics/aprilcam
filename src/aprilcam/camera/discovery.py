@@ -38,9 +38,10 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import AbstractSet, Callable, Dict, FrozenSet, Optional, Set
+from typing import AbstractSet, Callable, Dict, FrozenSet, List, Optional, Set
 
-from aprilcam.camera.backends import CaptureBackend
+from aprilcam.camera.backends import CaptureBackend, resolve_capture_backend
+from aprilcam.camera.backends.libcamera import LibcameraDevice
 from aprilcam.camera.backends.opencv_backend import OpenCVBackend
 from aprilcam.camera.camera import Camera
 from aprilcam.camera.identity import CameraIdentity, resolve_all
@@ -88,6 +89,16 @@ class CameraDiscovery(_CameraDiscoveryBase):
     watch_interval:
         Seconds between ``watch()`` polls. Overridable so tests need
         not wait :data:`DEFAULT_WATCH_INTERVAL` seconds for a poll.
+    list_loopback_cameras:
+        () -> ``[LibcameraDevice, ...]``. Consulted only for a
+        libcamera-identified camera (``identity.hardware_key`` prefixed
+        ``"libcamera:"``) to resolve the real ``/dev/videoN`` device
+        index a :class:`~aprilcam.camera.backends.v4l2_loopback.V4l2LoopbackBackend`
+        needs -- see :func:`~aprilcam.camera.backends.resolve_capture_backend`
+        (ticket 031-006, SUC-006). Defaults to the real, subprocess-free
+        ``/sys`` scan (``camera.backends.libcamera.list_loopback_cameras``);
+        overridable for headless tests exactly like *identity_source*
+        above.
     """
 
     def __init__(
@@ -98,12 +109,14 @@ class CameraDiscovery(_CameraDiscoveryBase):
         backend_factory: Callable[[int], CaptureBackend] = _default_backend_factory,
         identity_source: Callable[[], Dict[int, CameraIdentity]] = resolve_all,
         watch_interval: float = DEFAULT_WATCH_INTERVAL,
+        list_loopback_cameras: Optional[Callable[[], List[LibcameraDevice]]] = None,
     ) -> None:
         self._registry = registry
         self._active_slugs = active_slugs or (lambda: frozenset())
         self._backend_factory = backend_factory
         self._identity_source = identity_source
         self._watch_interval = watch_interval
+        self._list_loopback_cameras = list_loopback_cameras
 
         self._lock = threading.Lock()
         self._known_hardware_keys: FrozenSet[str] = frozenset()
@@ -155,7 +168,7 @@ class CameraDiscovery(_CameraDiscoveryBase):
                 )
                 continue
 
-            usable = self._probe_openable(slug, index)
+            usable = self._probe_openable(slug, index, identity.hardware_key)
             cameras.append(
                 CameraState(
                     name=slug,
@@ -243,14 +256,27 @@ class CameraDiscovery(_CameraDiscoveryBase):
         record = self._registry.get(slug)
         return record.number if record is not None else None
 
-    def _probe_openable(self, slug: str, index: int) -> bool:
+    def _probe_openable(self, slug: str, index: int, hardware_key: str) -> bool:
         """Open-then-close a fresh ``Camera`` over *index* to determine
         usability, per ``camera/discovery.py``'s module docstring
         ("delegates to Camera instances" -- sprint architecture module
         table). Any exception from ``open()`` means unusable, not a
         probe failure -- the camera still gets reported (UC-25.S-4).
+
+        *hardware_key* selects the backend via
+        :func:`~aprilcam.camera.backends.resolve_capture_backend`
+        (ticket 031-006): ``self._backend_factory`` (``OpenCVBackend`` by
+        default) for every identity source except libcamera, which opens
+        through :class:`~aprilcam.camera.backends.v4l2_loopback.V4l2LoopbackBackend`
+        instead.
         """
-        camera = Camera(slug, self._backend_factory(index))
+        backend = resolve_capture_backend(
+            hardware_key,
+            index,
+            backend_factory=self._backend_factory,
+            list_loopback_cameras=self._list_loopback_cameras,
+        )
+        camera = Camera(slug, backend)
         try:
             camera.open()
         except Exception as exc:

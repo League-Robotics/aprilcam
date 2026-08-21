@@ -85,7 +85,8 @@ from aprilcam import guides
 from aprilcam.calibration.calibration import Calibration, Calibrator
 from aprilcam.calibration.deskew import Deskewer
 from aprilcam.calibration.interfaces import CalibrationResult
-from aprilcam.camera.backends import CaptureBackend, ControlBackend
+from aprilcam.camera.backends import CaptureBackend, ControlBackend, resolve_capture_backend
+from aprilcam.camera.backends.libcamera import LibcameraDevice
 from aprilcam.camera.backends.opencv_backend import OpenCVBackend
 from aprilcam.camera.backends.uvc_util import UvcUtilBackend
 from aprilcam.camera.camera import Camera
@@ -224,6 +225,16 @@ class DaemonService(Daemon):
         via :meth:`get_frame` -- see :meth:`_camera_for`). Overridable
         for headless tests exactly like ``CameraDiscovery``'s own
         constructor; default to real hardware enumeration.
+    list_loopback_cameras:
+        () -> ``[LibcameraDevice, ...]``. Consulted only for a
+        libcamera-identified camera (``record.hardware_key`` prefixed
+        ``"libcamera:"``) to resolve the real ``/dev/videoN`` device a
+        :class:`~aprilcam.camera.backends.v4l2_loopback.V4l2LoopbackBackend`
+        needs -- see :func:`~aprilcam.camera.backends.resolve_capture_backend`
+        (ticket 031-006, SUC-006), which :meth:`_camera_for` delegates
+        backend selection to. Defaults to the real, subprocess-free
+        ``/sys`` scan; overridable for headless tests exactly like
+        *backend_factory* above.
     control_backend_factory:
         Builds the optional :class:`~aprilcam.camera.backends.ControlBackend`
         a newly-constructed ``Camera`` uses for ``apply_config``'s
@@ -279,6 +290,7 @@ class DaemonService(Daemon):
         control_backend_factory: Callable[[str], Optional[ControlBackend]] = (
             _default_control_backend_factory
         ),
+        list_loopback_cameras: Optional[Callable[[], List[LibcameraDevice]]] = None,
         detection: Optional[DetectionEngine] = None,
         calibrator: Optional[Calibrator] = None,
         config_loader: Optional[ConfigLoaderIface] = None,
@@ -290,6 +302,7 @@ class DaemonService(Daemon):
         self._identity_source = identity_source
         self._backend_factory = backend_factory
         self._control_backend_factory = control_backend_factory
+        self._list_loopback_cameras = list_loopback_cameras
         self._config_loader: ConfigLoaderIface = (
             config_loader if config_loader is not None else JsonConfigLoader()
         )
@@ -1709,6 +1722,18 @@ class DaemonService(Daemon):
         this is distinct from "never registered," not folded into
         :class:`UnknownCamera` the way it was before this ticket.
 
+        **Backend selection (ticket 031-006, SUC-006).** The freshly
+        opened camera's :class:`~aprilcam.camera.backends.CaptureBackend`
+        is chosen by :func:`~aprilcam.camera.backends.resolve_capture_backend`
+        against *record*'s ``hardware_key``, not unconditionally
+        ``self._backend_factory(index)`` as before this ticket: a
+        libcamera-identified camera (``hardware_key`` prefixed
+        ``"libcamera:"``) opens through
+        :class:`~aprilcam.camera.backends.v4l2_loopback.V4l2LoopbackBackend`
+        instead, since ``OpenCVBackend`` cannot read a v4l2loopback device
+        reliably (that class's own module docstring). Every other
+        identity source is unaffected.
+
         **Apply-on-open (ticket 023-003).** A freshly-opened camera
         checks :attr:`_camera_configs` for a config already held under
         its slug -- populated either by a live :meth:`set_camera_config`
@@ -1746,7 +1771,12 @@ class DaemonService(Daemon):
 
         cam = Camera(
             record.slug,
-            self._backend_factory(index),
+            resolve_capture_backend(
+                record.hardware_key,
+                index,
+                backend_factory=self._backend_factory,
+                list_loopback_cameras=self._list_loopback_cameras,
+            ),
             control_backend=self._control_backend_factory(record.device_name),
             device_name=record.device_name,
             number=record.number,
