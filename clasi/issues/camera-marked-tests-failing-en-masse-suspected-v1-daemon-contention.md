@@ -1,5 +1,6 @@
 ---
 status: pending
+sprint: '031'
 ---
 
 # 18 of 19 camera-marked failures were v1 daemon contention — CONFIRMED; 1 is genuinely physical
