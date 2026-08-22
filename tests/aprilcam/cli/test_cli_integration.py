@@ -7,11 +7,13 @@ Two tiers:
   ``@pytest.mark.camera``. Spawns the real ``aprilcam`` console script
   (the installed ``[project.scripts]`` entry point, not
   ``python -m aprilcam.cli``) via ``subprocess`` against a real local
-  daemon with this project's two fixture cameras attached
-  (``arducam-ov9782-usb-camera``, ``hd-usb-camera``), covering
-  UC-01.S-1, UC-13.S-3/S-4, UC-14.S-1, UC-25.S-1/S-2, UC-17.S-1/S-2/S-3
-  end to end. Skips cleanly if neither fixture camera is attached,
-  matching every other ``@pytest.mark.camera`` module's convention.
+  daemon, covering UC-01.S-1, UC-13.S-3/S-4, UC-14.S-1, UC-25.S-1/S-2,
+  UC-17.S-1/S-2/S-3 end to end against whichever camera(s) are actually
+  attached to this machine -- discovered at run time via
+  ``camera.identity.resolve_all()``, never a hardcoded device name
+  (camera hardware varies by machine and must not be baked into the
+  test). Skips cleanly if no camera is attached, matching every other
+  ``@pytest.mark.camera`` module's convention.
 
 * ``test_camera_list_all_fans_out_across_two_real_daemons_and_one_dead_target``
   -- ``@pytest.mark.integration``, no camera hardware needed. Covers
@@ -146,16 +148,24 @@ def isolated_env(tmp_path: Path, short_runtime_dir: Path, monkeypatch):
     return dict(os.environ)
 
 
-def _skip_if_fixture_cameras_absent() -> None:
-    slugs = {identity.slug for identity in resolve_all().values()}
-    missing = {"arducam-ov9782-usb-camera", "hd-usb-camera"} - slugs
-    if missing:
-        pytest.skip(f"fixture camera(s) not attached to this machine: {sorted(missing)}")
+def _attached_camera_slugs_or_skip() -> list[str]:
+    """The sorted slugs of every camera actually attached to this
+    machine right now, per ``camera.identity.resolve_all()`` -- the
+    same discovery source this module's fixture-presence check has
+    always used, just returned instead of compared against a
+    hardcoded pair. Skips (rather than hardcoding specific device
+    names) if nothing is attached, matching every other
+    ``@pytest.mark.camera`` module's convention.
+    """
+    slugs = sorted({identity.slug for identity in resolve_all().values()})
+    if not slugs:
+        pytest.skip("no camera attached to this machine")
+    return slugs
 
 
 @pytest.mark.camera
 def test_daemon_and_camera_round_trip_against_real_hardware(tmp_path, isolated_env):
-    _skip_if_fixture_cameras_absent()
+    slugs = _attached_camera_slugs_or_skip()
     bin_path = _aprilcam_bin()
     env = isolated_env
 
@@ -182,20 +192,20 @@ def test_daemon_and_camera_round_trip_against_real_hardware(tmp_path, isolated_e
     try:
         # Force the registry to settle before trusting list/status --
         # see the module docstring's startup-race note. This is also
-        # UC-25.S-1/S-2 in its own right: each fixture camera reported
+        # UC-25.S-1/S-2 in its own right: each attached camera reported
         # independently, by its derived name.
         result = _run(bin_path, "camera", "probe", env=env)
         assert result.returncode == 0, result.stderr
         probe_out = result.stdout.decode()
-        assert "arducam-ov9782-usb-camera" in probe_out
-        assert "hd-usb-camera" in probe_out
+        for slug in slugs:
+            assert slug in probe_out
 
-        # -- UC-14.S-1: both fixture cameras, with enumeration numbers -
+        # -- UC-14.S-1: every attached camera, with enumeration numbers -
         result = _run(bin_path, "camera", "list", env=env)
         assert result.returncode == 0, result.stderr
         list_out = result.stdout.decode()
-        assert "arducam-ov9782-usb-camera" in list_out
-        assert "hd-usb-camera" in list_out
+        for slug in slugs:
+            assert slug in list_out
         assert "[1]" in list_out or "[2]" in list_out or "[3]" in list_out or "[4]" in list_out
 
         # -- UC-13.S-3: status now reports running with the camera list
@@ -203,7 +213,15 @@ def test_daemon_and_camera_round_trip_against_real_hardware(tmp_path, isolated_e
         assert result.returncode == 0, result.stderr
         status_out = result.stdout.decode()
         assert "local: running" in status_out
-        assert "arducam-ov9782-usb-camera" in status_out
+        assert slugs[0] in status_out
+
+        # Two distinct slugs cover the two capture-encoding checks below
+        # when two or more cameras are attached; with only one attached,
+        # reuse it for both -- encoding-format coverage doesn't require
+        # a second physical camera, that pairing was incidental to the
+        # old hardcoded pair, not a real requirement.
+        png_slug = slugs[0]
+        jpeg_slug = slugs[1] if len(slugs) > 1 else slugs[0]
 
         # -- UC-17.S-1: lossless PNG fixture file ----------------------
         png_path = tmp_path / "frame.png"
@@ -211,7 +229,7 @@ def test_daemon_and_camera_round_trip_against_real_hardware(tmp_path, isolated_e
             bin_path,
             "camera",
             "image",
-            "arducam-ov9782-usb-camera",
+            png_slug,
             "-o",
             str(png_path),
             "--encoding",
@@ -223,12 +241,12 @@ def test_daemon_and_camera_round_trip_against_real_hardware(tmp_path, isolated_e
         assert data[:8] == b"\x89PNG\r\n\x1a\n"
 
         # -- UC-17.S-2: raw bytes to stdout, pipeable -------------------
-        result = _run(bin_path, "camera", "image", "hd-usb-camera", env=env)
+        result = _run(bin_path, "camera", "image", jpeg_slug, env=env)
         assert result.returncode == 0, result.stderr
         assert result.stdout[:2] == b"\xff\xd8"  # JPEG SOI marker
 
         # -- UC-17.S-3: base64 over a text-only channel -----------------
-        result = _run(bin_path, "camera", "image", "hd-usb-camera", "--base64", env=env)
+        result = _run(bin_path, "camera", "image", jpeg_slug, "--base64", env=env)
         assert result.returncode == 0, result.stderr
         decoded = base64.b64decode(result.stdout.strip())
         assert decoded[:2] == b"\xff\xd8"
@@ -237,7 +255,7 @@ def test_daemon_and_camera_round_trip_against_real_hardware(tmp_path, isolated_e
         result = _run(bin_path, "camera", "image", "no-such-camera", "--base64", env=env)
         assert result.returncode == 1
         assert b"no-such-camera" in result.stderr
-        assert b"arducam-ov9782-usb-camera" in result.stderr
+        assert any(slug.encode() in result.stderr for slug in slugs)
     finally:
         result = _run(bin_path, "daemon", "stop", env=env)
         assert result.returncode == 0, result.stderr
