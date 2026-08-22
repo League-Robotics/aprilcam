@@ -44,9 +44,13 @@ session ... drives the full golden path."
   used.
 * :func:`test_camera_golden_path_against_real_daemon_and_camera_3` --
   ``@pytest.mark.camera``: the same golden path as the fake-daemon test,
-  against a real daemon and camera 3 (``arducam-ov9782-usb-camera``)
-  aimed at the physical ``main-playfield`` -- matches the issue's
-  Verification section exactly, skips cleanly if that camera is not
+  against a real daemon and whichever attached camera is genuinely
+  configured and calibrated against the physical ``main-playfield``
+  (discovered at run time via
+  ``tests/aprilcam/hardware_camera.py``, never a hardcoded device name --
+  camera hardware varies by machine, and a specific device can also be
+  genuinely busy in another concurrent process) -- matches the issue's
+  Verification section exactly, skips cleanly if no such camera is
   attached (every ``@pytest.mark.camera`` module's convention).
 
 **A real bug this ticket's own no-cv2 sweep found and fixed.** Writing
@@ -97,7 +101,6 @@ import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from aprilcam.calibration.interfaces import CalibrationResult
-from aprilcam.camera.identity import resolve_all
 from aprilcam.client.discovery import Discovery
 from aprilcam.config.directories import Directories
 from aprilcam.config.interfaces import CameraConfig
@@ -111,10 +114,17 @@ from aprilcam.types import (
     ImageFrame,
     TagFrame,
 )
+from tests.aprilcam.hardware_camera import resolve_hardware_camera_slug
 
-#: ticket 003/006's ground-truth camera: aimed at main-playfield on this
-#: Mac -- matches every other ``@pytest.mark.camera`` module's constant.
-ARDUCAM_SLUG = "arducam-ov9782-usb-camera"
+#: An arbitrary, self-describing camera name for Part 1's fake-daemon
+#: golden path below -- ``_GoldenFakeDaemon`` never touches real hardware,
+#: so unlike this module's real ``@pytest.mark.camera`` test further down,
+#: there is nothing here to discover: any string works equally well as the
+#: fake's camera name. Deliberately not a real device slug (this used to
+#: be the same hardcoded ``ARDUCAM_SLUG`` the real-hardware test also
+#: used, which blurred "arbitrary fake label" with "the real, discovered
+#: camera" -- the two are unrelated and are now named accordingly).
+FAKE_CAMERA_SLUG = "fake-golden-path-camera"
 
 #: The real, checked-in playfield definition -- the same file every
 #: other hardware module names as ground truth. Loaded as a raw dict
@@ -130,14 +140,14 @@ def _main_playfield_document() -> Dict[str, Any]:
     return json.loads(MAIN_PLAYFIELD_JSON.read_text())
 
 
-def _skip_if_arducam_not_attached() -> None:
-    slugs = {identity.slug for identity in resolve_all().values()}
-    if ARDUCAM_SLUG not in slugs:
-        pytest.skip(
-            f"{ARDUCAM_SLUG!r} not attached to this machine -- this "
-            "module's @camera acceptance criteria are checked against "
-            "that camera aimed at main-playfield (ticket 026-006)"
-        )
+def _resolve_real_camera_slug() -> str:
+    """The slug of a currently-attached camera that is genuinely
+    configured and calibrated against ``main-playfield`` on this
+    machine's real system state -- see
+    ``tests/aprilcam/hardware_camera.py`` for the discovery contract.
+    Skips cleanly (rather than hardcoding a device name) if none
+    qualifies."""
+    return resolve_hardware_camera_slug()
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +257,7 @@ async def test_golden_path_against_a_fake_daemon(tmp_path):
     daemon = _GoldenFakeDaemon(
         cameras=(
             CameraState(
-                name=ARDUCAM_SLUG, present=True, usable=True, playfield=None, calibrated=False, number=3
+                name=FAKE_CAMERA_SLUG, present=True, usable=True, playfield=None, calibrated=False, number=3
             ),
         ),
         calibration_result=CalibrationResult(
@@ -270,7 +280,7 @@ async def test_golden_path_against_a_fake_daemon(tmp_path):
         assert cameras.isError is False
         assert cameras.structuredContent is not None
         names = {c["name"] for c in cameras.structuredContent["result"]}
-        assert ARDUCAM_SLUG in names
+        assert FAKE_CAMERA_SLUG in names
 
         # -- configure: push a playfield, then link the camera to it --
         set_pf = await session.call_tool("set_playfield", {"document": _main_playfield_document()})
@@ -280,14 +290,14 @@ async def test_golden_path_against_a_fake_daemon(tmp_path):
 
         set_cc = await session.call_tool(
             "set_camera_config",
-            {"document": {"name": ARDUCAM_SLUG, "playfield": "main-playfield", "settings": {}}},
+            {"document": {"name": FAKE_CAMERA_SLUG, "playfield": "main-playfield", "settings": {}}},
         )
         assert set_cc.isError is False, set_cc.content
         assert daemon.pushed_camera_config is not None
-        assert daemon.pushed_camera_config.name == ARDUCAM_SLUG
+        assert daemon.pushed_camera_config.name == FAKE_CAMERA_SLUG
 
         # -- calibrate --
-        cal = await session.call_tool("calibrate", {"camera": ARDUCAM_SLUG})
+        cal = await session.call_tool("calibrate", {"camera": FAKE_CAMERA_SLUG})
         assert cal.isError is False, cal.content
         assert cal.structuredContent == {
             "succeeded": True,
@@ -304,11 +314,11 @@ async def test_golden_path_against_a_fake_daemon(tmp_path):
         }
 
         # -- perceive again: tags, then a deskewed frame --
-        tags = await session.call_tool("get_tags", {"camera": ARDUCAM_SLUG})
+        tags = await session.call_tool("get_tags", {"camera": FAKE_CAMERA_SLUG})
         assert tags.isError is False
 
         frame = await session.call_tool(
-            "get_frame", {"camera": ARDUCAM_SLUG, "deskewed": True, "format": "base64"}
+            "get_frame", {"camera": FAKE_CAMERA_SLUG, "deskewed": True, "format": "base64"}
         )
         assert frame.isError is False, frame.content
         assert len(frame.content) == 1
@@ -565,7 +575,7 @@ async def test_camera_golden_path_against_real_daemon_and_camera_3(real_director
     corrupting it. If this machine has never calibrated this camera
     before, this falls back to requiring the live call to succeed.
     """
-    _skip_if_arducam_not_attached()
+    arducam_slug = _resolve_real_camera_slug()
     directories = real_directories
 
     # -- boot-load the playfield + camera-config link, and (if this
@@ -573,13 +583,13 @@ async def test_camera_golden_path_against_real_daemon_and_camera_3(real_director
     # docstring above and _find_real_prior_calibration's own docstring.
     (directories.config_dir / "playfields").mkdir(parents=True, exist_ok=True)
     shutil.copyfile(MAIN_PLAYFIELD_JSON, directories.config_dir / "playfields" / "main-playfield.json")
-    (directories.config_dir / "cameras" / ARDUCAM_SLUG).mkdir(parents=True, exist_ok=True)
-    (directories.config_dir / "cameras" / ARDUCAM_SLUG / "config.json").write_text(
-        json.dumps({"name": ARDUCAM_SLUG, "playfield": "main-playfield", "settings": {}}), encoding="utf-8"
+    (directories.config_dir / "cameras" / arducam_slug).mkdir(parents=True, exist_ok=True)
+    (directories.config_dir / "cameras" / arducam_slug / "config.json").write_text(
+        json.dumps({"name": arducam_slug, "playfield": "main-playfield", "settings": {}}), encoding="utf-8"
     )
-    prior_calibration = _find_real_prior_calibration(ARDUCAM_SLUG)
+    prior_calibration = _find_real_prior_calibration(arducam_slug)
     if prior_calibration is not None:
-        cal_dir = directories.state_dir / "cameras" / ARDUCAM_SLUG
+        cal_dir = directories.state_dir / "cameras" / arducam_slug
         cal_dir.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(prior_calibration, cal_dir / "calibration.json")
 
@@ -596,7 +606,7 @@ async def test_camera_golden_path_against_real_daemon_and_camera_3(real_director
             cameras = await session.call_tool("list_cameras", {})
             assert cameras.isError is False
             names = {c["name"] for c in cameras.structuredContent["result"]}
-            assert ARDUCAM_SLUG in names, f"arducam not enumerated by the real daemon: {names}"
+            assert arducam_slug in names, f"arducam not enumerated by the real daemon: {names}"
 
             # -- configure: push the playfield and camera-config link for
             # real, over the MCP tools, even though both were also
@@ -609,12 +619,12 @@ async def test_camera_golden_path_against_real_daemon_and_camera_3(real_director
 
             set_cc = await session.call_tool(
                 "set_camera_config",
-                {"document": {"name": ARDUCAM_SLUG, "playfield": "main-playfield", "settings": {}}},
+                {"document": {"name": arducam_slug, "playfield": "main-playfield", "settings": {}}},
             )
             assert set_cc.isError is False, set_cc.content
 
             # -- calibrate: a live attempt, honestly reported either way --
-            cal = await session.call_tool("calibrate", {"camera": ARDUCAM_SLUG})
+            cal = await session.call_tool("calibrate", {"camera": arducam_slug})
             assert cal.isError is False, cal.content
             live_result = cal.structuredContent
             print(f"\n[026-006 hardware] live calibrate() attempt: {live_result}")
@@ -624,7 +634,7 @@ async def test_camera_golden_path_against_real_daemon_and_camera_3(real_director
             # must still be intact regardless of the live attempt's
             # outcome (UC-04: "a failed attempt leaves any existing good
             # calibration untouched").
-            confirmed = await session.call_tool("get_calibration", {"camera": ARDUCAM_SLUG})
+            confirmed = await session.call_tool("get_calibration", {"camera": arducam_slug})
             assert confirmed.isError is False, confirmed.content
             confirmed_calibration = confirmed.structuredContent["result"]
             assert confirmed_calibration is not None, (
@@ -644,13 +654,13 @@ async def test_camera_golden_path_against_real_daemon_and_camera_3(real_director
             # now; the point here is the tool call itself, not a specific
             # tag's presence (test_calibration_hardware.py's own
             # precedent for not pinning to one specific tag).
-            tags = await session.call_tool("get_tags", {"camera": ARDUCAM_SLUG})
+            tags = await session.call_tool("get_tags", {"camera": arducam_slug})
             assert tags.isError is False, tags.content
             world_tags = [t for t in (tags.structuredContent or {}).get("tags", []) if t.get("world")]
             print(f"[026-006 hardware] {len(world_tags)} tag(s) with world coordinates this burst")
 
             frame = await session.call_tool(
-                "get_frame", {"camera": ARDUCAM_SLUG, "deskewed": True, "format": "base64"}
+                "get_frame", {"camera": arducam_slug, "deskewed": True, "format": "base64"}
             )
             assert frame.isError is False, frame.content
             assert frame.content[0].type == "image"

@@ -4,9 +4,12 @@ the sprint's acceptance gate, closing out the whole
 
 Everything in tickets 001-006 was built and tested against fixtures and
 fakes. This module exercises the same code -- unmodified -- for real,
-against a real ``arducam-ov9782-usb-camera`` aimed at the physical
-``main-playfield`` (AprilTag 1 at centre, ArUco 1-8 perimeter + 9-10
-internal, per ``config/aprilcam-old/playfields/main-playfield.json``).
+against whichever attached camera is genuinely configured and calibrated
+against the physical ``main-playfield`` (discovered at run time via
+``tests/aprilcam/hardware_camera.py``, never a hardcoded device name --
+historically ``arducam-ov9782-usb-camera`` on the stakeholder's Mac, but
+never assumed), with AprilTag 1 at centre, ArUco 1-8 perimeter + 9-10
+internal, per ``config/aprilcam-old/playfields/main-playfield.json``.
 Ground truth confirmed by hand before writing this module (see this
 ticket's completion notes): AprilTag 1 plus ArUco 1, 2, 4, 5, 7, 10 are
 reliably detected; ArUco 3, 6, 8, 9 are not currently in view.
@@ -87,11 +90,14 @@ from tests.aprilcam.daemon.conftest import (
     hardware_test_camera_config,
     undetected_marker_diagnosis,
 )
+from tests.aprilcam.hardware_camera import resolve_hardware_camera_slug
 
 pytestmark = pytest.mark.camera
 
-#: ticket 006's ground-truth camera: aimed at main-playfield on this Mac.
-ARDUCAM_SLUG = "arducam-ov9782-usb-camera"
+#: Resolved lazily, once per test, by :func:`_skip_if_arducam_not_attached`
+#: against this machine's real, persisted system state (see
+#: tests/aprilcam/hardware_camera.py) -- never hardcoded.
+ARDUCAM_SLUG: str = ""
 
 #: main-playfield.json's centre marker -- always in frame if the
 #: arducam is genuinely aimed at the field (ticket 006's ground truth).
@@ -99,13 +105,8 @@ APRILTAG_1 = TagId(family=TagFamily.APRILTAG, number=1)
 
 
 def _skip_if_arducam_not_attached() -> None:
-    slugs = {identity.slug for identity in resolve_all().values()}
-    if ARDUCAM_SLUG not in slugs:
-        pytest.skip(
-            f"{ARDUCAM_SLUG!r} not attached to this machine -- this "
-            "module's acceptance criteria are checked against that "
-            "camera aimed at main-playfield (ticket 021-007)"
-        )
+    global ARDUCAM_SLUG
+    ARDUCAM_SLUG = resolve_hardware_camera_slug()
 
 
 def _short_tmp_dir(prefix: str) -> Path:
@@ -193,7 +194,7 @@ def test_get_tags_detects_apriltag_1_and_a_plausible_aruco_subset(daemon):
     observed = [(r.tag.family.value, r.tag.number) for r in frame.tags]
 
     assert any(r.tag == APRILTAG_1 for r in frame.tags), (
-        f"AprilTag 1 (main-playfield's centre marker) was {undetected_marker_diagnosis(observed)}"
+        f"AprilTag 1 (main-playfield's centre marker) was {undetected_marker_diagnosis(observed, ARDUCAM_SLUG)}"
     )
 
     aruco_ids = {r.tag.number for r in frame.tags if r.tag.family == TagFamily.ARUCO}
@@ -667,13 +668,19 @@ def test_camera_tags_cli_output_is_legible_against_real_hardware(cli_env):
         assert stop.returncode == 0, stop.stderr
 
 
-_NUMBER_RE = re.compile(r"\[(\d+)\]\s+" + re.escape(ARDUCAM_SLUG) + r"\b")
+def _number_regex_for(slug: str) -> "re.Pattern[str]":
+    """Built per-call from the real, discovered *slug* -- not a
+    module-level constant, since ``ARDUCAM_SLUG`` is only resolved once
+    :func:`_skip_if_arducam_not_attached` runs inside a test, not at
+    import time."""
+    return re.compile(r"\[(\d+)\]\s+" + re.escape(slug) + r"\b")
 
 
 def test_camera_tags_by_cli_number_and_slug_agree_on_real_hardware(cli_env):
     """Re-verifies ticket 002 against real hardware: ``camera tags 3``
-    (an actual registry number on this machine) and
-    ``camera tags arducam-ov9782-usb-camera`` must be the same physical
+    (an actual registry number on this machine) and ``camera tags
+    <slug>`` (the real, discovered camera under test -- see
+    ``tests/aprilcam/hardware_camera.py``) must be the same physical
     camera -- closing the sprint-020 acceptance leg UC-25.S-5 could not
     verify without hands on hardware."""
     _skip_if_arducam_not_attached()
@@ -689,7 +696,7 @@ def test_camera_tags_by_cli_number_and_slug_agree_on_real_hardware(cli_env):
         listing = _run(bin_path, "camera", "list", env=env)
         assert listing.returncode == 0, listing.stderr
         list_out = listing.stdout.decode()
-        match = _NUMBER_RE.search(list_out)
+        match = _number_regex_for(ARDUCAM_SLUG).search(list_out)
         assert match is not None, f"{ARDUCAM_SLUG!r} not found in camera list output:\n{list_out}"
         number = match.group(1)
 
@@ -951,7 +958,7 @@ def test_stationary_tag_motion_fields_match_pre_confirmation_behavior_from_secon
     daemon.set_playfield(main_playfield_definition())
     daemon.set_camera_config(hardware_test_camera_config(ARDUCAM_SLUG, playfield="main-playfield"))
     result = daemon.calibrate(ARDUCAM_SLUG)
-    assert result.succeeded is True, f"setup calibration failed -- {calibration_diagnosis(result)}"
+    assert result.succeeded is True, f"setup calibration failed -- {calibration_diagnosis(result, ARDUCAM_SLUG)}"
 
     samples = []
     for _ in range(6):

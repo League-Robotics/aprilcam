@@ -6,9 +6,12 @@ Everything in tickets 001-006 was built and tested against fixtures and
 fakes. This module exercises the same code -- unmodified except for the
 two defect fixes this ticket itself made (``daemon/service.py``'s
 ``list_cameras`` calibration-flag bug and ``vision/motion.py``'s
-below-noise-floor heading suppression) -- for real, against a real
-``arducam-ov9782-usb-camera`` aimed at the physical ``main-playfield``
-(AprilTag 1 at centre, ArUco 1-10 per
+below-noise-floor heading suppression) -- for real, against whichever
+attached camera is genuinely configured and calibrated against the
+physical ``main-playfield`` (discovered at run time via
+``tests/aprilcam/hardware_camera.py``, never a hardcoded device name --
+historically ``arducam-ov9782-usb-camera`` on the stakeholder's Mac, but
+never assumed), with AprilTag 1 at centre and ArUco 1-10 per
 ``config/aprilcam-old/playfields/main-playfield.json``, a 134.3 x 89.3 cm
 field). Ground truth confirmed live during this ticket's own manual
 verification pass (see this ticket's completion notes): all 10 required
@@ -110,16 +113,15 @@ from tests.aprilcam.calibration.test_calibration import (
     MAIN_PLAYFIELD_ARUCO_POSITIONS,
     main_playfield_definition,
 )
-from tests.aprilcam.daemon.conftest import (
-    HARDWARE_TEST_CAMERA_SETTINGS,
-    calibration_diagnosis,
-    hardware_test_camera_config,
-)
+from tests.aprilcam.daemon.conftest import calibration_diagnosis, hardware_test_camera_config
+from tests.aprilcam.hardware_camera import resolve_hardware_camera_slug
 
 pytestmark = pytest.mark.camera
 
-#: ticket 003/006's ground-truth camera: aimed at main-playfield on this Mac.
-ARDUCAM_SLUG = "arducam-ov9782-usb-camera"
+#: Resolved lazily, once per test, by :func:`_skip_if_arducam_not_attached`
+#: against this machine's real, persisted system state (see
+#: tests/aprilcam/hardware_camera.py) -- never hardcoded.
+ARDUCAM_SLUG: str = ""
 
 #: main-playfield.json's centre marker -- always in frame if the
 #: arducam is genuinely aimed at the field.
@@ -138,13 +140,8 @@ MAIN_PLAYFIELD_JSON = (
 
 
 def _skip_if_arducam_not_attached() -> None:
-    slugs = {identity.slug for identity in resolve_all().values()}
-    if ARDUCAM_SLUG not in slugs:
-        pytest.skip(
-            f"{ARDUCAM_SLUG!r} not attached to this machine -- this "
-            "module's acceptance criteria are checked against that "
-            "camera aimed at main-playfield (ticket 022-007)"
-        )
+    global ARDUCAM_SLUG
+    ARDUCAM_SLUG = resolve_hardware_camera_slug()
 
 
 def _short_tmp_dir(prefix: str) -> Path:
@@ -211,7 +208,7 @@ def test_full_set_calibration_matches_all_ten_required_aruco_ids(daemon):
     result = _link_and_calibrate(daemon)
 
     assert result.succeeded is True, (
-        f"calibration failed against the real field -- {calibration_diagnosis(result)}"
+        f"calibration failed against the real field -- {calibration_diagnosis(result, ARDUCAM_SLUG)}"
     )
     assert result.matched_ids == tuple(range(1, 11))
     assert result.missing_ids == ()
@@ -231,7 +228,7 @@ def test_full_set_calibration_reprojection_error_stays_under_the_new_threshold(d
     result = _link_and_calibrate(daemon)
 
     assert result.succeeded is True, (
-        f"calibration failed against the real field -- {calibration_diagnosis(result)}"
+        f"calibration failed against the real field -- {calibration_diagnosis(result, ARDUCAM_SLUG)}"
     )
     assert result.reprojection_error_cm is not None
     assert result.reprojection_error_cm < MAX_REPROJECTION_ERROR_CM, (
@@ -300,7 +297,7 @@ def test_with_intrinsics_against_main_playfield_stores_a_lens_model(daemon):
 
     assert result.succeeded is True, (
         f"--with-intrinsics failed against the real field for a reason other "
-        f"than the known near-nadir degeneracy -- {calibration_diagnosis(result)}"
+        f"than the known near-nadir degeneracy -- {calibration_diagnosis(result, ARDUCAM_SLUG)}"
     )
     assert result.intrinsics_estimated is True
     assert result.intrinsics_mode == "coplanar-constrained"
@@ -429,7 +426,11 @@ def test_occluding_one_marker_fails_naming_exactly_that_marker(tmp_path):
     probe_backend = OpenCVBackend(index)
     probe_camera = Camera(ARDUCAM_SLUG, probe_backend, control_backend=UvcUtilBackend(device_name))
     probe_camera.open()
-    probe_camera.apply_config(hardware_test_camera_config(ARDUCAM_SLUG))
+    # camera=probe_camera: the sweep must drive this already-open camera
+    # directly rather than opening a second, conflicting handle on the
+    # same device index (tests/aprilcam/daemon/conftest.py's own
+    # "avoiding a double-open" section).
+    probe_camera.apply_config(hardware_test_camera_config(ARDUCAM_SLUG, camera=probe_camera))
     try:
         region, occluded_id = _find_marker_region(probe_camera)
     finally:
@@ -438,7 +439,7 @@ def test_occluding_one_marker_fails_naming_exactly_that_marker(tmp_path):
     backend = _OccludingBackend(OpenCVBackend(index), region)
     camera = Camera(ARDUCAM_SLUG, backend, control_backend=UvcUtilBackend(device_name))
     camera.open()
-    camera.apply_config(hardware_test_camera_config(ARDUCAM_SLUG))
+    camera.apply_config(hardware_test_camera_config(ARDUCAM_SLUG, camera=camera))
     try:
         def capture_frames(slug: str):
             frames = []
@@ -449,7 +450,7 @@ def test_occluding_one_marker_fails_naming_exactly_that_marker(tmp_path):
             return tuple(frames)
 
         definition = main_playfield_definition()
-        camera_config = hardware_test_camera_config(ARDUCAM_SLUG, playfield="main-playfield")
+        camera_config = hardware_test_camera_config(ARDUCAM_SLUG, playfield="main-playfield", camera=camera)
         calibrator = Calibrator(
             get_camera_config=lambda slug: camera_config,
             get_playfield=lambda name: definition,
@@ -721,7 +722,7 @@ def test_calibration_survives_a_restart_but_an_rpc_only_playfield_link_does_not(
                 # this CLI-driven calibrate at whatever exposure the
                 # previous process left on the device -- see this
                 # directory's conftest.py module docstring.
-                "settings": HARDWARE_TEST_CAMERA_SETTINGS,
+                "settings": hardware_test_camera_config(ARDUCAM_SLUG).settings,
             }
         ),
         encoding="utf-8",

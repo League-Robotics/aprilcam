@@ -8,8 +8,8 @@ and control-plane root instead of the real system directories, so this
 never collides with (or requires) a genuinely running daemon on the
 machine executing the suite.
 
-Skips cleanly (whole module) if neither of this project's two fixture
-cameras (``arducam-ov9782-usb-camera``, ``hd-usb-camera``) is attached,
+Skips cleanly (whole module, or the individual test below that needs a
+specific playfield-linked camera) if no usable camera is attached at all,
 matching every other ``@pytest.mark.camera`` module's convention
 (``tests/aprilcam/camera/test_discovery.py``, ``test_camera.py``).
 """
@@ -29,12 +29,14 @@ from aprilcam.config.directories import Directories
 from aprilcam.daemon import __main__ as daemon_main
 from aprilcam.errors import AlreadyRunning
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
+from tests.aprilcam.hardware_camera import resolve_hardware_camera_slug
 
 pytestmark = pytest.mark.camera
 
-#: ticket 003/006's ground-truth camera: aimed at main-playfield on this
-#: Mac -- matches ``test_calibration_hardware.py``'s ``ARDUCAM_SLUG``.
-ARDUCAM_SLUG = "arducam-ov9782-usb-camera"
+#: Resolved lazily, once per test, by :func:`_skip_if_arducam_not_attached`
+#: against this machine's real, persisted system state (see
+#: tests/aprilcam/hardware_camera.py) -- never hardcoded.
+ARDUCAM_SLUG: str = ""
 
 #: The real, checked-in playfield definition (same file
 #: ``test_calibration_hardware.py``/``test_detection_hardware.py`` name
@@ -141,14 +143,14 @@ def test_start_stop_and_restart_stability_against_real_cameras(tmp_path, short_t
 
 
 def _skip_if_arducam_not_attached() -> None:
-    slugs = {identity.slug for identity in resolve_all().values()}
-    if ARDUCAM_SLUG not in slugs:
-        pytest.skip(f"{ARDUCAM_SLUG!r} not attached to this machine")
+    global ARDUCAM_SLUG
+    ARDUCAM_SLUG = resolve_hardware_camera_slug()
 
 
 def test_boot_loaded_playfield_and_camera_config_need_no_manual_push(tmp_path, short_tmp_dir):
     """UC-01.S-4, closed for real: ``main-playfield.json`` plus a camera
-    config linking ``arducam-ov9782-usb-camera`` to it are installed
+    config linking a real, discovered camera (see
+    ``tests/aprilcam/hardware_camera.py``) to it are installed
     directly into ``config_dir`` -- never pushed over RPC anywhere in
     this test -- before the daemon ever starts. Calibrating with zero
     ``SetPlayfield``/``SetCameraConfig`` calls proves the playfield link

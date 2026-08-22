@@ -26,9 +26,10 @@ explicit message naming exactly what a human needs to do to make it run
 for real, rather than silently passing or asserting a false failure.
 
 Every test is ``@pytest.mark.camera`` and skips cleanly (module-wide, via
-``_skip_if_arducam_not_attached``) on a machine with no
-``arducam-ov9782-usb-camera`` attached -- ``uv run pytest -m "not
-camera"`` is unaffected.
+``_skip_if_arducam_not_attached``) on a machine with no camera that is
+genuinely configured and calibrated against ``main-playfield`` (discovered
+at run time via ``tests/aprilcam/hardware_camera.py``, never a hardcoded
+device name) -- ``uv run pytest -m "not camera"`` is unaffected.
 """
 
 from __future__ import annotations
@@ -41,7 +42,6 @@ from pathlib import Path
 import grpc
 import pytest
 
-from aprilcam.camera.identity import resolve_all
 from aprilcam.client.daemon_client import GrpcDaemon
 from aprilcam.config.directories import Directories
 from aprilcam.daemon import __main__ as daemon_main
@@ -49,12 +49,14 @@ from aprilcam.daemon.detection import CONFIRMATION_STREAK
 from aprilcam.proto import aprilcam_v2_pb2_grpc
 from aprilcam.tags.generator import TagGenerator
 from aprilcam.types import TagFamily, TagId
+from tests.aprilcam.hardware_camera import resolve_hardware_camera_slug
 
 pytestmark = pytest.mark.camera
 
-#: ticket 006/021-007's ground-truth camera: aimed at main-playfield on
-#: this Mac (matches every other hardware module in this suite).
-ARDUCAM_SLUG = "arducam-ov9782-usb-camera"
+#: Resolved lazily, once per test, by :func:`_skip_if_arducam_not_attached`
+#: against this machine's real, persisted system state (see
+#: tests/aprilcam/hardware_camera.py) -- never hardcoded.
+ARDUCAM_SLUG: str = ""
 
 #: ArUco 42 -- deliberately outside main-playfield's surveyed 1-10 corner
 #: set (``test_mobile_tags_hardware.py``'s ``_SURVEYED_ARUCO_IDS``), so a
@@ -65,13 +67,8 @@ _PRINT_SIZE_CM = 8.0
 
 
 def _skip_if_arducam_not_attached() -> None:
-    slugs = {identity.slug for identity in resolve_all().values()}
-    if ARDUCAM_SLUG not in slugs:
-        pytest.skip(
-            f"{ARDUCAM_SLUG!r} not attached to this machine -- this "
-            "module's acceptance criterion is checked against that "
-            "camera (sprint 028 Hardware Constraints item 1)"
-        )
+    global ARDUCAM_SLUG
+    ARDUCAM_SLUG = resolve_hardware_camera_slug()
 
 
 def _short_tmp_dir(prefix: str) -> Path:
@@ -119,7 +116,8 @@ def test_printed_generated_tag_is_detected_on_real_hardware(daemon, tmp_path):
 
     **The manual step this test cannot perform**: printing
     ``written[0]`` (an 8cm-edge PNG at 300 DPI) on paper and placing it
-    in view of ``arducam-ov9782-usb-camera``, aimed roughly at
+    in view of the real, discovered camera under test (see
+    ``tests/aprilcam/hardware_camera.py``), aimed roughly at
     ``main-playfield`` or held up directly in front of the lens, before
     this test runs. If that has happened, the polling loop below finds
     it for real and this test passes for real. If it has not -- the

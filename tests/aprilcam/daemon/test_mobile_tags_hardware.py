@@ -1,8 +1,10 @@
 """Hardware verification for ``aprilcam tags mount register|clear``
-(ticket 025-005, UC-12) -- against a real ``arducam-ov9782-usb-camera``
-aimed at the physical ``main-playfield``, calibrated per
-``test_calibration_hardware.py``'s own ground truth (AprilTag 1 at
-centre, ~0.18-0.21 cm reprojection error).
+(ticket 025-005, UC-12) -- against whichever attached camera is
+genuinely configured and calibrated against the physical
+``main-playfield`` (discovered at run time via
+``tests/aprilcam/hardware_camera.py``, never a hardcoded device name),
+calibrated per ``test_calibration_hardware.py``'s own ground truth
+(AprilTag 1 at centre, ~0.18-0.21 cm reprojection error).
 
 **Scope, deliberately narrower than UC-12 as a whole.** Ticket 004
 found that ``calibration.interfaces.Calibration`` has no camera-geometry
@@ -52,13 +54,15 @@ from typing import Dict, Optional, Tuple
 
 import pytest
 
-from aprilcam.camera.identity import resolve_all
 from aprilcam.config.directories import Directories
+from tests.aprilcam.hardware_camera import resolve_hardware_camera_slug
 
 pytestmark = pytest.mark.camera
 
-#: ticket 003/006's ground-truth camera: aimed at main-playfield on this Mac.
-ARDUCAM_SLUG = "arducam-ov9782-usb-camera"
+#: Resolved lazily, once per test, by :func:`_skip_if_arducam_not_attached`
+#: against this machine's real, persisted system state (see
+#: tests/aprilcam/hardware_camera.py) -- never hardcoded.
+ARDUCAM_SLUG: str = ""
 
 #: main-playfield.json's centre marker -- always in frame if the
 #: arducam is genuinely aimed at the field.
@@ -82,13 +86,8 @@ CAMERA_3_BASELINE_SETTINGS = (
 
 
 def _skip_if_arducam_not_attached() -> None:
-    slugs = {identity.slug for identity in resolve_all().values()}
-    if ARDUCAM_SLUG not in slugs:
-        pytest.skip(
-            f"{ARDUCAM_SLUG!r} not attached to this machine -- this "
-            "module's acceptance criteria are checked against that "
-            "camera aimed at main-playfield (ticket 025-005)"
-        )
+    global ARDUCAM_SLUG
+    ARDUCAM_SLUG = resolve_hardware_camera_slug()
 
 
 def _short_tmp_dir(prefix: str) -> Path:

@@ -1,8 +1,14 @@
 """Hardware verification for sprint 029's camera geometry / real parallax
-correction (ticket 029-004, SUC-001, SUC-003, UC-29) -- against a real
-``arducam-ov9782-usb-camera`` aimed at the physical ``main-playfield``,
-the same ground truth ``test_calibration_hardware.py`` and
-``test_mobile_tags_hardware.py`` use.
+correction (ticket 029-004, SUC-001, SUC-003, UC-29) -- against whichever
+attached camera is genuinely configured and calibrated against the
+physical ``main-playfield`` (discovered at run time via
+``tests/aprilcam/hardware_camera.py``, never a hardcoded device name --
+see that module's docstring for why), the same ground truth
+``test_calibration_hardware.py`` and ``test_mobile_tags_hardware.py`` use.
+Historically that camera has been named ``arducam-ov9782-usb-camera`` on
+the stakeholder's Mac (see the real geometry constants below, which are
+true of *that physical mount*, not of any device name), but this module
+never assumes so.
 
 **Rescope, recorded here for anyone reading this module cold.** This
 ticket's own text (``clasi/sprints/029-.../tickets/004-...md``) assumes
@@ -115,15 +121,23 @@ from typing import Dict, Optional, Tuple
 
 import pytest
 
-from aprilcam.camera.identity import resolve_all
 from aprilcam.client.discovery import probe_socket_reachable
 from aprilcam.config.directories import Directories
 from aprilcam.daemon.lifecycle import SOCKET_FILENAME
+from tests.aprilcam.hardware_camera import resolve_hardware_camera_slug
 
 pytestmark = pytest.mark.camera
 
-#: ticket 003/006's ground-truth camera: aimed at main-playfield on this Mac.
-ARDUCAM_SLUG = "arducam-ov9782-usb-camera"
+#: Resolved lazily, once per test, by :func:`_skip_if_arducam_not_attached`
+#: against this machine's real, persisted system state (see
+#: tests/aprilcam/hardware_camera.py) -- never hardcoded. This is the same
+#: physical rig ticket 003/029-004 measured (the real geometry constants
+#: below are true of *that mount*, not of any particular device name it
+#: happens to enumerate under), discovered by "which attached camera is
+#: configured+calibrated against main-playfield" instead of by a fixed
+#: slug string, so a device-name change (this project has already seen
+#: one) does not silently point this module at the wrong camera.
+ARDUCAM_SLUG: str = ""
 
 #: The real, checked-in playfield definition this module pushes -- the
 #: same file ``test_calibration_hardware.py``/``test_mobile_tags_hardware.py``
@@ -142,13 +156,8 @@ REAL_HEIGHT_CM = 128.22990496814816
 
 
 def _skip_if_arducam_not_attached() -> None:
-    slugs = {identity.slug for identity in resolve_all().values()}
-    if ARDUCAM_SLUG not in slugs:
-        pytest.skip(
-            f"{ARDUCAM_SLUG!r} not attached to this machine -- this "
-            "module's acceptance criteria are checked against that "
-            "camera aimed at main-playfield (sprint 029 ticket 004)"
-        )
+    global ARDUCAM_SLUG
+    ARDUCAM_SLUG = resolve_hardware_camera_slug()
 
 
 def _skip_if_no_local_daemon_reachable() -> None:

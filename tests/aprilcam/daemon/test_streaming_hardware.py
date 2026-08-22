@@ -3,12 +3,13 @@
 **Written, correctly marked, and expected to skip cleanly this
 sprint -- not silently omitted.** Every test in this module is
 ``@pytest.mark.camera`` (module-wide, via ``pytestmark``) and skips via
-``_skip_if_arducam_not_attached`` on a machine without
-``arducam-ov9782-usb-camera`` attached, matching every other
-``@pytest.mark.camera`` module in this project (``test_detection_hardware.py``,
-``test_calibration_hardware.py``, ``test_mobile_tags_hardware.py``) --
-``uv run pytest -m "not camera"`` (the sprint's own headless baseline) is
-unaffected either way.
+``_skip_if_arducam_not_attached`` on a machine with no camera genuinely
+configured and calibrated against ``main-playfield`` (discovered at run
+time via ``tests/aprilcam/hardware_camera.py``, never a hardcoded device
+name), matching every other ``@pytest.mark.camera`` module in this
+project (``test_detection_hardware.py``, ``test_calibration_hardware.py``,
+``test_mobile_tags_hardware.py``) -- ``uv run pytest -m "not camera"``
+(the sprint's own headless baseline) is unaffected either way.
 
 **Blocked this sprint, by a physical condition, not a code gap.**
 sprint.md's "Hardware constraint this sprint" section: the physical
@@ -87,22 +88,19 @@ from aprilcam.types import ImageFrame
 from aprilcam.view import viewer
 from tests.aprilcam.calibration.test_calibration import main_playfield_definition
 from tests.aprilcam.daemon.conftest import calibration_diagnosis, hardware_test_camera_config
+from tests.aprilcam.hardware_camera import resolve_hardware_camera_slug
 
 pytestmark = pytest.mark.camera
 
-#: ticket 021-006's ground-truth camera, reused by every sprint 027
-#: hardware test for consistency with the rest of this suite.
-ARDUCAM_SLUG = "arducam-ov9782-usb-camera"
+#: Resolved lazily, once per test, by :func:`_skip_if_arducam_not_attached`
+#: against this machine's real, persisted system state (see
+#: tests/aprilcam/hardware_camera.py) -- never hardcoded.
+ARDUCAM_SLUG: str = ""
 
 
 def _skip_if_arducam_not_attached() -> None:
-    slugs = {identity.slug for identity in resolve_all().values()}
-    if ARDUCAM_SLUG not in slugs:
-        pytest.skip(
-            f"{ARDUCAM_SLUG!r} not attached to this machine -- sprint 027's "
-            "hardware-blocked acceptance criteria are checked against that "
-            "camera aimed at main-playfield once the field is clear (ticket 008)"
-        )
+    global ARDUCAM_SLUG
+    ARDUCAM_SLUG = resolve_hardware_camera_slug()
 
 
 def _short_tmp_dir(prefix: str) -> Path:
@@ -122,7 +120,7 @@ def _short_tmp_dir(prefix: str) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def _real_arducam_service(tmp_path: Path) -> Tuple[DaemonService, str]:
+def _real_arducam_service(tmp_path: Path) -> Tuple[DaemonService, str, Camera]:
     identities = resolve_all()
     index = next((idx for idx, ident in identities.items() if ident.slug == ARDUCAM_SLUG), None)
     assert index is not None  # guaranteed by _skip_if_arducam_not_attached
@@ -156,11 +154,18 @@ def _real_arducam_service(tmp_path: Path) -> Tuple[DaemonService, str]:
         cameras=cameras,
         identity_source=lambda: {index: identity},
     )
-    return service, slug
+    return service, slug, cam
 
 
-def _calibrate_against_main_playfield(service: DaemonService, slug: str) -> None:
+def _calibrate_against_main_playfield(service: DaemonService, slug: str, camera: Camera) -> None:
     """Calibrate *slug* against the real, physical ``main-playfield``.
+
+    *camera* is *slug*'s already-open ``Camera`` (from
+    :func:`_real_arducam_service`) -- passed through to
+    :func:`hardware_test_camera_config` so its exposure sweep drives this
+    already-open handle directly instead of opening a second, conflicting
+    one on the same device index (``tests/aprilcam/daemon/conftest.py``'s
+    "avoiding a double-open" section).
 
     Skips cleanly (rather than failing) when calibration itself does not
     succeed -- sprint.md's documented hardware constraint ("the physical
@@ -173,12 +178,14 @@ def _calibrate_against_main_playfield(service: DaemonService, slug: str) -> None
     on top of it starts running for real, with no code change needed.
     """
     service.set_playfield(main_playfield_definition())
-    service.set_camera_config(hardware_test_camera_config(slug, playfield="main-playfield"))
+    service.set_camera_config(
+        hardware_test_camera_config(slug, playfield="main-playfield", camera=camera)
+    )
     result = service.calibrate(slug)
     if not result.succeeded:
         pytest.skip(
             f"real-hardware calibration against main-playfield did not succeed -- "
-            f"{calibration_diagnosis(result)} -- if the field is genuinely "
+            f"{calibration_diagnosis(result, slug)} -- if the field is genuinely "
             f"obstructed or dark (sprint.md's documented hardware constraint), "
             f"clear it and re-run"
         )
@@ -232,9 +239,9 @@ def daemon(tmp_path, monkeypatch):
 
 def test_two_real_subscribers_on_deskewed_stream_share_one_warp_per_tick(tmp_path, monkeypatch):
     _skip_if_arducam_not_attached()
-    service, slug = _real_arducam_service(tmp_path)
+    service, slug, camera = _real_arducam_service(tmp_path)
     try:
-        _calibrate_against_main_playfield(service, slug)
+        _calibrate_against_main_playfield(service, slug, camera)
 
         calls = {"n": 0}
         original_deskew = Deskewer.deskew
