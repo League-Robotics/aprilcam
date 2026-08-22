@@ -41,8 +41,14 @@ from aprilcam.config.interfaces import CameraConfig, CameraPosition, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import MountRegistration
 from aprilcam.daemon.rpc import PROTOCOL_VERSION, build_server
-from aprilcam.daemon.service import CALIBRATION_FRAME_COUNT, DaemonService
+from aprilcam.daemon.service import (
+    CALIBRATION_FRAME_COUNT,
+    _MAX_ANNOTATIONS_PER_LAYER,
+    _MAX_POINTS_PER_SHAPE,
+    DaemonService,
+)
 from aprilcam.errors import (
+    AnnotationLimitExceeded,
     CameraNotPresent,
     ConnectionFailed,
     DaemonVersionMismatch,
@@ -933,6 +939,46 @@ def test_replace_layer_unknown_playfield_raises_unknown_playfield(client):
 def test_clear_annotations_unknown_playfield_raises_unknown_playfield(client):
     with pytest.raises(UnknownPlayfield):
         client.clear_annotations("no-such-field")
+
+
+# ---------------------------------------------------------------------------
+# AnnotationLimitExceeded reconstructs client-side too (ticket 031-010) --
+# the daemon-side bound tests live in test_service.py; these confirm the
+# RPC trailing-metadata contract (daemon/rpc.py's _abort) round-trips back
+# into the exact typed exception on this side of the wire, not a generic
+# ConnectionFailed.
+# ---------------------------------------------------------------------------
+
+
+def test_put_annotation_over_point_bound_raises_annotation_limit_exceeded_with_fields_intact(
+    playfield_client,
+):
+    over_bound_points = tuple(WorldPoint(x=float(i), y=0.0) for i in range(_MAX_POINTS_PER_SHAPE + 1))
+
+    with pytest.raises(AnnotationLimitExceeded) as excinfo:
+        playfield_client.put_annotation(
+            "main-playfield",
+            Annotation(id="route", layer="planner", shape=PathShape(points=over_bound_points)),
+        )
+
+    assert excinfo.value.kind == "points"
+    assert excinfo.value.bound == _MAX_POINTS_PER_SHAPE
+    assert excinfo.value.actual == _MAX_POINTS_PER_SHAPE + 1
+
+
+def test_replace_layer_over_count_bound_raises_annotation_limit_exceeded_with_fields_intact(
+    playfield_client,
+):
+    too_many = tuple(
+        _marker_annotation(f"f{i}", "planner", x=float(i)) for i in range(_MAX_ANNOTATIONS_PER_LAYER + 1)
+    )
+
+    with pytest.raises(AnnotationLimitExceeded) as excinfo:
+        playfield_client.replace_layer("main-playfield", "planner", too_many)
+
+    assert excinfo.value.kind == "annotations"
+    assert excinfo.value.bound == _MAX_ANNOTATIONS_PER_LAYER
+    assert excinfo.value.actual == _MAX_ANNOTATIONS_PER_LAYER + 1
 
 
 # ---------------------------------------------------------------------------

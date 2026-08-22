@@ -234,3 +234,42 @@ class NoPlayfieldLinked(AprilCamError):
             "-- push a camera config naming a playfield first "
             "(aprilcam camera config <file>)"
         )
+
+
+class AnnotationLimitExceeded(AprilCamError):
+    """A ``put_annotation``/``replace_layer`` request would push a
+    playfield's annotation store past a fixed bound (UC-28, SUC-010,
+    ticket 031-010).
+
+    Sprint 024 shipped the annotation store with **no** bound at all
+    (``types.AnnotationSet``'s own "Open" note: "maximum annotations
+    per playfield/layer and points per path are unbounded here") -- a
+    misbehaving client could otherwise grow the store, and the
+    per-frame embedded payload every deskewed ``GetFrame`` call
+    carries, without limit. This closes that gap with two independent
+    checks, distinguished by ``kind``:
+
+    * ``"annotations"`` -- an addition (``put_annotation``) or a whole
+      replacement (``replace_layer``) would leave a single
+      ``(playfield, layer)`` holding more than the fixed per-layer
+      count bound.
+    * ``"points"`` -- a ``PathShape``/``Polygon`` shape's ``points``
+      tuple exceeds the fixed per-shape point-count bound.
+      ``Marker``/``Circle``/``Text`` are fixed-parametric (a handful of
+      scalar fields, no caller-sized tuple) and never raise this.
+
+    Both checks run, and this is raised, **before** either mutation
+    method touches the store -- a rejected request leaves the store's
+    previous contents completely unchanged, extending
+    ``replace_layer``'s existing "no consumer ever observes a
+    half-updated layer" atomicity guarantee (UC-28.S-2) to this new
+    failure path too.
+    """
+
+    def __init__(self, kind: str, bound: int, actual: int) -> None:
+        self.kind = kind
+        self.bound = bound
+        self.actual = actual
+        super().__init__(
+            f"{kind} limit exceeded: {actual} exceeds the bound of {bound}"
+        )

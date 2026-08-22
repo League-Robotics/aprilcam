@@ -56,8 +56,15 @@ from aprilcam.daemon.detection import CONFIRMATION_STREAK, DetectionEngine
 from aprilcam.daemon.interfaces import Daemon, MountRegistration
 from aprilcam.daemon.lifecycle import DaemonLifecycle
 from aprilcam.daemon.rpc import build_server
-from aprilcam.daemon.service import CALIBRATION_FRAME_COUNT, VALID_ENCODINGS, DaemonService
+from aprilcam.daemon.service import (
+    CALIBRATION_FRAME_COUNT,
+    VALID_ENCODINGS,
+    _MAX_ANNOTATIONS_PER_LAYER,
+    _MAX_POINTS_PER_SHAPE,
+    DaemonService,
+)
 from aprilcam.errors import (
+    AnnotationLimitExceeded,
     CameraNotPresent,
     MalformedDocument,
     NoPlayfieldLinked,
@@ -4328,6 +4335,155 @@ def test_two_writers_on_one_key_last_write_wins_no_merge_no_error(service):
     assert after.annotations[0].shape == Marker(at=WorldPoint(x=12.0, y=6.0))
 
 
+# ---------------------------------------------------------------------------
+# Annotation count/point limits (ticket 031-010, UC-28/SUC-010). Sprint
+# 024 shipped this store with no bound at all -- these prove the two
+# fixed bounds this ticket adds, and that a rejection never mutates the
+# store (matching replace_layer's pre-existing atomicity guarantee,
+# extended to this new failure path).
+# ---------------------------------------------------------------------------
+
+
+def test_put_annotation_at_the_count_bound_succeeds_one_new_id_over_it_rejects_with_no_mutation(
+    service,
+):
+    service.set_playfield(_playfield_definition("main-playfield"))
+    for i in range(_MAX_ANNOTATIONS_PER_LAYER):
+        service.put_annotation("main-playfield", _marker(f"a{i}", "planner", x=float(i)))
+    at_bound = service.get_annotations("main-playfield", layer="planner")
+    assert len(at_bound.annotations) == _MAX_ANNOTATIONS_PER_LAYER
+    revision_before = at_bound.revision
+
+    with pytest.raises(AnnotationLimitExceeded) as excinfo:
+        service.put_annotation("main-playfield", _marker("one-too-many", "planner"))
+
+    assert excinfo.value.kind == "annotations"
+    assert excinfo.value.bound == _MAX_ANNOTATIONS_PER_LAYER
+    assert excinfo.value.actual == _MAX_ANNOTATIONS_PER_LAYER + 1
+    after = service.get_annotations("main-playfield", layer="planner")
+    assert len(after.annotations) == _MAX_ANNOTATIONS_PER_LAYER  # unchanged -- no partial mutation
+    assert after.revision == revision_before  # rejection never bumps the revision
+
+
+def test_put_annotation_upsert_of_an_existing_id_at_the_count_bound_is_not_rejected(service):
+    """An upsert of an id already in the layer does not grow it, so it
+    must never be rejected on count grounds even when the layer is
+    already sitting exactly at the bound."""
+    service.set_playfield(_playfield_definition("main-playfield"))
+    for i in range(_MAX_ANNOTATIONS_PER_LAYER):
+        service.put_annotation("main-playfield", _marker(f"a{i}", "planner", x=float(i)))
+
+    service.put_annotation("main-playfield", _marker("a0", "planner", x=999.0))  # must not raise
+
+    after = service.get_annotations("main-playfield", layer="planner")
+    assert len(after.annotations) == _MAX_ANNOTATIONS_PER_LAYER
+    by_id = {a.id: a for a in after.annotations}
+    assert by_id["a0"].shape == Marker(at=WorldPoint(x=999.0, y=2.0))
+
+
+def test_replace_layer_at_the_count_bound_succeeds(service):
+    service.set_playfield(_playfield_definition("main-playfield"))
+    at_bound = tuple(
+        _marker(f"b{i}", "planner", x=float(i)) for i in range(_MAX_ANNOTATIONS_PER_LAYER)
+    )
+
+    service.replace_layer("main-playfield", "planner", at_bound)  # must not raise
+
+    after = service.get_annotations("main-playfield", layer="planner")
+    assert len(after.annotations) == _MAX_ANNOTATIONS_PER_LAYER
+
+
+def test_replace_layer_over_the_count_bound_rejects_leaving_previous_contents_intact(service):
+    service.set_playfield(_playfield_definition("main-playfield"))
+    service.put_annotation("main-playfield", _marker("keep", "planner"))
+    revision_before = service.get_annotations("main-playfield").revision
+
+    too_many = tuple(
+        _marker(f"c{i}", "planner", x=float(i)) for i in range(_MAX_ANNOTATIONS_PER_LAYER + 1)
+    )
+    with pytest.raises(AnnotationLimitExceeded) as excinfo:
+        service.replace_layer("main-playfield", "planner", too_many)
+
+    assert excinfo.value.kind == "annotations"
+    assert excinfo.value.bound == _MAX_ANNOTATIONS_PER_LAYER
+    assert excinfo.value.actual == _MAX_ANNOTATIONS_PER_LAYER + 1
+    after = service.get_annotations("main-playfield")
+    assert [a.id for a in after.annotations] == ["keep"]  # previous layer contents untouched
+    assert after.revision == revision_before
+
+
+def test_put_annotation_path_shape_at_the_point_bound_succeeds_one_over_rejects_with_no_mutation(
+    service,
+):
+    service.set_playfield(_playfield_definition("main-playfield"))
+    at_bound_points = tuple(WorldPoint(x=float(i), y=0.0) for i in range(_MAX_POINTS_PER_SHAPE))
+    service.put_annotation(
+        "main-playfield",
+        Annotation(id="route", layer="planner", shape=PathShape(points=at_bound_points)),
+    )
+    revision_before = service.get_annotations("main-playfield").revision
+
+    over_bound_points = at_bound_points + (WorldPoint(x=99999.0, y=0.0),)
+    with pytest.raises(AnnotationLimitExceeded) as excinfo:
+        service.put_annotation(
+            "main-playfield",
+            Annotation(id="too-long", layer="planner", shape=PathShape(points=over_bound_points)),
+        )
+
+    assert excinfo.value.kind == "points"
+    assert excinfo.value.bound == _MAX_POINTS_PER_SHAPE
+    assert excinfo.value.actual == _MAX_POINTS_PER_SHAPE + 1
+    after = service.get_annotations("main-playfield")
+    assert [a.id for a in after.annotations] == ["route"]  # "too-long" was never stored
+    assert after.revision == revision_before
+
+
+def test_replace_layer_rejects_a_polygon_over_the_point_bound_leaving_previous_contents_intact(
+    service,
+):
+    service.set_playfield(_playfield_definition("main-playfield"))
+    service.put_annotation("main-playfield", _marker("keep", "planner"))
+    revision_before = service.get_annotations("main-playfield").revision
+
+    over_bound_points = tuple(WorldPoint(x=float(i), y=0.0) for i in range(_MAX_POINTS_PER_SHAPE + 1))
+    with pytest.raises(AnnotationLimitExceeded) as excinfo:
+        service.replace_layer(
+            "main-playfield",
+            "planner",
+            (Annotation(id="zone", layer="planner", shape=Polygon(points=over_bound_points)),),
+        )
+
+    assert excinfo.value.kind == "points"
+    assert excinfo.value.bound == _MAX_POINTS_PER_SHAPE
+    assert excinfo.value.actual == _MAX_POINTS_PER_SHAPE + 1
+    after = service.get_annotations("main-playfield")
+    assert [a.id for a in after.annotations] == ["keep"]
+    assert after.revision == revision_before
+
+
+def test_put_annotation_and_replace_layer_well_under_both_bounds_are_unaffected(service):
+    """AC: a request well under both bounds behaves exactly as it did
+    before this ticket -- no new error, no behaviour change."""
+    service.set_playfield(_playfield_definition("main-playfield"))
+
+    service.put_annotation(
+        "main-playfield",
+        Annotation(
+            id="route",
+            layer="planner",
+            shape=PathShape(points=tuple(WorldPoint(x=float(i), y=0.0) for i in range(50))),
+        ),
+    )
+    service.replace_layer(
+        "main-playfield",
+        "planner",
+        tuple(_marker(f"d{i}", "planner", x=float(i)) for i in range(10)),
+    )
+
+    after = service.get_annotations("main-playfield", layer="planner")
+    assert len(after.annotations) == 10
+
+
 def test_get_annotations_filtered_by_layer_still_reports_the_whole_playfield_revision(service):
     service.set_playfield(_playfield_definition("main-playfield"))
     service.put_annotation("main-playfield", _marker("goal", "planner"))
@@ -4666,6 +4822,74 @@ def test_rpc_put_annotation_unknown_playfield_maps_to_not_found_naming_held_play
     assert metadata["aprilcam-error-type"] == "UnknownPlayfield"
     assert metadata["aprilcam-requested"] == "practice-field"
     assert metadata["aprilcam-available"] == "main-playfield"
+
+
+def test_rpc_put_annotation_over_point_bound_maps_to_resource_exhausted(stub):
+    """ticket 031-010: over the wire, over-bound is RESOURCE_EXHAUSTED
+    with ``aprilcam-kind``/``aprilcam-bound``/``aprilcam-actual``
+    trailing metadata, and the rejected annotation is never stored."""
+    stub.SetPlayfield(aprilcam_v2_pb2.SetPlayfieldRequest(definition=_playfield_definition_msg()))
+    over_bound = aprilcam_v2_pb2.Annotation(
+        id="route",
+        layer="planner",
+        path=aprilcam_v2_pb2.PathShape(
+            points=[
+                aprilcam_v2_pb2.WorldPoint(x=float(i), y=0.0)
+                for i in range(_MAX_POINTS_PER_SHAPE + 1)
+            ]
+        ),
+    )
+
+    with pytest.raises(grpc.RpcError) as excinfo:
+        stub.PutAnnotation(
+            aprilcam_v2_pb2.PutAnnotationRequest(playfield="main-playfield", annotation=over_bound)
+        )
+
+    assert excinfo.value.code() == grpc.StatusCode.RESOURCE_EXHAUSTED
+    metadata = dict(excinfo.value.trailing_metadata())
+    assert metadata["aprilcam-error-type"] == "AnnotationLimitExceeded"
+    assert metadata["aprilcam-kind"] == "points"
+    assert metadata["aprilcam-bound"] == str(_MAX_POINTS_PER_SHAPE)
+    assert metadata["aprilcam-actual"] == str(_MAX_POINTS_PER_SHAPE + 1)
+
+    after = stub.GetAnnotations(aprilcam_v2_pb2.GetAnnotationsRequest(playfield="main-playfield"))
+    assert list(after.annotations.annotations) == []
+
+
+def test_rpc_replace_layer_over_count_bound_maps_to_resource_exhausted_leaving_previous_layer_intact(
+    stub,
+):
+    stub.SetPlayfield(aprilcam_v2_pb2.SetPlayfieldRequest(definition=_playfield_definition_msg()))
+    stub.PutAnnotation(
+        aprilcam_v2_pb2.PutAnnotationRequest(
+            playfield="main-playfield", annotation=_annotation_msg("keep", "planner")
+        )
+    )
+    too_many = [
+        aprilcam_v2_pb2.Annotation(
+            id=f"e{i}",
+            layer="planner",
+            marker=aprilcam_v2_pb2.Marker(at=aprilcam_v2_pb2.WorldPoint(x=float(i), y=0.0)),
+        )
+        for i in range(_MAX_ANNOTATIONS_PER_LAYER + 1)
+    ]
+
+    with pytest.raises(grpc.RpcError) as excinfo:
+        stub.ReplaceLayer(
+            aprilcam_v2_pb2.ReplaceLayerRequest(
+                playfield="main-playfield", layer="planner", annotations=too_many
+            )
+        )
+
+    assert excinfo.value.code() == grpc.StatusCode.RESOURCE_EXHAUSTED
+    metadata = dict(excinfo.value.trailing_metadata())
+    assert metadata["aprilcam-error-type"] == "AnnotationLimitExceeded"
+    assert metadata["aprilcam-kind"] == "annotations"
+    assert metadata["aprilcam-bound"] == str(_MAX_ANNOTATIONS_PER_LAYER)
+    assert metadata["aprilcam-actual"] == str(_MAX_ANNOTATIONS_PER_LAYER + 1)
+
+    after = stub.GetAnnotations(aprilcam_v2_pb2.GetAnnotationsRequest(playfield="main-playfield"))
+    assert [a.id for a in after.annotations.annotations] == ["keep"]
 
 
 def test_rpc_remove_annotation_unknown_playfield_maps_to_not_found(stub):

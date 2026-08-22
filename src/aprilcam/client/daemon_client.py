@@ -95,6 +95,7 @@ from aprilcam.config.loader import PlayfieldDefinition
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus, ImageStream, MountRegistration, TagStream
 from aprilcam.errors import (
     AlreadyRunning,
+    AnnotationLimitExceeded,
     CameraNotPresent,
     ConnectionFailed,
     DaemonVersionMismatch,
@@ -346,6 +347,12 @@ def _reconstruct_error(exc: grpc.RpcError, target: str) -> Exception:
         return UnknownGuide(
             metadata.get("aprilcam-requested", ""),
             _split_available(metadata.get("aprilcam-available", "")),
+        )
+    if error_type == "AnnotationLimitExceeded":
+        return AnnotationLimitExceeded(
+            metadata.get("aprilcam-kind", "unknown"),
+            int(metadata.get("aprilcam-bound", "0")),
+            int(metadata.get("aprilcam-actual", "0")),
         )
     return ConnectionFailed(target, reason=exc.details() or str(exc.code()))
 

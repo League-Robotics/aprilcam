@@ -106,6 +106,7 @@ from aprilcam.daemon.streaming import (
     TagStreamProducer,
 )
 from aprilcam.errors import (
+    AnnotationLimitExceeded,
     CameraNotPresent,
     NotCalibrated,
     UnknownCamera,
@@ -117,9 +118,12 @@ from aprilcam.playfield.query import FeatureQuery
 from aprilcam.types import (
     Annotation,
     AnnotationSet,
+    AnnotationShape,
     CameraState,
     ImageFrame,
     MountParameters,
+    PathShape,
+    Polygon,
     ProbeReport,
     TagFrame,
     TagId,
@@ -185,6 +189,50 @@ def _default_control_backend_factory(device_name: str) -> Optional[ControlBacken
     if sys.platform != "darwin":
         return None
     return UvcUtilBackend(device_name)
+
+
+#: Fixed bound on how many annotations one ``(playfield, layer)`` pair
+#: may hold at once (ticket 031-010, UC-28/SUC-010, sprint.md Design
+#: Rationale). Sprint 024 shipped the annotation store with no bound at
+#: all (``types.AnnotationSet``'s own "Open" note); per sprint.md's
+#: explicit decision, this is a **fixed constant, not a configurable
+#: document field** -- even a fixed bound is new ground this sprint,
+#: and a configurable one (per-playfield or global, settable via a
+#: pushed document) is a larger design surface not needed yet.
+#:
+#: Sized against the installed real playfield
+#: (``config/aprilcam/playfields/main-playfield.json``, 134.3 x 89.3 cm)
+#: hosting a busy multi-robot session: each robot drawing a handful of
+#: annotations (a position marker, a planned path, a status label, a
+#: keep-out zone) puts a genuinely busy field on the order of 50-100
+#: annotations in one layer. 1,000 leaves an order of magnitude of
+#: headroom above that, while still bounding memory and the per-frame
+#: embedded payload against a runaway or misbehaving client.
+_MAX_ANNOTATIONS_PER_LAYER = 1000
+
+#: Fixed bound on ``PathShape.points``/``Polygon.points`` length for any
+#: one shape (ticket 031-010, UC-28/SUC-010) -- see
+#: :data:`_MAX_ANNOTATIONS_PER_LAYER` above for why this is a fixed
+#: constant, not a configurable document field.
+#:
+#: Sized against the same real playfield's ~447 cm perimeter
+#: (2 * (134.3 + 89.3)): a route traced with a waypoint every 2 cm
+#: around the whole perimeter is ~224 points; a dense multi-lap session
+#: log (ten laps at that same 2 cm spacing) is ~2,240 points. 10,000
+#: comfortably covers that with real headroom left above it.
+_MAX_POINTS_PER_SHAPE = 10000
+
+
+def _check_point_bound(shape: AnnotationShape) -> None:
+    """Reject *shape* with :class:`~aprilcam.errors.AnnotationLimitExceeded`
+    if it is a ``PathShape``/``Polygon`` whose ``points`` tuple exceeds
+    :data:`_MAX_POINTS_PER_SHAPE` (ticket 031-010).
+    ``Marker``/``Circle``/``Text`` are fixed-parametric -- a handful of
+    scalar fields, no caller-sized tuple -- so only the two
+    variable-length shapes in ``types.AnnotationShape`` can ever fail
+    this check."""
+    if isinstance(shape, (PathShape, Polygon)) and len(shape.points) > _MAX_POINTS_PER_SHAPE:
+        raise AnnotationLimitExceeded("points", _MAX_POINTS_PER_SHAPE, len(shape.points))
 
 
 class DaemonService(Daemon):
@@ -1108,11 +1156,26 @@ class DaemonService(Daemon):
         dict assignment below simply replaces whatever was there.
         Always bumps *playfield*'s revision -- a put is definitionally
         a real mutation, never a no-op.
+
+        Rejects with :class:`~aprilcam.errors.AnnotationLimitExceeded`
+        (ticket 031-010), before touching ``self._annotations`` at all,
+        when *annotation*'s shape exceeds :data:`_MAX_POINTS_PER_SHAPE`,
+        or when *annotation*'s id is genuinely new to the target layer
+        and that layer already holds :data:`_MAX_ANNOTATIONS_PER_LAYER`
+        annotations -- an upsert of an id already present never counts
+        against the count bound, since it does not grow the layer.
         """
         with self._lock:
             self._require_known_playfield_locked(playfield)
-            layer = self._annotations.setdefault(playfield, {}).setdefault(annotation.layer, {})
-            layer[annotation.id] = annotation
+            _check_point_bound(annotation.shape)
+            layer = self._annotations.get(playfield, {}).get(annotation.layer, {})
+            if annotation.id not in layer and len(layer) >= _MAX_ANNOTATIONS_PER_LAYER:
+                raise AnnotationLimitExceeded(
+                    "annotations", _MAX_ANNOTATIONS_PER_LAYER, len(layer) + 1
+                )
+            self._annotations.setdefault(playfield, {}).setdefault(
+                annotation.layer, {}
+            )[annotation.id] = annotation
             self._bump_annotation_revision_locked(playfield)
 
     def remove_annotation(self, playfield: str, layer: str, id: str) -> None:
@@ -1147,9 +1210,23 @@ class DaemonService(Daemon):
         always bumps the revision, including replacing an absent or
         already-empty layer with an empty tuple -- a replace is a
         deliberate whole-layer redraw, not a conditional mutation.
+
+        Rejects with :class:`~aprilcam.errors.AnnotationLimitExceeded`
+        (ticket 031-010), before touching ``self._annotations`` at all,
+        when *annotations* itself exceeds
+        :data:`_MAX_ANNOTATIONS_PER_LAYER`, or when any one shape in it
+        exceeds :data:`_MAX_POINTS_PER_SHAPE` -- the layer's *previous*
+        contents are left completely unchanged on rejection, matching
+        this method's existing atomicity guarantee (UC-28.S-2).
         """
         with self._lock:
             self._require_known_playfield_locked(playfield)
+            if len(annotations) > _MAX_ANNOTATIONS_PER_LAYER:
+                raise AnnotationLimitExceeded(
+                    "annotations", _MAX_ANNOTATIONS_PER_LAYER, len(annotations)
+                )
+            for one in annotations:
+                _check_point_bound(one.shape)
             self._annotations.setdefault(playfield, {})[layer] = {
                 a.id: a for a in annotations
             }

@@ -88,6 +88,7 @@ from aprilcam.daemon.lifecycle import ControlPlaneListener
 from aprilcam.daemon.stream_transport import StreamEndpoint, StreamTransportManager
 from aprilcam.errors import (
     AlreadyRunning,
+    AnnotationLimitExceeded,
     AprilCamError,
     CameraNotPresent,
     NoPlayfieldLinked,
@@ -163,6 +164,12 @@ _STATUS_CODES = {
     # given current state," distinct from the explicit-but-failed
     # CalibrationResult path, which is not an error at all.
     NoPlayfieldLinked: grpc.StatusCode.FAILED_PRECONDITION,
+    # A put_annotation/replace_layer request exceeding the fixed
+    # per-layer count or per-shape point bound (ticket 031-010) --
+    # RESOURCE_EXHAUSTED matches gRPC's own "quota exceeded" status
+    # convention, distinct from INVALID_ARGUMENT (the request is not
+    # malformed, it is simply larger than this daemon's fixed capacity).
+    AnnotationLimitExceeded: grpc.StatusCode.RESOURCE_EXHAUSTED,
 }
 
 
@@ -754,6 +761,9 @@ def _abort(context: grpc.ServicerContext, exc: Exception) -> None:
       also an ``UnknownTarget`` subtype (UC-27.S-3, ticket 025-007).
     * :class:`CameraNotPresent`: + ``aprilcam-slug``.
     * :class:`~aprilcam.errors.NoPlayfieldLinked`: + ``aprilcam-camera``.
+    * :class:`~aprilcam.errors.AnnotationLimitExceeded` (ticket
+      031-010): + ``aprilcam-kind``, ``aprilcam-bound``,
+      ``aprilcam-actual``.
     """
     if isinstance(exc, AprilCamError):
         code = grpc.StatusCode.INTERNAL
@@ -771,6 +781,10 @@ def _abort(context: grpc.ServicerContext, exc: Exception) -> None:
             metadata.append(("aprilcam-slug", exc.slug))
         elif isinstance(exc, NoPlayfieldLinked):
             metadata.append(("aprilcam-camera", exc.camera))
+        elif isinstance(exc, AnnotationLimitExceeded):
+            metadata.append(("aprilcam-kind", exc.kind))
+            metadata.append(("aprilcam-bound", str(exc.bound)))
+            metadata.append(("aprilcam-actual", str(exc.actual)))
         context.set_trailing_metadata(tuple(metadata))
         context.abort(code, str(exc))
     else:
