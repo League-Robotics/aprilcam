@@ -76,13 +76,17 @@ from aprilcam.camera.camera import Camera
 from aprilcam.camera.identity import resolve_all
 from aprilcam.client.daemon_client import GrpcDaemon
 from aprilcam.config.directories import Directories
-from aprilcam.config.interfaces import CameraConfig
 from aprilcam.daemon import __main__ as daemon_main
 from aprilcam.daemon.detection import CONFIRMATION_STREAK, DetectionEngine
 from aprilcam.proto import aprilcam_v2_pb2_grpc
 from aprilcam.types import TagFamily, TagId
 from aprilcam.vision.detector import TagDetector
 from tests.aprilcam.calibration.test_calibration import main_playfield_definition
+from tests.aprilcam.daemon.conftest import (
+    calibration_diagnosis,
+    hardware_test_camera_config,
+    undetected_marker_diagnosis,
+)
 
 pytestmark = pytest.mark.camera
 
@@ -178,14 +182,18 @@ def _prime(daemon: GrpcDaemon) -> None:
 
 
 def test_get_tags_detects_apriltag_1_and_a_plausible_aruco_subset(daemon):
+    # ticket 031-009: this test's raw daemon.get_tags call never links a
+    # playfield or calibrates -- pushing exposure only (no playfield) so
+    # it does not inherit whatever the previous process left on the
+    # device either, matching every other hardware fixture in this
+    # directory.
+    daemon.set_camera_config(hardware_test_camera_config(ARDUCAM_SLUG))
     _prime(daemon)
     frame = daemon.get_tags(ARDUCAM_SLUG)
     observed = [(r.tag.family.value, r.tag.number) for r in frame.tags]
 
     assert any(r.tag == APRILTAG_1 for r in frame.tags), (
-        "AprilTag 1 (main-playfield's centre marker) was not detected -- "
-        "check that the arducam is physically aimed at main-playfield "
-        f"(observed this burst: {observed})"
+        f"AprilTag 1 (main-playfield's centre marker) was {undetected_marker_diagnosis(observed)}"
     )
 
     aruco_ids = {r.tag.number for r in frame.tags if r.tag.family == TagFamily.ARUCO}
@@ -941,11 +949,9 @@ def test_stationary_tag_motion_fields_match_pre_confirmation_behavior_from_secon
     motion checks.
     """
     daemon.set_playfield(main_playfield_definition())
-    daemon.set_camera_config(
-        CameraConfig(name=ARDUCAM_SLUG, playfield="main-playfield", settings={})
-    )
+    daemon.set_camera_config(hardware_test_camera_config(ARDUCAM_SLUG, playfield="main-playfield"))
     result = daemon.calibrate(ARDUCAM_SLUG)
-    assert result.succeeded is True, f"setup calibration failed: {result.reason}"
+    assert result.succeeded is True, f"setup calibration failed -- {calibration_diagnosis(result)}"
 
     samples = []
     for _ in range(6):

@@ -95,11 +95,11 @@ import pytest
 
 from aprilcam.calibration.calibration import MAX_REPROJECTION_ERROR_CM, Calibrator
 from aprilcam.camera.backends.opencv_backend import OpenCVBackend
+from aprilcam.camera.backends.uvc_util import UvcUtilBackend
 from aprilcam.camera.camera import Camera
 from aprilcam.camera.identity import resolve_all
 from aprilcam.client.daemon_client import GrpcDaemon
 from aprilcam.config.directories import Directories
-from aprilcam.config.interfaces import CameraConfig
 from aprilcam.daemon import __main__ as daemon_main
 from aprilcam.errors import NotCalibrated
 from aprilcam.proto import aprilcam_v2_pb2_grpc
@@ -109,6 +109,11 @@ from aprilcam.vision.pipeline import run_pipeline
 from tests.aprilcam.calibration.test_calibration import (
     MAIN_PLAYFIELD_ARUCO_POSITIONS,
     main_playfield_definition,
+)
+from tests.aprilcam.daemon.conftest import (
+    HARDWARE_TEST_CAMERA_SETTINGS,
+    calibration_diagnosis,
+    hardware_test_camera_config,
 )
 
 pytestmark = pytest.mark.camera
@@ -193,9 +198,7 @@ def _link_and_calibrate(daemon: GrpcDaemon):
     and calibrate -- the setup every "already calibrated" test below
     shares. Returns the real ``CalibrationResult``."""
     daemon.set_playfield(main_playfield_definition())
-    daemon.set_camera_config(
-        CameraConfig(name=ARDUCAM_SLUG, playfield="main-playfield", settings={})
-    )
+    daemon.set_camera_config(hardware_test_camera_config(ARDUCAM_SLUG, playfield="main-playfield"))
     return daemon.calibrate(ARDUCAM_SLUG)
 
 
@@ -208,10 +211,7 @@ def test_full_set_calibration_matches_all_ten_required_aruco_ids(daemon):
     result = _link_and_calibrate(daemon)
 
     assert result.succeeded is True, (
-        f"calibration failed against the real field -- matched "
-        f"{result.matched_ids}, missing {result.missing_ids} "
-        f"(reason={result.reason!r}). Check the arducam is physically "
-        "aimed at main-playfield with all 10 markers in view."
+        f"calibration failed against the real field -- {calibration_diagnosis(result)}"
     )
     assert result.matched_ids == tuple(range(1, 11))
     assert result.missing_ids == ()
@@ -231,9 +231,7 @@ def test_full_set_calibration_reprojection_error_stays_under_the_new_threshold(d
     result = _link_and_calibrate(daemon)
 
     assert result.succeeded is True, (
-        f"calibration failed against the real field -- matched "
-        f"{result.matched_ids}, missing {result.missing_ids} "
-        f"(reason={result.reason!r})."
+        f"calibration failed against the real field -- {calibration_diagnosis(result)}"
     )
     assert result.reprojection_error_cm is not None
     assert result.reprojection_error_cm < MAX_REPROJECTION_ERROR_CM, (
@@ -285,9 +283,7 @@ def test_full_set_calibration_reprojection_error_stays_under_the_new_threshold(d
 
 def test_with_intrinsics_against_main_playfield_stores_a_lens_model(daemon):
     daemon.set_playfield(main_playfield_definition())
-    daemon.set_camera_config(
-        CameraConfig(name=ARDUCAM_SLUG, playfield="main-playfield", settings={})
-    )
+    daemon.set_camera_config(hardware_test_camera_config(ARDUCAM_SLUG, playfield="main-playfield"))
 
     result = daemon.calibrate(ARDUCAM_SLUG, estimate_intrinsics=True)
 
@@ -304,8 +300,7 @@ def test_with_intrinsics_against_main_playfield_stores_a_lens_model(daemon):
 
     assert result.succeeded is True, (
         f"--with-intrinsics failed against the real field for a reason other "
-        f"than the known near-nadir degeneracy -- matched {result.matched_ids}, "
-        f"missing {result.missing_ids} (reason={result.reason!r})."
+        f"than the known near-nadir degeneracy -- {calibration_diagnosis(result)}"
     )
     assert result.intrinsics_estimated is True
     assert result.intrinsics_mode == "coplanar-constrained"
@@ -375,6 +370,17 @@ def _real_os_index_for_arducam() -> int:
     raise AssertionError("arducam not resolved -- _skip_if_arducam_not_attached should have caught this")
 
 
+def _real_device_name_for_arducam() -> str:
+    """The raw OS-reported device name, needed to wire a real
+    ``UvcUtilBackend`` (ticket 031-009) -- pushing exposure through the
+    bare ``OpenCVBackend`` alone is known not to work on this exact
+    camera (``camera.camera`` module docstring, ticket 023-001)."""
+    for identity in resolve_all().values():
+        if identity.slug == ARDUCAM_SLUG:
+            return identity.device_name
+    raise AssertionError("arducam not resolved -- _skip_if_arducam_not_attached should have caught this")
+
+
 def _find_marker_region(camera: Camera) -> tuple:
     """One real frame's worth of real detection, used only to locate
     *some* currently-visible ArUco marker's pixel region to black out
@@ -412,18 +418,27 @@ def test_occluding_one_marker_fails_naming_exactly_that_marker(tmp_path):
     ``DaemonService``."""
     _skip_if_arducam_not_attached()
     index = _real_os_index_for_arducam()
+    device_name = _real_device_name_for_arducam()
 
+    # ticket 031-009: push this module's known exposure directly onto
+    # each real Camera built below -- neither is opened through
+    # DaemonService (see this test's own docstring for why), so neither
+    # gets DaemonService._camera_for's automatic control_backend wiring
+    # or apply-on-open config push. Without this, both cameras would run
+    # at whatever exposure the previous process left on the device.
     probe_backend = OpenCVBackend(index)
-    probe_camera = Camera(ARDUCAM_SLUG, probe_backend)
+    probe_camera = Camera(ARDUCAM_SLUG, probe_backend, control_backend=UvcUtilBackend(device_name))
     probe_camera.open()
+    probe_camera.apply_config(hardware_test_camera_config(ARDUCAM_SLUG))
     try:
         region, occluded_id = _find_marker_region(probe_camera)
     finally:
         probe_camera.close()
 
     backend = _OccludingBackend(OpenCVBackend(index), region)
-    camera = Camera(ARDUCAM_SLUG, backend)
+    camera = Camera(ARDUCAM_SLUG, backend, control_backend=UvcUtilBackend(device_name))
     camera.open()
+    camera.apply_config(hardware_test_camera_config(ARDUCAM_SLUG))
     try:
         def capture_frames(slug: str):
             frames = []
@@ -434,7 +449,7 @@ def test_occluding_one_marker_fails_naming_exactly_that_marker(tmp_path):
             return tuple(frames)
 
         definition = main_playfield_definition()
-        camera_config = CameraConfig(name=ARDUCAM_SLUG, playfield="main-playfield", settings={})
+        camera_config = hardware_test_camera_config(ARDUCAM_SLUG, playfield="main-playfield")
         calibrator = Calibrator(
             get_camera_config=lambda slug: camera_config,
             get_playfield=lambda name: definition,
@@ -696,7 +711,20 @@ def test_calibration_survives_a_restart_but_an_rpc_only_playfield_link_does_not(
 
     camera_config_path = tmp_path / "arducam-config.json"
     camera_config_path.write_text(
-        json.dumps({"name": ARDUCAM_SLUG, "playfield": "main-playfield"}), encoding="utf-8"
+        json.dumps(
+            {
+                "name": ARDUCAM_SLUG,
+                "playfield": "main-playfield",
+                # ticket 031-009: an omitted "settings" key here would
+                # be indistinguishable from settings={} once loaded (a
+                # blank template, per ConfigLoader's default), running
+                # this CLI-driven calibrate at whatever exposure the
+                # previous process left on the device -- see this
+                # directory's conftest.py module docstring.
+                "settings": HARDWARE_TEST_CAMERA_SETTINGS,
+            }
+        ),
+        encoding="utf-8",
     )
 
     result = _run(bin_path, "daemon", "start", env=env)

@@ -73,19 +73,20 @@ import pytest
 
 from aprilcam.calibration.deskew import Deskewer
 from aprilcam.camera.backends.opencv_backend import OpenCVBackend
+from aprilcam.camera.backends.uvc_util import UvcUtilBackend
 from aprilcam.camera.camera import Camera
 from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import resolve_all
 from aprilcam.camera.registry import CameraRegistry
 from aprilcam.client.daemon_client import GrpcDaemon
 from aprilcam.config.directories import Directories
-from aprilcam.config.interfaces import CameraConfig
 from aprilcam.daemon import __main__ as daemon_main
 from aprilcam.daemon.service import DaemonService
 from aprilcam.proto import aprilcam_v2_pb2_grpc
 from aprilcam.types import ImageFrame
 from aprilcam.view import viewer
 from tests.aprilcam.calibration.test_calibration import main_playfield_definition
+from tests.aprilcam.daemon.conftest import calibration_diagnosis, hardware_test_camera_config
 
 pytestmark = pytest.mark.camera
 
@@ -130,7 +131,14 @@ def _real_arducam_service(tmp_path: Path) -> Tuple[DaemonService, str]:
     registry = CameraRegistry(tmp_path / "state" / "cameras")
     slug = registry.resolve(identity)
     number = registry.get(slug).number
-    cam = Camera(slug, OpenCVBackend(index), number=number)
+    # ticket 031-009: a real control_backend, matching
+    # DaemonService._camera_for's own production wiring exactly --
+    # without it, _calibrate_against_main_playfield's exposure push
+    # below would raise UnsupportedSetting on this exact hardware
+    # (camera.camera module docstring, ticket 023-001: cv2.VideoCapture.
+    # set() does not work for exposure/gain/etc on this camera's
+    # AVFoundation capture session).
+    cam = Camera(slug, OpenCVBackend(index), control_backend=UvcUtilBackend(identity.device_name), number=number)
     cam.open()
 
     cameras: Dict[str, Camera] = {slug: cam}
@@ -165,15 +173,14 @@ def _calibrate_against_main_playfield(service: DaemonService, slug: str) -> None
     on top of it starts running for real, with no code change needed.
     """
     service.set_playfield(main_playfield_definition())
-    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    service.set_camera_config(hardware_test_camera_config(slug, playfield="main-playfield"))
     result = service.calibrate(slug)
     if not result.succeeded:
         pytest.skip(
-            f"real-hardware calibration against main-playfield did not succeed "
-            f"(matched={result.matched_ids}, missing={result.missing_ids}, "
-            f"reason={result.reason}) -- expected while the field is obstructed/"
-            f"dark per sprint.md's documented hardware constraint; re-run once "
-            f"main-playfield is clear, lit, and unobstructed"
+            f"real-hardware calibration against main-playfield did not succeed -- "
+            f"{calibration_diagnosis(result)} -- if the field is genuinely "
+            f"obstructed or dark (sprint.md's documented hardware constraint), "
+            f"clear it and re-run"
         )
 
 
