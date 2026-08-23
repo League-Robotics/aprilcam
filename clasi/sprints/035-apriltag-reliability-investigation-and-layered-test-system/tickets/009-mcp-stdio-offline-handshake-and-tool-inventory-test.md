@@ -1,8 +1,9 @@
 ---
-id: '009'
+id: 009
 title: MCP stdio offline handshake and tool-inventory test
-status: open
-use-cases: [UC-22]
+status: in-progress
+use-cases:
+- UC-22
 depends-on: []
 github-issue: ''
 issue: aprilcam-v2-layered-test-system.md
