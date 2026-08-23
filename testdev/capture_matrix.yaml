@@ -72,6 +72,62 @@ cameras:
       - name: stress-highexp-logain
         controls: {exposure-time-abs: "40", gain: "1"}
 
+  # Arducam OV9281 (camera 5, monochrome global-shutter, main-playfield).
+  # Ambient-dependent exposure -- NOT a single fixed camera default like
+  # OV9782's -- see docs/knowledge/dark-camera-image-uvc-drift-reset.md's
+  # daylight sweep: exposure ~20 in daylight is the known-good daytime
+  # value (75-300 saturates in daylight, 0/5 AprilTags; 10 starts dropping
+  # ArUco), ~300 known-good at night (manual exposure by design -- the
+  # daemon never auto-adjusts). That "baseline exposure 20" is
+  # informational only, describing this camera's expected live state --
+  # like every camera in this file, the actual capture-time baseline is
+  # always read live from hardware (never this entry, never hardcoded --
+  # see the module docstring's "Config-schema note"), so the sweep below
+  # does not special-case 20 as "the" baseline value the way OV9782's
+  # entry skips its own baseline exposure (6). The sweep spans 5-300 to
+  # cover both day and night operating ranges in one committed fixture
+  # generation. No white-balance axis: OV9281 is a monochrome sensor, no
+  # color-temperature control exists on this hardware.
+  - match: "ov9281"
+    variations:
+      # -- exposure sweep spanning day (low) through night (high) --
+      - name: exp-005
+        controls: {exposure-time-abs: "5"}
+      - name: exp-010
+        controls: {exposure-time-abs: "10"}
+      - name: exp-015
+        controls: {exposure-time-abs: "15"}
+      - name: exp-020
+        controls: {exposure-time-abs: "20"}
+      - name: exp-030
+        controls: {exposure-time-abs: "30"}
+      - name: exp-050
+        controls: {exposure-time-abs: "50"}
+      - name: exp-075
+        controls: {exposure-time-abs: "75"}
+      - name: exp-100
+        controls: {exposure-time-abs: "100"}
+      - name: exp-150
+        controls: {exposure-time-abs: "150"}
+      - name: exp-200
+        controls: {exposure-time-abs: "200"}
+      - name: exp-300
+        controls: {exposure-time-abs: "300"}
+      # -- gain axis at baseline exposure -- values mirror OV9782's own
+      # gain sweep (same Arducam OV92xx sensor family); unconfirmed
+      # against this specific camera's live uvc-util range, so any value
+      # this hardware rejects is recorded (not silently dropped) in the
+      # manifest's skipped_variations.apply_failed rather than failing
+      # the whole run -- see apply_controls/run_camera.
+      - name: gain-01
+        controls: {gain: "1"}
+      - name: gain-04
+        controls: {gain: "4"}
+      - name: gain-08
+        controls: {gain: "8"}
+      - name: gain-16
+        controls: {gain: "16"}
+
 # Generic fallback for any camera with no matching `cameras` entry above
 # (e.g. HD USB CAMERA, which has no `settings` block in its config.json).
 # Baseline is whatever the hardware is set to when the tool starts — it is

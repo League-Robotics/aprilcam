@@ -80,11 +80,16 @@ Usage:
     python testdev/capture_matrix.py --all
     python testdev/capture_matrix.py arducam          # one camera, by pattern
     python testdev/capture_matrix.py --dry-run        # print the plan only
+    python testdev/capture_matrix.py hd-usb --field-state-id fs-20260823
+        # tag manifests with an explicit field-state id and write fixtures to
+        # tests/images/fs-20260823/<slug>/ instead of tests/images/<slug>/,
+        # so this generation coexists with an older one (sprint 035 ticket 003).
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import re
@@ -95,7 +100,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
 import cv2 as cv
 import numpy as np
@@ -211,6 +216,79 @@ def _run_uvc(uvc_bin: Path, device_name: str, *args: str, timeout: float = 5.0):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
+#: Raw uvc-util control names this tool's own vocabulary gates on, mapped
+#: to the (gate control name, manual value) that must be pushed before a
+#: value on the left will reliably stick. Mirrors ``camera.camera``'s
+#: ``_GATE_KEYS``-first convention (``camera/DESIGN.md`` §3: "Auto-exposure
+#: must be pushed manual before an exposure value sticks; auto-white-balance
+#: off before a WB temperature") -- but that module's ``_GATE_KEYS`` is
+#: keyed by ``Camera.apply_config``'s abstracted vocabulary (``exposure``,
+#: ``auto_exposure``, ...), not the raw uvc-util control names this tool
+#: drives hardware with directly (module docstring's "Config-schema note").
+#: Confirmed live: HD USB CAMERA's July run rejected every
+#: ``exposure-time-abs``/``white-balance-temp`` variation because its own
+#: LIVE baseline had ``auto-exposure-mode``/``auto-white-balance-temp``
+#: themselves set to "auto" -- uvc-util rejects a manual value while the
+#: gating auto mode is active. See ``tests/images/hd-usb-camera/manifest.json``'s
+#: ``skipped_variations.apply_failed`` for the recorded evidence (every one
+#: of ``exp-*``, ``wb-*``, and the two ``stress-*`` combos -- all of which
+#: touch exposure and/or white balance -- failed; every ``gain-*`` variation,
+#: ungated, succeeded).
+_GATE_FOR_VALUE_CONTROL: Dict[str, Tuple[str, str]] = {
+    "exposure-time-abs": ("auto-exposure-mode", "1"),
+    "white-balance-temp": ("auto-white-balance-temp", "false"),
+}
+
+#: Every gate control name from the map above, for ordering purposes.
+_GATE_CONTROLS: FrozenSet[str] = frozenset(gate for gate, _ in _GATE_FOR_VALUE_CONTROL.values())
+
+
+def _gate_first_order(controls: Dict[str, str]) -> Dict[str, str]:
+    """Reorder *controls* so any ``_GATE_CONTROLS`` member is pushed first,
+    deterministically -- mirrors ``camera.camera.Camera.apply_config``'s own
+    ``_GATE_KEYS``-first ordering, which this tool does not reuse (it drives
+    hardware directly) but should mirror per that module's docstring.
+
+    Without this, ``controls`` dicts built from a ``set`` union (e.g.
+    ``snapshot_baseline``'s ``default_names | variation_names``) iterate in
+    Python's hash-randomized order -- nondeterministic per-process -- so a
+    gate control could easily land *after* the value control it gates,
+    silently reproducing the HD-cam July bug on an unlucky run. Relative
+    order among non-gate keys is preserved (stable sort).
+    """
+    gate_items = [(k, v) for k, v in controls.items() if k in _GATE_CONTROLS]
+    rest_items = [(k, v) for k, v in controls.items() if k not in _GATE_CONTROLS]
+    return dict(gate_items + rest_items)
+
+
+def _ensure_gate_overrides(
+    controls: Dict[str, str], supported: Optional[Set[str]] = None,
+) -> Dict[str, str]:
+    """Force a value control's gate to manual when the value is present but
+    the gate is not already explicit in *controls*.
+
+    Applied to each *variation*'s own control set, never to the baseline
+    (which always reflects the true live hardware state -- the module
+    docstring's "NEVER a hardcoded baseline" contract; only what this tool
+    actively varies gets this override). A variation that already names the
+    gate explicitly (e.g. the auto-exposure toggle test itself) is left
+    untouched -- this fills a gap, it never overrides stated intent.
+
+    *supported* (a camera's live ``uvc-util -c`` control names, when known)
+    guards against injecting a control name a given camera does not even
+    expose -- pushing an unsupported control would fail and wrongly mark an
+    otherwise-fine variation as ``skipped_apply_failed``.
+    """
+    out = dict(controls)
+    for value_ctrl, (gate_ctrl, manual_value) in _GATE_FOR_VALUE_CONTROL.items():
+        if value_ctrl not in out or gate_ctrl in out:
+            continue
+        if supported is not None and gate_ctrl not in supported:
+            continue
+        out[gate_ctrl] = manual_value
+    return _gate_first_order(out)
+
+
 def apply_control(uvc_bin: Path, device_name: str, name: str, value: str) -> bool:
     try:
         result = _run_uvc(uvc_bin, device_name, "-s", f"{name}={value}")
@@ -227,9 +305,17 @@ def apply_control(uvc_bin: Path, device_name: str, name: str, value: str) -> boo
 
 
 def apply_controls(uvc_bin: Path, device_name: str, controls: Dict[str, str]) -> List[str]:
-    """Apply every control in *controls*. Returns the names that failed to apply."""
+    """Apply every control in *controls*, gate controls first. Returns the
+    names that failed to apply.
+
+    Ordering is unconditional and applies to every caller -- baseline
+    restore/apply as well as a single variation's overlay -- via
+    :func:`_gate_first_order`, mirroring ``camera.camera.Camera.
+    apply_config``'s own ``_GATE_KEYS``-first convention (``camera/
+    DESIGN.md`` §3).
+    """
     failed: List[str] = []
-    for name, value in controls.items():
+    for name, value in _gate_first_order(controls).items():
         if not apply_control(uvc_bin, device_name, name, str(value)):
             failed.append(name)
     return failed
@@ -545,9 +631,69 @@ def dedupe_against_baseline(variations: List[Variation], baseline: Dict[str, str
 # ---------------------------------------------------------------------------
 
 
-def ensure_field_state_stub(output_root: Path) -> str:
-    """Create ``tests/images/field-state.json`` if absent; return the current id."""
+def ensure_field_state_stub(output_root: Path, field_state_id: Optional[str] = None) -> str:
+    """Create/update ``tests/images/field-state.json`` -- always at the
+    fixture root, never per-camera, so every camera's manifest in a run can
+    reference the SAME field-state id. Returns the id to stamp into
+    manifests.
+
+    With an explicit *field_state_id* (``--field-state-id``): ensures a
+    ``"states"`` entry exists for it (a stub, if none is already there -- an
+    operator session fills in the real ``visible_*``/``status`` afterward,
+    per ``docs/test-plans/camera-image-matrix.md`` §5) and sets it as
+    ``"current"``. An existing entry for that id is left completely
+    untouched -- this never clobbers a stakeholder-confirmed entry.
+
+    With no *field_state_id*: unchanged legacy behavior -- returns the
+    existing ``"current"`` id if the file already exists and parses,
+    otherwise generates a fresh ``"unverified-<date>"`` stub id and writes
+    it.
+    """
     path = output_root / "field-state.json"
+    if field_state_id:
+        data: dict = {"current": None, "states": {}}
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                log.warning(
+                    "field-state.json exists but could not be parsed; "
+                    "rewriting its top-level structure (existing 'states' "
+                    "entries for other ids are lost in this case)"
+                )
+                data = {"current": None, "states": {}}
+        data.setdefault("states", {})
+        if field_state_id not in data["states"]:
+            data["states"][field_state_id] = {
+                "status": "unverified",
+                "description": (
+                    "Stub generated by testdev/capture_matrix.py "
+                    f"--field-state-id {field_state_id}. The set of tags/"
+                    "objects actually visible on the field at capture time "
+                    "has not been confirmed by the stakeholder yet -- "
+                    "populate visible_april_tags / visible_aruco_tags / "
+                    "visible_rectangles / visible_dots (IDs from "
+                    "main-playfield.json) and flip status to \"confirmed\" "
+                    "before wiring image-matrix test assertions to this "
+                    "state."
+                ),
+                "visible_april_tags": [],
+                "visible_aruco_tags": [],
+                "visible_rectangles": [],
+                "visible_dots": [],
+            }
+        else:
+            log.info(
+                "field-state.json already has a '%s' entry -- leaving it untouched",
+                field_state_id,
+            )
+        data["current"] = field_state_id
+        output_root.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        log.info("field-state.json: current=%s (%s)", field_state_id, path)
+        return field_state_id
+
+    # -- legacy path: no --field-state-id given, behavior unchanged --
     if path.exists():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -583,6 +729,56 @@ def ensure_field_state_stub(output_root: Path) -> str:
         path.write_text(json.dumps(stub, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         log.info("wrote stub field-state.json (id=%s)", state_id)
     return state_id
+
+
+def resolve_fixture_dir(output_root: Path, explicit_field_state_id: Optional[str], slug: str) -> Path:
+    """Where one camera's fixtures for this run are written.
+
+    With an explicit ``--field-state-id``, fixtures nest under a
+    per-generation directory (``tests/images/<field-state-id>/<slug>/``) so
+    a new generation coexists with an older one instead of overwriting it
+    in place (the July corpus stays put when a later ``fs-20260823`` run
+    happens). With no ``--field-state-id`` (the default/legacy path), the
+    fixture directory is unchanged: ``tests/images/<slug>/`` directly under
+    the fixture root -- existing camera entries keep their existing layout
+    with no flags.
+    """
+    if explicit_field_state_id:
+        return output_root / explicit_field_state_id / slug
+    return output_root / slug
+
+
+def pin_calibration_snapshot(directories: Directories, cam_slug: str, fixture_dir: Path) -> Optional[str]:
+    """Copy the camera's active ``calibration.json`` (read-only -- copy
+    only, the source is never touched) beside its fixtures and return its
+    sha256 hex digest, or ``None`` if this camera has no calibration yet.
+
+    ``docs/test-plans/camera-image-matrix.md`` §6.2: L0's world-accuracy
+    tests must not depend on live machine state, so whatever calibration a
+    camera held at capture time is pinned alongside its images and its
+    hash recorded in the manifest -- a later drift/recalibration on the
+    real machine can never silently invalidate what a committed fixture
+    generation's tests assert against.
+
+    Source path mirrors ``daemon/service.py``'s own convention exactly:
+    ``<state_dir>/cameras/<slug>/calibration.json``.
+    """
+    src = directories.state_dir / "cameras" / cam_slug / "calibration.json"
+    if not src.is_file():
+        log.warning(
+            "%s: no calibration.json at %s -- capturing without a pinned "
+            "calibration snapshot (this camera has not been calibrated yet; "
+            "world-accuracy tests against this fixture generation will skip "
+            "until it is calibrated and recaptured)",
+            cam_slug, src,
+        )
+        return None
+    data = src.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    dest = fixture_dir / "calibration.json"
+    dest.write_bytes(data)
+    log.info("%s: pinned calibration.json snapshot (sha256=%s) -> %s", cam_slug, digest, dest)
+    return digest
 
 
 # ---------------------------------------------------------------------------
@@ -635,13 +831,14 @@ def run_camera(
     field_state_id: str,
     settle_override: Optional[float],
     detector: TagDetector,
+    directories: Directories,
+    explicit_field_state_id: Optional[str] = None,
 ) -> CameraRunResult:
     result = CameraRunResult(device_name=cam.device_name, dir_name=cam.slug)
     t0 = time.monotonic()
 
-    fixture_slug = cam.slug
-    fixture_dir = output_root / fixture_slug
-    result.fixture_dir = fixture_slug
+    fixture_dir = resolve_fixture_dir(output_root, explicit_field_state_id, cam.slug)
+    result.fixture_dir = str(fixture_dir.relative_to(output_root))
 
     backend = OpenCVBackend(cam.live_index)
     try:
@@ -749,6 +946,14 @@ def run_camera(
             else:
                 log.info("%s: no matrix entry matched -- using generic fallback sweep", cam.device_name)
                 variations = build_fallback_variations(uvc_bin, cam.device_name, fb_spec, supported)
+            # HD-cam control-ordering fix: force each variation's own gated
+            # value control's gate to manual, when the variation touches the
+            # value but doesn't already say what the gate should be -- see
+            # _ensure_gate_overrides/_GATE_FOR_VALUE_CONTROL above.
+            variations = [
+                Variation(name=v.name, controls=_ensure_gate_overrides(v.controls, supported), settle_s=v.settle_s)
+                for v in variations
+            ]
             variations = dedupe_against_baseline(variations, baseline_controls)
 
             settle_auto = matrix_spec.get("settle_s_auto", 3.0)
@@ -779,6 +984,10 @@ def run_camera(
                 effective = {**baseline_controls, **var.controls}
                 _capture_one(var.name, effective, settle_s)
 
+            # -- calibration snapshot pin (§6.2: L0's world-accuracy tests
+            # must not depend on live machine state) --
+            calibration_sha256 = pin_calibration_snapshot(directories, cam.slug, fixture_dir)
+
             # -- manifest --
             manifest = {
                 "camera": {
@@ -792,6 +1001,7 @@ def run_camera(
                 "package_version": _package_version(),
                 "daemon_version": _package_version(),
                 "field_state_id": field_state_id,
+                "calibration_snapshot_sha256": calibration_sha256,
                 "matrix_source": "matrix" if matrix_entry is not None else "fallback",
                 "baseline_controls": baseline_controls,
                 "capture_started_at": manifest_images[0]["captured_at"] if manifest_images else None,
@@ -853,6 +1063,18 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--output-dir", default=None, help="Fixture output root (default: tests/images).")
     p.add_argument("--matrix-spec", default=None, help="Path to capture_matrix.yaml (default: alongside this script).")
     p.add_argument("--settle", type=float, default=None, help="Override the per-variation settle time (seconds).")
+    p.add_argument(
+        "--field-state-id",
+        default=None,
+        help="Tag this run's manifests with an explicit field-state id (e.g. "
+        "fs-20260823) instead of the default auto-generated/legacy "
+        "'unverified-<date>' stub, and nest this generation's fixtures under "
+        "tests/images/<field-state-id>/<slug>/ so it coexists with an older "
+        "generation instead of overwriting it. tests/images/field-state.json "
+        "(always at the fixture root, never per-camera) gains/keeps a stub "
+        "entry for this id and is set as current. Omit to keep the default "
+        "unnested output and legacy field-state.json behavior.",
+    )
     p.add_argument("-v", "--verbose", action="store_true", help="Debug logging.")
     return p.parse_args(argv)
 
@@ -908,7 +1130,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     output_root = Path(args.output_dir) if args.output_dir else DEFAULT_OUTPUT_ROOT
     output_root.mkdir(parents=True, exist_ok=True)
-    field_state_id = ensure_field_state_stub(output_root)
+    field_state_id = ensure_field_state_stub(output_root, args.field_state_id)
 
     matrix_spec_path = Path(args.matrix_spec) if args.matrix_spec else DEFAULT_MATRIX_SPEC
     matrix_spec = load_matrix_spec(matrix_spec_path)
@@ -924,6 +1146,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"\n=== capturing {cam.device_name} ===")
         result = run_camera(
             cam, uvc_bin, matrix_spec, output_root, field_state_id, args.settle, detector,
+            directories, args.field_state_id,
         )
         results.append(result)
         if result.error:

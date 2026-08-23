@@ -3,12 +3,18 @@
 **Status:** IMPLEMENTED — capture tool built and first fixtures captured 2026-07-29
 (`testdev/capture_matrix.py` + `testdev/capture_matrix.yaml`; fixtures in
 `tests/images/` — 19 Arducam OV9782 images, 9 HD USB CAMERA images, manifests +
-field-state stub). Remaining work tracked in
-`clasi/issues/image-matrix-fixture-test-suite.md`: the pytest suite (§6), the
-HD USB control-ordering fix (its exposure/WB values are rejected on a live
-handle while auto modes are active — answered §8's first open item), and
-field-state verification.
-**Date:** 2026-07-29
+field-state stub). **Updated 2026-08-23 (sprint 035 ticket 003):** capture
+tool gained `--field-state-id` (§4), calibration-snapshot pinning (§6.2), a
+dedicated `ov9281` matrix entry, and the HD USB control-ordering fix (§4,
+§8's first open item — answered: the exposure/WB values were rejected
+because the live baseline itself had `auto-exposure-mode`/
+`auto-white-balance-temp` set to "auto"; fixed by forcing each variation's
+gated value control's gate to manual before the value, ordered gate-first).
+Remaining work tracked in `clasi/issues/image-matrix-fixture-test-suite.md`:
+the pytest suite (§6, superseded by sprint 035's `tests/image_matrix/`
+package) and the operator-assisted `fs-20260823` capture session (sprint 035
+ticket 004) that exercises this ticket's changes against real hardware.
+**Date:** 2026-07-29 (capture tool); 2026-08-23 (ticket 003 updates)
 **Stakeholder intent:** capture real playfield images from several cameras
 under systematically varied camera configurations, save them as regenerable
 test fixtures, and run the detection/calibration pipeline against them as
@@ -99,7 +105,24 @@ pattern, or alpha code — same resolution as other CLI tools).
 3. **Select matrix** from `capture_matrix.yaml` by device-name pattern.
 4. Per variation:
    a. Build the variation control set = baseline controls with the
-      varied values.
+      varied values. **Gate-first ordering (sprint 035 ticket 003).**
+      Any auto-mode control that gates a value control (`auto-exposure-mode`
+      before `exposure-time-abs`; `auto-white-balance-temp` before
+      `white-balance-temp`) is always pushed first — both because a
+      variation that touches the value but not the gate has the gate
+      forced to manual (`_ensure_gate_overrides`), and because the whole
+      push, baseline or variation, is reordered gate-first regardless of
+      dict iteration order (`_gate_first_order`, mirroring
+      `camera.camera.Camera.apply_config`'s own `_GATE_KEYS`-first
+      convention). Without this, a `set`-derived baseline dict's
+      hash-randomized iteration order could push a value before its gate
+      on some runs and not others — exactly what happened to HD USB
+      CAMERA (camera 2) in the July run: its live baseline itself had
+      both auto modes active, so every `exposure-time-abs`/
+      `white-balance-temp` variation (and the two combined stress
+      states) was silently rejected — recorded in
+      `tests/images/hd-usb-camera/manifest.json`'s
+      `skipped_variations.apply_failed`.
    b. Apply directly to the hardware via the same uvc-util path the
       daemon uses (`_apply_camera_settings`). `config.json` on disk is
       **never modified** — variations exist only on the hardware.
@@ -110,20 +133,44 @@ pattern, or alpha code — same resolution as other CLI tools).
    block. A crashed run must not leave the playfield camera
    misconfigured; since disk config is untouched, a daemon restart also
    fully recovers.
-6. Write/refresh the **manifest**.
+6. Write/refresh the **manifest**, including a pinned `calibration.json`
+   snapshot (§6.2) and, when `--field-state-id` was given, that id.
+
+### `--field-state-id` (sprint 035 ticket 003)
+
+`python testdev/capture_matrix.py <camera> --field-state-id fs-20260823`
+tags every manifest this run produces with the given id (instead of the
+default auto-generated `unverified-<date>` stub) and nests the run's
+fixtures under `tests/images/<field-state-id>/<slug>/` instead of the flat
+`tests/images/<slug>/` layout — so a new field-state generation coexists
+with an older one rather than overwriting it in place. Omitting the flag
+keeps the default unnested layout and legacy field-state.json behavior,
+so existing camera entries and their existing captures are unaffected.
+`tests/images/field-state.json` is always read/written at the fixture
+root (`tests/images/field-state.json`), never per-camera and never
+per-generation, so every camera's manifest in one run can reference the
+SAME field-state id; an explicit id's `--field-state-id` run only ever
+adds/sets `"current"` and fills a stub entry when one doesn't already
+exist — it never clobbers a stakeholder-confirmed entry for that id.
 
 ### Fixture layout (committed to git — regenerable but CI-usable)
 
 ```
 tests/images/
-  <camera-slug>/
+  field-state.json         # fixture root -- never per-camera
+  <camera-slug>/            # default (no --field-state-id) layout
     manifest.json          # per-camera capture session record
+    calibration.json        # pinned calibration snapshot (§6.2)
     baseline.jpg
     exp-03.jpg exp-04.jpg ... exp-40.jpg
     gain-01.jpg ... gain-16.jpg
     auto-exposure.jpg
     wb-3000.jpg wb-6500.jpg wb-auto.jpg
     stress-lowexp-higain.jpg ...
+  <field-state-id>/<camera-slug>/   # with --field-state-id fs-...
+    manifest.json
+    calibration.json
+    baseline.jpg ...
 ```
 
 `manifest.json` per image records: full effective config document,
@@ -164,7 +211,17 @@ parallel reimplementation).
    (start: 1.5 cm; tighten empirically). Uses the camera's committed
    calibration snapshot (the manifest pins which calibration.json was
    active; a copy is stored beside the fixtures so tests don't depend
-   on live machine state).
+   on live machine state). **Implemented (sprint 035 ticket 003):**
+   `testdev/capture_matrix.py`'s `pin_calibration_snapshot` copies
+   `<state_dir>/cameras/<slug>/calibration.json` (the same path
+   `daemon/service.py` writes to — see `docs/design/design.md`
+   §6/`calibration/DESIGN.md`) to `<fixture-dir>/calibration.json`
+   **read-only** — it only ever reads the source, never writes it, so a
+   capture run can never disturb a real camera's live calibration — and
+   records its sha256 in the manifest's `calibration_snapshot_sha256`
+   field. When a camera has no calibration yet, the field is `null` and
+   the run still proceeds (logged, not fatal) — that camera's
+   world-accuracy tests skip until it is calibrated and recaptured.
 3. **Geometry conventions.** Using two tags with known east/north
    relationships from the survey: assert +x east / +y north / north-up
    on the deskewed image — the axis-mirror regression tests required by
