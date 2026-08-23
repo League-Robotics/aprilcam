@@ -567,16 +567,58 @@ class Camera(_CameraBase):
             if value is None:
                 continue  # blank -- nothing to push for this key
             backend, _get_property, set_property = accessors[key]
-            if not set_property(key, float(value)):
+
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError) as exc:
+                # A non-numeric settings value (e.g. a stray JSON string
+                # like "100" -- ticket: camera 3's persisted config held
+                # exactly this) must never reach set_property or
+                # _describe_set_failure below: both assume a real float,
+                # and a bare comparison against a str
+                # (UvcUtilBackend.describe_set_failure's
+                # ``minimum <= value <= maximum``) raises an untyped
+                # TypeError that crosses the RPC boundary unclean
+                # instead of a typed, diagnosable error (2026-08-22
+                # hotfix). config/loader.py's ``_coerce_settings``
+                # rejects this at load time for every document that goes
+                # through it, but this is the one place every settings
+                # value is actually used regardless of origin, so it is
+                # also where the last-resort, always-clean guarantee has
+                # to live.
+                self._rollback_applied(applied, accessors, previous)
+                raise UnsupportedSetting(
+                    key,
+                    reason=(
+                        f"{self._slug}: value {value!r} for setting {key!r} is not a "
+                        f"number ({type(value).__name__})"
+                    ),
+                ) from exc
+            if not set_property(key, numeric_value):
                 # Whole push fails; undo everything already applied
                 # this call, each key through its own backend, so the
                 # camera is left exactly as it was (interfaces.py's
                 # Camera.apply_config contract).
-                for applied_key in applied:
-                    _, _, applied_set_property = accessors[applied_key]
-                    applied_set_property(applied_key, previous.get(applied_key, 0.0))
-                raise UnsupportedSetting(key, reason=self._describe_set_failure(key, value, backend))
+                self._rollback_applied(applied, accessors, previous)
+                raise UnsupportedSetting(
+                    key, reason=self._describe_set_failure(key, numeric_value, backend)
+                )
             applied.append(key)
+
+    @staticmethod
+    def _rollback_applied(
+        applied: list,
+        accessors: Dict[str, Tuple[Any, Any, Any]],
+        previous: Dict[str, float],
+    ) -> None:
+        """Undo every key in *applied* through its own backend
+        (:meth:`apply_config`'s whole-push, hard-error contract) --
+        shared by both of that method's failure paths (a non-numeric
+        settings value, and a hardware-rejected write) so the rollback
+        behaviour cannot drift between them."""
+        for applied_key in applied:
+            _, _, applied_set_property = accessors[applied_key]
+            applied_set_property(applied_key, previous.get(applied_key, 0.0))
 
     def _settle_after_open(self) -> None:
         """Read-and-discard :data:`_OPEN_SETTLE_READS` frames from

@@ -104,6 +104,7 @@ from aprilcam.errors import (
     UnknownCamera,
     UnknownGuide,
     UnknownPlayfield,
+    UnsupportedSetting,
 )
 from aprilcam.playfield.interfaces import Playfield
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
@@ -353,6 +354,11 @@ def _reconstruct_error(exc: grpc.RpcError, target: str) -> Exception:
             metadata.get("aprilcam-kind", "unknown"),
             int(metadata.get("aprilcam-bound", "0")),
             int(metadata.get("aprilcam-actual", "0")),
+        )
+    if error_type == "UnsupportedSetting":
+        return UnsupportedSetting(
+            metadata.get("aprilcam-key", "unknown"),
+            reason=metadata.get("aprilcam-reason") or None,
         )
     return ConnectionFailed(target, reason=exc.details() or str(exc.code()))
 

@@ -410,6 +410,94 @@ def test_camera_config_non_object_settings_is_rejected(loader, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# settings value coercion (2026-08-22 hotfix) -- a numeric-looking JSON
+# *string* (e.g. camera 3's real on-disk "exposure": "100") must never
+# reach Camera.apply_config un-coerced: it survives float(value) at the
+# point a value is pushed, but a later diagnostic comparison
+# (UvcUtilBackend.describe_set_failure's `minimum <= value <= maximum`)
+# does not survive a raw str, and previously raised a bare TypeError
+# instead of a typed, catchable error. Rejecting/normalising here, at
+# load time, is what stops that class of bug recurring silently for any
+# numeric setting, not just exposure.
+# ---------------------------------------------------------------------------
+
+
+def test_camera_config_numeric_string_setting_is_coerced_to_a_number(loader, tmp_path):
+    """The exact real-world shape that broke camera 3: an
+    accidentally-quoted numeric setting. Coerced to a real ``int``
+    rather than rejected -- self-healing, not just error-avoiding."""
+    doc = {"name": "arducam-ov9782-usb-camera", "settings": {"exposure": "100"}}
+    path = _write(tmp_path, "camera-string-exposure.json", doc)
+
+    config = loader.load_camera_config(path)
+
+    assert config.settings == {"exposure": 100}
+    assert isinstance(config.settings["exposure"], int)
+
+
+def test_camera_config_numeric_string_setting_with_decimal_coerces_to_float(loader, tmp_path):
+    doc = {"name": "hd-usb-camera", "settings": {"gain": "2.5"}}
+    path = _write(tmp_path, "camera-string-gain.json", doc)
+
+    config = loader.load_camera_config(path)
+
+    assert config.settings == {"gain": 2.5}
+    assert isinstance(config.settings["gain"], float)
+
+
+def test_camera_config_non_numeric_string_setting_is_rejected(loader, tmp_path):
+    doc = {"name": "hd-usb-camera", "settings": {"exposure": "not-a-number"}}
+    path = _write(tmp_path, "camera-garbage-exposure.json", doc)
+
+    with pytest.raises(MalformedDocument, match="exposure"):
+        loader.load_camera_config(path)
+
+
+def test_camera_config_boolean_setting_is_rejected(loader, tmp_path):
+    """A JSON boolean is never silently coerced to 1.0/0.0 -- nothing in
+    this schema has ever meant a bool for a settings value."""
+    doc = {"name": "hd-usb-camera", "settings": {"auto_exposure": True}}
+    path = _write(tmp_path, "camera-bool-setting.json", doc)
+
+    with pytest.raises(MalformedDocument, match="auto_exposure"):
+        loader.load_camera_config(path)
+
+
+def test_camera_config_none_setting_stays_none(loader, tmp_path):
+    """The blank-template placeholder (CameraConfig.settings' own
+    docstring) is untouched by coercion."""
+    doc = {"name": "hd-usb-camera", "settings": {"exposure": None}}
+    path = _write(tmp_path, "camera-blank-setting.json", doc)
+
+    config = loader.load_camera_config(path)
+
+    assert config.settings == {"exposure": None}
+
+
+def test_camera_config_already_numeric_setting_is_untouched(loader, tmp_path):
+    """An already-well-typed file's shape is never perturbed by this
+    pass -- a float stays a float, an int stays an int."""
+    doc = {"name": "hd-usb-camera", "settings": {"exposure": 100, "gain": 2.5}}
+    path = _write(tmp_path, "camera-numeric-settings.json", doc)
+
+    config = loader.load_camera_config(path)
+
+    assert config.settings == {"exposure": 100, "gain": 2.5}
+    assert isinstance(config.settings["exposure"], int)
+    assert isinstance(config.settings["gain"], float)
+
+
+def test_parse_camera_config_rejects_non_numeric_setting_too(loader):
+    """The dict-based entry point (MCP's ``set_camera_config`` tool)
+    runs the identical coercion/validation -- not just the file-based
+    loader."""
+    document = {"name": "hd-usb-camera", "settings": {"exposure": "abc"}}
+
+    with pytest.raises(MalformedDocument, match="exposure"):
+        loader.parse_camera_config(document)
+
+
+# ---------------------------------------------------------------------------
 # camera_position (sprint 029 ticket 001) -- nadir + optical height, the
 # two inputs calibration.geometry.project_tag_to_field_plane needs.
 # ---------------------------------------------------------------------------

@@ -56,6 +56,7 @@ from aprilcam.errors import (
     UnknownCamera,
     UnknownGuide,
     UnknownPlayfield,
+    UnsupportedSetting,
 )
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
 from aprilcam.types import (
@@ -290,6 +291,37 @@ def test_get_camera_config_camera_position_none_when_unset(client, held_camera):
     fetched = client.get_camera_config(slug)
 
     assert fetched.camera_position is None
+
+
+def test_set_camera_config_with_non_numeric_setting_raises_unsupported_setting_with_fields_intact(
+    client, held_camera
+):
+    """2026-08-22 hotfix: camera 3's real on-disk config held
+    ``"exposure": "100"`` (a JSON string). Before this fix, a
+    non-numeric settings value crashed ``Camera.apply_config`` with a
+    bare, untyped ``TypeError`` that ``daemon/rpc.py``'s ``_abort``
+    could only report as opaque ``INTERNAL`` text -- and even a clean
+    ``UnsupportedSetting`` had no trailing-metadata mapping at all
+    (``UnsupportedSetting`` was entirely absent from ``_STATUS_CODES``
+    and from ``daemon_client.py``'s ``_reconstruct_error``), so it
+    reconstructed client-side as a generic
+    ``ConnectionFailed("did not answer: ...")`` instead of the typed
+    exception a caller could actually catch. This confirms the full
+    round trip -- daemon-side raise, RPC trailing metadata, client-side
+    reconstruction -- now produces the real ``UnsupportedSetting``,
+    naming the key, over the real gRPC wire (not just a direct
+    in-process ``Camera.apply_config`` call, which
+    ``test_camera.py`` already covers)."""
+    _, slug, _ = held_camera
+
+    with pytest.raises(UnsupportedSetting) as excinfo:
+        client.set_camera_config(
+            CameraConfig(name=slug, playfield=None, settings={"exposure": "not-a-number"})
+        )
+
+    assert excinfo.value.key == "exposure"
+    assert excinfo.value.reason is not None
+    assert "not-a-number" in excinfo.value.reason
 
 
 def test_status_round_trip(client, directories, held_camera):

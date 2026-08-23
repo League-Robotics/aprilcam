@@ -718,6 +718,92 @@ def test_apply_config_rolls_back_on_mid_push_failure():
     assert backend.get_property("gain") == 5.0  # rolled back
 
 
+# ---------------------------------------------------------------------------
+# non-numeric settings values (2026-08-22 hotfix) -- camera 3's real,
+# on-disk config held "exposure": "100" (a JSON *string*), which
+# survived config/loader.py's own (then-nonexistent) type checking and
+# crashed deep inside UvcUtilBackend.describe_set_failure's `minimum <=
+# value <= maximum` with a bare, untyped TypeError instead of a clean
+# UnsupportedSetting. config/loader.py's parse_camera_config now rejects
+# this at load time (tests/aprilcam/config/test_loader.py), but this is
+# the one place every settings value is actually used regardless of
+# where it came from, so it is also where the last-resort guarantee
+# belongs.
+# ---------------------------------------------------------------------------
+
+
+def test_apply_config_non_numeric_setting_raises_typed_error_not_typeerror():
+    """A settings value ``float()`` cannot convert (e.g. a config
+    document built by hand, bypassing config/loader.py's own
+    validation) must raise a clean, typed ``UnsupportedSetting`` naming
+    the camera and the key -- never a bare ``TypeError``/``ValueError``
+    escaping ``apply_config``."""
+    cam = Camera("cam-a", FakeBackend())
+    cam.open()
+    cfg = CameraConfig(name="cam-a", playfield=None, settings={"exposure": "not-a-number"})
+    with pytest.raises(UnsupportedSetting) as exc_info:
+        cam.apply_config(cfg)
+    assert exc_info.value.key == "exposure"
+    assert exc_info.value.reason is not None
+    assert "not-a-number" in exc_info.value.reason
+    assert "cam-a" in exc_info.value.reason
+
+
+def test_apply_config_numeric_string_setting_still_applies():
+    """A numeric-looking string (camera 3's exact real value, "100")
+    is coerced and pushed normally -- config/loader.py's own validation
+    is what normally catches/normalises this before it ever reaches
+    here, but apply_config itself must not choke on it either (defense
+    in depth, matching real hardware: ``set_property`` genuinely accepts
+    ``float("100")``, only the *diagnostic* path used to choke)."""
+    backend = FakeBackend()
+    cam = Camera("cam-a", backend)
+    cam.open()
+    cfg = CameraConfig(name="cam-a", playfield=None, settings={"exposure": "100"})
+    cam.apply_config(cfg)
+    assert backend.get_property("exposure") == 100.0
+
+
+def test_apply_config_non_numeric_setting_rolls_back_previously_applied_keys():
+    backend = FakeBackend()
+    cam = Camera("cam-a", backend)
+    cam.open()
+    backend.set_property("gain", 5.0)  # pre-existing value to roll back to
+
+    cfg = CameraConfig(name="cam-a", playfield=None, settings={"gain": 9.0, "exposure": "bogus"})
+    with pytest.raises(UnsupportedSetting):
+        cam.apply_config(cfg)
+    assert backend.get_property("gain") == 5.0  # rolled back
+
+
+def test_apply_config_describe_set_failure_receives_a_coerced_float_not_the_raw_string():
+    """The exact real-hardware bug (camera 3's real traceback):
+    ``UvcUtilBackend.describe_set_failure`` compares ``minimum <= value
+    <= maximum`` -- an un-coerced string reaching it raises a bare
+    ``TypeError``. ``Camera.apply_config`` must pass
+    ``_describe_set_failure`` the already-coerced float, never
+    ``config.settings[key]`` verbatim."""
+    backend = FakeControlBackend(names=("exposure",))
+    backend.set_property = lambda name, value: False  # type: ignore[method-assign]
+    seen: list = []
+
+    def spy_describe(name, value):
+        seen.append(value)
+        # Mirrors UvcUtilBackend.describe_set_failure's own comparison,
+        # which raises TypeError if *value* is still a str here.
+        assert 0.0 <= value <= 1000.0
+        return "rejected"
+
+    backend.describe_set_failure = spy_describe  # type: ignore[attr-defined]
+    cam = Camera("cam-a", FakeBackend(), control_backend=backend)
+    cam.open()
+    cfg = CameraConfig(name="cam-a", playfield=None, settings={"exposure": "100"})
+    with pytest.raises(UnsupportedSetting):
+        cam.apply_config(cfg)
+    assert seen == [100.0]
+    assert isinstance(seen[0], float)
+
+
 def test_apply_config_gated_key_failure_names_the_missing_gate_when_backend_has_no_diagnostic(
 ) -> None:
     """Ticket 030-005: ``FakeBackend`` has no ``describe_set_failure``

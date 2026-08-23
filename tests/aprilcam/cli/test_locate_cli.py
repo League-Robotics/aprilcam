@@ -531,9 +531,23 @@ def test_locate_refuses_a_reference_registered_with_nonzero_mount_z(capsys):
     assert daemon.get_tag_calls == []  # no detection was attempted
 
 
-def test_locate_allows_a_reference_registered_with_zero_mount_z(capsys):
+def test_locate_allows_a_reference_registered_with_zero_mount_z(capsys, tmp_path):
     """mount_z <= 0 is project_tag_to_field_plane's own no-op sentinel --
-    identical to 'unregistered' for the contamination guard's purpose."""
+    identical to 'unregistered' for the contamination guard's purpose.
+
+    ``config_dir`` is pinned to ``tmp_path`` (2026-08-22 hotfix) --
+    without it, ``_seams`` omits ``directories_factory`` entirely and
+    ``cmd_locate`` falls back to its real default, ``SystemDirectories``.
+    This test reaches ``code == 0`` (a genuine solve-and-apply, unlike
+    every other ``_seams(...)`` call in this file with no ``config_dir``,
+    all of which exit before ever writing), so with no override it wrote
+    ``_camera_config()``'s fixture settings straight into this real dev
+    machine's actual ``~/.config/aprilcam/cameras/arducam-ov9782-usb-
+    camera/config.json`` -- the exact live file for the exact real
+    camera this constant names -- silently clobbering whatever was
+    really configured there. Confirmed live: running this file
+    reintroduced the real ``"exposure": "100"`` string-typed bug this
+    same sprint's hotfix had just corrected on disk."""
     daemon = _FakeDaemon(
         camera_config=_camera_config(),
         playfield=_playfield(),
@@ -548,7 +562,7 @@ def test_locate_allows_a_reference_registered_with_zero_mount_z(capsys):
 
     code = locate_cli.cmd_locate(
         _args(reference=["15:dot-northeast-orange:17.2", "14:dot-southwest-orange:15.0"]),
-        **_seams(daemon=daemon, loader=loader),
+        **_seams(daemon=daemon, loader=loader, config_dir=tmp_path / "config"),
     )
 
     assert code == 0

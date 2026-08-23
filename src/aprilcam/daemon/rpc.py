@@ -96,6 +96,7 @@ from aprilcam.errors import (
     UnknownCamera,
     UnknownGuide,
     UnknownPlayfield,
+    UnsupportedSetting,
 )
 from aprilcam.playfield.interfaces import Playfield
 from aprilcam.proto import aprilcam_v2_pb2, aprilcam_v2_pb2_grpc
@@ -170,6 +171,19 @@ _STATUS_CODES = {
     # convention, distinct from INVALID_ARGUMENT (the request is not
     # malformed, it is simply larger than this daemon's fixed capacity).
     AnnotationLimitExceeded: grpc.StatusCode.RESOURCE_EXHAUSTED,
+    # A set_camera_config push (or an apply-on-open of a stored/on-disk
+    # document) naming a key the camera's backend(s) do not support, or
+    # a value the hardware rejected (out of range, still gated by an
+    # auto-mode control, or -- the 2026-08-22 hotfix's own trigger -- a
+    # non-numeric settings value) -- INVALID_ARGUMENT matches gRPC's own
+    # "the request itself is malformed/unacceptable" convention, distinct
+    # from FAILED_PRECONDITION's "state doesn't allow it right now" (the
+    # request would still be wrong on a retry with no state change).
+    # Previously unmapped (fell through to the generic INTERNAL default
+    # below with no metadata a client could reconstruct from -- every
+    # UnsupportedSetting crossed the RPC boundary as an opaque
+    # ConnectionFailed("did not answer: ...") until this entry existed).
+    UnsupportedSetting: grpc.StatusCode.INVALID_ARGUMENT,
 }
 
 
@@ -764,6 +778,13 @@ def _abort(context: grpc.ServicerContext, exc: Exception) -> None:
     * :class:`~aprilcam.errors.AnnotationLimitExceeded` (ticket
       031-010): + ``aprilcam-kind``, ``aprilcam-bound``,
       ``aprilcam-actual``.
+    * :class:`~aprilcam.errors.UnsupportedSetting` (2026-08-22 hotfix):
+      + ``aprilcam-key``, and ``aprilcam-reason`` when ``.reason`` is
+      set -- previously unmapped entirely (fell through to the generic
+      ``AprilCamError`` case below with no extra metadata, so the
+      client's ``_reconstruct_error`` had nothing to dispatch on and
+      reported every ``UnsupportedSetting`` as an opaque
+      ``ConnectionFailed``).
     """
     if isinstance(exc, AprilCamError):
         code = grpc.StatusCode.INTERNAL
@@ -785,6 +806,10 @@ def _abort(context: grpc.ServicerContext, exc: Exception) -> None:
             metadata.append(("aprilcam-kind", exc.kind))
             metadata.append(("aprilcam-bound", str(exc.bound)))
             metadata.append(("aprilcam-actual", str(exc.actual)))
+        elif isinstance(exc, UnsupportedSetting):
+            metadata.append(("aprilcam-key", exc.key))
+            if exc.reason:
+                metadata.append(("aprilcam-reason", exc.reason))
         context.set_trailing_metadata(tuple(metadata))
         context.abort(code, str(exc))
     else:

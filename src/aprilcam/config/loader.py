@@ -353,11 +353,12 @@ class ConfigLoader(_ConfigLoaderBase):
             settings = {}
         if not isinstance(settings, dict):
             raise MalformedDocument(f"camera config in {source}: 'settings' must be an object")
+        settings = _coerce_settings(settings, name=name, source=source)
 
         camera_position = _parse_camera_position(data, source=source)
 
         return CameraConfig(
-            name=name, playfield=playfield, settings=dict(settings), camera_position=camera_position
+            name=name, playfield=playfield, settings=settings, camera_position=camera_position
         )
 
     def parse_playfield(
@@ -447,6 +448,69 @@ def _require_geometry(data: Dict[str, Any], *, source: str) -> Tuple[float, floa
             f"(got {width_cm}x{height_cm})"
         )
     return width_cm, height_cm
+
+
+def _coerce_settings(settings: Dict[str, Any], *, name: str, source: str) -> Dict[str, Any]:
+    """Validate/coerce every ``CameraConfig.settings`` value to a real
+    number (OOP hotfix, 2026-08-22 -- camera 3's ``exposure`` was found
+    persisted on disk as the JSON *string* ``"100"``, not the number
+    ``100``).
+
+    Nothing this far in the load path ever checked a settings value's
+    *type* -- only that ``settings`` itself is a JSON object. A stray
+    quoted number sails straight through, gets stored verbatim in
+    ``CameraConfig.settings`` (``dict[str, Any]``), and only breaks much
+    later, deep inside ``Camera.apply_config``'s hardware push: a
+    numeric-looking string survives ``float(value)`` at the point the
+    value is actually written, but a subsequent diagnostic comparison
+    (``camera.backends.uvc_util.UvcUtilBackend.describe_set_failure``'s
+    ``minimum <= value <= maximum``) does not survive a raw string,
+    and raises a bare, untyped ``TypeError`` across the RPC boundary
+    instead of a clean, typed rejection. Catching the type mismatch
+    here -- at load time, before it is ever stored or pushed -- is what
+    lets a caller see *this* document, *this* camera, and *this* key
+    named in the error, instead of a comparison failure with no context
+    at all.
+
+    ``None`` is left alone (:class:`~aprilcam.config.interfaces.
+    CameraConfig`'s own docstring: "blank" -- nothing to push for that
+    key). A ``bool`` is rejected outright even though
+    ``isinstance(True, int)`` is true in Python -- nothing in this
+    schema has ever meant a JSON boolean for a settings value, and
+    silently accepting one would coerce it to ``1.0``/``0.0`` with no
+    caller ever having asked for that. An already-numeric ``int``/
+    ``float`` is returned unchanged (so a well-formed file's on-disk
+    shape is never perturbed by this pass). Anything else is coerced
+    through ``float()``: a numeric-looking string (``"100"``,
+    ``"12.5"``) converts cleanly and is normalised back to a plain
+    ``int`` when it represents a whole number -- self-healing the
+    on-disk shape the next time this document is re-saved
+    (:meth:`CameraConfig.to_dict`) -- while anything that cannot
+    convert (``"abc"``, a list, a dict) raises :class:`MalformedDocument`
+    naming the camera, the key, and the offending value.
+    """
+    coerced: Dict[str, Any] = {}
+    for key, value in settings.items():
+        if value is None:
+            coerced[key] = None
+            continue
+        if isinstance(value, bool):
+            raise MalformedDocument(
+                f"camera config {name!r} in {source}: setting {key!r} must be a number, "
+                f"got a boolean ({value!r})"
+            )
+        if isinstance(value, (int, float)):
+            coerced[key] = value
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError) as exc:
+            raise MalformedDocument(
+                f"camera config {name!r} in {source}: setting {key!r} must be a number, "
+                f"got {value!r} ({type(value).__name__})"
+            ) from exc
+        coerced[key] = int(numeric) if numeric.is_integer() else numeric
+    return coerced
 
 
 def _parse_camera_position(data: Dict[str, Any], *, source: str) -> Optional[CameraPosition]:
