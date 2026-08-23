@@ -41,3 +41,15 @@ configs (exposure etc.) re-apply automatically.
 
 Durable fix is filed:
 `clasi/issues/later/daemon-start-should-fail-loudly-without-capture-backend.md`.
+
+## Related wedge: "no frame available" from one camera, device still on USB
+
+Seen 2026-08-23 on camera 5 (OV9281) after a session of repeated config
+pushes + captures while a view streamed: `camera list` shows the camera
+`present`/`unusable`, `get_frame`/`get_tags` error
+"no frame available", `system_profiler` still lists the device, and
+other cameras work. `camera probe` flips it back to `usable` but reads
+still return nothing — the daemon process's AVFoundation capture
+session for that device is wedged and only a **daemon restart** (per
+the recipe above) recovers it. Views subscribed to the wedged camera
+hang waiting for a first frame; kill and reopen them after the restart.
