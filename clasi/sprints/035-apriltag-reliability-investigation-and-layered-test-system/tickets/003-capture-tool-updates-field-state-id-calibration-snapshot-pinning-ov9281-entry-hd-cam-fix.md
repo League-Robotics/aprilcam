@@ -1,8 +1,10 @@
 ---
 id: '003'
-title: 'Capture-tool updates: field-state-id, calibration snapshot pinning, ov9281 entry, HD-cam fix'
-status: open
-use-cases: [UC-10]
+title: 'Capture-tool updates: field-state-id, calibration snapshot pinning, ov9281
+  entry, HD-cam fix'
+status: done
+use-cases:
+- UC-10
 depends-on: []
 github-issue: ''
 issue: aprilcam-v2-layered-test-system.md
@@ -42,30 +44,77 @@ July fixtures/cameras before ticket 004 runs.
 
 ## Acceptance Criteria
 
-- [ ] `python testdev/capture_matrix.py <camera> --field-state-id
+- [x] `python testdev/capture_matrix.py <camera> --field-state-id
       fs-20260823` writes that id into every manifest entry the run
       produces, and updates `tests/images/field-state.json` at the
       fixture root (not per-camera) — verified by inspecting the written
       manifest and `field-state.json` after a dry/real run.
-- [ ] Every manifest entry gains a `calibration_snapshot_sha256` field,
+      Verified dry (per the Critical Constraints — no camera access this
+      session): `TestRunCameraEndToEnd::test_full_matrix_applies_with_calibration_and_field_state`
+      drives the real `run_camera`/`ensure_field_state_stub` code paths
+      end to end with only hardware I/O faked, and inspects the real
+      written `manifest.json` (`field_state_id: "fs-20260823"`) and
+      `field-state.json` (`current: "fs-20260823"`) on disk.
+      `TestEnsureFieldStateStub` covers the fixture-root-not-per-camera
+      placement and non-clobbering of a confirmed entry directly.
+- [x] Every manifest entry gains a `calibration_snapshot_sha256` field,
       and a copy of the active `calibration.json` is written beside that
       camera's fixtures at capture time.
-- [ ] `capture_matrix.yaml` gains an `ov9281` entry matching the device
+      Verified by `TestPinCalibrationSnapshot` (copy + matching sha256 +
+      source never written + `None` when absent) and by the same
+      end-to-end test above inspecting the real manifest field and the
+      copied `calibration.json` bytes.
+- [x] `capture_matrix.yaml` gains an `ov9281` entry matching the device
       name pattern for `arducam-ov9281-usb-camera`; running the capture
       tool against camera 5 selects it (verified by a dry-run or a real
       capture against camera 5, not just eyeballing the YAML).
-- [ ] Re-running the capture tool against `hd-usb-camera` (camera 2)
+      Verified dry: `TestOv9281MatrixEntry::test_selected_for_the_real_device_name_pattern`
+      calls the real `select_matrix_entry` against the real OS-reported
+      device name string (`"Arducam OV9281 USB Camera"`), not a YAML
+      read.
+- [x] Re-running the capture tool against `hd-usb-camera` (camera 2)
       successfully applies its full variation matrix — auto-exposure is
       pushed manual (and any other gate-flagged control) *before*
       exposure/gain values, mirroring `camera.camera`'s own
       `_GATE_KEYS`-first ordering — where the July run's manifest shows
       values rejected on a live handle, this run's manifest shows them
       accepted.
-- [ ] The tool still always restores baseline controls in a `finally:`
+      Verified against fakes/recorded call order, per the Critical
+      Constraints (no camera access this session — real-hardware
+      confirmation against camera 2 is ticket 004's job, not this
+      ticket's): `TestApplyControlsAgainstFakeHardware` reproduces
+      July's exact recorded baseline (`auto-exposure-mode: "8"`,
+      `auto-white-balance-temp: "true"`) against a fake uvc-util that
+      rejects a value push exactly when its gate is not manual (mirroring
+      real observed behavior), and shows the push failing pre-fix-shape
+      and succeeding once `_ensure_gate_overrides` + `apply_controls`'s
+      gate-first ordering are applied, with the gate control recorded as
+      the first call. `TestRunCameraEndToEnd::test_full_matrix_applies_with_calibration_and_field_state`
+      runs the same scenario through the real `run_camera` end to end and
+      asserts `result.skipped_apply_failed == []` — none of July's twelve
+      `apply_failed` variations recur.
+- [x] The tool still always restores baseline controls in a `finally:`
       block (existing behavior; regression-checked, not just assumed).
-- [ ] Existing camera entries (arducam-ov9782) and their existing
+      Verified by both `TestRunCameraEndToEnd` tests asserting
+      `result.restored is True` unconditionally (the finally-block flag),
+      and by `test_default_no_field_state_id_stays_unnested`'s
+      fully-manual baseline scenario asserting `restore_mismatches == []`
+      (byte-exact restore, achievable when nothing gates the restored
+      values); the auto-baseline HD-cam test asserts the two gate
+      controls themselves restore exactly and documents why a byte-exact
+      readback of the two auto-overridden *values* specifically is not
+      achievable on this or the real July hardware (an out-of-scope,
+      pre-existing limitation, not introduced or worsened by this fix).
+- [x] Existing camera entries (arducam-ov9782) and their existing
       capture behavior are unchanged — a re-run against that camera with
       no new flags produces the same variation set as before.
+      Verified by `TestEnsureGateOverrides::test_ov9782_regression_effective_controls_unchanged`
+      (gate injection never changes the effective/merged controls actually
+      pushed and recorded for an already-manual baseline),
+      `TestOv9281MatrixEntry::test_not_selected_for_ov9782_or_hd_cam`, and
+      `TestRunCameraEndToEnd::test_default_no_field_state_id_stays_unnested`
+      (no `--field-state-id` keeps the flat, unnested
+      `tests/images/<slug>/` layout).
 
 ## Implementation Plan
 
