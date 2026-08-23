@@ -2,13 +2,32 @@
 status: pending
 ---
 
-# `aprilcam camera config` clearing a field (e.g. `playfield: null`) updates live daemon state but not the on-disk config.json
+# `aprilcam camera config` pushes update live daemon state but sometimes don't persist to the on-disk config.json
 
 ## Description
 
-Pushing a camera config document that *clears* a field only updates the
-daemon's in-memory state; the persisted file on disk keeps the old
-value.
+Pushing a camera config document sometimes only updates the daemon's
+in-memory state; the persisted file on disk keeps the old value. Two
+independent occurrences found so far, both live and both self-defeating
+(the CLI reports success and an immediate `camera list`/re-query
+confirms the new behavior, but the file never changes):
+
+**Occurrence 2 (2026-08-23, broader than originally filed) — a
+`settings` push for an *unlinked* camera doesn't persist at all.**
+Tuning `arducam-ov9281-usb-camera` (a camera with `playfield: null` at
+the time) live: pushed `{"auto_exposure": 1, "exposure": 300}`. The
+live daemon genuinely took it — the very next capture was correctly
+exposed and tag detection worked — but the on-disk `config.json` still
+read `"settings": {}`, completely unchanged. A daemon restart would
+have silently reverted the camera to unusable (pitch black) with no
+warning. Worked around by editing the file directly. Suggests the
+persistence gap may specifically be "does this camera need to be
+linked to a playfield for a settings push to actually write through,"
+not only "clearing a field" as originally filed below — needs
+investigation to confirm the real boundary.
+
+**Occurrence 1 (original filing) — clearing a field (`playfield:
+null`) doesn't persist.**
 
 Discovered 2026-08-22 while unlinking `arducam-ov9281-usb-camera` from
 `main-playfield` (administrative cleanup after a temporary contention
