@@ -1,8 +1,9 @@
 ---
 id: '010'
 title: Generalize hardware_camera.py rig enumeration across cameras 2, 3, 5
-status: open
-use-cases: [UC-22]
+status: in-progress
+use-cases:
+- UC-22
 depends-on: []
 github-issue: ''
 issue: aprilcam-v2-layered-test-system.md
