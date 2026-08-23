@@ -1,290 +1,286 @@
 ---
 title: Daemon Wire Protocol
-blurb: The gRPC control service and length-prefixed protobuf stream sockets the aprilcam daemon exposes — the wire-level contract beneath the Python client.
-order: 50
-updated: 2026-06-21
-tags: [daemon, grpc, protobuf, protocol]
+blurb: The gRPC control service and length-prefixed protobuf stream sockets the aprilcam v2 daemon exposes — the wire-level contract beneath the Python client.
+order: 6
+updated: 2026-08-23
+tags: [daemon, grpc, protobuf, protocol, mdns]
 ---
 
 # AprilCam Daemon Wire Protocol
 
-`aprilcamd` is a long-running background process that owns all cameras,
-runs AprilTag/ArUco detection, and serves per-frame data to any number of
-subscribers. The daemon exposes a **gRPC** control service plus on-demand
-**length-prefixed protobuf** stream sockets.
+`aprilcamd` is a long-running background process that owns all cameras, runs
+AprilTag/ArUco detection, and serves per-frame data to any number of clients.
+It exposes one **gRPC** control service plus on-demand **length-prefixed
+protobuf** stream sockets for bulk data (images, tag streams) — frame bytes
+never flow over the gRPC connection itself.
 
-This document describes the wire-level contract. If you are writing a
-robot program in Python, use the [Robot Direct API](robot-direct-api.md)
-client (`DaemonControl`) instead of speaking the protocol by hand — it
-wraps everything below. This page is for understanding the protocol or
-implementing a client in another language. The authoritative schema is
-[`proto/aprilcam.proto`](https://github.com/League-Robotics/aprilcam/blob/master/proto/aprilcam.proto).
-
----
-
-## Starting the daemon and file paths
-
-Start the daemon explicitly with `aprilcam daemon start` (or a systemd service);
-clients never spawn it. Manage it with
-`aprilcam daemon start|stop|status|restart`. For the full lifecycle, the
-config/environment variables, the FHS/XDG directory layout, and systemd, see
-**[Operating the Daemon](daemon.md)**.
-
-Endpoints and on-disk files this protocol references (all under `Config`-derived
-directories — see `src/aprilcam/config.py`):
-
-| Path | Default |
-|------|---------|
-| gRPC control socket | `<socket_dir>/control.sock` |
-| Pidfile / spawn lock | `<socket_dir>/aprilcamd.pid` · `<socket_dir>/aprilcamd.spawn.lock` |
-| Per-camera directory | `<data_dir>/cameras/<cam_name>/` |
-| Per-camera config (developer-owned, static) | `<data_dir>/cameras/<cam_name>/config.json` |
-| Per-camera calibration (daemon-owned, regenerable) | `<data_dir>/cameras/<cam_name>/calibration.json` |
-| Per-camera info / paths | `<data_dir>/cameras/<cam_name>/info.json` · `paths.json` |
-| Camera registry (persistent enum) | `<data_dir>/cameras/registry.json` |
-| Daemon log | `<log_dir>/aprilcamd.log` |
-
-**Camera naming.** `<cam_name>` is a slug derived from the OS device name
-(e.g. `arducam-ov9782-usb-camera`), *not* `cam_<index>`. `OpenCamera` takes an
-OpenCV device `index` and returns the resolved `cam_name`. The stable,
-user-facing camera handle is the **persistent enumeration number** stored in
-`registry.json` and returned by `EnumerateCameras` as `CameraDevice.enum`
-(see below) — the OS `index` changes across replug.
-
-**config.json vs calibration.json.** Static, developer-owned fields
-(`device_name`, `resolution`, UVC `settings`, `camera_position`,
-`static_marker_ids`, linked `playfield`) live in `config.json`. `calibration.json`
-is regenerable and holds only homography/geometry; it must never carry the
-config-owned keys. The daemon overlays the config-owned fields at load time.
+This page describes the wire-level contract for someone implementing a client
+in another language. If you are writing a robot program in Python, use the
+[Robot Direct API](robot-direct-api.md) client instead — it wraps everything
+below. For running and configuring the daemon itself, see
+[Operating the Daemon](daemon.md); for the big picture, [Overview](overview.md).
+The authoritative schema is
+[`proto/aprilcam_v2.proto`](https://github.com/League-Robotics/aprilcam/blob/master/proto/aprilcam_v2.proto).
 
 ---
 
-## Control Service (gRPC)
+## Endpoints and discovery
 
-**Endpoint:** `unix:<socket_dir>/control.sock` (a TCP port is used as a
-fallback when Unix sockets are unavailable).
+The control plane is the gRPC service **`aprilcam.v2.AprilCamV2`**, served on
+two transports simultaneously:
 
-**Service:** `aprilcam.AprilCam`. Generated stubs live in
-`aprilcam.proto.aprilcam_pb2_grpc`. All RPCs are unary (single request,
-single response); the streaming endpoints below return a *descriptor* of a
-separate socket rather than a gRPC stream.
+| Transport | Endpoint | Notes |
+|-----------|----------|-------|
+| Unix socket | `<socket_dir>/control.sock` | Same-host clients. `socket_dir` resolves to `/run/aprilcam` (root) or an XDG runtime dir — see [Operating the Daemon](daemon.md). |
+| TCP | `0.0.0.0:5280` | `DEFAULT_DAEMON_PORT`, unauthenticated plaintext (`add_insecure_port`). A TCP bind failure is non-fatal: the daemon logs a warning and continues unix-socket-only. |
 
-| RPC | Request | Response | Purpose |
-|-----|---------|----------|---------|
-| `ListCameras` | `Empty` | `ListCamerasResponse` | Names of currently-open cameras. |
-| `EnumerateCameras` | `Empty` | `EnumerateCamerasResponse{cameras[]}` | Probe host hardware; each `CameraDevice` carries `index`, `name`, `slug`, and the persistent `enum`. |
-| `OpenCamera` | `OpenCameraRequest{index}` | `OpenCameraResponse{cam_name, camera_dir}` | Open a camera by OpenCV index; idempotent if already open. |
-| `CloseCamera` | `CameraRequest{cam_name}` | `Empty` | Stop the pipeline and release the camera. |
-| `GetCameraConfig` / `SetCameraConfig` | `CameraRequest` / `CameraJsonRequest` | `JsonBlobReply` / `StatusReply` | Read/write `config.json` as an opaque JSON blob. |
-| `GetCalibration` / `SetCalibration` | `CameraRequest` / `CameraJsonRequest` | `JsonBlobReply` / `StatusReply` | Read/write `calibration.json`; `SetCalibration` triggers a live pipeline reload. |
-| `ReloadCalibration` | `CameraRequest{cam_name}` | `Empty` | Reload `calibration.json` from disk into the live pipeline. |
-| `Shutdown` | `Empty` | `Empty` | Stop all pipelines and exit the daemon. |
-| `GetCameraInfo` | `CameraRequest{cam_name}` | `CameraInfoResponse` | `cam_name`, `calibrated`, `frame_w/h`, `fps`. |
-| `CaptureFrame` | `CameraRequest{cam_name}` | `CaptureFrameResponse{jpeg}` | Most recent raw frame as JPEG bytes. |
-| `GetTags` | `CameraRequest{cam_name}` | `TagFrameResponse` | One-shot latest tag detections. |
-| `GetObjects` | `CameraRequest{cam_name}` | `GetObjectsResponse{objects[]}` | Colored non-tag objects; `wx,wy` in the same A1-centred cm frame as tags. |
-| `WhereIs` | `WhereRequest{query, cam_name}` | `WhereResponse` | Natural-language playfield feature lookup. |
-| `GetImageStream` | `StreamRequest{cam_name, max_hz}` | `StreamEndpoint` | Allocate an image stream socket on demand. |
-| `GetTagStream` | `StreamRequest{cam_name, max_hz}` | `StreamEndpoint` | Allocate a tag/overlay stream socket on demand. |
-| `PublishOverlay` | `PublishOverlayRequest{cam_name, overlay}` | `StatusReply{ok, error}` | Inject overlay elements to all tag-stream subscribers. |
+**mDNS discovery.** When (and only when) the TCP bind succeeds, the daemon
+registers a Bonjour/zeroconf service record:
 
-### CameraDevice (EnumerateCameras)
+- Service type: **`_aprilcam._tcp.local.`**
+- Instance name: `aprilcam-<hostname>._aprilcam._tcp.local.`
+- Port: the bound gRPC TCP port (5280 by default)
+- TXT properties: `version` (the aprilcam package version) and `host` (the
+  daemon's `socket.gethostname()`)
+
+Clients browse that service type to build a daemon list. The `host` TXT key is
+load-bearing: the Python client compares it against its *own* hostname to drop
+the local daemon's advertisement (the local daemon is found by probing the
+lock file and `control.sock` directly instead). Advertising itself is never
+load-bearing — a daemon whose multicast stack is broken still works over its
+sockets, and a direct connect (`-d HOST`, implied port 5280) never touches
+discovery at all.
+
+**Version handshake.** `GetStatus` — the first RPC the Python client makes on
+any fresh connection — echoes `protocol_version` (currently **1**,
+`daemon.rpc.PROTOCOL_VERSION`). The proto file only ever grows — existing
+fields are never removed or renumbered — so an older client keeps working
+against a newer daemon (unknown fields are ignored per protobuf rules), and
+`protocol_version` bumps only if that guarantee is ever broken. A responder
+that fails `GetStatus` with `UNIMPLEMENTED` and no `aprilcam-error-type`
+trailing metadata is not a v2 daemon. Note: `grpcio-reflection` is declared
+as a daemon dependency, but the server does not currently register the gRPC
+reflection service — use `GetStatus` (or the `.proto` file) rather than
+runtime reflection.
+
+**Camera addressing.** Every `camera` request field accepts either form
+`aprilcam camera list` prints: an **all-digits token** resolves by persistent
+registry number, anything else by slug (slugs always contain a non-digit, so
+the forms can't collide). There is no open/close RPC — the daemon opens a
+camera on first use and holds it.
+
+---
+
+## Control service RPCs
+
+All RPCs are unary. The two `Get*Stream` RPCs return a *descriptor* of a
+separate socket, never a gRPC stream.
+
+**Cameras and status**
+
+| RPC | Purpose |
+|-----|---------|
+| `ListCameras` | Every camera the registry knows (present or not), from cached state — never re-probes. |
+| `ProbeCameras` | Deep re-interrogation of every backend. May be slow; cameras held open for a live caller are reported from cache and named in `skipped`. |
+| `GetStatus` | `running`, camera states, `config_dir`, `state_dir`, `protocol_version`. |
+| `GetFrame` | One raw or deskewed frame (`encoding`: `"jpeg"` default, `"png"` lossless). `deskewed=true` on an uncalibrated camera fails — never silently substitutes a raw frame. |
+
+**Tags**
+
+| RPC | Purpose |
+|-----|---------|
+| `GetTags` | All tags currently detected on a camera. Triggers exactly one detection burst and appends it to the ring buffer; an empty field returns an empty `TagFrame`, never an error. |
+| `GetTag` | One tag by `(family, number)` — same single burst, filtered. Absent `record` means "not detected this burst", never a zero-valued record. |
+| `GetTagHistory` | Recent `TagFrame`s from the ring buffer (optionally one tag, last N frames). Pure buffer read; frames where the tag was absent appear as entries with empty `tags` — gaps are never dropped. |
+
+**Playfields, config, calibration**
+
+| RPC | Purpose |
+|-----|---------|
+| `SetPlayfield` / `GetPlayfield` / `ListPlayfields` | Adopt/fetch/list playfield definitions, held in daemon memory, keyed by name. `GetPlayfield` adds derived `linked_cameras`. |
+| `SetCameraConfig` / `GetCameraConfig` | Push/fetch a camera's config (playfield link, hardware settings as JSON text, camera position). An unconfigured camera is `NOT_FOUND`. |
+| `ResetCameraConfig` | Discard the live override and re-apply `config_dir/cameras/<slug>/config.json` from disk — ends an experiment without a daemon restart. |
+| `Calibrate` | Run a detection burst and solve the pixel↔world homography against the linked playfield's ArUco set (optional `estimate_intrinsics`). The client sends a camera name, never pixels; no playfield link → `FAILED_PRECONDITION`. |
+| `GetCalibration` | The currently-held calibration. Absent means "never calibrated" — never a fabricated default. |
+
+**Annotations, features, mobile tags, guides**
+
+| RPC | Purpose |
+|-----|---------|
+| `PutAnnotation` / `RemoveAnnotation` / `ReplaceLayer` / `ClearAnnotations` / `GetAnnotations` | The playfield-addressed annotation store (world-cm drawings the daemon stores and embeds in deskewed frames — it never renders). Upsert by `(layer, id)`, last write wins; `ReplaceLayer` swaps a layer atomically. In-memory only — a restart yields an empty set at revision 0. |
+| `FindFeature` | Fuzzy-match free text ("blue dot") against a playfield's surveyed features. No camera, no calibration needed; no match → empty list. |
+| `RegisterTag` / `UnregisterTag` / `ListTagParameters` | The mobile-tag registry: how a tag is mounted on its robot (size, offset, height, yaw). In-memory; corrections are applied inside the daemon before a `TagRecord` is serialized — the math never crosses the wire. |
+| `GetGuide` | The packaged agent/robot usage guide text (`"agent"` default, `"robot"`). |
+
+**Stream endpoints**
+
+| RPC | Purpose |
+|-----|---------|
+| `GetImageStream` | Allocate (or reuse) the raw-socket endpoint for a camera's image stream, raw or `deskewed`. |
+| `GetTagStream` | Same, for a camera's tag stream. |
+
+### Error mapping
+
+The daemon's typed errors cross the wire as a gRPC status code plus **trailing
+metadata**, so a client can reconstruct the same typed exception instead of
+parsing status text. Every error carries `aprilcam-error-type` (the exception
+class name); specific types add fields:
+
+| Error | Status code | Extra metadata keys |
+|-------|-------------|---------------------|
+| `UnknownCamera`, `UnknownPlayfield`, `UnknownGuide` | `NOT_FOUND` | `aprilcam-requested`, `aprilcam-available` (comma-joined) |
+| `CameraNotPresent` | `FAILED_PRECONDITION` | `aprilcam-slug` |
+| `NotCalibrated` | `FAILED_PRECONDITION` | — |
+| `NoPlayfieldLinked` | `FAILED_PRECONDITION` | `aprilcam-camera` |
+| `AlreadyRunning` | `ALREADY_EXISTS` | `aprilcam-holder` |
+| `AnnotationLimitExceeded` | `RESOURCE_EXHAUSTED` | `aprilcam-kind`, `aprilcam-bound`, `aprilcam-actual` |
+| `UnsupportedSetting` | `INVALID_ARGUMENT` | `aprilcam-key`, `aprilcam-reason` |
+| anything else | `INTERNAL` | — |
+
+---
+
+## Key message schemas
+
+A wire-wide convention: **absence is meaningful**. proto3 `optional` fields
+distinguish "not applicable" from a legitimate zero — an uncalibrated tag
+record has *no* `world` field, never a `(0, 0)` placeholder. Check `HasField`
+(or your language's presence API) rather than testing for zero.
+
+### TagRecord / TagFrame
+
+`GetTags`, `GetTag`, `GetTagHistory`, the tag stream, and the `tags` embed in
+`GetFrameResponse` all carry the same records:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `index` | int32 | OS probe index — **unstable**, changes on plug/unplug. Used only to open the device. |
-| `name` | string | Human-readable device name. |
-| `slug` | string | URL-safe identifier (= `cam_name` / per-camera dir). |
-| `enum` | int32 | **Persistent enumeration number** — the stable, user-facing camera handle (`0` if unregistered). |
+| `tag` | `TagId` | `family` (`APRILTAG` \| `ARUCO`) + `number` (the family's own non-negative id). |
+| `world` | optional `WorldPoint` | Position in cm, A1-centred, +x east +y north. Absent when uncalibrated. |
+| `heading_rad`, `speed` | optional double | Velocity heading and speed (world units). |
+| `world_velocity` | optional `WorldPoint` | Velocity components, cm/s. |
+| `timestamp` | double | Capture time. |
+| `pixel` | optional `PixelPoint` | Center pixel, origin top-left. |
+| `calibrated` | bool | Whether world fields could be populated. |
+| `yaw_rad` | optional double | Tag orientation. |
+| `world_corners` / `pixel_corners` | repeated points | Exactly 4 when present (front-left, front-right, back-right, back-left); empty = absent. |
 
-`OpenCamera` still takes the OS `index`; higher layers (the CLI and the MCP
-`open_camera`) accept the `enum` and resolve it to the live `index` via
-`EnumerateCameras`.
+`TagFrame` wraps `repeated TagRecord tags` with `timestamp`, `frame_index`,
+and `calibration_stale`. For a registered mobile tag, `world`/`yaw_rad` are
+already the *robot's* pose — parallax/offset correction runs inside the daemon.
 
-### TagMsg fields
-
-`GetTags` and the tag stream both carry `TagMsg` records:
+### GetFrameResponse (frames)
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `id` | int32 | AprilTag/ArUco ID. |
-| `cx_px`, `cy_px` | float | Center pixel coordinate. |
-| `corners_px` | repeated float (8) | Corner pixels `x0,y0,…,x3,y3` (UL, UR, LR, LL). |
-| `yaw` | float | Orientation in radians. |
-| `wx`, `wy` | float | World position in cm (`0` when uncalibrated). |
-| `in_playfield` | bool | Center inside the playfield polygon. |
-| `vx_px`, `vy_px`, `speed_px` | float | Pixel velocity components and speed. |
-| `vx_world`, `vy_world`, `speed_world` | float | World velocity components and speed (cm/s). |
-| `heading_rad` | float | Velocity heading in radians. |
-| `age` | float | Seconds since last detected (`0` = this frame). |
+| `data` | bytes | Encoded image (`jpeg` or `png`). |
+| `width`, `height` | int32 | Pixel dimensions. |
+| `encoding` | string | What was actually produced. |
+| `timestamp` | double | Capture time. |
+| `deskewed`, `calibration_stale`, `frame_dark` | bool | Frame flags. |
+| `tags` | optional `TagFrame` | The burst nearest this frame's capture. Absent = detection has never run; present-but-empty = ran and saw nothing. `GetFrame` never triggers a burst itself. |
+| `px_per_cm` | optional double | Deskewed frames only: derived scale (`frame_width / field_width_cm`). |
+| `world_extent` | optional `WorldExtent` | Deskewed only: field size `(width_cm, height_cm)`. |
+| `annotations` | optional `AnnotationSet` | Deskewed only, and *always* set on that branch (even empty, revision 0). Never on a raw frame — raw means raw. |
 
-`TagFrameResponse` wraps the tag list with `frame_id`, a row-major 3×3
-`homography` (9 floats; empty when uncalibrated), `playfield_corners`
-(8 floats), and `field_width_cm`/`field_height_cm`.
+One deskewed frame therefore carries everything needed to render a fully
+annotated view.
+
+### PlayfieldDefinition (playfield)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | The playfield's key. |
+| `width_cm`, `height_cm` | double | Field dimensions. |
+| `april_tags`, `aruco_tags`, `rectangles`, `dots` | repeated `PlayfieldFeatureEntry` | Surveyed features by section. |
+
+Each `PlayfieldFeatureEntry`: `slug`, `x`, `y` (world cm), optional `id` (tag
+sections only — the calibration ground truth), optional `colour`
+(rectangles/dots only), and `height_cm` above the field plane (plain field —
+`0.0` means on the plane). `FindFeature` answers with the more abstract
+`FeatureMatch` shape (`slug`, `kind`, `position`, optional `colour`,
+`height_cm` — no numeric id).
+
+### CameraConfig (config)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Camera slug. |
+| `playfield` | optional string | Link to a held playfield. |
+| `settings_json` | string | Hardware settings as JSON object text (e.g. `"{}"`), stored and echoed verbatim. |
+| `camera_position` | optional `CameraPosition` | `nadir` (`WorldPoint` under the lens) + `height_cm` — the inputs for tall-tag parallax correction. Absent = not configured. |
+
+### Calibration
+
+`Calibration`: `stale`, `calibrated_at`, `playfield`, `homography` (the solved
+pixel→world 3×3 matrix as exactly 9 row-major doubles), `matched_ids`,
+optional `reprojection_error_cm`, and — when a lens model was estimated —
+`camera_matrix` (9 row-major doubles) and `dist_coeffs` (empty = no lens
+model). `CalibrationResult` (from `Calibrate`) reports `succeeded`,
+`matched_ids`, `missing_ids` (always the exact ids, never a count), and
+optional `reason` / intrinsics-estimation fields.
 
 ---
 
-## Stream Sockets
+## Stream sockets
 
-`GetTagStream` and `GetImageStream` do not stream over gRPC. Each returns
-a `StreamEndpoint` describing a freshly-allocated socket:
+`GetImageStream` and `GetTagStream` allocate — or **reuse**, one listener per
+`(camera, deskewed)` / `camera` key — a raw socket and return where to connect:
 
-```
-StreamEndpoint {
-  string socket_path = 1;  // non-empty when using a Unix socket
-  uint32 tcp_port    = 2;  // non-zero when using TCP (127.0.0.1)
+```proto
+message StreamEndpoint {
+  optional string socket_path = 1;  // unix socket, same-host clients
+  optional int32  tcp_port    = 2;  // TCP on 0.0.0.0, OS-assigned ephemeral port
 }
 ```
 
-Connect to that socket and read a continuous stream of **length-prefixed
-protobuf** messages. The daemon fans each frame out to all connected
-subscribers; slow subscribers have frames dropped silently (per-subscriber
-send queue capped at 2) — you always get the latest available frame, never
-a backlog.
+Unix stream sockets are bound at `<socket_dir>/stream-<key>.sock`
+(`stream-images-raw-<camera>.sock`, `stream-images-deskewed-<camera>.sock`,
+`stream-tags-<camera>.sock`). Either field may be absent if that transport
+failed to bind; the Python client prefers the unix path when the daemon is
+local and falls back to TCP.
+
+Allocation is cheap and starts nothing: capture, deskew, and detection begin
+only when the **first connection is accepted**, and stop when the last
+subscriber disconnects. There is no unsubscribe RPC — closing your socket *is*
+the unsubscribe. Preconditions (unknown camera, deskewed stream on an
+uncalibrated camera) are checked at first connect, not at allocation: a bad
+request gets a socket that connects and then immediately closes without a
+single frame — treat "connected, then EOF with no frame" as a real error, not
+a hiccup.
 
 ### Wire framing
 
-Both stream types use the same framing:
+Both stream types use the same framing (`src/aprilcam/framing.py`):
 
 ```
 [4 bytes: big-endian uint32 length][<length> bytes: protobuf payload]
 ```
 
-Read exactly 4 bytes for the length, then exactly that many bytes for the
-payload, and parse with the appropriate protobuf message type.
+Read exactly 4 bytes, then exactly that many payload bytes, and parse with the
+appropriate message type. A short read means the daemon closed the stream.
 
-### Tag stream payload — `StreamMessage`
+### Payloads
 
-The tag stream multiplexes tag data and overlays through a `oneof`:
+- **Image stream** — each message is a serialized **`GetFrameResponse`**,
+  byte-for-byte identical to what the one-shot `GetFrame` RPC returns for the
+  same frame (tags/px_per_cm/annotations embeds included). Published
+  unconditionally at a steady cadence (~15 Hz), always JPEG.
+- **Tag stream** — each message is a serialized **`TagFrame`** (the same shape
+  as `GetTagsResponse.tags`; there is no `oneof` wrapper message in v2).
+  Detection runs at ~30 Hz while subscribed; frames are published on
+  meaningful change (0.5 cm world / 8 px uncalibrated, and always when a tag
+  appears or disappears), rate-capped at 20 Hz, with an unchanged-frame
+  heartbeat every 1 s. The rate is fixed server-side — requests carry no
+  `max_hz` field.
 
-```
-StreamMessage {
-  oneof payload {
-    TagFrame     tag_frame = 1;   // detections (see TagMsg above)
-    OverlayFrame overlay   = 2;   // overlays published by other processes
-  }
-}
-```
+**Backpressure is silent drop.** Each subscriber has its own bounded queue
+(depth 2); a slow reader loses frames rather than building a backlog — you
+always get the latest available frame. N subscribers to the same key share
+one producer: one capture, one warp, one detection per tick, fanned out.
 
-`TagFrame` carries `frame_id`, `ts_mono_ns`, `ts_wall_ms`, the `tags`
-list, `homography`, `playfield_corners`, `fps`, and field dimensions. It
-is published on every detected change and at a 1-second heartbeat, rate-
-limited to the `max_hz` the subscriber requested (default 20). A
-consumer-only client can ignore `overlay` messages.
+The client-side reference implementation is
+[`src/aprilcam/client/streams.py`](https://github.com/League-Robotics/aprilcam/blob/master/src/aprilcam/client/streams.py)
+(`SocketImageStream` / `SocketTagStream`); the daemon side is
+[`src/aprilcam/daemon/stream_transport.py`](https://github.com/League-Robotics/aprilcam/blob/master/src/aprilcam/daemon/stream_transport.py)
+and
+[`src/aprilcam/daemon/streaming.py`](https://github.com/League-Robotics/aprilcam/blob/master/src/aprilcam/daemon/streaming.py).
 
-### Image stream payload — `ImageFrame`
-
-```
-ImageFrame {
-  uint64 frame_id;    // matches the TagFrame captured at the same instant
-  uint64 ts_mono_ns;
-  bytes  jpeg;
-  int32  width;
-  int32  height;
-}
-```
-
----
-
-## Live Overlays
-
-Overlays are world-coordinate (cm) drawables pushed to every tag-stream
-subscriber for a camera, via `PublishOverlay`. The viewer drops any
-`OverlayFrame` whose `(now - timestamp) > ttl`, so a short TTL makes stale
-data disappear automatically.
-
-```
-OverlayElement {
-  string         type;       // "arc" | "arrow" | "point" | "polyline"
-                             // | "text" | "rect" | "polygon"
-  repeated float params;     // shape-specific, world cm (see proto comments)
-  repeated int32 color;      // [R, G, B], 0-255
-  int32          thickness;  // -1 = filled
-  string         text;       // content for "text" elements
-}
-
-OverlayFrame {
-  double                  timestamp;
-  float                   ttl;
-  repeated OverlayElement elements;
-  string                  camera_id;
-}
-```
-
-See the [Robot Direct API](robot-direct-api.md#live-overlay--push-annotations-at-5-50-hz)
-for the Python `publish_overlay` helper and a control-loop example.
-
----
-
-## info.json
-
-Written atomically to `<data_dir>/cameras/<cam_name>/info.json` when a
-camera is opened. It currently records the per-camera paths file location:
-
-```json
-{
-  "paths_file": "/abs/path/data/aprilcam/cameras/arducam-ov9782-usb-camera/paths.json"
-}
-```
-
-Calibration state, frame size, and fps are not stored here — query them
-live with `GetCameraInfo`.
-
----
-
-## paths.json
-
-Written atomically by the MCP server (not the daemon) whenever paths are
-created, deleted, or cleared. The live viewer polls this file's `mtime`
-and reloads when it changes; the daemon never reads or writes it. The path
-is announced in `info.json` (`paths_file`).
-
-**Format:** JSON array of path objects, or `[]` when no paths are active.
-
-```json
-[
-  {
-    "path_id": "path_000",
-    "playfield_id": "arducam-ov9782-usb-camera",
-    "waypoints": [
-      {
-        "x": 20.0, "y": 15.0, "size_cm": 5.0,
-        "symbol": "filled_circle",
-        "symbol_color": [255, 0, 0],
-        "line_color": [0, 200, 0]
-      }
-    ]
-  }
-]
-```
-
-Valid symbols: `square`, `filled_square`, `circle`, `filled_circle`,
-`triangle`, `filled_triangle`, `x`, `none`. Colors are RGB `[0..255]`.
-See the [Robot Direct API](robot-direct-api.md#persistent-paths--write-to-pathsjson)
-for writing paths directly from a robot program.
-
----
-
-## Configuration
-
-All paths and tunables come from `Config` (`src/aprilcam/config.py`), resolved
-from `APRILCAM_*` environment variables, `.env`/`.aprilcam` dotfiles, and
-`/etc/aprilcam.env`, with an auto-selected FHS (root) or XDG (user) directory
-layout. The full table of variables, the priority order, the directory layout,
-and systemd deployment are documented in
-**[Operating the Daemon → Configuration](daemon.md#configuration)**.
-
-> A client and the daemon **must resolve the same `APRILCAM_SOCKET_DIR`** or
-> they cannot find each other on the control socket.
-
----
-
-## Known Limitations
-
-- **Dead pipeline not auto-restarted.** If a camera is unplugged, its
-  capture thread exits but the daemon still considers it registered;
-  `OpenCamera` then returns the existing (dead) handle. Workaround:
-  `CloseCamera` then `OpenCamera`, or restart the daemon.
-
-- **Daemon does not exit when idle.** It runs until `Shutdown` or a kill
-  signal, even with no cameras open and no subscribers connected.

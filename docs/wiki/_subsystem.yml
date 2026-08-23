@@ -1,16 +1,18 @@
-# AprilCam subsystem metadata for the League Robotics docs hub.
+# AprilCam v2 subsystem metadata for the League Robotics docs hub.
 #
 # SEE ALSO — updating this wiki:
 #   Read /AGENTS.md (repo root) first. It explains that docs/wiki/ is the
 #   source of truth published to
-#   https://robots.jointheleague.org/subsystems/aprilcam/, and maps each page
-#   to the in-repo files it is generated from (MCP tool docstrings in
-#   src/aprilcam/server/mcp_server.py, proto/aprilcam.proto, the
-#   ROBOT_API_GUIDE / AGENT_GUIDE, the daemon CLI, and config.py). Bump a
-#   page's `updated:` date when you edit it. Publishing is automatic on push to
-#   docs/wiki/** on master (.github/workflows/notify-docs-hub.yml).
+#   https://robots.jointheleague.org/subsystems/aprilcam/. Pages are kept in
+#   sync with the v2 sources they describe: MCP tool docstrings in
+#   src/aprilcam/mcp/server.py and src/aprilcam/mcp/tools/, the wire protocol
+#   in proto/aprilcam_v2.proto, the AGENT_GUIDE / ROBOT_API_GUIDE shipped in
+#   src/aprilcam/, the daemon CLI in src/aprilcam/cli/daemon.py, and the
+#   config loader in src/aprilcam/config/. Bump a page's `updated:` date when
+#   you edit it. Publishing is automatic on push to docs/wiki/** on master
+#   (.github/workflows/notify-docs-hub.yml).
 #   Authoritative spec: https://robots.jointheleague.org/publishing/
 name: aprilcam
-title: AprilCam
-blurb: MCP server and gRPC daemon for AprilTag/ArUco perception on robotics playfields — tag positions, orientation, velocity, and homography for AI agents and robot control loops.
+title: AprilCam v2
+blurb: Rebuilt MCP server and gRPC daemon for AprilTag/ArUco perception on robotics playfields — one daemon owns the cameras and all vision; agents and robot control loops read tag positions, orientation, velocity, and homography through thin clients.
 order: 100
