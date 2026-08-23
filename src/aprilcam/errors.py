@@ -236,6 +236,38 @@ class NoPlayfieldLinked(AprilCamError):
         )
 
 
+class MissingOptionalDependency(AprilCamError):
+    """A subcommand needs a package this environment does not actually
+    have -- e.g. ``aprilcam mcp`` needs the ``mcp`` SDK's
+    ``mcp.server.fastmcp``.
+
+    Distinct from every other error in this module: it is not a
+    daemon-reported precondition or protocol failure, it is a local
+    import failure -- the requested feature's own code could not even
+    be loaded. Raised so the affected subcommand can report a clear,
+    actionable message through the same ``report_error`` path every
+    other typed error already uses, instead of letting a raw
+    ``ModuleNotFoundError`` traceback reach the operator.
+
+    Critically, this must only ever be raised from *inside* the one
+    subcommand that needs the package, at the moment that subcommand
+    actually runs -- never from module-level code that ``cli/__init__``
+    imports unconditionally at CLI startup (``cli/mcp.py``'s module
+    docstring has the fuller story for that command). A dependency
+    that is merely optional for the CLI as a whole must never make the
+    whole CLI unusable just because one subcommand cannot import it.
+    """
+
+    def __init__(self, feature: str, package: str, *, install_hint: str) -> None:
+        self.feature = feature
+        self.package = package
+        self.install_hint = install_hint
+        super().__init__(
+            f"{feature} requires the {package!r} package, which is not "
+            f"available in this environment -- {install_hint}"
+        )
+
+
 class AnnotationLimitExceeded(AprilCamError):
     """A ``put_annotation``/``replace_layer`` request would push a
     playfield's annotation store past a fixed bound (UC-28, SUC-010,
