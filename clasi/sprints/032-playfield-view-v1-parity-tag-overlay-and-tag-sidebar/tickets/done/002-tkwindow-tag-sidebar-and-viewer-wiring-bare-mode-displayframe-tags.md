@@ -1,7 +1,7 @@
 ---
 id: '002'
-title: 'TkWindow tag sidebar and viewer wiring (bare mode, DisplayFrame.tags)'
-status: open
+title: TkWindow tag sidebar and viewer wiring (bare mode, DisplayFrame.tags)
+status: done
 use-cases:
 - SUC-002
 - SUC-003
@@ -155,33 +155,33 @@ this explicitly with a regression test — this ticket must not change
 
 ## Acceptance Criteria
 
-- [ ] `DisplayFrame` has a new `tags: Optional[Tuple[TagRecord, ...]] =
+- [x] `DisplayFrame` has a new `tags: Optional[Tuple[TagRecord, ...]] =
       None` field; every pre-existing construction site compiles and
       behaves identically without modification.
-- [ ] `Window.update_tags` exists as a concrete no-op default; a test
+- [x] `Window.update_tags` exists as a concrete no-op default; a test
       fake `Window` that does not override it does not raise when
       called.
-- [ ] `TkWindow(title)` (no `show_sidebar` kwarg) behaves exactly as
+- [x] `TkWindow(title)` (no `show_sidebar` kwarg) behaves exactly as
       before this ticket — no sidebar, same image/status layout.
-- [ ] `TkWindow(title, show_sidebar=True)` builds a side panel packed
+- [x] `TkWindow(title, show_sidebar=True)` builds a side panel packed
       beside the image, in the same root.
-- [ ] The sidebar lists every tag in the most recent `update_tags` call,
+- [x] The sidebar lists every tag in the most recent `update_tags` call,
       ordered by tag number, with the five documented columns,
       `"--"` placeholders for absent fields.
-- [ ] `run_playfield_view(..., bare=False)` (the default) populates
+- [x] `run_playfield_view(..., bare=False)` (the default) populates
       `DisplayFrame.tags` from the streamed frame's `frame.tags.tags`
       and renders the overlay via `renderer_factory()` — end-to-end
       through `StreamLoop`.
-- [ ] `run_playfield_view(..., bare=True)` shows `frame.data` unmodified
+- [x] `run_playfield_view(..., bare=True)` shows `frame.data` unmodified
       (no `Renderer.render()` call — assert this directly, e.g. via a
       renderer factory that raises if called) and never populates
       `DisplayFrame.tags`; its window is built with `show_sidebar=False`.
-- [ ] `run_raw_view` is unchanged: its window has no sidebar, its
+- [x] `run_raw_view` is unchanged: its window has no sidebar, its
       converter still never reads `frame.tags` (regression test).
-- [ ] `test_run_playfield_view_never_calls_get_tags_only_stream_images`
+- [x] `test_run_playfield_view_never_calls_get_tags_only_stream_images`
       (`:533`) passes with zero changes to its own assertions — the
       sidebar adds no new daemon call.
-- [ ] The end-to-end geometry tests (`:718`-area
+- [x] The end-to-end geometry tests (`:718`-area
       `test_run_playfield_view_draws_apriltag_1_at_the_image_centre_...`
       and the "moves right and up" test just after it) are updated:
       `_front_edge_midpoint` (`:664`) sampled a boundary-line pixel that,
@@ -189,7 +189,7 @@ this explicitly with a regression test — this ticket must not change
       Move the sample to a red U-side pixel or a green hat-line pixel;
       keep the tests' actual intent (prove the viewer's own wiring
       doesn't lose or shift the drawn position) unchanged.
-- [ ] `uv run mypy` clean.
+- [x] `uv run mypy` clean.
 
 ## Testing
 

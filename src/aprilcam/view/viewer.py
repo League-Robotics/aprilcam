@@ -71,6 +71,18 @@ carried forward onto ``StreamLoop``: the loop, timing, and window
 lifecycle stay identical between the two views; only the subscription's
 ``deskewed`` flag and the conversion callable differ.
 
+**A deliberately narrow exception (sprint 032 ticket 002).**
+``TkWindow``'s ``show_sidebar`` constructor flag and :meth:`Window.update_tags`
+are view-kind-specific in a way nothing else in this seam is: the tag
+sidebar is a playfield-view-only presentation feature. The raw view's
+window is never built with ``show_sidebar=True`` and its
+``_convert_raw_frame`` never populates :attr:`DisplayFrame.tags`, so
+:meth:`StreamLoop.run` can still call ``update_tags`` unconditionally,
+on every frame, for both view kinds -- :meth:`Window.update_tags`'s
+concrete no-op default (not ``NotImplementedError``, unlike every other
+``Window`` method -- see that method's own docstring) is what keeps
+:class:`StreamLoop` itself agnostic even though the *feature* is not.
+
 **``playfield view``'s "raw means raw" counterpart: never fall back.**
 :func:`run_playfield_view` calls ``daemon.stream_images`` with
 ``deskewed=True`` and has no ``except`` around that call or around
@@ -115,6 +127,7 @@ UC-16.S-3 message pointing at ``camera image``.
 from __future__ import annotations
 
 import glob
+import math
 import os
 import io
 import sys
@@ -122,14 +135,14 @@ import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from PIL import Image, ImageTk
 
 from aprilcam.client.interfaces import Renderer as RendererBase
 from aprilcam.client.renderer import Renderer as PillowRenderer
 from aprilcam.daemon.interfaces import Daemon, ImageStream
-from aprilcam.types import ImageFrame
+from aprilcam.types import ImageFrame, TagRecord
 
 __all__ = [
     "DEFAULT_POLL_HZ",
@@ -195,10 +208,22 @@ class NoDisplayAvailable(Exception):
 class DisplayFrame:
     """One display update's payload -- an already-encoded image (JPEG
     or PNG) plus an optional advisory line for the window chrome, never
-    drawn onto the image itself (see ``Window.set_status``)."""
+    drawn onto the image itself (see ``Window.set_status``).
+
+    ``tags`` (sprint 032 ticket 002) is the current frame's full tag
+    list for :meth:`Window.update_tags` to refresh a side panel from --
+    additive and default-``None``, so every construction site that
+    predates this field (``_convert_raw_frame``,
+    ``_convert_bare_playfield_frame``) keeps compiling and behaving
+    identically without being touched. Only
+    ``_make_playfield_converter``'s non-bare ``convert`` populates it,
+    from the same ``frame.tags`` it already reads to render the overlay
+    -- no second subscription, no new daemon call.
+    """
 
     data: bytes
     status: Optional[str] = None
+    tags: Optional[Tuple[TagRecord, ...]] = None
 
 
 class Window:
@@ -234,6 +259,15 @@ class Window:
     def close(self) -> None:
         """Release the window and any toolkit resources. Idempotent."""
         raise NotImplementedError(f"{type(self).__name__} does not implement Window.close")
+
+    def update_tags(self, tags: Optional[Tuple[TagRecord, ...]]) -> None:
+        """Refresh any side panel with *tags* -- the current frame's full
+        tag list, or ``None``. Concrete no-op default (deliberate
+        exception to this class's raise-``NotImplementedError``
+        convention -- see sprint 032's sprint.md Design Rationale): a
+        window with no side panel has no wrong way to handle a tag
+        update."""
+        return None
 
 
 def _headless_reason() -> Optional[str]:
@@ -279,11 +313,96 @@ def _ensure_tk_library_env() -> None:
                 return
 
 
+#: Tag-family abbreviations for the sidebar's ID column -- short enough
+#: to keep the column narrow while still telling AprilTag 7 and ArUco 7
+#: apart, since a single playfield can legitimately carry both
+#: (``types.TagFamily``'s own docstring: family is part of a tag's
+#: identity, never inferred from the number alone).
+_TAG_FAMILY_ABBR = {
+    "apriltag": "AT",
+    "aruco": "AR",
+}
+
+#: The sidebar's header row -- column labels over the same fixed-width
+#: fields :func:`_format_tag_row` produces, so headers and data line up
+#: under a monospace font.
+_SIDEBAR_HEADER = f"{'ID':<6}{'PxX':>7}{'PxY':>7}{'WldX':>7}{'WldY':>7}{'Ang':>6}{'Speed':>8}"
+
+
+def _format_sidebar_number(value: Optional[float], *, width: int) -> str:
+    """One numeric sidebar cell, right-aligned to *width* -- ``"--"``
+    when *value* is ``None`` (an absent field, e.g. an uncalibrated
+    observation's world position), a fixed one-decimal number
+    otherwise, so every row's columns stay aligned under a monospace
+    font regardless of which fields a given record carries."""
+    if value is None:
+        return f"{'--':>{width}}"
+    return f"{value:{width}.1f}"
+
+
+def _format_tag_row(record: TagRecord) -> str:
+    """One sidebar row for *record*, ordered by :func:`_format_sidebar_text`
+    by ``tag.number`` -- ID, pixel x/y, world x/y (cm), orientation
+    (degrees, from ``yaw_rad``), and velocity, with ``"--"`` for any
+    field *record* does not carry (sprint 032 ticket 002, Description's
+    row-content table).
+
+    **Velocity presentation choice**: shown as ``record.speed`` -- a
+    single cm/s magnitude -- rather than ``world_velocity``'s separate
+    x/y components. Either satisfies the driving issue; a single number
+    reads more compactly in a narrow sidebar column, and this is the
+    one column where this module picked one of two documented-equal
+    options rather than the table dictating it.
+
+    A pure function of *record* alone -- no ``tkinter`` import needed
+    to exercise it, per the ticket's own testing note.
+    """
+    family = _TAG_FAMILY_ABBR.get(record.tag.family.value, "?")
+    tag_id = f"{family}{record.tag.number}"
+    pixel_x = _format_sidebar_number(record.pixel.x if record.pixel is not None else None, width=7)
+    pixel_y = _format_sidebar_number(record.pixel.y if record.pixel is not None else None, width=7)
+    world_x = _format_sidebar_number(record.world.x if record.world is not None else None, width=7)
+    world_y = _format_sidebar_number(record.world.y if record.world is not None else None, width=7)
+    angle = _format_sidebar_number(
+        math.degrees(record.yaw_rad) if record.yaw_rad is not None else None, width=6
+    )
+    speed = _format_sidebar_number(record.speed, width=8)
+    return f"{tag_id:<6}{pixel_x}{pixel_y}{world_x}{world_y}{angle}{speed}"
+
+
+def _format_sidebar_text(tags: Optional[Tuple[TagRecord, ...]]) -> str:
+    """The sidebar's full plain-text content for one :meth:`Window.update_tags`
+    call: the header row plus one row per tag in *tags*, ordered by
+    ``tag.tag.number`` (sprint 032 ticket 002/sprint.md Scope -- no
+    mobile/stationary split, one single ordered list). ``None`` or an
+    empty *tags* still produces the header alone, so the panel reads as
+    "no tags currently detected" rather than a blank pane.
+
+    Kept independent of any real ``tkinter`` widget -- per the ticket's
+    own testing note, this is the piece that is unit-tested directly;
+    :class:`TkWindow` only has to pour the string into a widget.
+    """
+    lines = [_SIDEBAR_HEADER]
+    if tags:
+        for record in sorted(tags, key=lambda r: r.tag.number):
+            lines.append(_format_tag_row(record))
+    return "\n".join(lines)
+
+
 class TkWindow(Window):
     """The real, tkinter-backed :class:`Window`. See the module
-    docstring for the headless-detection strategy."""
+    docstring for the headless-detection strategy.
 
-    def __init__(self, title: str) -> None:
+    *show_sidebar* (sprint 032 ticket 002, default ``False`` -- exactly
+    today's layout when omitted): when ``True``, builds a second
+    ``tk.Frame`` packed beside the image, inside the same ``tk.Tk()``
+    root (v1's ``left_frame``/``right_frame`` shape,
+    ``archive/src/aprilcam/cli/view_cli.py:783-955`` for reference --
+    the *layout idea* only, not its widget code), holding a monospace
+    ``tk.Text`` refreshed by :meth:`update_tags`.
+    """
+
+    def __init__(self, title: str, *, show_sidebar: bool = False) -> None:
         reason = _headless_reason()
         if reason is not None:
             raise NoDisplayAvailable(reason)
@@ -297,11 +416,26 @@ class TkWindow(Window):
         self._closed = False
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        self._image_label = tk.Label(self._root, bg="black")
+        image_parent: tk.Misc = self._root
+        self._sidebar_text: Optional[tk.Text] = None
+        if show_sidebar:
+            image_frame = tk.Frame(self._root)
+            image_frame.pack(side=tk.LEFT)
+            image_parent = image_frame
+
+            sidebar_frame = tk.Frame(self._root)
+            sidebar_frame.pack(side=tk.RIGHT, fill=tk.Y)
+            sidebar_text = tk.Text(sidebar_frame, width=48, font=("Courier", 10))
+            sidebar_text.pack(fill=tk.BOTH, expand=True)
+            sidebar_text.insert("1.0", _format_sidebar_text(None))
+            sidebar_text.configure(state=tk.DISABLED)
+            self._sidebar_text = sidebar_text
+
+        self._image_label = tk.Label(image_parent, bg="black")
         self._image_label.pack()
         self._status_var = tk.StringVar(value="")
         tk.Label(
-            self._root, textvariable=self._status_var, fg="#cc8800", anchor="w"
+            image_parent, textvariable=self._status_var, fg="#cc8800", anchor="w"
         ).pack(fill=tk.X)
 
         # tkinter drops a PhotoImage the instant nothing keeps a Python
@@ -349,6 +483,20 @@ class TkWindow(Window):
             self._root.destroy()
         except tk.TclError:
             pass
+
+    def update_tags(self, tags: Optional[Tuple[TagRecord, ...]]) -> None:
+        """Refresh the side panel built when ``show_sidebar=True`` --
+        a no-op (inherited behaviour, not overridden away) when this
+        window has none, so :meth:`StreamLoop.run` can call this
+        unconditionally regardless of which mode this window was built
+        in."""
+        if self._sidebar_text is None:
+            return None
+        self._sidebar_text.configure(state=tk.NORMAL)
+        self._sidebar_text.delete("1.0", tk.END)
+        self._sidebar_text.insert("1.0", _format_sidebar_text(tags))
+        self._sidebar_text.configure(state=tk.DISABLED)
+        return None
 
 
 class StreamLoop:
@@ -455,6 +603,7 @@ class StreamLoop:
                     raise error
                 if frame is not None:
                     self._window.show(frame.data)
+                    self._window.update_tags(frame.tags)
                     self._window.set_status(frame.status)
                 self._sleep(self._pump_interval)
         finally:
@@ -532,9 +681,32 @@ def _make_playfield_converter(renderer: RendererBase) -> Callable[[ImageFrame], 
             status_parts.append("frame dark -- image may be hard to see")
         status = "; ".join(status_parts) if status_parts else None
 
-        return DisplayFrame(data=data, status=status)
+        tags = frame.tags.tags if frame.tags is not None else None
+        return DisplayFrame(data=data, status=status, tags=tags)
 
     return convert
+
+
+def _convert_bare_playfield_frame(frame: ImageFrame) -> DisplayFrame:
+    """``playfield view --bare``'s per-frame converter (sprint 032
+    ticket 002): mirrors :func:`_convert_raw_frame`'s zero-overhead
+    shape, but for the deskewed stream -- ``data=frame.data`` unmodified
+    (no ``Renderer.render()`` call at all), and ``tags`` left at its
+    ``None`` default (never reads ``frame.tags``), so a bare window's
+    (sidebar-less, per ``show_sidebar=False``) ``update_tags`` call
+    stays the inherited no-op. Only ``calibration_stale``/``frame_dark``
+    still surface as the window's advisory status line, exactly like
+    :func:`_make_playfield_converter`'s ``convert``."""
+    status_parts = []
+    if frame.calibration_stale:
+        status_parts.append(
+            "calibration stale -- re-run 'aprilcam camera calibrate' (UC-18)"
+        )
+    if frame.frame_dark:
+        status_parts.append("frame dark -- image may be hard to see")
+    status = "; ".join(status_parts) if status_parts else None
+
+    return DisplayFrame(data=frame.data, status=status)
 
 
 def run_playfield_view(
@@ -542,7 +714,8 @@ def run_playfield_view(
     daemon: Daemon,
     *,
     renderer_factory: Callable[[], RendererBase] = PillowRenderer,
-    window_factory: Callable[[str], Window] = TkWindow,
+    window_factory: Callable[..., Window] = TkWindow,
+    bare: bool = False,
 ) -> None:
     """``playfield view`` (UC-18, ticket 022-006, streaming per ticket
     027-007): open a window and subscribe to ``stream_images(camera,
@@ -551,6 +724,18 @@ def run_playfield_view(
     through *renderer_factory* (``client/renderer.py`` by default)
     before display, reusing :class:`StreamLoop`/:class:`Window`
     unchanged (module docstring's "reuse seam").
+
+    *bare* (sprint 032 ticket 002, default ``False``): when ``False``
+    (the annotated default), the window is built with
+    ``show_sidebar=True`` and each frame is rendered through
+    *renderer_factory* with :class:`DisplayFrame`'s ``tags`` populated
+    from the frame's own embedded ``TagFrame``, feeding the sidebar
+    :meth:`StreamLoop.run` refreshes on every frame. When ``True``, the
+    window is built with ``show_sidebar=False`` and frames are shown via
+    :func:`_convert_bare_playfield_frame` -- *renderer_factory* is never
+    even called, and ``DisplayFrame.tags`` stays ``None`` -- reproducing
+    today's plain image-only behaviour (this ticket's own regression
+    coverage for that path).
 
     As a side effect, opening this view is what makes the target
     camera's ring buffer start filling for as long as the window stays
@@ -580,10 +765,16 @@ def run_playfield_view(
     Any other ``aprilcam.errors.AprilCamError`` raised mid-view
     propagates the same way, after the window is closed.
     """
-    renderer = renderer_factory()
-    window = window_factory(f"aprilcam playfield view -- {camera}")
+    window = window_factory(
+        f"aprilcam playfield view -- {camera}", show_sidebar=not bare
+    )
     try:
         stream = daemon.stream_images(camera, deskewed=True)
-        StreamLoop(window, stream, _make_playfield_converter(renderer)).run()
+        convert: Callable[[ImageFrame], DisplayFrame]
+        if bare:
+            convert = _convert_bare_playfield_frame
+        else:
+            convert = _make_playfield_converter(renderer_factory())
+        StreamLoop(window, stream, convert).run()
     finally:
         window.close()

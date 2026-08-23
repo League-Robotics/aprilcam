@@ -49,10 +49,11 @@ from __future__ import annotations
 
 import io
 import itertools
+import math
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Iterable, Iterator, List, Optional
+from typing import Iterable, Iterator, List, Optional, Tuple
 
 import numpy as np
 import pytest
@@ -106,6 +107,7 @@ class _FakeWindow(viewer.Window):
     close_after_frames: Optional[int] = None
     shown: List[bytes] = field(default_factory=list)
     statuses: List[Optional[str]] = field(default_factory=list)
+    tags_updates: List[Optional[Tuple[TagRecord, ...]]] = field(default_factory=list)
     closed: bool = False
     close_called: bool = False
 
@@ -114,6 +116,12 @@ class _FakeWindow(viewer.Window):
 
     def set_status(self, text: Optional[str]) -> None:
         self.statuses.append(text)
+
+    def update_tags(self, tags: Optional[Tuple[TagRecord, ...]]) -> None:
+        """Overridden (not the inherited no-op) purely for test
+        instrumentation -- records every call so tests can assert what
+        :class:`viewer.StreamLoop` fed the window, per frame."""
+        self.tags_updates.append(tags)
 
     def pump(self) -> bool:
         if self.close_after_frames is not None and len(self.shown) >= self.close_after_frames:
@@ -294,6 +302,131 @@ def _tiny_png() -> bytes:
     return buf.getvalue()
 
 
+def _bare_tag_record(**overrides) -> TagRecord:
+    """A minimal ``TagRecord`` for sidebar-formatting tests -- every
+    field defaults to "absent" so a test only has to override what it
+    actually cares about."""
+    fields = dict(
+        tag=TagId(TagFamily.APRILTAG, 1),
+        world=None,
+        heading_rad=None,
+        world_velocity=None,
+        speed=None,
+        timestamp=0.0,
+        pixel=None,
+        calibrated=False,
+        yaw_rad=None,
+    )
+    fields.update(overrides)
+    return TagRecord(**fields)
+
+
+# ---------------------------------------------------------------------------
+# Window.update_tags -- concrete no-op default (sprint 032 ticket 002),
+# and TkWindow's sidebar row-formatting pure functions.
+# ---------------------------------------------------------------------------
+
+
+def test_window_update_tags_default_is_a_concrete_noop():
+    """Acceptance criterion: a fake ``Window`` that does not override
+    ``update_tags`` does not raise when called -- with either a real
+    tag tuple or ``None`` -- the deliberate exception to this module's
+    raise-``NotImplementedError`` convention (sprint.md Design
+    Rationale)."""
+    window = viewer.Window()
+    tags = _tag_frame_with_one_tag().tags
+
+    assert window.update_tags(None) is None
+    assert window.update_tags(tags) is None
+
+
+def test_format_tag_row_shows_placeholders_for_every_absent_field():
+    """Row-content table (ticket Description): pixel x/y, world x/y,
+    angle, and speed each independently fall back to ``"--"`` when the
+    record does not carry them -- exercised here with a pure function,
+    no real Tk widget needed."""
+    record = _bare_tag_record(tag=TagId(TagFamily.APRILTAG, 3))
+
+    row = viewer._format_tag_row(record)
+
+    assert "AT3" in row
+    assert row.count("--") == 6  # pixel x, pixel y, world x, world y, angle, speed
+
+
+def test_format_tag_row_formats_present_numeric_fields_and_abbreviates_aruco():
+    record = _bare_tag_record(
+        tag=TagId(TagFamily.ARUCO, 9),
+        world=WorldPoint(x=3.0, y=-4.0),
+        speed=7.0,
+        pixel=PixelPoint(x=100.0, y=50.0),
+        calibrated=True,
+        yaw_rad=math.radians(45.0),
+    )
+
+    row = viewer._format_tag_row(record)
+
+    assert "AR9" in row  # ArUco id abbreviated distinctly from AprilTag
+    assert "100.0" in row
+    assert "50.0" in row
+    assert "3.0" in row
+    assert "-4.0" in row
+    assert "45.0" in row
+    assert "7.0" in row
+    assert "--" not in row
+
+
+def test_format_sidebar_text_orders_rows_by_tag_number_no_mobile_stationary_split():
+    """Sprint.md Scope: one single ordered list, by ``tag.tag.number``
+    -- no mobile/stationary split -- regardless of the order records
+    are handed in."""
+    high = _bare_tag_record(tag=TagId(TagFamily.APRILTAG, 5))
+    low = _bare_tag_record(tag=TagId(TagFamily.APRILTAG, 1))
+
+    text = viewer._format_sidebar_text((high, low))
+    lines = text.splitlines()
+
+    assert len(lines) == 3  # header + two rows
+    assert "AT1" in lines[1]
+    assert "AT5" in lines[2]
+
+
+def test_format_sidebar_text_with_no_tags_is_header_only():
+    """``None`` or an empty tuple both produce the header alone --
+    "no tags currently detected" reads as an intentional, still-legible
+    panel state, not a blank pane."""
+    assert viewer._format_sidebar_text(None) == viewer._SIDEBAR_HEADER
+    assert viewer._format_sidebar_text(()) == viewer._SIDEBAR_HEADER
+
+
+@pytest.mark.camera
+def test_tkwindow_with_sidebar_builds_a_side_panel_and_updates_it_from_tags():
+    """A thin smoke-level check of the real Tk widget wiring (the
+    ticket's own testing note: row-formatting logic is unit-tested
+    directly above, with no Tk root at all; this is the one test that
+    actually builds the ``tk.Text`` side panel and reads its content
+    back). Not about camera hardware, but reuses the one marker this
+    project's GUI-test rule already deselects from the baseline run."""
+    window = viewer.TkWindow("aprilcam sidebar test", show_sidebar=True)
+    try:
+        record = _bare_tag_record(
+            tag=TagId(TagFamily.APRILTAG, 4),
+            world=WorldPoint(x=1.0, y=2.0),
+            speed=3.0,
+            pixel=PixelPoint(x=10.0, y=20.0),
+            calibrated=True,
+            yaw_rad=0.0,
+        )
+        window.update_tags((record,))
+        content = window._sidebar_text.get("1.0", "end")
+        assert "AT4" in content
+
+        window.update_tags(None)
+        cleared = window._sidebar_text.get("1.0", "end")
+        assert "AT4" not in cleared
+    finally:
+        window.close()
+
+
 # ---------------------------------------------------------------------------
 # Headless detection -- UC-16.S-3, no real GUI toolkit instantiated
 # ---------------------------------------------------------------------------
@@ -468,6 +601,30 @@ def test_run_raw_view_ignores_embedded_tags_even_when_detection_is_active():
     viewer.run_raw_view("cam", daemon, window_factory=lambda title: window)
 
     assert window.shown == [b"raw-with-tags"]
+    # Window.update_tags's inherited no-op default is what the raw view
+    # exercises (sprint 032 ticket 002, SUC-002 acceptance criterion):
+    # DisplayFrame.tags stays None regardless of the embedded TagFrame,
+    # since _convert_raw_frame never reads frame.tags at all.
+    assert window.tags_updates == [None]
+
+
+def test_run_raw_view_window_factory_receives_no_show_sidebar_kwarg():
+    """Regression (ticket 002 acceptance criterion): run_raw_view's own
+    window_factory call site is unchanged -- a single positional title,
+    no ``show_sidebar`` kwarg -- so ``TkWindow(title)`` behaves exactly
+    as before this ticket."""
+    stream = _ScriptedImageStream([_image_frame(data=b"raw-1")])
+    daemon = _FakeStreamDaemon(stream=stream)
+    window = _FakeWindow(close_after_frames=1)
+    captured_kwargs: dict = {}
+
+    def factory(title, **kwargs):
+        captured_kwargs.update(kwargs)
+        return window
+
+    viewer.run_raw_view("cam", daemon, window_factory=factory)
+
+    assert captured_kwargs == {}
 
 
 def test_run_raw_view_still_displays_a_dark_frame_with_the_advisory_surfaced():
@@ -522,7 +679,7 @@ def test_run_playfield_view_subscribes_to_the_deskewed_stream_and_shows_frames()
         "arducam-ov9782-usb-camera",
         daemon,
         renderer_factory=_PassThroughRenderer,
-        window_factory=lambda title: window,
+        window_factory=lambda title, **kwargs: window,
     )
 
     assert daemon.requested_deskewed == [True]
@@ -541,7 +698,10 @@ def test_run_playfield_view_never_calls_get_tags_only_stream_images():
     window = _FakeWindow(close_after_frames=1)
 
     viewer.run_playfield_view(
-        "cam", daemon, renderer_factory=_PassThroughRenderer, window_factory=lambda title: window
+        "cam",
+        daemon,
+        renderer_factory=_PassThroughRenderer,
+        window_factory=lambda title, **kwargs: window,
     )
 
     assert daemon.requested_deskewed == [True]
@@ -561,7 +721,7 @@ def test_run_playfield_view_never_falls_back_to_a_raw_frame_when_uncalibrated():
             "cam",
             daemon,
             renderer_factory=_PassThroughRenderer,
-            window_factory=lambda title: window,
+            window_factory=lambda title, **kwargs: window,
         )
 
     assert daemon.requested_deskewed == [True]
@@ -579,7 +739,10 @@ def test_run_playfield_view_surfaces_calibration_stale_as_a_status():
     window = _FakeWindow(close_after_frames=1)
 
     viewer.run_playfield_view(
-        "cam", daemon, renderer_factory=_PassThroughRenderer, window_factory=lambda title: window
+        "cam",
+        daemon,
+        renderer_factory=_PassThroughRenderer,
+        window_factory=lambda title, **kwargs: window,
     )
 
     assert window.shown == [b"stale-frame"]  # still displayed, not withheld
@@ -593,7 +756,10 @@ def test_run_playfield_view_still_surfaces_a_dark_frame_advisory():
     window = _FakeWindow(close_after_frames=1)
 
     viewer.run_playfield_view(
-        "cam", daemon, renderer_factory=_PassThroughRenderer, window_factory=lambda title: window
+        "cam",
+        daemon,
+        renderer_factory=_PassThroughRenderer,
+        window_factory=lambda title, **kwargs: window,
     )
 
     assert window.statuses[0] is not None
@@ -603,7 +769,7 @@ def test_run_playfield_view_still_surfaces_a_dark_frame_advisory():
 def test_run_playfield_view_propagates_no_display_available_before_any_daemon_call():
     daemon = _FakeStreamDaemon(stream=_ScriptedImageStream([_image_frame()]))
 
-    def boom_factory(title: str) -> viewer.Window:
+    def boom_factory(title: str, **kwargs) -> viewer.Window:
         raise viewer.NoDisplayAvailable("no $DISPLAY or $WAYLAND_DISPLAY set")
 
     with pytest.raises(viewer.NoDisplayAvailable):
@@ -621,7 +787,7 @@ def test_run_playfield_view_closes_the_window_even_when_the_stream_raises():
             "cam",
             daemon,
             renderer_factory=_PassThroughRenderer,
-            window_factory=lambda title: window,
+            window_factory=lambda title, **kwargs: window,
         )
 
     assert window.close_called is True
@@ -637,11 +803,128 @@ def test_run_playfield_view_stops_the_reader_thread_and_unsubscribes_once_the_wi
     window = _FakeWindow(close_after_frames=2)
 
     viewer.run_playfield_view(
-        "cam", daemon, renderer_factory=_PassThroughRenderer, window_factory=lambda title: window
+        "cam",
+        daemon,
+        renderer_factory=_PassThroughRenderer,
+        window_factory=lambda title, **kwargs: window,
     )
 
     assert stream.close_called is True
     assert _no_reader_thread_alive()
+
+
+# ---------------------------------------------------------------------------
+# bare mode / DisplayFrame.tags wiring (sprint 032 ticket 002, SUC-002/SUC-003)
+# ---------------------------------------------------------------------------
+
+
+class _BoomRendererFactory:
+    """A ``renderer_factory`` double that fails the test outright if
+    ever called -- the strongest available proof that ``bare=True``
+    never constructs a renderer at all (ticket 002's own acceptance
+    criterion, phrased exactly this way)."""
+
+    def __call__(self):
+        raise AssertionError("bare mode must never call the renderer factory")
+
+
+def test_run_playfield_view_populates_display_frame_tags_in_the_default_annotated_mode():
+    """SUC-002: DisplayFrame.tags is populated straight from the
+    streamed frame's own embedded TagFrame -- the same one the renderer
+    already reads, no second subscription -- and reaches the window via
+    Window.update_tags on every displayed frame."""
+    tag_frame = _tag_frame_with_one_tag()
+    stream = _ScriptedImageStream([_image_frame(data=b"f1", tags=tag_frame)])
+    daemon = _FakeStreamDaemon(stream=stream)
+    window = _FakeWindow(close_after_frames=1)
+
+    viewer.run_playfield_view(
+        "cam",
+        daemon,
+        renderer_factory=_PassThroughRenderer,
+        window_factory=lambda title, **kwargs: window,
+    )
+
+    assert window.tags_updates == [tag_frame.tags]
+
+
+def test_run_playfield_view_bare_mode_never_calls_the_renderer_factory():
+    """Acceptance criterion, asserted the strong way: a renderer_factory
+    that raises if called is passed in, and bare mode still succeeds --
+    proof no ``Renderer`` is ever constructed on this path."""
+    stream = _ScriptedImageStream([_image_frame(data=b"f1")])
+    daemon = _FakeStreamDaemon(stream=stream)
+    window = _FakeWindow(close_after_frames=1)
+
+    viewer.run_playfield_view(
+        "cam",
+        daemon,
+        renderer_factory=_BoomRendererFactory(),
+        window_factory=lambda title, **kwargs: window,
+        bare=True,
+    )
+
+    assert window.shown == [b"f1"]
+
+
+def test_run_playfield_view_bare_mode_shows_unmodified_bytes_and_never_populates_tags():
+    """``bare=True`` reproduces today's plain image-only mode: the
+    stream's own bytes, unmodified, and DisplayFrame.tags stays at its
+    None default even though the streamed frame carries a real
+    TagFrame -- no overlay, no sidebar data, by construction."""
+    tag_frame = _tag_frame_with_one_tag()
+    stream = _ScriptedImageStream([_image_frame(data=b"bare-bytes", tags=tag_frame)])
+    daemon = _FakeStreamDaemon(stream=stream)
+    window = _FakeWindow(close_after_frames=1)
+
+    viewer.run_playfield_view(
+        "cam",
+        daemon,
+        renderer_factory=_BoomRendererFactory(),
+        window_factory=lambda title, **kwargs: window,
+        bare=True,
+    )
+
+    assert window.shown == [b"bare-bytes"]  # unmodified -- no Renderer call
+    assert window.tags_updates == [None]  # DisplayFrame.tags never populated
+
+
+def test_run_playfield_view_bare_mode_builds_the_window_without_a_sidebar():
+    stream = _ScriptedImageStream([_image_frame(data=b"f1")])
+    daemon = _FakeStreamDaemon(stream=stream)
+    window = _FakeWindow(close_after_frames=1)
+    captured_kwargs: dict = {}
+
+    def factory(title, **kwargs):
+        captured_kwargs.update(kwargs)
+        return window
+
+    viewer.run_playfield_view(
+        "cam",
+        daemon,
+        renderer_factory=_BoomRendererFactory(),
+        window_factory=factory,
+        bare=True,
+    )
+
+    assert captured_kwargs == {"show_sidebar": False}
+
+
+def test_run_playfield_view_default_mode_builds_the_window_with_a_sidebar():
+    stream = _ScriptedImageStream([_image_frame(data=b"f1")])
+    daemon = _FakeStreamDaemon(stream=stream)
+    window = _FakeWindow(close_after_frames=1)
+    captured_kwargs: dict = {}
+
+    def factory(title, **kwargs):
+        captured_kwargs.update(kwargs)
+        return window
+
+    viewer.run_playfield_view(
+        "cam", daemon, renderer_factory=_PassThroughRenderer, window_factory=factory
+    )
+
+    assert captured_kwargs == {"show_sidebar": True}
 
 
 # -- the live geometry check, through the real Renderer -----------------
@@ -661,12 +944,20 @@ def _solid_deskewed_png() -> bytes:
     return buf.getvalue()
 
 
-def _front_edge_midpoint(center: WorldPoint) -> WorldPoint:
-    """The midpoint of the tag's front edge -- a boundary *line*, so
-    (unlike the tag's own centre) it is actually drawn-on pixel by
-    ``_draw_tag``'s ``draw.polygon(..., outline=...)`` call, matching
-    ``test_renderer.py``'s own sampling point."""
-    return WorldPoint(center.x, center.y + _TAG_HALF_CM)
+def _red_edge_midpoint(center: WorldPoint) -> WorldPoint:
+    """The midpoint of the tag's *back* edge (``back_right``-
+    ``back_left``) -- one of the three sides ``client/renderer.py``'s
+    red open "U" actually draws under ticket 032-001's v1-parity scheme
+    (the *front* edge, at ``center.y + _TAG_HALF_CM``, is the one side
+    that scheme never draws red -- see that ticket's
+    ``test_render_never_draws_the_front_edge_red``). Matches
+    ``tests/aprilcam/client/test_renderer.py``'s own back-edge sampling
+    point (``test_render_draws_the_red_u_at_the_position_the_metadata_predicts``);
+    same intent as this module's old ``_front_edge_midpoint`` (proving
+    the viewer's own stream->render->display wiring does not lose or
+    shift the drawn position), moved to a pixel the new scheme actually
+    draws on."""
+    return WorldPoint(center.x, center.y - _TAG_HALF_CM)
 
 
 def _tag_record_at(center: WorldPoint) -> TagRecord:
@@ -732,15 +1023,16 @@ def test_run_playfield_view_draws_apriltag_1_at_the_image_centre_for_a_centred_w
         "arducam",
         daemon,
         renderer_factory=Renderer,
-        window_factory=lambda title: window,
+        window_factory=lambda title, **kwargs: window,
     )
 
     image = _decode_png(window.shown[0])
-    front_edge_midpoint = _front_edge_midpoint(WorldPoint(0.0, 0.0))
+    red_edge_midpoint = _red_edge_midpoint(WorldPoint(0.0, 0.0))
     predicted = world_to_deskewed_pixel(
-        front_edge_midpoint, world_extent=(_GEO_WIDTH_CM, _GEO_HEIGHT_CM), px_per_cm=_GEO_PX_PER_CM
+        red_edge_midpoint, world_extent=(_GEO_WIDTH_CM, _GEO_HEIGHT_CM), px_per_cm=_GEO_PX_PER_CM
     )
-    # World (0, 0)'s front-edge midpoint is directly above the image
+    # World (0, 0)'s back-edge midpoint (a drawn red side under the new
+    # 3-sided-U scheme, ticket 032-001) is directly below the image
     # centre by exactly the tag's half-width in pixels -- both land
     # squarely in the centre neighbourhood of a 500x400 image.
     assert abs(predicted.x - _GEO_WIDTH_PX / 2) < 1.0
@@ -769,7 +1061,7 @@ def test_run_playfield_view_moves_the_drawn_tag_right_and_up_as_the_physical_tag
         "arducam",
         daemon,
         renderer_factory=Renderer,
-        window_factory=lambda title: window,
+        window_factory=lambda title, **kwargs: window,
     )
 
     assert len(window.shown) == 2
@@ -778,10 +1070,10 @@ def test_run_playfield_view_moves_the_drawn_tag_right_and_up_as_the_physical_tag
 
     extent = (_GEO_WIDTH_CM, _GEO_HEIGHT_CM)
     predicted_start = world_to_deskewed_pixel(
-        _front_edge_midpoint(start), world_extent=extent, px_per_cm=_GEO_PX_PER_CM
+        _red_edge_midpoint(start), world_extent=extent, px_per_cm=_GEO_PX_PER_CM
     )
     predicted_moved = world_to_deskewed_pixel(
-        _front_edge_midpoint(moved), world_extent=extent, px_per_cm=_GEO_PX_PER_CM
+        _red_edge_midpoint(moved), world_extent=extent, px_per_cm=_GEO_PX_PER_CM
     )
     assert predicted_moved.x > predicted_start.x  # east -> right on screen
     assert predicted_moved.y < predicted_start.y  # north -> up on screen (smaller pixel-y)
