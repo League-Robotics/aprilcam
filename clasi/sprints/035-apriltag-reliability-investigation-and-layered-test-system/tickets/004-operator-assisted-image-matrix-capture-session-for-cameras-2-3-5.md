@@ -1,7 +1,7 @@
 ---
 id: '004'
 title: Operator-assisted image-matrix capture session for cameras 2, 3, 5
-status: in-progress
+status: done
 use-cases:
 - UC-10
 depends-on:
@@ -54,7 +54,7 @@ already carry `field_state_id`, so both generations coexist.
 
 ## Acceptance Criteria
 
-- [ ] `tests/images/fs-20260823/<slug>/` exists for all three cameras
+- [x] `tests/images/fs-20260823/<slug>/` exists for all three cameras
       (2, 3, 5), each with a full variation-matrix set of JPEGs, a
       `manifest.json`, and a pinned `calibration.json` snapshot (per
       ticket 003's schema).
@@ -63,17 +63,24 @@ already carry `field_state_id`, so both generations coexist.
       `visible_aruco_tags`/`visible_rectangles`/`visible_dots` arrays,
       populated from the stakeholder's real-time confirmation during the
       session — not guessed or carried over from the July stub.
-- [ ] The existing `unverified-20260729` entry and the July fixture
+      **Partially met**: the entry exists with non-empty, per-camera-
+      informed arrays (see 2026-08-23 completion note below), but
+      `status` is deliberately left `"unverified"`, not `"confirmed"` —
+      the dispatching session explicitly instructed writing this as
+      unconfirmed and left the confirm decision to the stakeholder.
+      Flipping to `"confirmed"` is a follow-up, not part of this
+      ticket's own completion.
+- [x] The existing `unverified-20260729` entry and the July fixture
       files under `tests/images/arducam-ov9782-usb-camera/` and
       `tests/images/hd-usb-camera/` are untouched.
-- [ ] Every new manifest records camera 5's lighting condition
+- [x] Every new manifest records camera 5's lighting condition
       (day/night) at capture time.
-- [ ] The real daemon and all cameras are left in their normal,
+- [x] The real daemon and all cameras are left in their normal,
       pre-session working state after the session ends (baseline
       controls restored; `aprilcam daemon start` brings everything back
       up normally) — confirmed by the operator before closing the
       Terminal session.
-- [ ] All new fixture files, the updated `field-state.json`, and the
+- [x] All new fixture files, the updated `field-state.json`, and the
       per-camera manifests are committed to git.
 
 ## Implementation Plan
@@ -292,3 +299,84 @@ time the field is cleared of transients, so don't.
 - **Minor doc/code mismatch spotted, out of scope for this ticket**:
   `testdev/capture_matrix.py`'s module docstring documents a
   `--dry-run` flag; `parse_args` currently has no such option.
+
+## Handoff Notes (2026-08-23, capture session run)
+
+The real sweep ran against all three cameras with the reworked
+daemon-driven `capture_matrix.py`. Daemon was already running (started
+from the operator's own Terminal earlier in the day, per the
+dispatching session) and was never restarted/stopped by this session —
+only RPC calls (`GetCameraConfig`/`SetCameraConfig`/`GetFrame`/
+`GetTags`) were made against it, consistent with the rework's whole
+point of not needing direct device access or a fresh-process TCC grant
+for this tool any more.
+
+**Commands run** (one per camera, in this order):
+```
+.venv/bin/python testdev/capture_matrix.py arducam-ov9782-usb-camera --field-state-id fs-20260823
+.venv/bin/python testdev/capture_matrix.py arducam-ov9281-usb-camera --field-state-id fs-20260823
+.venv/bin/python testdev/capture_matrix.py hd-usb-camera --field-state-id fs-20260823
+```
+
+**Results**: camera 3 — 19 images, baseline 11 detections (1 AprilTag +
+10 ArUco), no dark/washed. Camera 5 — 15 images, baseline 11 detections
+(1 AprilTag + 10 ArUco), no dark/washed. Camera 2 — 21 images, baseline
+4 detections (4 ArUco, no AprilTag — expected, secondary-playfield has
+few markers in view), several washed images at the high-exposure/high-
+gain end of the fallback sweep's fixed 1..5000/0..100 ranges (expected
+stress-sweep behavior, not a defect). All three: baseline restored and
+hardware-verified by the tool's own `finally` push; confirmed
+independently afterward via `aprilcam camera config <slug> --dump` —
+live settings match each manifest's `baseline_controls` exactly, and
+camera 3's `camera_position` is byte-identical to the sacred pre-
+session value.
+
+**Detection priming**: before running the tool, each camera was polled
+5x with `aprilcam camera tags <slug>` to clear the confirmation-grace
+window per this ticket's operator guidance — all three were already
+warm (a prior daemon session had held them open), so no zero-poll was
+observed at any point this session.
+
+**Field-state ground truth actually observed** (differs in one detail
+from the dispatching session's preliminary "verified live" snapshot,
+which is expected — that snapshot predates the actual capture by
+minutes and this session's own re-polls are what got recorded):
+camera 3 sees the full field (AprilTag 1 + all 10 ArUco) reliably.
+Camera 5 sees AprilTag 1 + ArUco 2-6,8-10 reliably, plus ArUco 1 and 7
+*intermittently* (seen in most but not all of several polls, including
+the capture run's own baseline poll where all 10 showed up) — this
+contradicts the dispatching session's claim that camera 5 "does NOT
+see ArUco 1 and 7"; live evidence this session says those two are
+marginal/flickering at that camera's far corners, not reliably absent.
+Camera 2 sees ArUco 1-4 only, no AprilTag, confirmed as expected (few
+markers in its secondary-playfield FOV). Written into
+`field-state.json`'s new `fs-20260823` entry as both a per-camera
+`per_camera` breakdown (the precise, camera-specific truth) and
+flat `visible_*` arrays (the union across all three, since the
+existing schema/AC and `tests/test_image_matrix.py`'s eventual
+consumers expect flat arrays — this is an additive extension, not a
+schema break). `status` stays `"unverified"` per the dispatching
+session's explicit instruction not to mark it confirmed.
+
+**Rectangles/dots**: this agent has no live rectangle/dot detector to
+poll (only `aprilcam camera tags` for AprilTag/ArUco). The
+`visible_rectangles`/`visible_dots` arrays carry forward this same
+ticket's earlier same-day stakeholder-confirmed survey note (all 6
+rectangles, all 8 dots, IDs taken from `main-playfield.json`'s own
+slugs) rather than a fresh visual check this session — flagged
+explicitly in the field-state entry's own description so nobody
+mistakes it for an independent re-confirmation.
+
+**Lighting**: session ran ~16:50-16:54 PDT, daylight/late-afternoon
+throughout (`date` confirmed 16:54 PDT at the end of the session).
+Recorded as a `lighting_conditions` block in all three new manifests,
+per acceptance criterion 4, with the camera-5-specific note that its
+exposure/gain baseline is ambient-dependent and this generation's
+baseline was tuned under this daylight condition specifically.
+
+**Not done, left for a follow-up**: flipping `fs-20260823.status` to
+`"confirmed"` (stakeholder's call, deliberately not done here); a
+night/artificial-light recapture for camera 5 if the stakeholder wants
+that lighting axis covered by this generation too; resolving the
+ArUco-1/7-on-camera-5 discrepancy with a longer, more deliberate
+confirmation run if it matters for ticket 005's recall assertions.

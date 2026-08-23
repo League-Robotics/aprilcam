@@ -1,0 +1,294 @@
+{
+  "baseline_controls": {},
+  "calibration_snapshot_sha256": "4329fe68a5608aedc0a533d50a4c94f0dcd05b58b16136d1ba1ea80207513ca2",
+  "camera": {
+    "config_dir": "hd-usb-camera",
+    "registry_enum": 2,
+    "resolution": [
+      1920,
+      1080
+    ]
+  },
+  "capture_finished_at": "2026-08-23T23:53:51.161835+00:00",
+  "capture_started_at": "2026-08-23T23:52:49.854415+00:00",
+  "daemon_version": "0.20260823.5",
+  "field_state_id": "fs-20260823",
+  "images": [
+    {
+      "captured_at": "2026-08-23T23:52:49.854415+00:00",
+      "controls": {},
+      "dark": false,
+      "file": "baseline.jpg",
+      "mean_luminance": 118.53,
+      "name": "baseline",
+      "settle_s": 1.5,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:52:53.825351+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 26
+      },
+      "dark": false,
+      "file": "exp-26.jpg",
+      "mean_luminance": 114.41,
+      "name": "exp-26",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:52:57.324639+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 51
+      },
+      "dark": false,
+      "file": "exp-51.jpg",
+      "mean_luminance": 187.7,
+      "name": "exp-51",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:53:00.860278+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 151
+      },
+      "dark": false,
+      "file": "exp-151.jpg",
+      "mean_luminance": 214.86,
+      "name": "exp-151",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:53:04.397066+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 401
+      },
+      "dark": false,
+      "file": "exp-401.jpg",
+      "mean_luminance": 246.57,
+      "name": "exp-401",
+      "settle_s": 3.0,
+      "washed": true
+    },
+    {
+      "captured_at": "2026-08-23T23:53:07.870423+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 1001
+      },
+      "dark": false,
+      "file": "exp-1001.jpg",
+      "mean_luminance": 248.47,
+      "name": "exp-1001",
+      "settle_s": 3.0,
+      "washed": true
+    },
+    {
+      "captured_at": "2026-08-23T23:53:11.370109+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 2500
+      },
+      "dark": false,
+      "file": "exp-2500.jpg",
+      "mean_luminance": 252.38,
+      "name": "exp-2500",
+      "settle_s": 3.0,
+      "washed": true
+    },
+    {
+      "captured_at": "2026-08-23T23:53:15.106863+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 5000
+      },
+      "dark": false,
+      "file": "exp-5000.jpg",
+      "mean_luminance": 253.91,
+      "name": "exp-5000",
+      "settle_s": 3.0,
+      "washed": true
+    },
+    {
+      "captured_at": "2026-08-23T23:53:16.909523+00:00",
+      "controls": {
+        "gain": 5
+      },
+      "dark": false,
+      "file": "gain-5.jpg",
+      "mean_luminance": 253.7,
+      "name": "gain-5",
+      "settle_s": 1.5,
+      "washed": true
+    },
+    {
+      "captured_at": "2026-08-23T23:53:18.749664+00:00",
+      "controls": {
+        "gain": 15
+      },
+      "dark": false,
+      "file": "gain-15.jpg",
+      "mean_luminance": 253.74,
+      "name": "gain-15",
+      "settle_s": 1.5,
+      "washed": true
+    },
+    {
+      "captured_at": "2026-08-23T23:53:20.584284+00:00",
+      "controls": {
+        "gain": 30
+      },
+      "dark": false,
+      "file": "gain-30.jpg",
+      "mean_luminance": 253.79,
+      "name": "gain-30",
+      "settle_s": 1.5,
+      "washed": true
+    },
+    {
+      "captured_at": "2026-08-23T23:53:22.428846+00:00",
+      "controls": {
+        "gain": 50
+      },
+      "dark": false,
+      "file": "gain-50.jpg",
+      "mean_luminance": 253.85,
+      "name": "gain-50",
+      "settle_s": 1.5,
+      "washed": true
+    },
+    {
+      "captured_at": "2026-08-23T23:53:24.264202+00:00",
+      "controls": {
+        "gain": 80
+      },
+      "dark": false,
+      "file": "gain-80.jpg",
+      "mean_luminance": 253.96,
+      "name": "gain-80",
+      "settle_s": 1.5,
+      "washed": true
+    },
+    {
+      "captured_at": "2026-08-23T23:53:26.069662+00:00",
+      "controls": {
+        "gain": 100
+      },
+      "dark": false,
+      "file": "gain-100.jpg",
+      "mean_luminance": 254.02,
+      "name": "gain-100",
+      "settle_s": 1.5,
+      "washed": true
+    },
+    {
+      "captured_at": "2026-08-23T23:53:29.339962+00:00",
+      "controls": {
+        "auto_exposure": 1
+      },
+      "dark": false,
+      "file": "auto-exposure-1.jpg",
+      "mean_luminance": 254.02,
+      "name": "auto-exposure-1",
+      "settle_s": 3.0,
+      "washed": true
+    },
+    {
+      "captured_at": "2026-08-23T23:53:32.992849+00:00",
+      "controls": {
+        "auto_white_balance": false,
+        "white_balance_temperature": 2800
+      },
+      "dark": false,
+      "file": "wb-2800.jpg",
+      "mean_luminance": 253.82,
+      "name": "wb-2800",
+      "settle_s": 3.0,
+      "washed": true
+    },
+    {
+      "captured_at": "2026-08-23T23:53:36.478404+00:00",
+      "controls": {
+        "auto_white_balance": false,
+        "white_balance_temperature": 4650
+      },
+      "dark": false,
+      "file": "wb-4650.jpg",
+      "mean_luminance": 254.02,
+      "name": "wb-4650",
+      "settle_s": 3.0,
+      "washed": true
+    },
+    {
+      "captured_at": "2026-08-23T23:53:40.098009+00:00",
+      "controls": {
+        "auto_white_balance": false,
+        "white_balance_temperature": 6500
+      },
+      "dark": false,
+      "file": "wb-6500.jpg",
+      "mean_luminance": 254.57,
+      "name": "wb-6500",
+      "settle_s": 3.0,
+      "washed": true
+    },
+    {
+      "captured_at": "2026-08-23T23:53:43.402105+00:00",
+      "controls": {
+        "auto_white_balance": true
+      },
+      "dark": false,
+      "file": "auto-wb-true.jpg",
+      "mean_luminance": 254.01,
+      "name": "auto-wb-true",
+      "settle_s": 3.0,
+      "washed": true
+    },
+    {
+      "captured_at": "2026-08-23T23:53:47.173947+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 51,
+        "gain": 100
+      },
+      "dark": false,
+      "file": "stress-lowexp-higain.jpg",
+      "mean_luminance": 198.48,
+      "name": "stress-lowexp-higain",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:53:51.148678+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 5000,
+        "gain": 5
+      },
+      "dark": false,
+      "file": "stress-highexp-logain.jpg",
+      "mean_luminance": 253.69,
+      "name": "stress-highexp-logain",
+      "settle_s": 3.0,
+      "washed": true
+    }
+  ],
+  "lighting_conditions": {
+    "captured_at_local": "2026-08-23 ~16:53-16:54 PDT",
+    "condition": "daylight-late-afternoon",
+    "note": "Same session/lighting window as the camera-3 and camera-5 captures."
+  },
+  "matrix_source": "fallback",
+  "package_version": "0.20260823.5",
+  "playfield": "secondary-playfield",
+  "skipped_variations": {
+    "apply_failed": [],
+    "no_frame": []
+  }
+}

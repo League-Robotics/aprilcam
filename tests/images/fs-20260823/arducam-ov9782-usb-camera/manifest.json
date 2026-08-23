@@ -1,0 +1,338 @@
+{
+  "baseline_controls": {
+    "auto_exposure": 1,
+    "auto_white_balance": 0,
+    "exposure": 6,
+    "gain": 2,
+    "white_balance_temperature": 4600
+  },
+  "calibration_snapshot_sha256": "b7b7ccf1cdad55499611b75ff5ce3a13ae090665d9458ede26cfab829f9abf28",
+  "camera": {
+    "config_dir": "arducam-ov9782-usb-camera",
+    "registry_enum": 3,
+    "resolution": [
+      1280,
+      800
+    ]
+  },
+  "capture_finished_at": "2026-08-23T23:51:25.859165+00:00",
+  "capture_started_at": "2026-08-23T23:50:20.435217+00:00",
+  "daemon_version": "0.20260823.5",
+  "field_state_id": "fs-20260823",
+  "images": [
+    {
+      "captured_at": "2026-08-23T23:50:20.435217+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "auto_white_balance": 0,
+        "exposure": 6,
+        "gain": 2,
+        "white_balance_temperature": 4600
+      },
+      "dark": false,
+      "file": "baseline.jpg",
+      "mean_luminance": 95.54,
+      "name": "baseline",
+      "settle_s": 1.5,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:50:24.701313+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "auto_white_balance": 0,
+        "exposure": 3,
+        "gain": 2,
+        "white_balance_temperature": 4600
+      },
+      "dark": false,
+      "file": "exp-03.jpg",
+      "mean_luminance": 52.51,
+      "name": "exp-03",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:50:28.663011+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "auto_white_balance": 0,
+        "exposure": 4,
+        "gain": 2,
+        "white_balance_temperature": 4600
+      },
+      "dark": false,
+      "file": "exp-04.jpg",
+      "mean_luminance": 75.78,
+      "name": "exp-04",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:50:32.797967+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "auto_white_balance": 0,
+        "exposure": 8,
+        "gain": 2,
+        "white_balance_temperature": 4600
+      },
+      "dark": false,
+      "file": "exp-08.jpg",
+      "mean_luminance": 114.76,
+      "name": "exp-08",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:50:36.986897+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "auto_white_balance": 0,
+        "exposure": 10,
+        "gain": 2,
+        "white_balance_temperature": 4600
+      },
+      "dark": false,
+      "file": "exp-10.jpg",
+      "mean_luminance": 133.02,
+      "name": "exp-10",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:50:40.997200+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "auto_white_balance": 0,
+        "exposure": 12,
+        "gain": 2,
+        "white_balance_temperature": 4600
+      },
+      "dark": false,
+      "file": "exp-12.jpg",
+      "mean_luminance": 146.29,
+      "name": "exp-12",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:50:44.775048+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "auto_white_balance": 0,
+        "exposure": 16,
+        "gain": 2,
+        "white_balance_temperature": 4600
+      },
+      "dark": false,
+      "file": "exp-16.jpg",
+      "mean_luminance": 167.96,
+      "name": "exp-16",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:50:48.589867+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "auto_white_balance": 0,
+        "exposure": 24,
+        "gain": 2,
+        "white_balance_temperature": 4600
+      },
+      "dark": false,
+      "file": "exp-24.jpg",
+      "mean_luminance": 198.56,
+      "name": "exp-24",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:50:53.015550+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "auto_white_balance": 0,
+        "exposure": 40,
+        "gain": 2,
+        "white_balance_temperature": 4600
+      },
+      "dark": false,
+      "file": "exp-40.jpg",
+      "mean_luminance": 224.35,
+      "name": "exp-40",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:50:55.460726+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "auto_white_balance": 0,
+        "exposure": 6,
+        "gain": 1,
+        "white_balance_temperature": 4600
+      },
+      "dark": false,
+      "file": "gain-01.jpg",
+      "mean_luminance": 93.53,
+      "name": "gain-01",
+      "settle_s": 1.5,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:50:57.778184+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "auto_white_balance": 0,
+        "exposure": 6,
+        "gain": 4,
+        "white_balance_temperature": 4600
+      },
+      "dark": false,
+      "file": "gain-04.jpg",
+      "mean_luminance": 100.29,
+      "name": "gain-04",
+      "settle_s": 1.5,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:51:00.172277+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "auto_white_balance": 0,
+        "exposure": 6,
+        "gain": 8,
+        "white_balance_temperature": 4600
+      },
+      "dark": false,
+      "file": "gain-08.jpg",
+      "mean_luminance": 103.65,
+      "name": "gain-08",
+      "settle_s": 1.5,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:51:03.064977+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "auto_white_balance": 0,
+        "exposure": 6,
+        "gain": 16,
+        "white_balance_temperature": 4600
+      },
+      "dark": false,
+      "file": "gain-16.jpg",
+      "mean_luminance": 109.95,
+      "name": "gain-16",
+      "settle_s": 1.5,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:51:07.094504+00:00",
+      "controls": {
+        "auto_exposure": 8,
+        "auto_white_balance": 0,
+        "gain": 2,
+        "white_balance_temperature": 4600
+      },
+      "dark": false,
+      "file": "auto-exposure.jpg",
+      "mean_luminance": 129.42,
+      "name": "auto-exposure",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:51:10.857246+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "auto_white_balance": false,
+        "exposure": 6,
+        "gain": 2,
+        "white_balance_temperature": 3000
+      },
+      "dark": false,
+      "file": "wb-3000.jpg",
+      "mean_luminance": 97.63,
+      "name": "wb-3000",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:51:14.686015+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "auto_white_balance": false,
+        "exposure": 6,
+        "gain": 2,
+        "white_balance_temperature": 6500
+      },
+      "dark": false,
+      "file": "wb-6500.jpg",
+      "mean_luminance": 97.0,
+      "name": "wb-6500",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:51:18.321481+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "auto_white_balance": true,
+        "exposure": 6,
+        "gain": 2
+      },
+      "dark": false,
+      "file": "wb-auto.jpg",
+      "mean_luminance": 86.4,
+      "name": "wb-auto",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:51:22.069977+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "auto_white_balance": 0,
+        "exposure": 3,
+        "gain": 16,
+        "white_balance_temperature": 4600
+      },
+      "dark": false,
+      "file": "stress-lowexp-higain.jpg",
+      "mean_luminance": 60.11,
+      "name": "stress-lowexp-higain",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:51:25.837498+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "auto_white_balance": 0,
+        "exposure": 40,
+        "gain": 1,
+        "white_balance_temperature": 4600
+      },
+      "dark": false,
+      "file": "stress-highexp-logain.jpg",
+      "mean_luminance": 222.23,
+      "name": "stress-highexp-logain",
+      "settle_s": 3.0,
+      "washed": false
+    }
+  ],
+  "lighting_conditions": {
+    "captured_at_local": "2026-08-23 ~16:50-16:51 PDT",
+    "condition": "daylight-late-afternoon",
+    "note": "Same session/lighting window as the camera-5 and camera-2 captures below."
+  },
+  "matrix_source": "matrix",
+  "package_version": "0.20260823.5",
+  "playfield": "main-playfield",
+  "skipped_variations": {
+    "apply_failed": [],
+    "no_frame": []
+  }
+}
