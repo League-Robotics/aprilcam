@@ -1,9 +1,11 @@
 ---
 id: '002'
 title: 'Sticky sidebar roster: ghost-state bookkeeping, 30s horizon, grey rendering'
-status: open
-use-cases: ['SUC-002']
-depends-on: ['001']
+status: done
+use-cases:
+- SUC-002
+depends-on:
+- '001'
 github-issue: ''
 issue: sidebar-tag-list-sticky-30s-grey-ghosting.md
 completes_issue: true
@@ -58,24 +60,24 @@ inside `view/viewer.py` as one new pure class, not a new module"):
 
 ## Acceptance Criteria
 
-- [ ] A tag's row greys out on the very first frame it is absent from
+- [x] A tag's row greys out on the very first frame it is absent from
       — no multi-frame grace period before greying.
-- [ ] A greyed row keeps its last-seen values (not blanked, not
+- [x] A greyed row keeps its last-seen values (not blanked, not
       zeroed) until dropped.
-- [ ] A row is dropped only once at least 30 seconds
+- [x] A row is dropped only once at least 30 seconds
       (`_GHOST_HORIZON_S`) have elapsed since its last live sighting.
-- [ ] A tag that reappears before the 30-second horizon is fully
+- [x] A tag that reappears before the 30-second horizon is fully
       restored to live color and current values, not left grey.
-- [ ] Live and ghosted rows share one ordered list by tag number — no
+- [x] Live and ghosted rows share one ordered list by tag number — no
       separate "stale" section.
-- [ ] The roster's live/ghost/drop bookkeeping is unit-testable with an
+- [x] The roster's live/ghost/drop bookkeeping is unit-testable with an
       injected fake clock, with no real Tk window required.
-- [ ] An ArUco record is never admitted to the roster (defense in
+- [x] An ArUco record is never admitted to the roster (defense in
       depth on top of ticket 001's upstream filter).
-- [ ] `test_tkwindow_with_sidebar_builds_a_side_panel_and_updates_it_from_tags`
+- [x] `test_tkwindow_with_sidebar_builds_a_side_panel_and_updates_it_from_tags`
       is extended to confirm a ghosted row actually renders with the
       grey Tk text tag applied (real widget behavior).
-- [ ] `test_run_playfield_view_never_calls_get_tags_only_stream_images`
+- [x] `test_run_playfield_view_never_calls_get_tags_only_stream_images`
       continues to pass unmodified.
 
 ## Implementation Plan

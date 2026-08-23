@@ -1,6 +1,6 @@
 # view/
 
-**Owner:** Eric Busboom · **Last reviewed:** 2026-08-21 · **Status:** stable
+**Owner:** Eric Busboom · **Last reviewed:** 2026-08-22 · **Status:** stable
 
 ---
 
@@ -100,6 +100,46 @@ zero-overhead shape), and `DisplayFrame.tags` stays at its `None`
 default. It is a new capability, not a preserved old one: the
 lime-box/single-hat overlay `bare` replaces was retired
 project-wide, not made optional (sprint.md Design Rationale).
+
+**The sticky sidebar roster (sprint 033 ticket 002).** The sprint-032
+sidebar rebuilt its row set from each individual frame's tags, so a tag
+missing even one frame (occlusion, ordinary detection flicker) vanished
+and reappeared, reading as churn rather than a stable roster
+(`clasi/issues/sidebar-tag-list-sticky-30s-grey-ghosting.md`).
+`TkWindow` now owns a private `_TagRoster` — a pure, Tk-free structure
+keyed by `TagId` (family+number), holding each tracked tag's latest
+`TagRecord` plus the monotonic timestamp of its last *live* sighting.
+`update_tags` feeds this frame's (already AprilTag-filtered)
+`tags` into the roster's `update()` before rendering, and renders the
+roster's `snapshot()` — not `tags` directly — so:
+
+- A tag present this frame is (re)admitted live, values fully
+  refreshed.
+- A previously-tracked tag absent this frame is ghosted *immediately*
+  (no multi-frame grace period), its last-seen `TagRecord` retained
+  unchanged.
+- A tag unseen for `_GHOST_HORIZON_S` (30.0s, a named constant with a
+  documented rationale comment — the stakeholder-specified retention
+  window) or more, measured from its last live sighting, is dropped.
+- A reappearing tag is restored to live with fully refreshed values.
+
+The roster's clock is injectable (`time.monotonic` by default), so its
+live/ghost/drop transitions are unit-tested directly with a fake clock
+and no Tk root at all. Each `update()` call touches only the current
+frame's tags plus the currently-tracked ids — cost proportional to the
+number of tracked ids, not to elapsed wall time — since `update_tags`
+runs on every streamed frame at `_PUMP_INTERVAL_S`'s ~20Hz cadence.
+`_format_tag_row`/`_format_sidebar_text` stay pure and unchanged,
+reused for both live and ghosted rows; `TkWindow.update_tags` is the
+only place that decides color, applying a Tk text tag (`_GHOST_TK_TAG`,
+grey foreground `_GHOST_ROW_COLOR`) via `tag_add`/`tag_remove` to a
+ghosted row's line range one layer above the pure formatters (sprint.md
+Design Rationale: color is a Tk-rendering concern, never folded into
+the row formatter itself). Live and ghosted rows share one list ordered
+by tag number — no separate "stale" section. `_TagRoster` never admits
+a non-AprilTag record (defense in depth on top of ticket 001's own
+upstream filter, which is what the roster otherwise trusts completely
+rather than re-filtering).
 
 ## 3. Constraints and Invariants
 
@@ -241,8 +281,11 @@ conversion callable differ between the two views.
   current frame's full tag list, or `None`. A concrete no-op on
   `Window` itself (deliberate exception to this module's
   raise-`NotImplementedError` convention); `TkWindow` overrides it to
-  update its `tk.Text` sidebar only when built with `show_sidebar=True`,
-  otherwise inherits the no-op unchanged.
+  feed `tags` into its private `_TagRoster` and render the roster's
+  current live+ghosted snapshot (sprint 033 ticket 002 — see this doc's
+  "sticky sidebar roster" note above) into its `tk.Text` sidebar, only
+  when built with `show_sidebar=True`; otherwise inherits the no-op
+  unchanged.
 - Both raise `NoDisplayAvailable` before any daemon call is made if no
   display can be opened, and propagate any `aprilcam.errors.AprilCamError`
   raised mid-view (e.g. a mid-session disconnect, or `NotCalibrated` for

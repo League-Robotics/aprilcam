@@ -142,7 +142,7 @@ from PIL import Image, ImageTk
 from aprilcam.client.interfaces import Renderer as RendererBase
 from aprilcam.client.renderer import Renderer as PillowRenderer
 from aprilcam.daemon.interfaces import Daemon, ImageStream
-from aprilcam.types import ImageFrame, TagFamily, TagRecord
+from aprilcam.types import ImageFrame, TagFamily, TagId, TagRecord
 
 __all__ = [
     "DEFAULT_POLL_HZ",
@@ -392,6 +392,125 @@ def _format_sidebar_text(tags: Optional[Tuple[TagRecord, ...]]) -> str:
     return "\n".join(lines)
 
 
+#: How long a tag may go completely unseen before its sidebar row is
+#: dropped outright (sprint 033 ticket 002) -- the stakeholder-specified
+#: retention window, verbatim from the driving issue
+#: (`clasi/issues/sidebar-tag-list-sticky-30s-grey-ghosting.md`): "the
+#: list should retain a tag in there for 30 seconds at least before it
+#: drops out." A tag absent for less than this stays listed, greyed (see
+#: `_TagRoster` below), so ordinary single-frame detection flicker never
+#: makes a row disappear and reappear -- only a genuine >=30s absence
+#: does.
+_GHOST_HORIZON_S = 30.0
+
+#: A ghosted sidebar row's Tk text-tag foreground color -- applied one
+#: layer above the pure `_format_tag_row`/`_format_sidebar_text`
+#: (sprint.md Design Rationale: color is a Tk-rendering concern, decided
+#: by `TkWindow`, never folded into the row formatter itself).
+_GHOST_ROW_COLOR = "grey50"
+
+#: The Tk text-tag name `TkWindow.update_tags` applies to (and clears
+#: from) a ghosted row's line range via `tag_add`/`tag_remove`.
+_GHOST_TK_TAG = "ghost"
+
+
+@dataclass(frozen=True)
+class _RosterEntry:
+    """One tracked tag id's sticky-roster bookkeeping (sprint 033
+    ticket 002): its most recent :class:`~aprilcam.types.TagRecord` --
+    refreshed only while live, retained unchanged while ghosted, per
+    SUC-002's "last-seen values, not blanked" contract -- plus the
+    monotonic timestamp of its last *live* sighting, and whether it was
+    present in the most recently processed frame. Frozen and always
+    replaced wholesale by :meth:`_TagRoster.update`, never mutated in
+    place, matching this module's other value-shaped dataclasses (e.g.
+    :class:`DisplayFrame`)."""
+
+    record: TagRecord
+    last_seen: float
+    live: bool
+
+
+class _TagRoster:
+    """Sticky, per-tag-id bookkeeping for the playfield sidebar (sprint
+    033 ticket 002, driving issue
+    `clasi/issues/sidebar-tag-list-sticky-30s-grey-ghosting.md`).
+
+    Given each frame's already AprilTag-filtered live tags (sprint 033
+    ticket 001's own filter -- this class trusts it and never re-filters
+    by family itself beyond the defense-in-depth guard in
+    :meth:`update`), tracks each tag id's live/ghost/dropped lifecycle
+    across frames, per sprint.md's state diagram:
+
+    * A tag present this frame is (re)admitted live, values fully
+      refreshed, whether or not it was tracked before.
+    * A previously-tracked tag absent this frame is ghosted
+      *immediately* -- no multi-frame grace period -- keeping its
+      last-seen :class:`~aprilcam.types.TagRecord` untouched.
+    * A tag (live or ghosted) unseen for :data:`_GHOST_HORIZON_S` or
+      more, measured from its last *live* sighting, is dropped outright.
+
+    Pure and Tk-free -- no ``tkinter`` import anywhere in this class --
+    so its transitions are unit-testable with an injected fake clock and
+    no real window (the ticket's own acceptance criterion).
+    :class:`TkWindow` is this class's sole consumer (sprint.md Design
+    Rationale: one consumer, no reason for a new module).
+
+    *clock* defaults to :func:`time.monotonic` -- injectable so tests
+    control elapsed time without sleeping, mirroring this module's other
+    injectable-callable conventions (e.g. :class:`StreamLoop`'s
+    *sleep*).
+    """
+
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._entries: "dict[TagId, _RosterEntry]" = {}
+
+    def update(self, tags: Optional[Tuple[TagRecord, ...]]) -> None:
+        """Feed one frame's live tags into the roster.
+
+        Refreshes any entry present this frame (fully replacing its
+        record and last-seen timestamp), marks any previously-tracked
+        entry absent this frame ghosted, and drops any entry whose last
+        live sighting is :data:`_GHOST_HORIZON_S` or further in the
+        past. Touches only this frame's tags plus the currently-tracked
+        entries -- cost proportional to the number of tracked ids, never
+        to elapsed wall time -- since :meth:`TkWindow.update_tags` calls
+        this on every streamed frame at ``_PUMP_INTERVAL_S``'s ~20Hz
+        cadence.
+
+        A non-AprilTag record, if one is ever handed in despite ticket
+        001's own upstream filter, is skipped outright -- defense in
+        depth, per this ticket's own acceptance criterion that an ArUco
+        record is never admitted to the roster.
+        """
+        now = self._clock()
+        present_ids: "set[TagId]" = set()
+        for record in tags or ():
+            if record.tag.family != TagFamily.APRILTAG:
+                continue
+            present_ids.add(record.tag)
+            self._entries[record.tag] = _RosterEntry(record=record, last_seen=now, live=True)
+
+        for tag_id, entry in list(self._entries.items()):
+            if tag_id in present_ids:
+                continue
+            if now - entry.last_seen >= _GHOST_HORIZON_S:
+                del self._entries[tag_id]
+            elif entry.live:
+                self._entries[tag_id] = _RosterEntry(
+                    record=entry.record, last_seen=entry.last_seen, live=False
+                )
+
+    def snapshot(self) -> Tuple[Tuple[TagRecord, bool], ...]:
+        """The roster's current rows, ordered by tag number -- each a
+        ``(record, ghosted)`` pair, live and ghosted rows interleaved in
+        one list (sprint.md's "no separate stale section"). ``ghosted``
+        is ``True`` exactly when the entry is not currently live."""
+        entries = sorted(self._entries.values(), key=lambda entry: entry.record.tag.number)
+        return tuple((entry.record, not entry.live) for entry in entries)
+
+
 class TkWindow(Window):
     """The real, tkinter-backed :class:`Window`. See the module
     docstring for the headless-detection strategy.
@@ -403,6 +522,14 @@ class TkWindow(Window):
     ``archive/src/aprilcam/cli/view_cli.py:783-955`` for reference --
     the *layout idea* only, not its widget code), holding a monospace
     ``tk.Text`` refreshed by :meth:`update_tags`.
+
+    **Sticky roster (sprint 033 ticket 002).** :meth:`update_tags` feeds
+    every call into a private :class:`_TagRoster` and renders its
+    current live+ghosted snapshot, applying a Tk text tag
+    (:data:`_GHOST_TK_TAG`) to grey out ghosted rows' lines. The roster
+    is constructed unconditionally (harmless when ``show_sidebar`` is
+    ``False``, since :meth:`update_tags` returns before ever touching
+    it in that case).
     """
 
     def __init__(self, title: str, *, show_sidebar: bool = False) -> None:
@@ -418,6 +545,7 @@ class TkWindow(Window):
         self._root.title(title)
         self._closed = False
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._roster = _TagRoster()
 
         image_parent: tk.Misc = self._root
         self._sidebar_text: Optional[tk.Text] = None
@@ -430,6 +558,7 @@ class TkWindow(Window):
             sidebar_frame.pack(side=tk.RIGHT, fill=tk.Y)
             sidebar_text = tk.Text(sidebar_frame, width=48, font=("Courier", 10))
             sidebar_text.pack(fill=tk.BOTH, expand=True)
+            sidebar_text.tag_config(_GHOST_TK_TAG, foreground=_GHOST_ROW_COLOR)
             sidebar_text.insert("1.0", _format_sidebar_text(None))
             sidebar_text.configure(state=tk.DISABLED)
             self._sidebar_text = sidebar_text
@@ -492,12 +621,31 @@ class TkWindow(Window):
         a no-op (inherited behaviour, not overridden away) when this
         window has none, so :meth:`StreamLoop.run` can call this
         unconditionally regardless of which mode this window was built
-        in."""
+        in.
+
+        Sprint 033 ticket 002: *tags* is fed into this window's private
+        :class:`_TagRoster` first, and the roster's current live+ghosted
+        snapshot -- not *tags* directly -- is what gets rendered, so a
+        tag absent this frame stays listed (greyed) rather than
+        vanishing. ``_format_tag_row``/``_format_sidebar_text`` stay
+        pure and unchanged; only the per-line grey :data:`_GHOST_TK_TAG`
+        is applied here, one layer above them.
+        """
         if self._sidebar_text is None:
             return None
+        self._roster.update(tags)
+        rows = self._roster.snapshot()
+        text = _format_sidebar_text(tuple(record for record, _ in rows))
+
         self._sidebar_text.configure(state=tk.NORMAL)
         self._sidebar_text.delete("1.0", tk.END)
-        self._sidebar_text.insert("1.0", _format_sidebar_text(tags))
+        self._sidebar_text.insert("1.0", text)
+        self._sidebar_text.tag_remove(_GHOST_TK_TAG, "1.0", tk.END)
+        for offset, (_, ghosted) in enumerate(rows):
+            if not ghosted:
+                continue
+            line = offset + 2  # line 1 is the header; rows start at line 2
+            self._sidebar_text.tag_add(_GHOST_TK_TAG, f"{line}.0", f"{line}.end")
         self._sidebar_text.configure(state=tk.DISABLED)
         return None
 
