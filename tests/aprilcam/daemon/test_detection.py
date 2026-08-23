@@ -47,7 +47,12 @@ from aprilcam.calibration.calibration import (
 from aprilcam.calibration.geometry import apply_mount_offset, correct_tag_pose
 from aprilcam.camera.camera import Camera
 from aprilcam.config.interfaces import CameraConfig
-from aprilcam.daemon.detection import CONFIRMATION_STREAK, RING_BUFFER_SIZE, DetectionEngine
+from aprilcam.daemon.detection import (
+    CONFIRMATION_GRACE,
+    CONFIRMATION_STREAK,
+    RING_BUFFER_SIZE,
+    DetectionEngine,
+)
 from aprilcam.types import MountParameters, PixelPoint, TagFamily, TagId, WorldPoint
 from aprilcam.vision.detector import Detection, TagDetector
 
@@ -1234,6 +1239,213 @@ def test_confirmation_streak_is_genuinely_overridable_to_three_requires_three_bu
     assert second.tags == ()  # only 2 consecutive so far -- below the raised threshold
     assert len(third.tags) == 1
     assert third.tags[0].tag == TagId(family=TagFamily.APRILTAG, number=8)
+
+
+# ---------------------------------------------------------------------------
+# Disappearance grace (ticket 034-001) -- once a tag id is confirmed, it
+# now survives up to confirmation_grace consecutive missed bursts before
+# its confirmed status is dropped. Appearance (the suite above) is
+# completely unaffected by any test in this section: grace only ever
+# acts on an id that has already reached CONFIRMATION_STREAK. See
+# daemon/detection.py's module docstring ("Disappearance grace") and
+# CONFIRMATION_GRACE's own docstring for the full mechanism and the
+# geometric argument behind the default.
+# ---------------------------------------------------------------------------
+
+
+def test_confirmation_grace_constant_and_default_are_eight():
+    """The module constant itself, and that the constructor default
+    actually wires it in -- mirrors
+    :func:`test_confirmation_streak_constant_and_default_are_three`. See
+    ``CONFIRMATION_GRACE``'s own docstring in daemon/detection.py for the
+    geometric argument behind the default."""
+    assert CONFIRMATION_GRACE == 8
+    engine = DetectionEngine()
+    assert engine._confirmation_grace == CONFIRMATION_GRACE  # noqa: SLF001 - internal, pinning the default
+
+
+def test_confirmed_tag_missing_within_grace_is_reported_immediately_on_redetection():
+    """Acceptance criterion 1: a tag confirmed via ``CONFIRMATION_STREAK``
+    consecutive hits, then missing for exactly ``confirmation_grace``
+    consecutive bursts, is reported immediately on the next hit after the
+    gap -- no partial-streak penalty, no re-confirmation delay. A small
+    ``confirmation_grace`` override (2) keeps the script short and
+    explicit."""
+    grace = 2
+    hit = _detection_at(TagFamily.APRILTAG, 10, center_world=(0.0, 0.0))
+    script = [[hit]] * CONFIRMATION_STREAK + [[], []] + [[hit]]
+    engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector(script),
+        confirmation_grace=grace,
+    )
+    cam = _camera("grace-cam", frames=[_blank_frame() for _ in script])
+
+    frames = [engine.run_burst("grace-cam", cam) for _ in script]
+
+    # Confirms on the CONFIRMATION_STREAK-th burst, exactly as today.
+    assert all(frame.tags == () for frame in frames[: CONFIRMATION_STREAK - 1])
+    assert len(frames[CONFIRMATION_STREAK - 1].tags) == 1
+    # The two grace-window misses: honestly absent, never fabricated.
+    assert frames[CONFIRMATION_STREAK].tags == ()
+    assert frames[CONFIRMATION_STREAK + 1].tags == ()
+    # Redetected within grace -- reported immediately, no re-confirmation delay.
+    last = frames[-1]
+    assert len(last.tags) == 1
+    assert last.tags[0].tag == TagId(family=TagFamily.APRILTAG, number=10)
+
+
+def test_confirmed_tag_missing_beyond_grace_drops_and_requires_full_reconfirmation():
+    """Acceptance criterion 2: the same setup as above but with
+    ``confirmation_grace + 1`` consecutive misses -- the tag is dropped
+    and the next hit does **not** report immediately; it must satisfy a
+    fresh ``CONFIRMATION_STREAK`` again, with every intervening burst
+    staying empty until that fresh streak completes."""
+    grace = 2
+    hit = _detection_at(TagFamily.APRILTAG, 11, center_world=(0.0, 0.0))
+    misses = [[]] * (grace + 1)
+    script = [[hit]] * CONFIRMATION_STREAK + misses + [[hit]] * CONFIRMATION_STREAK
+    engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector(script),
+        confirmation_grace=grace,
+    )
+    cam = _camera("grace-drop-cam", frames=[_blank_frame() for _ in script])
+
+    frames = [engine.run_burst("grace-drop-cam", cam) for _ in script]
+
+    assert len(frames[CONFIRMATION_STREAK - 1].tags) == 1  # initial confirmation
+    miss_start = CONFIRMATION_STREAK
+    miss_end = CONFIRMATION_STREAK + len(misses)
+    # Every miss burst -- within and beyond grace -- stays honestly empty.
+    assert all(frame.tags == () for frame in frames[miss_start:miss_end])
+    # Grace exceeded: redetection does NOT report immediately -- a fresh
+    # CONFIRMATION_STREAK must complete from scratch.
+    post_grace = frames[miss_end:]
+    assert len(post_grace) == CONFIRMATION_STREAK
+    assert all(frame.tags == () for frame in post_grace[:-1])
+    assert len(post_grace[-1].tags) == 1
+    assert post_grace[-1].tags[0].tag == TagId(family=TagFamily.APRILTAG, number=11)
+
+
+def test_grace_burst_never_builds_or_buffers_a_record_for_the_missing_tag():
+    """Acceptance criterion 3: during a grace burst (tag confirmed,
+    currently missing, within the grace window), the returned
+    ``TagFrame.tags`` omits the tag entirely, and the corresponding
+    buffered frame in ``engine.history()`` matches -- proving no
+    fabricated or re-emitted record is ever built or buffered, not just
+    that the immediate return value looks right."""
+    hit = _detection_at(TagFamily.APRILTAG, 12, center_world=(0.0, 0.0))
+    script = [[hit]] * CONFIRMATION_STREAK + [[]]
+    engine = DetectionEngine(detector_factory=lambda: _ScriptedDetector(script))
+    cam = _camera("grace-buffer-cam", frames=[_blank_frame() for _ in script])
+
+    frames = [engine.run_burst("grace-buffer-cam", cam) for _ in script]
+    grace_frame = frames[-1]
+
+    assert grace_frame.tags == ()
+    buffered = engine.history("grace-buffer-cam")
+    assert buffered[-1] is grace_frame
+    assert buffered[-1].tags == ()
+
+
+def test_confirmation_grace_zero_reproduces_the_pre_ticket_instant_drop_behaviour():
+    """DoD: ``confirmation_grace=0`` is a regression guard for the old
+    default behaviour -- a single miss right after confirmation
+    immediately requires full re-confirmation again, exactly as every
+    build before this ticket behaved. Mirrors
+    ``test_confirmation_streak_is_genuinely_overridable_to_one_reports_immediately``'s
+    style for the new parameter."""
+    hit = _detection_at(TagFamily.APRILTAG, 13, center_world=(0.0, 0.0))
+    script = [[hit]] * CONFIRMATION_STREAK + [[]] + [[hit]] * CONFIRMATION_STREAK
+    engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector(script),
+        confirmation_grace=0,
+    )
+    cam = _camera("grace-zero-cam", frames=[_blank_frame() for _ in script])
+
+    frames = [engine.run_burst("grace-zero-cam", cam) for _ in script]
+
+    assert len(frames[CONFIRMATION_STREAK - 1].tags) == 1  # initial confirmation
+    assert frames[CONFIRMATION_STREAK].tags == ()  # the single miss -- instant drop
+    # Redetection after the miss does not report immediately -- a fresh
+    # CONFIRMATION_STREAK must complete, exactly like grace exceeded above.
+    rebuild = frames[CONFIRMATION_STREAK + 1 :]
+    assert len(rebuild) == CONFIRMATION_STREAK
+    assert all(frame.tags == () for frame in rebuild[:-1])
+    assert len(rebuild[-1].tags) == 1
+    assert rebuild[-1].tags[0].tag == TagId(family=TagFamily.APRILTAG, number=13)
+
+
+def test_confirmation_grace_is_genuinely_overridable_to_a_larger_value_tolerates_a_longer_gap():
+    """The other direction from the grace=0 regression guard: a larger
+    override genuinely tolerates a longer gap than the default -- pins
+    that ``confirmation_grace`` is a real, working override, not just an
+    accepted constructor parameter. Mirrors
+    ``test_confirmation_streak_is_genuinely_overridable_to_three_requires_three_bursts``'s
+    style for the new parameter."""
+    grace = 5
+    hit = _detection_at(TagFamily.APRILTAG, 15, center_world=(0.0, 0.0))
+    script = [[hit]] * CONFIRMATION_STREAK + [[]] * grace + [[hit]]
+    engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector(script),
+        confirmation_grace=grace,
+    )
+    cam = _camera("grace-override-cam", frames=[_blank_frame() for _ in script])
+
+    frames = [engine.run_burst("grace-override-cam", cam) for _ in script]
+
+    assert len(frames[CONFIRMATION_STREAK - 1].tags) == 1
+    assert all(
+        frame.tags == () for frame in frames[CONFIRMATION_STREAK : CONFIRMATION_STREAK + grace]
+    )
+    last = frames[-1]
+    assert len(last.tags) == 1
+    assert last.tags[0].tag == TagId(family=TagFamily.APRILTAG, number=15)
+
+
+def test_grace_does_not_shortcut_appearance_for_an_unconfirmed_or_phantom_id():
+    """Hard constraint (sprint.md Success Criteria): disappearance grace
+    only ever applies to an id that has *already* satisfied appearance
+    confirmation. An id that never reaches ``CONFIRMATION_STREAK``
+    consecutive hits -- including a phantom recurring across gaps, with
+    a deliberately huge ``confirmation_grace`` override in play -- must
+    still never be confirmed or reported. Grace has no effect on the
+    building path at all."""
+    phantom = _detection_at(TagFamily.ARUCO, 17, center_world=(-59.4, -19.6))
+    engine = DetectionEngine(
+        detector_factory=lambda: _ScriptedDetector([[phantom], [], [phantom], [], [phantom]]),
+        confirmation_grace=100,  # deliberately huge -- must still make no difference
+    )
+    cam = _camera("grace-no-shortcut-cam", frames=[_blank_frame() for _ in range(5)])
+
+    frames = [engine.run_burst("grace-no-shortcut-cam", cam) for _ in range(5)]
+
+    assert all(frame.tags == () for frame in frames)
+
+
+def test_steady_state_reporting_with_interleaved_grace_misses_matches_actual_detections():
+    """A steady-state redetection test analogous to
+    ``test_steady_state_reporting_is_unaffected_by_confirmation_once_past_the_threshold``,
+    but interleaving occasional single-burst misses within the (default)
+    grace window across many bursts: the tag is reported on every burst
+    it is actually detected in, and never on a burst it is not."""
+    hit = _detection_at(TagFamily.APRILTAG, 14, center_world=(0.0, 0.0))
+    # A single miss every third burst -- comfortably inside the default
+    # grace window (8), and each miss resets before the next one starts,
+    # so misses never accumulate past 1 consecutive.
+    steady_state = [[] if i % 3 == 2 else [hit] for i in range(12)]
+    script = [[hit]] * CONFIRMATION_STREAK + steady_state
+    engine = DetectionEngine(detector_factory=lambda: _ScriptedDetector(script))
+    cam = _camera("grace-steady-cam", frames=[_blank_frame() for _ in script])
+
+    frames = [engine.run_burst("grace-steady-cam", cam) for _ in script]
+    steady_frames = frames[CONFIRMATION_STREAK:]
+
+    for scripted_hit, frame in zip(steady_state, steady_frames):
+        if scripted_hit:
+            assert len(frame.tags) == 1
+            assert frame.tags[0].tag == TagId(family=TagFamily.APRILTAG, number=14)
+        else:
+            assert frame.tags == ()
 
 
 # ---------------------------------------------------------------------------

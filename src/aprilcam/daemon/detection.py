@@ -198,6 +198,32 @@ not been detected at all, and therefore never reaches the ring buffer
 or ``vision.motion.compute_motion`` either. See :meth:`DetectionEngine.
 _confirm_detections` for the full mechanism and the presence-vs-position
 rationale.
+
+**Disappearance grace (ticket 034-001).** The streak above only ever
+governs *appearance* -- becoming confirmed in the first place -- and is
+unchanged by this addition. Once a tag id *is* confirmed, it now
+survives up to ``confirmation_grace`` (default :data:`CONFIRMATION_GRACE`,
+8) consecutive missed bursts before its confirmed status is dropped,
+instead of dropping on the very next miss. This closes a real gap found
+by the sprint 034 root-cause analysis (``clasi/sprints/034-detection-
+confirmation-grace-for-marginal-tags/issues/apriltag-1-detects-
+unreliably-on-arducam-ov9281-usb-camera.md``, 2026-08-23): a confirmed
+tag with a marginal raw per-burst detection rate (AprilTag 1 on
+``arducam-ov9281-usb-camera``, raw ~0.45-0.6) was being bounced back to
+a fresh ``confirmation_streak`` on every single miss, collapsing its
+*reported* rate to roughly the raw rate cubed (observed live: 1/12
+polls) even though the tag was genuinely present most of the time. A
+missed burst within the grace window never fabricates or re-emits a
+record -- the tag is simply, honestly absent from that one
+``TagFrame.tags``, exactly as an unconfirmed miss already is; only the
+*confirmed status itself* survives the gap, so the tag's very next
+genuine detection is reported immediately rather than paying the full
+re-confirmation cost again. See :data:`CONFIRMATION_GRACE`'s own
+docstring for the geometric argument behind its default, and
+:meth:`DetectionEngine._confirm_detections` for the three-state
+mechanism (``_streaks``/``_confirmed``/``_grace_counters``) that
+implements both the appearance streak and the disappearance grace
+without either affecting the other.
 """
 
 from __future__ import annotations
@@ -235,7 +261,7 @@ from aprilcam.vision.detector import Detection, TagDetector
 from aprilcam.vision.motion import compute_motion
 from aprilcam.vision.pipeline import PipelineConfig, run_pipeline
 
-__all__ = ["RING_BUFFER_SIZE", "CONFIRMATION_STREAK", "DetectionEngine"]
+__all__ = ["RING_BUFFER_SIZE", "CONFIRMATION_STREAK", "CONFIRMATION_GRACE", "DetectionEngine"]
 
 #: v1's ``RingBuffer(maxlen=300)`` sizing (``archive/src/aprilcam/core/
 #: detection.py``) -- roughly 10 seconds at 30 fps *when something fills
@@ -280,6 +306,47 @@ RING_BUFFER_SIZE = 300
 #: matching ``drift_tolerance_cm``'s override pattern. See
 #: :meth:`DetectionEngine._confirm_detections` for the mechanism.
 CONFIRMATION_STREAK = 3
+
+#: Number of consecutive missed bursts a tag id may go, **after** it has
+#: already satisfied :data:`CONFIRMATION_STREAK` appearance confirmation,
+#: before its confirmed status is dropped and it must re-earn the full
+#: streak from scratch -- ticket 034-001's disappearance-grace fix (sprint
+#: 034's root-cause issue, ``clasi/sprints/034-detection-confirmation-
+#: grace-for-marginal-tags/issues/apriltag-1-detects-unreliably-on-
+#: arducam-ov9281-usb-camera.md``, measurements dated 2026-08-23).
+#: **The problem this closes.** Before this ticket, ``_confirm_detections``
+#: had no disappearance side at all: a confirmed tag that missed even one
+#: burst, for any reason, paid the exact same cost as a brand-new tag
+#: first appearing. For AprilTag 1 on ``arducam-ov9281-usb-camera``, whose
+#: raw per-burst detection rate measured ~0.45-0.6 (a real, marginal
+#: physical property of that tag/camera combination, not a detector bug --
+#: a byte-identical v1-vs-v2 detector comparison ruled that out), the
+#: *reported* rate collapses to roughly the raw rate cubed under
+#: ``CONFIRMATION_STREAK``'s 3-burst gate -- matching the issue's directly
+#: observed 1 of 12 live polls. **The geometric argument for 8.** Treating
+#: consecutive misses as independent, ``P(>= N consecutive misses while
+#: the tag is still genuinely present) ~= q^N`` where ``q`` is the
+#: per-burst miss probability. At the documented worst case ``q~=0.55``,
+#: ``N=8`` gives ``q^8 ~= 1.1%``; at a more typical ``q~=0.5`` it is
+#: ``q^8 ~= 0.4%`` -- both small enough that a marginal-but-present tag
+#: almost never gets bounced back to full re-confirmation by chance, while
+#: a genuinely-removed tag still leaves confirmed status within a handful
+#: of bursts (fractions of a second at tag-stream cadence). This mirrors
+#: :data:`CONFIRMATION_STREAK`'s own evidence-based-but-explicitly-
+#: revisable framing exactly: 8 sits in the middle of the sprint's
+#: considered 5-15 range (5 trades a slightly higher false-reset rate for
+#: slightly faster genuine-disappearance detection; 15 does the reverse)
+#: and is the smallest value that gets the documented worst case
+#: comfortably under 2%. A longer real-hardware campaign could in
+#: principle motivate a different value, exactly as ``CONFIRMATION_STREAK``
+#: anticipates for itself -- which is why this stays constructor-
+#: injectable rather than hardcoded, via the constructor's
+#: ``confirmation_grace`` parameter. See :meth:`DetectionEngine.
+#: _confirm_detections` for the mechanism: grace only ever preserves
+#: confirmed *status* across a gap -- it never fabricates, re-emits, or
+#: backdates a ``TagRecord`` for a burst the tag was not actually detected
+#: in (sprint.md Design Rationale Decision 3).
+CONFIRMATION_GRACE = 8
 
 #: A callable that builds one ``TagDetector`` (or, in tests, a
 #: duck-typed substitute exposing the same ``detect(gray, scale=...)``
@@ -588,6 +655,20 @@ class DetectionEngine:
         already establishes -- tests that are not themselves about
         confirmation pass ``confirmation_streak=1`` to keep today's
         single-burst-reports-immediately behaviour.
+    confirmation_grace:
+        Number of consecutive missed bursts a tag id may go **after**
+        already satisfying *confirmation_streak* before its confirmed
+        status is dropped and it must re-earn the full streak again from
+        scratch (ticket 034-001's disappearance-grace fix -- module
+        docstring's "Disappearance grace" section). Defaults to
+        :data:`CONFIRMATION_GRACE` (8) but is genuinely overridable per
+        instance, the same "domain-tuning call" shape *confirmation_streak*
+        already establishes -- ``confirmation_grace=0`` reproduces exactly
+        the pre-ticket instant-drop-on-any-miss behaviour. Appearance
+        confirmation (*confirmation_streak*) is completely unaffected by
+        this parameter: an id that never reaches *confirmation_streak*
+        consecutive hits never enters ``_confirmed`` and is therefore
+        never eligible for grace at all.
     mount_lookup:
         Resolves a ``TagId`` -> its currently registered
         ``types.MountParameters`` (ticket 025-004, UC-12), or ``None``
@@ -621,6 +702,7 @@ class DetectionEngine:
         drift_tolerance_cm: float = DRIFT_TOLERANCE_CM,
         drift_check_interval_s: float = DRIFT_CHECK_INTERVAL_S,
         confirmation_streak: int = CONFIRMATION_STREAK,
+        confirmation_grace: int = CONFIRMATION_GRACE,
         mount_lookup: MountLookup = _default_mount_lookup,
         camera_geometry_lookup: CameraGeometryLookup = _default_camera_geometry_lookup,
     ) -> None:
@@ -635,11 +717,14 @@ class DetectionEngine:
         self._mount_lookup = mount_lookup
         self._camera_geometry_lookup = camera_geometry_lookup
         self._confirmation_streak = confirmation_streak
+        self._confirmation_grace = confirmation_grace
         self._buffers: Dict[str, Deque[TagFrame]] = {}
         self._detectors: Dict[str, TagDetector] = {}
         self._frame_counts: Dict[str, int] = {}
         self._last_drift_check: Dict[str, float] = {}
         self._streaks: Dict[str, Dict[TagId, int]] = {}
+        self._confirmed: Dict[str, Set[TagId]] = {}
+        self._grace_counters: Dict[str, Dict[TagId, int]] = {}
         self._lock = threading.Lock()
 
     def run_burst(self, slug: str, camera: Camera) -> TagFrame:
@@ -742,65 +827,120 @@ class DetectionEngine:
         self, slug: str, detections: Sequence[Detection]
     ) -> Tuple[Detection, ...]:
         """Presence-based temporal confirmation (ticket 024-006, streak
-        raised to 3 by ticket 024-007's real-hardware run).
+        raised to 3 by ticket 024-007's real-hardware run) plus
+        disappearance grace (ticket 034-001).
 
-        Filters *detections* down to only the ids that have now been
-        detected in ``self._confirmation_streak`` (default
-        :data:`CONFIRMATION_STREAK`, 3) strictly consecutive bursts for
-        *slug*, updating this camera's per-id streak counters as a side
-        effect. Called exactly once per :meth:`run_burst`, before any
-        ``TagRecord`` is built -- an unconfirmed detection never reaches
-        :func:`_build_tag_record` and therefore never enters the
-        returned ``TagFrame`` or the ring buffer. It is not reported
-        with a pending flag; it is simply absent, exactly as if it had
-        not been detected at all.
+        Filters *detections* down to only the ids that are currently
+        *confirmed for* and *actually present in* this exact burst,
+        updating three pieces of per-slug, per-id state as a side effect:
+        an appearance-building streak (``self._streaks``, used only
+        while an id is not yet confirmed), the set of currently-confirmed
+        ids (``self._confirmed``), and a consecutive-miss counter for
+        each confirmed id (``self._grace_counters``). Called exactly once
+        per :meth:`run_burst`, before any ``TagRecord`` is built -- an id
+        that ends this method neither confirmed nor present this burst
+        never reaches :func:`_build_tag_record` and therefore never
+        enters the returned ``TagFrame`` or the ring buffer. It is not
+        reported with a pending flag; it is simply absent, exactly as if
+        it had not been detected at all.
 
         **Presence, never position -- the load-bearing design choice.**
-        The only question asked is "was this exact ``TagId`` also
-        present in the immediately preceding burst for this camera" --
-        never *where* it was. The bug this exists to fix (a single false
-        ArUco decode, observed live as ArUco 17 -- not on the field --
-        recurring at a *different* world position each time: ``(-59.4,
-        -19.6)`` in one session, ``(50.1, -30.3)`` in another) rules out
-        a same-place-twice rule: that would catch this particular
-        phantom, but would just as reliably reject a real, fast-moving
-        robot tag whose reported position legitimately differs between
-        two consecutive sightings simply because it moved. Checking
-        presence only satisfies that mobile-tag constraint by
-        construction, and is simpler to reason about besides. Do not add
-        a position-similarity check here -- it would look like a
-        reasonable extra safeguard and would actually reintroduce the
-        exact bug this design avoids (ticket 024-006).
+        The only question ever asked, for both appearance and
+        disappearance, is "was this exact ``TagId`` also present in the
+        immediately preceding burst for this camera" -- never *where* it
+        was. The bug this exists to fix (a single false ArUco decode,
+        observed live as ArUco 17 -- not on the field -- recurring at a
+        *different* world position each time: ``(-59.4, -19.6)`` in one
+        session, ``(50.1, -30.3)`` in another) rules out a
+        same-place-twice rule: that would catch this particular phantom,
+        but would just as reliably reject a real, fast-moving robot tag
+        whose reported position legitimately differs between two
+        consecutive sightings simply because it moved. Checking presence
+        only satisfies that mobile-tag constraint by construction, and is
+        simpler to reason about besides. Do not add a position-similarity
+        check here -- it would look like a reasonable extra safeguard and
+        would actually reintroduce the exact bug this design avoids
+        (ticket 024-006).
 
-        A gap of even one burst -- this id detected, then absent, then
-        detected again -- drops it from the streak dict entirely (the
-        dict comprehension below only ever keys *this* burst's ids), so
-        the next sighting starts a fresh streak at 1 rather than
-        resuming a prior count. A flickering real tag therefore
-        re-confirms after an occlusion gap exactly as slowly as a
-        brand-new tag would -- ``self._confirmation_streak - 1`` bursts
-        of latency after detection resumes (two, at the current default
-        of 3, raised from one at the ticket 024-006 default of 2 -- see
-        :data:`CONFIRMATION_STREAK`'s docstring) -- an accepted
-        trade-off (sprint.md Migration Concerns), not a defect to work
-        around.
+        **Appearance (unchanged).** An id detected this burst that is
+        *not yet* confirmed increments its building streak by exactly 1
+        from whatever it was last burst (0 if this is its first sighting,
+        or if a prior gap already dropped it); once that streak reaches
+        ``self._confirmation_streak`` the id is promoted into
+        ``self._confirmed``. An id that is *not yet* confirmed and *not*
+        detected this burst is dropped from the building streak entirely
+        -- exactly today's behaviour -- so a gap of even one burst during
+        build-up restarts appearance at a fresh streak of 1 on the next
+        sighting, never a resumed count (accepted trade-off, sprint.md
+        Migration Concerns).
 
-        Once confirmed, a steadily-redetected id's streak keeps growing
-        past ``self._confirmation_streak`` on every further consecutive
-        burst, so it stays confirmed (and reported) on every one of
-        them -- there is no re-drop once past the threshold.
+        **Disappearance grace (new, ticket 034-001).** An id detected
+        this burst that *is already* confirmed stays confirmed and has
+        its grace (miss) counter reset to 0 -- a real redetection always
+        clears any accumulated grace. An id that *is* confirmed but *not*
+        detected this burst has its grace counter incremented; it
+        *remains* confirmed -- silently absent from just this one
+        burst's output, never a fabricated or re-emitted record -- as
+        long as the incremented count is ``<= self._confirmation_grace``
+        (default :data:`CONFIRMATION_GRACE`, 8); the instant that bound
+        is exceeded the id is dropped back to fully unconfirmed, with no
+        partial credit carried into a future streak. ``confirmation_grace
+        == 0`` reproduces the pre-ticket instant-drop-on-any-miss
+        behaviour exactly, since a single miss already exceeds a bound of
+        0. Once confirmed, a steadily-redetected id stays confirmed (and
+        reported) on every further consecutive burst -- there is no
+        re-drop once past the threshold, on either the streak or the
+        grace side.
+
+        The final confirmed-and-reported set for this burst is
+        ``self._confirmed`` (after the above updates) intersected with
+        this burst's own raw ids -- i.e. a ``TagRecord`` is only ever
+        built from a detection that is *both* currently confirmed *and*
+        genuinely present in this exact burst. A grace burst therefore
+        never builds a record, never re-emits a stale one, and never
+        touches the ring buffer for the tag it is being lenient about
+        (sprint.md Design Rationale Decision 3).
         """
         ids_this_burst: Set[TagId] = {
             TagId(family=detection.family, number=detection.number) for detection in detections
         }
         with self._lock:
-            previous = self._streaks.get(slug, {})
-            streaks = {tag_id: previous.get(tag_id, 0) + 1 for tag_id in ids_this_burst}
-            self._streaks[slug] = streaks
+            previous_streaks = self._streaks.get(slug, {})
+            previous_confirmed = self._confirmed.get(slug, set())
+            previous_grace = self._grace_counters.get(slug, {})
 
-        confirmed_ids = {
-            tag_id for tag_id, streak in streaks.items() if streak >= self._confirmation_streak
-        }
+            new_streaks: Dict[TagId, int] = {}
+            new_confirmed: Set[TagId] = set()
+            new_grace: Dict[TagId, int] = {}
+
+            for tag_id in ids_this_burst:
+                if tag_id in previous_confirmed:
+                    # Already confirmed and genuinely redetected -- stays
+                    # confirmed; grace resets to 0 (omitted from
+                    # new_grace, whose .get default is 0).
+                    new_confirmed.add(tag_id)
+                    continue
+                # Not yet confirmed: keep building the appearance streak.
+                streak = previous_streaks.get(tag_id, 0) + 1
+                if streak >= self._confirmation_streak:
+                    new_confirmed.add(tag_id)
+                else:
+                    new_streaks[tag_id] = streak
+
+            for tag_id in previous_confirmed - ids_this_burst:
+                # Confirmed but missing this burst -- disappearance grace.
+                misses = previous_grace.get(tag_id, 0) + 1
+                if misses <= self._confirmation_grace:
+                    new_confirmed.add(tag_id)
+                    new_grace[tag_id] = misses
+                # else: grace exceeded -- dropped entirely, no partial
+                # credit carried into new_streaks.
+
+            self._streaks[slug] = new_streaks
+            self._confirmed[slug] = new_confirmed
+            self._grace_counters[slug] = new_grace
+
+        confirmed_ids = new_confirmed & ids_this_burst
         return tuple(
             detection
             for detection in detections
