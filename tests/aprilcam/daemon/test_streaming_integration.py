@@ -502,7 +502,7 @@ def test_tag_stream_slow_subscriber_drops_frames_without_stalling_fast_subscribe
         return [_pixel_hit(1, 20.0 * call_index, 0.0)]  # moves every tick -- always "changed"
 
     detector = _SequenceDetector(build_hits)
-    engine = DetectionEngine(detector_factory=lambda: detector, confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: detector, confirmation_streak=1)
     cam = _camera("cam-real-clock-slow-tags")
     producer = TagStreamProducer(
         "cam-real-clock-slow-tags",

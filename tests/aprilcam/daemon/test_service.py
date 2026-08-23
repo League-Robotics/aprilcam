@@ -695,7 +695,7 @@ def test_stream_images_deskewed_alone_keeps_detection_running_and_tags_update(di
     # temporal confirmation (test_detection.py's own concern) -- matches
     # this file's established pattern (``_build_tag_service``'s
     # docstring) for tests genuinely about something else entirely.
-    detection = DetectionEngine(detector_factory=lambda: scripted_detector, confirmation_streak=1)
+    detection = DetectionEngine(detector_factory=lambda _slug: scripted_detector, confirmation_streak=1)
 
     cameras: Dict[str, Camera] = {slug: cam}
     discovery = CameraDiscovery(
@@ -1076,7 +1076,7 @@ def _build_tag_service(directories, registry, *, detector, frame_count: int = 10
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: FakeBackend(),
     )
-    detection = DetectionEngine(detector_factory=lambda: detector, confirmation_streak=1)
+    detection = DetectionEngine(detector_factory=lambda _slug: detector, confirmation_streak=1)
     service = DaemonService(
         registry=registry,
         discovery=discovery,
