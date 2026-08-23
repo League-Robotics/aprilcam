@@ -1,8 +1,9 @@
 ---
 id: '013'
 title: Installed-package cv2-free base-install test
-status: open
-use-cases: [UC-10]
+status: in-progress
+use-cases:
+- UC-10
 depends-on: []
 github-issue: ''
 issue: aprilcam-v2-layered-test-system.md
