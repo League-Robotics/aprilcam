@@ -1,7 +1,7 @@
 ---
 id: '034'
 title: Detection confirmation grace for marginal tags
-status: executing
+status: done
 branch: sprint/034-detection-confirmation-grace-for-marginal-tags
 use-cases:
 - SUC-001
