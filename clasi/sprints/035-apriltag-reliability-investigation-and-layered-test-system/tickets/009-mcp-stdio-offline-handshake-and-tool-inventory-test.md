@@ -1,7 +1,7 @@
 ---
 id: 009
 title: MCP stdio offline handshake and tool-inventory test
-status: in-progress
+status: done
 use-cases:
 - UC-22
 depends-on: []
@@ -30,25 +30,68 @@ dependency — it can run with no daemon and no hardware at all.
 
 ## Acceptance Criteria
 
-- [ ] `tests/aprilcam/mcp/test_stdio_offline.py` spawns
+- [x] `tests/aprilcam/mcp/test_stdio_offline.py` spawns
       `aprilcam mcp` as a real subprocess, completes the MCP
       initialize handshake, and calls `tools/list`.
-- [ ] The returned tool set is a superset of a pinned, explicit 27-tool
+- [x] The returned tool set is a superset of a pinned, explicit 27-tool
       list (named in the test, not derived from `mcp/DESIGN.md`'s prose,
       so a change to either is caught).
-- [ ] No daemon is started or connected to during this test — verified
+- [x] No daemon is started or connected to during this test — verified
       (e.g., by asserting no daemon socket/process exists before and
       after, or via an injected connection-attempt counter) rather than
       merely assumed from the source code's stated invariant.
-- [ ] If step above finds an eager connect, the test is marked
+- [x] If step above finds an eager connect, the test is marked
       `@pytest.mark.integration` and the finding is recorded in the
       ticket's implementation notes — this ticket does not silently
       "fix" `mcp/server.py` to make the assumption true; that would be
       out of this ticket's scope (report via the exception protocol if
       it contradicts `mcp/DESIGN.md`'s documented invariant).
-- [ ] The subprocess is cleanly terminated at test teardown in every
+- [x] The subprocess is cleanly terminated at test teardown in every
       case (pass, fail, or error) — no orphaned `aprilcam mcp` process
       survives the test run.
+
+## Implementation Notes (verification pass, 2026-08-23)
+
+The test module already existed (committed in `dba1b45` from an earlier
+interrupted attempt) and was re-verified against every acceptance
+criterion rather than rewritten, since it held up:
+
+- **No eager daemon connect**: confirmed both empirically (the test's
+  `socket_path.exists()` assertions at three checkpoints -- before the
+  subprocess starts, mid-session after `initialize`+`tools/list`, and
+  after full teardown -- all pass) and by reading `mcp/connection.py`
+  and `mcp/server.py`: `ConnectionManager.__init__` only stores its
+  arguments, and `ConnectionManager.resolve()`/`Discovery.connect()`
+  are invoked exclusively from `ConnectionManager.call()`, which only
+  `mcp/tools/*.register`-registered tool *functions* invoke when
+  actually called -- never from `build_server`'s registration pass,
+  never from MCP's `initialize`, never from `tools/list` (which only
+  enumerates already-registered tool schemas). So criterion 4's
+  condition (an eager connect found) never triggers; the test correctly
+  stays unmarked (no `integration` marker) and `mcp/server.py` was not
+  touched.
+- **27-tool pin accuracy**: cross-checked `_EXPECTED_TOOLS` against
+  every real `@mcp.tool()` decorator in `server.py` (1),
+  `tools/perception.py` (7), `tools/configuration.py` (8),
+  `tools/mobile_tags.py` (3), and `tools/annotations.py` (8) = 27,
+  excluding one docstring mention of the literal string `@mcp.tool()`
+  in each tools module (module-docstring prose, not a real decorator).
+  Exact match, and the test's assertion (`missing = _EXPECTED_TOOLS -
+  tool_names`) is genuinely a superset check, not equality.
+- **Clean subprocess teardown**: confirmed by reading the installed
+  `mcp` SDK's `mcp/client/stdio/__init__.py` -- its `stdio_client`
+  async context manager's `finally` block closes stdin, waits briefly,
+  then escalates to `_terminate_process_tree` (SIGTERM, then SIGKILL on
+  timeout) unconditionally, so it runs on the exception path too, not
+  just on a clean return.
+- **Real subprocess, not skipped**: re-ran the test; it found and
+  exercised the real `.venv/bin/aprilcam` console script (editable
+  install) rather than hitting the `pytest.skip` fallback.
+
+No code changes were required. Re-ran
+`uv run pytest tests/aprilcam/mcp/test_stdio_offline.py -v`: 2 passed
+in 3.78s, no orphaned `aprilcam mcp` process before or after (checked
+via `ps aux | grep 'aprilcam mcp'`).
 
 ## Implementation Plan
 
