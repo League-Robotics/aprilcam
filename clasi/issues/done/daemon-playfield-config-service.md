@@ -2,6 +2,18 @@
 status: pending
 ---
 
+**Superseded 2026-08-23.** This describes `SetPlayfield` validating and
+persisting to `config_dir/playfields/<slug>.json` via an atomic write
+-- contradicted by the later (2026-07-30), actually-implemented
+decision in `docs/design/configuration.md` §5: RPC-pushed config is
+in-memory only for both cameras and playfields, never written to a
+file. A whole-project write-call-site audit
+(2026-08-23, `clasi/issues/later/camera-config-clearing-a-field-does-not-persist-to-disk.md`'s
+investigation) found zero daemon code paths writing to `config_dir` at
+all. The source-of-record model is the human's repo file, pushed fresh
+each session -- not the daemon writing anything back. Closing rather
+than implementing as written.
+
 # Playfield configuration service: whole-document Set/Get in the daemon
 
 Per [specification.md](../../docs/design/specification.md) §2 principle 3,

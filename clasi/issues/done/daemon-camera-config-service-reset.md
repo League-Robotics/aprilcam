@@ -2,6 +2,17 @@
 status: pending
 ---
 
+**Superseded 2026-08-23.** This describes camera config persisting to
+disk "through this sanctioned Set proxy" — contradicted by the later
+(2026-07-30), actually-implemented decision in
+`docs/design/configuration.md` §5: RPC-pushed config (camera *and*
+playfield) is in-memory only, never written to a file, by design.
+`/etc` is not writable by the daemon at all. Making a push permanent is
+`camera config --dump` plus a file copy (UC-24), not an automatic
+write. Closing rather than implementing as written; the `Reset`
+half (re-apply a stored document to hardware) may still be worth its
+own issue if wanted, scoped against the real, current design.
+
 # Camera configuration service: whole-document Set/Get plus Reset
 
 Per [specification.md](../../docs/design/specification.md) §4.1: camera

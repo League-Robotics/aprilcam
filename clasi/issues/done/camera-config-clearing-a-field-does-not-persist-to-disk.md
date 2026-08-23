@@ -2,6 +2,16 @@
 status: pending
 ---
 
+**Superseded 2026-08-23 — this was misdiagnosed as a bug.** A full
+investigation found RPC-pushed config is deliberately, always
+in-memory-only (`docs/design/configuration.md` §5); the apparent
+non-determinism below was this session interleaving live pushes with
+manual disk-file edits, not real inconsistency in the code. See
+`camera-config-push-looks-persistent-but-is-ephemeral-with-no-warning.md`
+for the corrected diagnosis and the real, remaining problem (the CLI
+gives no warning that a push is ephemeral). Kept here for the four
+occurrences' evidence trail.
+
 # `aprilcam camera config` pushes update live daemon state but sometimes don't persist to the on-disk config.json
 
 ## Description
