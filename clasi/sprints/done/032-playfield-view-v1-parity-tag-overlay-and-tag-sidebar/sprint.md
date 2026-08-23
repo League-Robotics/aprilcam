@@ -1,7 +1,7 @@
 ---
 id: '032'
 title: Playfield view v1-parity tag overlay and tag sidebar
-status: executing
+status: done
 branch: sprint/032-playfield-view-v1-parity-tag-overlay-and-tag-sidebar
 use-cases: []
 issues:
