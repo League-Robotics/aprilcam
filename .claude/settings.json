@@ -83,7 +83,7 @@
         ]
       },
       {
-        "matcher": "mcp__clasi__create_ticket|mcp__clasi__create_sprint",
+        "matcher": "mcp__clasi__create_ticket",
         "hooks": [
           {
             "type": "command",

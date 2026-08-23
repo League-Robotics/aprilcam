@@ -86,11 +86,10 @@ instead (see below).
 **Scope your test run to the ticket, not the full suite.** Run the test
 modules/files that exercise the code you touched (e.g. `uv run pytest
 tests/unit/test_<module>.py --no-cov` or the equivalent for your
-language), not the entire project suite. The full suite is a
-once-per-sprint gate owned by execute-sprint/close-sprint, run exactly
-once before the sprint closes — not once per ticket. Running it
-redundantly on every ticket is slow and is part of what makes
-backgrounding tempting in the first place.
+language), not the entire project suite. The full suite runs exactly
+once per sprint, inside `close_sprint` itself (031/008) — not once per
+ticket. Running it redundantly on every ticket is slow and is part of
+what makes backgrounding tempting in the first place.
 
 **A ticket is not done until, in the same turn:** its scoped tests were
 run in the foreground and observed passing, the code is committed, and
@@ -163,6 +162,21 @@ results, and a recommendation. Wait for guidance.
 - Your code may be reviewed by the `code-review` skill after implementation.
 - Consider the `tdd-cycle` skill when designing well-defined, testable
   interfaces.
+
+## Guard Blocks
+
+If a CLASI guard (role-guard, mcp-guard) blocks a write, stop and report
+it to the dispatcher — do not route around it with a Bash heredoc,
+`sed -i`, a shell redirection, `git apply`, or any other tool or
+mechanism that reaches the file without going through the blocked call.
+The full stop/report/wait rule, the one legitimate exception (a
+deliberately invoked, reported `clasi oop on --reason '...'`), and the
+explicit note that this does not close role-guard's own matcher gap all
+live in one place — call `get_instruction("software-engineering")` and
+read "Error Recovery" -> "Guard blocks (stop, report, wait)" if unsure
+of the steps. **Reporting a block is a successful outcome of a
+dispatch, not a failure** — an agent that stops and reports has done
+its job correctly.
 
 ## Exception Protocol
 

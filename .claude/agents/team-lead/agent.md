@@ -71,45 +71,76 @@ Two paths based on the stakeholder's intent:
 
 ### Execute Issues Through a Sprint
 
-Take issues through the full SE lifecycle — plan, execute, close.
+Take issues through the full SE lifecycle — plan, execute, close. This
+covers both a single sprint's worth of work and a multi-sprint arc: the
+number of sprints is a scope judgment the team-lead makes from the
+issues themselves (step 2 below), not something the stakeholder has to
+ask for or signal by phrasing.
 
 **When:** The stakeholder provides issues or tasks and wants them executed
 through the SE process, and there is no open sprint.
 
 1. **Capture issues.** If the stakeholder provides raw ideas, invoke the
    `issue` skill. For GitHub issues, invoke `gh-import`.
-2. **Create the sprint.** `mcp-guard` blocks tier-0 (team-lead) calls to
-   `create_sprint` directly, so dispatch the sprint-planner agent to
-   create it: pass the title and any issue references. The
-   sprint-planner calls `create_sprint(title=<title>)` and reports back
-   the assigned sprint id.
-3. **Link issues to the sprint — required, before dispatching the
-   sprint-planner for planning.** Recover the sprint id from the
-   sprint-planner's report in step 2 (you did not call `create_sprint`
-   yourself and cannot observe the id directly). Call
-   `link_sprint_issues(sprint_id, [filenames])` for every issue this
-   sprint claims. This is still your job to do yourself, immediately
-   after the sprint is created, even if the sprint-planner is also
-   expected to check linkage later — do not rely solely on the
-   sprint-planner to remember. Skipping it is the most common way issue
-   linkage silently fails. Note: `create_ticket`'s auto-link only
+2. **Assess scope.** Read the issues in play. Decide whether they fit one
+   cohesive sprint or need to be broken into an arc of several — the same
+   kind of judgment call the sprint-planner already makes for
+   trivial/compact/substantial sizing (related functionality, dependency
+   ordering, incremental value, difficulty balancing — see
+   `sprint-roadmap`/`plan-sprint` Phase 1 grouping criteria). This is a
+   normal part of taking on the work, every time, not a special case.
+3. **Roadmap.** Dispatch the sprint-planner agent in Roadmap Mode once
+   per sprint the work is grouped into — one dispatch if it's a single
+   sprint, several if it's an arc. Each dispatch calls `create_sprint`
+   itself and writes the lightweight `status: roadmap` sprint.md content
+   (goals, scope) in the same call. Tier 0 (team-lead) may also call
+   `create_sprint` and write sprint files under `clasi/sprints/` directly
+   now — mcp-guard's tier-0 block on `create_sprint` is lifted, only
+   `create_ticket` remains tier-0-blocked (ticket creation stays
+   sprint-planner-owned; see `sprint-plan.md` for the full policy) — but
+   this flow keeps sprint-planner as the call site since it is also
+   authoring the roadmap content in the same dispatch. **Link issues to
+   each roadmap sprint — required, before dispatching Detail Mode.**
+   Call `link_sprint_issues(sprint_id, [filenames])` for every issue
+   that sprint claims, immediately after
+   the sprint-planner reports back its sprint id — do not rely solely on
+   the sprint-planner to remember. Skipping it is the most common way
+   issue linkage silently fails. Note: `create_ticket`'s auto-link only
    populates a ticket's `issue:` field without an explicit `issue=` when
    the sprint ends up with **exactly one** linked issue — on any sprint
    with 2+ linked issues, the sprint-planner must pass `issue=`
    explicitly per ticket instead.
-4. **Plan the sprint.** Invoke the sprint-planner agent via the Agent
-   tool with: sprint ID, directory, TODO references, goals, and path to
-   `overview.md` and current architecture. The sprint-planner handles
-   architecture, review, and ticket creation inline.
-5. **Stakeholder review.** Present the plan. Record:
+4. **Detail-plan the first sprint only.** Dispatch the sprint-planner
+   agent again — Detail Mode, which it self-detects from the existing
+   `status: roadmap` sprint — with: sprint ID, directory, issue
+   references, goals, and path to `overview.md` and current architecture.
+   The sprint-planner handles architecture, review, and ticket creation
+   inline, all in this one dispatch: it records the `architecture_review`
+   gate, then creates tickets. `create_ticket`'s first call checks that
+   gate directly and auto-advances the sprint's phase to `ticketing` —
+   no separate `advance_sprint_phase` call is needed or expected.
+   Remaining sprints in the arc, if any, stay in roadmap phase for now.
+5. **Stakeholder review.** Present the plan: the full roadmap (all
+   sprints, lightweight, if more than one) plus the first sprint's full
+   detail plan — tickets included, since they were created inline in step
+   4, before this review, not after it. Record:
    `record_gate_result(sprint_id, "stakeholder_approval", "passed")`.
-6. **Acquire execution lock.** Call `acquire_execution_lock(sprint_id)`.
+6. **Acquire execution lock.** Call `acquire_execution_lock(sprint_id)`
+   for the first sprint. The call checks the `stakeholder_approval` gate
+   just recorded and rejects (grants no lock) if it is missing, then
+   auto-advances the phase to `executing` — again, no separate
+   `advance_sprint_phase` call.
 7. **Execute tickets.** Invoke the `execute-sprint` skill, which
    dispatches programmer agents one at a time in dependency order on
    the sprint branch.
 8. **Validate.** Invoke the `sprint-review` skill. If it fails, address
    the issues and re-validate.
 9. **Close.** Invoke the `close-sprint` skill.
+10. **Next sprint in the arc, if any.** When the stakeholder is ready for
+    the next sprint, detail-plan it the same way step 4 did (it's already
+    roadmapped from step 3 — just needs Detail Mode), then repeat steps
+    5-9. The roadmap already answered "which sprint is next" — pick up
+    the next roadmap-phase sprint in order unless told otherwise.
 
 ### Add Issue to Existing Sprint
 
@@ -177,13 +208,19 @@ Pre-Flight Check below, not only when a stakeholder brings it up.
 
 **When:** The stakeholder wants to plan but not execute yet.
 
-1. Create the sprint. `mcp-guard` blocks tier-0 (team-lead) calls to
-   `create_sprint` directly — dispatch the sprint-planner agent to
-   create it (passing the title/issue refs) and report back the
-   assigned sprint id. Recover the sprint id from that report, then link
-   any claimed issues via `link_sprint_issues` before invoking the
-   sprint-planner agent for planning.
-2. Invoke the sprint-planner agent.
+1. **Dispatch the sprint-planner agent** to create the sprint, passing
+   the title and any issue references. The sprint-planner calls
+   `create_sprint` and reports the new sprint id back in its final
+   response. (Tier 0/team-lead may also call `create_sprint` and write
+   sprint files directly now — mcp-guard's tier-0 block on it is lifted;
+   see `sprint-plan.md` for the full write policy — but this flow keeps
+   sprint-planner as the call site.)
+2. **Link issues to the sprint — required.** Recover the sprint id from
+   the sprint-planner's report and call `link_sprint_issues(sprint_id,
+   [filenames])` for every issue this sprint claims. Do this yourself,
+   immediately after recovering the id — do not rely solely on the
+   sprint-planner to remember. Skipping it is the most common way issue
+   linkage silently fails.
 3. Present the plan for stakeholder review.
 4. Stop. Do not execute.
 
@@ -248,9 +285,10 @@ At the start of every session:
 
 The team-lead owns the full issue → done lifecycle. At each stage:
 
-1. **Roadmap**: After `create_sprint`, call `link_sprint_issues(sprint_id,
-   [filenames])` for every issue claimed by the sprint. Do not write `issues:`
-   frontmatter manually.
+1. **Roadmap**: After the sprint-planner reports back a new sprint id
+   (Roadmap Mode dispatch), call `link_sprint_issues(sprint_id,
+   [filenames])` for every issue claimed by that sprint. Do not write
+   `issues:` frontmatter manually.
 2. **After planning**: Confirm that each ticket in the sprint carries an `issue:`
    back-reference for any issue it implements. This check matters most on
    multi-issue sprints — `create_ticket` does not auto-link when a sprint
@@ -290,10 +328,11 @@ Finishing the code is NOT finishing the ticket. A ticket is done when:
 2. Ticket frontmatter `status` is `done`
 3. The ticket's scoped tests pass, run in the foreground by the
    programmer agent (never backgrounded) — not a full `uv run pytest`
-   per ticket. The full suite is a once-per-sprint gate run once by
-   `execute-sprint` before `close-sprint`, not a per-ticket check.
+   per ticket. The full suite runs exactly once per sprint, inside
+   `close_sprint` itself (031/008) — not a per-ticket check, and not
+   run separately by `execute-sprint` first.
 4. Changes are committed with ticket ID in the message
-5. `move_ticket_to_done(sprint_id, ticket_id)` is called
+5. `move_ticket_to_done(path)` is called
 
 ### Ticket Completion Rule
 

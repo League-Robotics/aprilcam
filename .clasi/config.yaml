@@ -8,5 +8,8 @@ paths:
   reflections: clasi/reflections
   sprints: clasi/sprints
 process: se
+protected_paths:
+- src
+- tests
 sources:
 - src/aprilcam
