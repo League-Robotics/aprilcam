@@ -45,6 +45,29 @@ def test_unknown_argument_exits_nonzero() -> None:
     assert excinfo.value.code != 0
 
 
+def test_version_flag_prints_version_and_exits_zero(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--version"])
+
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert out.startswith("aprilcam ")
+    assert out.strip() != "aprilcam"
+
+
+def test_short_version_flag_matches_long_flag(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        main(["-V"])
+
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert out.startswith("aprilcam ")
+
+
 # ---------------------------------------------------------------------------
 # BrokenPipeError / SIGPIPE handling -- ticket 031-003, SUC-003
 # ---------------------------------------------------------------------------

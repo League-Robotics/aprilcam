@@ -31,9 +31,27 @@ import argparse
 import os
 import signal
 import sys
+from importlib.metadata import PackageNotFoundError, version
 from typing import Optional, Sequence
 
 from aprilcam.cli import camera, daemon, guide, mcp, playfield, tags
+
+
+def _package_version() -> str:
+    """The installed ``aprilcam`` distribution version, read from
+    package metadata -- the same mechanism ``testdev/capture_matrix.py``
+    already uses, rather than ``aprilcam.__version__`` (a hardcoded,
+    stale placeholder never wired to the ``dotconfig``-managed version
+    that ``pyproject.toml`` actually carries). Falls back to
+    ``"unknown"`` for an editable/zipapp/frozen context where package
+    metadata isn't discoverable, so ``--version`` degrades gracefully
+    instead of crashing.
+    """
+    try:
+        return version("aprilcam")
+    except PackageNotFoundError:
+        return "unknown"
+
 
 #: Conventional Unix exit code for a process terminated by ``SIGPIPE``
 #: (128 + signal number) -- used whether the process is actually killed
@@ -50,7 +68,9 @@ _SIGPIPE_EXIT_CODE = 128 + getattr(signal, "SIGPIPE", 13)
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    """The top-level ``argparse`` parser: ``-h``/``--help`` plus the
+    """The top-level ``argparse`` parser: ``-h``/``--help``, ``-V``/
+    ``--version`` (argparse's standard ``action="version"``, which
+    prints and exits before any subcommand dispatch runs), plus the
     ``daemon``, ``camera``, ``playfield``, ``tags``, ``guide``, and
     ``mcp`` subcommand trees."""
     parser = argparse.ArgumentParser(
@@ -59,6 +79,12 @@ def _build_parser() -> argparse.ArgumentParser:
             "AprilCam daemon control, camera management, and fiducial "
             "tag generation."
         ),
+    )
+    parser.add_argument(
+        "-V",
+        "--version",
+        action="version",
+        version=f"aprilcam {_package_version()}",
     )
     parser.set_defaults(func=None)
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
