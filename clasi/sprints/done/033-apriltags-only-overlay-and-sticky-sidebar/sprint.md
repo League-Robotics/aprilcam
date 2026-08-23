@@ -1,7 +1,7 @@
 ---
 id: '033'
 title: AprilTags-only overlay and sticky sidebar
-status: executing
+status: done
 branch: sprint/033-apriltags-only-overlay-and-sticky-sidebar
 use-cases: []
 issues:
