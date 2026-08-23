@@ -257,7 +257,7 @@ from aprilcam.types import (
     TagRecord,
     WorldPoint,
 )
-from aprilcam.vision.detector import Detection, TagDetector
+from aprilcam.vision.detector import Detection, DetectorConfig, TagDetector
 from aprilcam.vision.motion import compute_motion
 from aprilcam.vision.pipeline import PipelineConfig, run_pipeline
 
@@ -348,12 +348,22 @@ CONFIRMATION_STREAK = 3
 #: in (sprint.md Design Rationale Decision 3).
 CONFIRMATION_GRACE = 8
 
-#: A callable that builds one ``TagDetector`` (or, in tests, a
-#: duck-typed substitute exposing the same ``detect(gray, scale=...)``
-#: method -- see ``tests/aprilcam/daemon/test_detection.py``'s
-#: burst-counting doubles). Injectable so tests can pin exactly how many
-#: times detection actually runs without needing real pixel data.
-DetectorFactory = Callable[[], TagDetector]
+#: A callable that builds one ``TagDetector`` for a given camera slug
+#: (or, in tests, a duck-typed substitute exposing the same
+#: ``detect(gray, scale=...)`` method -- see ``tests/aprilcam/daemon/
+#: test_detection.py``'s burst-counting doubles). Injectable so tests
+#: can pin exactly how many times detection actually runs without
+#: needing real pixel data.
+#:
+#: **Widened from zero-argument to slug-argument (ticket 035-001).**
+#: This ticket is pure plumbing -- the slug flows through to
+#: :func:`_default_detector_factory`'s (currently empty)
+#: :data:`_DETECTOR_CONFIG_OVERRIDES` lookup so a *future* ticket
+#: (035-002) can hand back a differently-configured ``TagDetector`` for
+#: one camera slug without affecting any other, without a second
+#: signature change. No behaviour changes yet: every slug still
+#: resolves to identical ``DetectorConfig()`` defaults.
+DetectorFactory = Callable[[str], TagDetector]
 
 #: A callable that resolves a camera slug -> its currently-held
 #: ``Calibration``, or ``None`` if that camera has never been
@@ -405,8 +415,33 @@ CameraGeometryLookup = Callable[[str], Tuple[WorldPoint, float]]
 MarkStale = Callable[[str], None]
 
 
-def _default_detector_factory() -> TagDetector:
-    return TagDetector()
+#: Per-camera-slug :class:`~aprilcam.vision.detector.DetectorConfig`
+#: overrides, keyed by camera slug (``Camera.slug``) -- the seam
+#: :func:`_default_detector_factory` uses to build a differently-tuned
+#: ``TagDetector`` for one camera without touching any other (ticket
+#: 035-001; sprint 035 sprint.md Decision 2: a small per-slug constants
+#: table here, not a global override or a new ``CameraConfig`` field).
+#:
+#: **Empty this ticket.** Every slug therefore misses this lookup and
+#: falls through to ``TagDetector(None)`` -- identical to
+#: ``TagDetector()`` and to every camera's behaviour before this
+#: ticket existed. Ticket 035-002 adds the first real entry (camera 5,
+#: ``arducam-ov9281-usb-camera``) once its tuned parameters are
+#: measured.
+_DETECTOR_CONFIG_OVERRIDES: Dict[str, DetectorConfig] = {}
+
+
+def _default_detector_factory(slug: str) -> TagDetector:
+    """Build one ``TagDetector`` for *slug*, applying its per-camera
+    override from :data:`_DETECTOR_CONFIG_OVERRIDES` when one exists.
+
+    ``dict.get`` returns ``None`` for an unmapped slug, and
+    ``TagDetector(None)`` is exactly ``TagDetector()`` (that
+    constructor's own default), so a slug with no override entry --
+    every slug, this ticket, since the table is empty -- behaves
+    identically to today.
+    """
+    return TagDetector(_DETECTOR_CONFIG_OVERRIDES.get(slug))
 
 
 def _default_calibration_lookup(slug: str) -> Optional[Calibration]:
@@ -593,9 +628,16 @@ class DetectionEngine:
     detector_factory:
         Builds one detector per camera, lazily, on that camera's first
         burst (see the module docstring's "one ``TagDetector`` per
-        camera" section). Overridable so tests can substitute a
-        call-counting double without needing real pixel data or a real
-        ``cv2.aruco`` build.
+        camera" section). Called with the camera *slug* (ticket
+        035-001's ``DetectorFactory`` widening) so a per-camera tuning
+        table can hand back a differently-configured ``TagDetector``
+        for one camera without affecting any other --
+        :func:`_default_detector_factory`'s
+        :data:`_DETECTOR_CONFIG_OVERRIDES` lookup is empty this ticket,
+        so every slug still gets identical ``DetectorConfig()``
+        defaults. Overridable so tests can substitute a call-counting
+        double without needing real pixel data or a real ``cv2.aruco``
+        build.
     calibration_lookup:
         Resolves a camera slug -> its currently-held ``Calibration``, or
         ``None`` if uncalibrated (module docstring's "world coordinates,
@@ -1147,7 +1189,7 @@ class DetectionEngine:
         with self._lock:
             detector = self._detectors.get(slug)
             if detector is None:
-                detector = self._detector_factory()
+                detector = self._detector_factory(slug)
                 self._detectors[slug] = detector
             return detector
 
