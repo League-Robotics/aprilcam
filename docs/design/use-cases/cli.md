@@ -480,12 +480,20 @@ actually working" view. This is what `aprilcam view` does in v1.
 
 **Open questions.** The panel model itself is settled (UC-28, spec §9
 #8): collapsible panels toggle layers by name — built-in layers (tags,
-features) plus each named daemon annotation layer. Still open: which
-layers are **on by default** — tag ids, world coordinates, headings,
-velocity vectors, surveyed features, and whether client annotation
-layers start visible or hidden. Also open: whether the CLI *authors*
-annotations (draw a marker from a script) or only lists and clears
-them (UC-28).
+features) plus each named daemon annotation layer. **Resolved (sprint
+032):** which layers are **on by default** in `playfield view`'s
+annotated mode. Tag ids, world coordinates (drawn via the crosshair),
+and orientation (drawn via the "hat") are all on by default, rendered
+over the deskewed frame; the tag sidebar (numeric id/position/heading/
+speed per tag) is also on by default alongside them. `--bare` is the
+opt-out: the plain deskewed stream, no overlay, no sidebar. Velocity
+**vectors** — a drawn arrow on the frame itself showing a tag's heading
+and speed — remain out of scope; only the sidebar's velocity *columns*
+(numeric speed/heading text) are in scope this sprint, and the two
+should not be conflated by a future reader. Still open: surveyed
+features' on/off default, and whether client annotation layers start
+visible or hidden. Also open: whether the CLI *authors* annotations
+(draw a marker from a script) or only lists and clears them (UC-28).
 
 #### Scenarios
 
@@ -493,7 +501,11 @@ them (UC-28).
 After UC-15.S-1, `aprilcam playfield view` shows the field deskewed to
 its 134.3 × 89.3 proportions, north up. AprilTag 1 is drawn at the centre
 of the image, and a robot's AprilTag 7 is drawn where the robot actually
-is. Moving the robot east moves the drawn tag right.
+is. Moving the robot east moves the drawn tag right. This annotated view
+— tag ids, hats, crosshairs, and the tag sidebar — is what opens by
+default; the same command with `--bare` shows the plain deskewed stream
+instead, with no overlay and no sidebar (sprint 032), mirroring how
+`camera view` (UC-16) is the honest, unprocessed counterpart.
 
 **UC-18.S-2 — Uncalibrated camera** · _failure path_
 The camera is linked but never calibrated. The command errors, naming

@@ -1,7 +1,7 @@
 ---
 id: '003'
 title: 'CLI: annotated view as default, --bare flag, doc touch-ups'
-status: open
+status: done
 use-cases:
 - SUC-003
 depends-on:
@@ -76,21 +76,21 @@ alternative, mirroring how UC-16.S-3 names `camera view [RAW]`'s role.
 
 ## Acceptance Criteria
 
-- [ ] `aprilcam playfield view` (no flags) opens the annotated view
+- [x] `aprilcam playfield view` (no flags) opens the annotated view
       (overlay + sidebar) by default.
-- [ ] `aprilcam playfield view --bare` opens the undecorated view (no
+- [x] `aprilcam playfield view --bare` opens the undecorated view (no
       overlay, no sidebar).
-- [ ] `--camera`, `-d`, `--all`-refusal, `NoDisplayAvailable`, and
+- [x] `--camera`, `-d`, `--all`-refusal, `NoDisplayAvailable`, and
       `NotCalibrated` message behavior are all unchanged with and
       without `--bare`.
-- [ ] `cli/playfield.py`'s module docstring and `view/viewer.py`'s
+- [x] `cli/playfield.py`'s module docstring and `view/viewer.py`'s
       "poll-driven" wording are corrected to describe streaming
       accurately (both currently drift from the ticket-027-007 reality,
       per `view/DESIGN.md`'s own Open Questions note).
-- [ ] `docs/design/use-cases/cli.md` UC-18's open question about default
+- [x] `docs/design/use-cases/cli.md` UC-18's open question about default
       layers is resolved in the document, and `--bare` is named as the
       undecorated alternative.
-- [ ] `uv run mypy` clean.
+- [x] `uv run mypy` clean.
 
 ## Testing
 
@@ -117,3 +117,14 @@ is the ticket that closes out the sprint's documentation debt — confirm
 `src/aprilcam/client/DESIGN.md` and `src/aprilcam/view/DESIGN.md` (from
 tickets 001/002) are both actually updated on disk before this ticket is
 marked done, since this is the last ticket in the sprint.
+
+**Verification result**: `src/aprilcam/view/DESIGN.md` was already in
+sync with the sprint's `design/view-DESIGN.md` overlay (byte-identical,
+ticket 002's commit `611d6ad` updated both). `src/aprilcam/client/
+DESIGN.md` was **not** in sync: ticket 001's commit `b659f45` updated
+only the sprint's `design/client-DESIGN.md` overlay's `renderer.py`
+line (353→592 lines, old lime-box/single-hat scheme → v1-parity red-U/
+green-hat/ID/crosshair), leaving the co-located `src/aprilcam/client/
+DESIGN.md` on the stale pre-032 text. Fixed here by copying the
+overlay's corrected line into the co-located file; both are now
+byte-identical.

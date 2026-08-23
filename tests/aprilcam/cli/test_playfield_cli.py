@@ -215,6 +215,7 @@ def _args(**overrides) -> argparse.Namespace:
         clear=False,
         layer=None,
         query="the blue dot",
+        bare=False,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -594,11 +595,11 @@ def test_view_resolves_the_one_linked_camera_and_hands_it_to_run_view():
     code = playfield_cli.cmd_view(
         _args(),
         discovery_factory=lambda: discovery,
-        run_view=lambda camera, connected: calls.append((camera, connected)),
+        run_view=lambda camera, connected, bare: calls.append((camera, connected, bare)),
     )
 
     assert code == 0
-    assert calls == [("arducam", daemon)]
+    assert calls == [("arducam", daemon, False)]
 
 
 def test_view_explicit_camera_flag_skips_resolution_entirely():
@@ -612,11 +613,11 @@ def test_view_explicit_camera_flag_skips_resolution_entirely():
     code = playfield_cli.cmd_view(
         _args(camera="chosen-camera"),
         discovery_factory=lambda: discovery,
-        run_view=lambda camera, connected: calls.append((camera, connected)),
+        run_view=lambda camera, connected, bare: calls.append((camera, connected, bare)),
     )
 
     assert code == 0
-    assert calls == [("chosen-camera", discovery.daemon)]
+    assert calls == [("chosen-camera", discovery.daemon, False)]
 
 
 def test_view_with_no_linked_camera_errors_naming_camera_config(capsys):
@@ -627,7 +628,7 @@ def test_view_with_no_linked_camera_errors_naming_camera_config(capsys):
     code = playfield_cli.cmd_view(
         _args(),
         discovery_factory=lambda: discovery,
-        run_view=lambda camera, connected: calls.append((camera, connected)),
+        run_view=lambda camera, connected, bare: calls.append((camera, connected, bare)),
     )
 
     assert code == 1
@@ -650,7 +651,7 @@ def test_view_with_several_linked_cameras_errors_naming_them_and_pointing_at_cam
     code = playfield_cli.cmd_view(
         _args(),
         discovery_factory=lambda: discovery,
-        run_view=lambda camera, connected: calls.append((camera, connected)),
+        run_view=lambda camera, connected, bare: calls.append((camera, connected, bare)),
     )
 
     assert code == 1
@@ -669,7 +670,7 @@ def test_view_reports_a_connection_failure_without_ever_calling_run_view(capsys)
     code = playfield_cli.cmd_view(
         _args(daemon="pi-field.local"),
         discovery_factory=lambda: discovery,
-        run_view=lambda camera, connected: calls.append((camera, connected)),
+        run_view=lambda camera, connected, bare: calls.append((camera, connected, bare)),
     )
 
     assert code == 1
@@ -683,7 +684,7 @@ def test_view_no_display_points_at_playfield_image_instead_of_a_backtrace(capsys
     daemon = _FakeDaemon(cameras=(_camera("arducam", playfield="main-playfield"),))
     discovery = _FakeDiscovery(daemon=daemon)
 
-    def raising_run_view(camera, connected):
+    def raising_run_view(camera, connected, bare):
         raise NoDisplayAvailable("no $DISPLAY or $WAYLAND_DISPLAY set")
 
     code = playfield_cli.cmd_view(
@@ -703,7 +704,7 @@ def test_view_uncalibrated_camera_points_at_camera_calibrate(capsys):
     daemon = _FakeDaemon(cameras=(_camera("arducam", playfield="main-playfield"),))
     discovery = _FakeDiscovery(daemon=daemon)
 
-    def raising_run_view(camera, connected):
+    def raising_run_view(camera, connected, bare):
         raise NotCalibrated("'arducam' is not calibrated")
 
     code = playfield_cli.cmd_view(
@@ -721,7 +722,7 @@ def test_view_surfaces_a_typed_error_raised_mid_view(capsys):
     daemon = _FakeDaemon(cameras=(_camera("hd-usb-camera", playfield="main-playfield"),))
     discovery = _FakeDiscovery(daemon=daemon)
 
-    def raising_run_view(camera, connected):
+    def raising_run_view(camera, connected, bare):
         raise CameraNotPresent(camera)
 
     code = playfield_cli.cmd_view(
@@ -730,6 +731,59 @@ def test_view_surfaces_a_typed_error_raised_mid_view(capsys):
 
     assert code == 1
     assert "not currently present" in capsys.readouterr().err
+
+
+def test_view_without_bare_flag_calls_run_view_with_bare_false():
+    """``--bare`` omitted -> the parser default (``False``) is passed
+    straight through, matching the module docstring's annotated-by-
+    default contract."""
+    daemon = _FakeDaemon(cameras=(_camera("arducam", playfield="main-playfield"),))
+    discovery = _FakeDiscovery(daemon=daemon)
+    calls = []
+
+    code = playfield_cli.cmd_view(
+        _args(bare=False),
+        discovery_factory=lambda: discovery,
+        run_view=lambda camera, connected, bare: calls.append((camera, connected, bare)),
+    )
+
+    assert code == 0
+    assert calls == [("arducam", daemon, False)]
+
+
+def test_view_bare_flag_calls_run_view_with_bare_true():
+    """``--bare`` passed through unmodified -- the ticket's own
+    ``run_view(camera, daemon, bare=args.bare)`` pass-through."""
+    daemon = _FakeDaemon(cameras=(_camera("arducam", playfield="main-playfield"),))
+    discovery = _FakeDiscovery(daemon=daemon)
+    calls = []
+
+    code = playfield_cli.cmd_view(
+        _args(bare=True),
+        discovery_factory=lambda: discovery,
+        run_view=lambda camera, connected, bare: calls.append((camera, connected, bare)),
+    )
+
+    assert code == 0
+    assert calls == [("arducam", daemon, True)]
+
+
+def test_view_bare_combined_with_all_still_hits_the_upfront_all_refusal(capsys):
+    """``--bare`` does not change the ``--all`` refusal -- it only
+    changes what ``run_view`` draws once a window is open, not whether
+    a connection is even attempted."""
+    class _ExplodingDiscovery:
+        def connect(self, host=None):
+            raise AssertionError("must not connect when --all is refused up front")
+
+    code = playfield_cli.cmd_view(
+        _args(all=True, bare=True), discovery_factory=lambda: _ExplodingDiscovery()
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "--all" in err
+    assert "single" in err.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -1033,12 +1087,21 @@ def test_view_is_wired_to_cmd_view_with_no_camera_positional():
     assert args.camera is None
     assert args.daemon is None
     assert args.all is False
+    assert args.bare is False
 
 
 def test_view_accepts_an_explicit_camera_flag():
     parser = _build_parser()
     args = parser.parse_args(["playfield", "view", "--camera", "3"])
     assert args.camera == "3"
+
+
+def test_view_accepts_the_bare_flag():
+    """``--bare`` defaults to ``False`` (the annotated view) and
+    ``store_true``s to ``True`` when passed."""
+    parser = _build_parser()
+    args = parser.parse_args(["playfield", "view", "--bare"])
+    assert args.bare is True
 
 
 def test_view_accepts_all_at_parse_time_but_cmd_view_refuses_it_at_runtime():
