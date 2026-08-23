@@ -422,13 +422,38 @@ MarkStale = Callable[[str], None]
 #: 035-001; sprint 035 sprint.md Decision 2: a small per-slug constants
 #: table here, not a global override or a new ``CameraConfig`` field).
 #:
-#: **Empty this ticket.** Every slug therefore misses this lookup and
-#: falls through to ``TagDetector(None)`` -- identical to
-#: ``TagDetector()`` and to every camera's behaviour before this
-#: ticket existed. Ticket 035-002 adds the first real entry (camera 5,
-#: ``arducam-ov9281-usb-camera``) once its tuned parameters are
-#: measured.
-_DETECTOR_CONFIG_OVERRIDES: Dict[str, DetectorConfig] = {}
+#: **One real entry, ticket 035-002.** ``arducam-ov9281-usb-camera``
+#: ("camera 5") decoded AprilTag 1 on only 1-3 of 10 real polls at night
+#: exposures (150-500) per the source issue
+#: (``clasi/sprints/035-.../issues/apriltag-1-detects-unreliably-on-
+#: arducam-ov9281-usb-camera.md``), while all 10 ArUco markers on the
+#: same frames decoded on effectively every poll. **Five** independent
+#: real-hardware sweeps against this exact camera (daylight, auto-swept
+#: exposure 3-25; see
+#: ``tests/aprilcam/daemon/test_detector_tuning_hardware.py`` and
+#: ``docs/knowledge/2026-08-23-camera-5-detector-tuning-blocked-by-
+#: sandbox-camera-permission.md`` for the real numbers, including one
+#: candidate -- ``corner_refine="contour"`` -- that looked like a clean
+#: winner after 3 runs and then did not hold up under 2 more) found
+#: loosening the three AprilTag-quad earned constants
+#: (``april_min_wb_diff``/``april_min_cluster_pixels``/
+#: ``april_max_line_fit_mse``) is the one candidate that never missed
+#: AprilTag 1 across all 5 runs (50/50 bursts) and never dropped ArUco
+#: recall below 9/10 -- the *default* config, by contrast, missed
+#: AprilTag 1 in 4 of the 5 runs (46/50) and dropped ArUco recall as low
+#: as 7/10. ``corner_refine`` alternatives and plain ``quad_decimate``
+#: coarsening were both tried too (this ticket's own acceptance
+#: criteria) but neither matched this candidate's consistency across all
+#: 5 runs.
+#:
+#: Every other slug still misses this lookup and falls through to
+#: ``TagDetector(None)`` -- identical to ``TagDetector()`` and to every
+#: camera's behaviour before ticket 035-001 existed.
+_DETECTOR_CONFIG_OVERRIDES: Dict[str, DetectorConfig] = {
+    "arducam-ov9281-usb-camera": DetectorConfig(
+        april_min_wb_diff=1.0, april_min_cluster_pixels=3, april_max_line_fit_mse=40.0
+    ),
+}
 
 
 def _default_detector_factory(slug: str) -> TagDetector:

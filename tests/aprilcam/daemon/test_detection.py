@@ -340,16 +340,17 @@ def test_default_detector_factory_builds_a_real_tag_detector():
     assert isinstance(detector, TagDetector)
 
 
-def test_default_detector_factory_returns_defaults_for_any_slug_when_overrides_empty():
+def test_default_detector_factory_returns_defaults_for_unmapped_slug():
     """Ticket 035-001: ``DetectorFactory`` widens to accept the camera
-    slug, but ``_DETECTOR_CONFIG_OVERRIDES`` ships empty this ticket, so
-    every slug -- however it is spelled -- still resolves to a
-    ``TagDetector`` built from plain ``DetectorConfig()`` defaults, byte-
-    identical to the pre-ticket zero-argument factory's output. Pins the
-    "no override yet" contract this ticket ships; ticket 035-002 is the
-    one that adds a real entry and a test proving a configured slug
-    differs from this."""
-    assert _DETECTOR_CONFIG_OVERRIDES == {}
+    slug, and ``_DETECTOR_CONFIG_OVERRIDES`` gained its first real entry
+    in ticket 035-002 (below) -- but any slug *not* in that table still
+    resolves to a ``TagDetector`` built from plain ``DetectorConfig()``
+    defaults, byte-identical to the pre-ticket zero-argument factory's
+    output. ``"any-slug"`` is deliberately not
+    ``"arducam-ov9281-usb-camera"`` (the one slug ticket 035-002 mapped),
+    so this pins the "every other camera is untouched" half of that
+    ticket's own acceptance criteria."""
+    assert "any-slug" not in _DETECTOR_CONFIG_OVERRIDES
 
     detector = _default_detector_factory("any-slug")
 
@@ -357,7 +358,7 @@ def test_default_detector_factory_returns_defaults_for_any_slug_when_overrides_e
     assert detector._config == DetectorConfig()  # noqa: SLF001 - internal, testing the default wiring
 
 
-def test_detector_config_overrides_still_empty_after_ticket_035_002():
+def test_detector_config_overrides_has_exactly_one_entry_for_camera_5_after_ticket_035_002():
     """Ticket 035-002 investigated whether a tuned ``DetectorConfig`` for
     ``arducam-ov9281-usb-camera`` ("camera 5") measurably improves
     AprilTag 1's marginal detection rate (source issue: ``apriltag-1-
@@ -365,31 +366,40 @@ def test_detector_config_overrides_still_empty_after_ticket_035_002():
     1-3/10 real polls across a 150-500 exposure sweep, while all 10
     ArUco markers detect on effectively every poll on the same frames).
 
-    It could not obtain a real measurement in this repository's automated
-    test environment: the physical device enumerates
-    (``camera.identity.resolve_all()`` sees it) but the process running
-    tests is not authorized by macOS to open it for capture (``OpenCV:
-    not authorized to capture video``, confirmed live while building this
-    ticket -- see ``docs/knowledge/2026-08-23-camera-5-detector-tuning-
-    blocked-by-sandbox-camera-permission.md``). That is a sandbox/
-    permission gap, not evidence the tuning hypothesis is wrong, and this
-    ticket was explicitly told not to fabricate a "tuned" value to fill
-    the gap -- so ``_DETECTOR_CONFIG_OVERRIDES`` stays exactly as ticket
-    001 left it (this test is the same assertion
-    :func:`test_default_detector_factory_returns_defaults_for_any_slug_when_overrides_empty`
-    above already makes; this one exists as a discoverable pointer, not a
-    second independent check).
+    A prior session could not get a real measurement (macOS TCC denied
+    camera-capture-open to that session's process -- see
+    ``docs/knowledge/2026-08-23-camera-5-detector-tuning-blocked-by-
+    sandbox-camera-permission.md``). This ticket's reopened execution
+    session resolved that (routing camera work through an
+    already-authorized Terminal.app process -- ``docs/knowledge/
+    claude-code-camera-permission-run-via-terminal.md``) and ran seven
+    independent real sweeps against camera 5: loosening the three
+    AprilTag-quad earned constants (``april_min_wb_diff``/
+    ``april_min_cluster_pixels``/``april_max_line_fit_mse`` -- the source
+    issue's own hypothesis) hit AprilTag 1 in all 70/70 real bursts
+    across every run, vs. the *default* config's 46/50 (92%) -- see
+    ``tests/aprilcam/daemon/test_detector_tuning_hardware.py``'s module
+    docstring for the full seven-run comparison table and the two-pass
+    story (an initially-promising ``corner_refine="contour"`` candidate
+    did not hold up under more real runs).
 
-    The measurement + sweep tooling ticket 035-002 built --
-    ``sweep_detector_configs()`` (manual/exploratory, run at the physical
-    rig) and a pinned ``@pytest.mark.camera`` regression test -- live in
-    ``tests/aprilcam/daemon/test_detector_tuning_hardware.py``, ready for
-    a human with real camera-5 access to complete: run the sweep, fill in
-    that module's ``PINNED_*`` constants and this dict's
-    ``arducam-ov9281-usb-camera`` entry (if a config is found to help),
-    re-run the regression test.
+    Pins the resulting production state: exactly one entry, keyed by
+    camera 5's exact slug, and every other camera's detector still
+    untouched (:func:`test_default_detector_factory_returns_defaults_for_unmapped_slug`
+    above covers the "untouched" half independently).
     """
-    assert _DETECTOR_CONFIG_OVERRIDES == {}
+    assert _DETECTOR_CONFIG_OVERRIDES == {
+        "arducam-ov9281-usb-camera": DetectorConfig(
+            april_min_wb_diff=1.0, april_min_cluster_pixels=3, april_max_line_fit_mse=40.0
+        )
+    }
+
+    detector = _default_detector_factory("arducam-ov9281-usb-camera")
+
+    assert isinstance(detector, TagDetector)
+    assert detector._config == DetectorConfig(  # noqa: SLF001 - internal, testing the override wiring
+        april_min_wb_diff=1.0, april_min_cluster_pixels=3, april_max_line_fit_mse=40.0
+    )
 
 
 # ---------------------------------------------------------------------------
