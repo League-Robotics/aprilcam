@@ -216,6 +216,7 @@ def _args(**overrides) -> argparse.Namespace:
         layer=None,
         query="the blue dot",
         bare=False,
+        camera_flag=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -1080,20 +1081,63 @@ def test_image_h_prints_help_not_a_missing_hostname_error():
     assert excinfo.value.code == 0
 
 
-def test_view_is_wired_to_cmd_view_with_no_camera_positional():
+def test_view_is_wired_to_cmd_view_with_an_optional_camera_positional():
     parser = _build_parser()
     args = parser.parse_args(["playfield", "view"])
     assert args.func is playfield_cli.cmd_view
     assert args.camera is None
+    assert args.camera_flag is None
     assert args.daemon is None
     assert args.all is False
     assert args.bare is False
 
 
+def test_view_accepts_a_camera_positional():
+    parser = _build_parser()
+    args = parser.parse_args(["playfield", "view", "5"])
+    assert args.camera == "5"
+    assert args.camera_flag is None
+
+
 def test_view_accepts_an_explicit_camera_flag():
     parser = _build_parser()
     args = parser.parse_args(["playfield", "view", "--camera", "3"])
-    assert args.camera == "3"
+    assert args.camera_flag == "3"
+    assert args.camera is None
+
+
+def test_cmd_view_refuses_positional_and_flag_together(capsys):
+    """Giving the camera twice (positional and ``--camera``) is refused
+    up front, before any daemon connection is attempted."""
+    code = playfield_cli.cmd_view(
+        _args(camera="5", camera_flag="3"),
+        discovery_factory=lambda: _ExplodingDiscovery(),
+    )
+    err = capsys.readouterr().err
+    assert code == playfield_cli.EXIT_ERROR
+    assert "pass it once" in err
+
+
+def test_cmd_view_uses_the_camera_flag_when_no_positional_is_given():
+    """``--camera`` remains a working compatibility alias: its value
+    reaches ``run_view`` exactly as the positional's would, skipping
+    auto-resolution just like the positional does."""
+
+    class _ExplodingCameraList:
+        def list_cameras(self):
+            raise AssertionError("must not call list_cameras when --camera is given")
+
+    discovery = _FakeDiscovery(daemon=_ExplodingCameraList())
+    calls = []
+
+    code = playfield_cli.cmd_view(
+        _args(camera=None, camera_flag="chosen-camera"),
+        discovery_factory=lambda: discovery,
+        run_view=lambda camera, connected, bare: calls.append((camera, connected, bare)),
+    )
+
+    assert code == 0
+    assert calls == [("chosen-camera", discovery.daemon, False)]
 
 
 def test_view_accepts_the_bare_flag():

@@ -284,8 +284,10 @@ def cmd_view(
     discovery_factory: Callable[[], Discovery] = Discovery,
     run_view: Callable[..., None] = viewer.run_playfield_view,
 ) -> int:
-    """``aprilcam playfield view [--camera CAMERA] [--bare] [-d HOST]``
-    (UC-18, ticket 022-006; ``--bare`` added sprint 032 ticket 003).
+    """``aprilcam playfield view [CAMERA] [--bare] [-d HOST]``
+    (UC-18, ticket 022-006; ``--bare`` added sprint 032 ticket 003;
+    ``CAMERA`` positional added out-of-process 2026-08-23 -- ``--camera``
+    remains as a compatibility alias).
 
     Opens a streaming window (``view/viewer.py``'s
     ``run_playfield_view``, subscribed to the daemon's image stream --
@@ -295,10 +297,15 @@ def cmd_view(
     "hats" (``client/renderer.py``) drawn over the frame, plus the tag
     sidebar (sprint 032). ``--bare`` opts out of both, showing the
     plain deskewed stream unmodified -- passed straight through as
-    ``run_view(camera, daemon, bare=args.bare)``. No camera positional:
-    resolved via ``--camera`` or, when omitted,
-    ``cli._common.resolve_playfield_camera`` -- the same convention
-    :func:`cmd_image` uses.
+    ``run_view(camera, daemon, bare=args.bare)``. The camera comes from
+    the optional positional (``aprilcam playfield view 5``), the
+    ``--camera`` compatibility alias, or, when both are omitted,
+    ``cli._common.resolve_playfield_camera`` -- the auto-resolve
+    convention :func:`cmd_image` still uses. Giving both the positional
+    and ``--camera`` is refused up front. (:func:`cmd_image` keeps its
+    flag-only shape for now -- unifying both commands on a positional
+    that also accepts a playfield name is the parked design issue
+    ``playfield-view-should-accept-a-camera-number-or-playfield-name``.)
 
     ``--all`` is refused up front, before any connection is attempted --
     a live video window has no sensible multi-daemon meaning, matching
@@ -321,12 +328,21 @@ def cmd_view(
         )
         return EXIT_ERROR
 
+    if args.camera is not None and args.camera_flag is not None:
+        print(
+            "error: camera given both as a positional and via --camera "
+            "-- pass it once.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    camera_request = args.camera if args.camera is not None else args.camera_flag
+
     try:
         daemon = discovery_factory().connect(args.daemon)
     except AprilCamError as exc:
         return report_error(exc)
 
-    camera, problem = resolve_playfield_camera(daemon, camera=args.camera)
+    camera, problem = resolve_playfield_camera(daemon, camera=camera_request)
     if problem is not None:
         print(f"error: {problem}", file=sys.stderr)
         return EXIT_ERROR
@@ -663,10 +679,18 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
         "view", help="open a live deskewed, calibrated playfield window (UC-18, no --all)"
     )
     p_view.add_argument(
-        "--camera",
+        "camera",
+        nargs="?",
         default=None,
         help="camera name (slug or persistent number) -- resolved automatically "
         "when omitted and exactly one camera is linked to a playfield",
+    )
+    p_view.add_argument(
+        "--camera",
+        dest="camera_flag",
+        default=None,
+        metavar="CAMERA",
+        help="compatibility alias for the camera positional",
     )
     add_daemon_option(p_view)
     add_all_option(p_view, note=" (refused -- viewing is single-target)")
