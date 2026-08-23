@@ -48,6 +48,32 @@ Verify with the `uvc-util -g` readbacks and a fresh
 
 Durable fix is an open design question — see
 `clasi/issues/later/daemon-cannot-detect-uvc-control-drift-camera-left-dark.md`.
-Known-good values per camera: exposure 300 (camera 5, OV9281);
-exposure 6 / gain 2 / wb 4600 (camera 3, OV9782 — see
-`2026-08-23-v1-known-good-arducam-ov9782-exposure-settings.md`).
+
+## Camera 5's exposure is ambient-dependent — there is no one right value
+
+Measured 2026-08-23 (daylight): every exposure ≥ 75 saturates the
+OV9281 in daylight (luma pinned at 187, 13% clipped, frames identical
+from 75 to 300) and AprilTag detection drops to ZERO while ArUco
+partially survives — the exact "detects some tags, image washed out"
+symptom. The nighttime-tuned `exposure: 300` is the daytime failure.
+
+| exposure (daylight) | result |
+|---|---|
+| 75–300 | saturated, 0/5 AprilTags |
+| 50 | borderline |
+| **20–30** | all 5 AprilTags on every frame |
+| 10 | all AprilTags but ArUco starts dropping |
+
+**Known-good values: camera 5 (OV9281): exposure 20 in daylight,
+~300 at night** (manual exposure by design — the daemon never
+auto-adjusts). Camera 3 (OV9782): exposure 6 / gain 2 / wb 4600 —
+see `2026-08-23-v1-known-good-arducam-ov9782-exposure-settings.md`.
+
+When tags stop detecting after a lighting change, re-run the sweep:
+push candidate exposures with `aprilcam camera config`, capture PNG
+frames, and run `vision.pipeline.run_pipeline` +
+`vision.detector.TagDetector` offline per frame (this measures raw
+detectability without the confirmation gate) — script pattern in the
+2026-08-23 session; ~1 minute end to end. Persist the winner to
+`~/.config/aprilcam/cameras/<slug>/config.json` and
+`camera config --reset <n>`.
