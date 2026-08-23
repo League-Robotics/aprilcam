@@ -7,13 +7,32 @@ status: pending
 ## Description
 
 Pushing a camera config document sometimes only updates the daemon's
-in-memory state; the persisted file on disk keeps the old value. Two
+in-memory state; the persisted file on disk keeps the old value. Three
 independent occurrences found so far, both live and both self-defeating
-(the CLI reports success and an immediate `camera list`/re-query
-confirms the new behavior, but the file never changes):
+(the CLI reports success and an immediate `camera list`/re-query, or
+even a live capture, confirms the new behavior took effect, but the
+file never changes). The occurrences span a linked camera and an
+unlinked one, and both a `settings` update and a `playfield` clear —
+**the "unlinked camera" theory from occurrence 2 does not hold up**;
+this looks like config-push-to-disk persistence being broadly
+unreliable, not conditional on one specific field or link state.
 
-**Occurrence 2 (2026-08-23, broader than originally filed) — a
-`settings` push for an *unlinked* camera doesn't persist at all.**
+**Occurrence 3 (2026-08-23) — a `settings` push for a *linked, already-
+configured* camera silently failed to persist.** Deploying v1's known-
+good exposure settings to `arducam-ov9782-usb-camera` (already linked
+to `main-playfield`, already had a `settings.exposure` key): pushed
+`{"auto_exposure": 1, "exposure": 6, "gain": 2, "auto_white_balance":
+0, "white_balance_temperature": 4600}`. CLI reported success; the very
+next `camera image` capture was correctly exposed, proving the daemon
+applied it live. The on-disk file still read `{"auto_exposure": 1,
+"exposure": 100}` — not just missing the three new keys, but not even
+updating the *pre-existing* `exposure` key from its stale value. This
+rules out "only new keys fail to write" as the mechanism too. See
+`docs/knowledge/2026-08-23-v1-known-good-arducam-ov9782-exposure-settings.md`
+for the full context this was found in.
+
+**Occurrence 2 (2026-08-23) — a `settings` push for an *unlinked*
+camera doesn't persist at all.**
 Tuning `arducam-ov9281-usb-camera` (a camera with `playfield: null` at
 the time) live: pushed `{"auto_exposure": 1, "exposure": 300}`. The
 live daemon genuinely took it — the very next capture was correctly
