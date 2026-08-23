@@ -31,6 +31,19 @@ rules out "only new keys fail to write" as the mechanism too. See
 `docs/knowledge/2026-08-23-v1-known-good-arducam-ov9782-exposure-settings.md`
 for the full context this was found in.
 
+**Occurrence 4 (2026-08-23) — inverted: `settings` persisted correctly,
+`playfield` silently reverted.** Immediately after occurrence 3, pushed
+`arducam-ov9281-usb-camera` with both `settings.exposure: 300` and
+`playfield: "main-playfield"` in the same document. Re-reading the file
+afterward: `settings` was correct on disk, but `playfield` read back as
+`null` -- the opposite of occurrence 2, where `playfield` was the field
+being pushed to `null` and *that* didn't persist. **This rules out "one
+specific field never persists"** -- across the four occurrences, both
+`settings` and `playfield` have each independently failed to persist
+in different pushes, sometimes clearing incorrectly, sometimes failing
+to set. This now reads as non-deterministic/racy config-write behavior,
+not a single deterministic code path with one bad branch.
+
 **Occurrence 2 (2026-08-23) — a `settings` push for an *unlinked*
 camera doesn't persist at all.**
 Tuning `arducam-ov9281-usb-camera` (a camera with `playfield: null` at
