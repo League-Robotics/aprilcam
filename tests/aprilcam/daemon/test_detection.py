@@ -357,6 +357,41 @@ def test_default_detector_factory_returns_defaults_for_any_slug_when_overrides_e
     assert detector._config == DetectorConfig()  # noqa: SLF001 - internal, testing the default wiring
 
 
+def test_detector_config_overrides_still_empty_after_ticket_035_002():
+    """Ticket 035-002 investigated whether a tuned ``DetectorConfig`` for
+    ``arducam-ov9281-usb-camera`` ("camera 5") measurably improves
+    AprilTag 1's marginal detection rate (source issue: ``apriltag-1-
+    detects-unreliably-on-arducam-ov9281-usb-camera.md`` -- AprilTag 1 at
+    1-3/10 real polls across a 150-500 exposure sweep, while all 10
+    ArUco markers detect on effectively every poll on the same frames).
+
+    It could not obtain a real measurement in this repository's automated
+    test environment: the physical device enumerates
+    (``camera.identity.resolve_all()`` sees it) but the process running
+    tests is not authorized by macOS to open it for capture (``OpenCV:
+    not authorized to capture video``, confirmed live while building this
+    ticket -- see ``docs/knowledge/2026-08-23-camera-5-detector-tuning-
+    blocked-by-sandbox-camera-permission.md``). That is a sandbox/
+    permission gap, not evidence the tuning hypothesis is wrong, and this
+    ticket was explicitly told not to fabricate a "tuned" value to fill
+    the gap -- so ``_DETECTOR_CONFIG_OVERRIDES`` stays exactly as ticket
+    001 left it (this test is the same assertion
+    :func:`test_default_detector_factory_returns_defaults_for_any_slug_when_overrides_empty`
+    above already makes; this one exists as a discoverable pointer, not a
+    second independent check).
+
+    The measurement + sweep tooling ticket 035-002 built --
+    ``sweep_detector_configs()`` (manual/exploratory, run at the physical
+    rig) and a pinned ``@pytest.mark.camera`` regression test -- live in
+    ``tests/aprilcam/daemon/test_detector_tuning_hardware.py``, ready for
+    a human with real camera-5 access to complete: run the sweep, fill in
+    that module's ``PINNED_*`` constants and this dict's
+    ``arducam-ov9281-usb-camera`` entry (if a config is found to help),
+    re-run the regression test.
+    """
+    assert _DETECTOR_CONFIG_OVERRIDES == {}
+
+
 # ---------------------------------------------------------------------------
 # World coordinates (ticket 022-004) -- calibrated camera path
 # ---------------------------------------------------------------------------
