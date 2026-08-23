@@ -142,7 +142,7 @@ from PIL import Image, ImageTk
 from aprilcam.client.interfaces import Renderer as RendererBase
 from aprilcam.client.renderer import Renderer as PillowRenderer
 from aprilcam.daemon.interfaces import Daemon, ImageStream
-from aprilcam.types import ImageFrame, TagRecord
+from aprilcam.types import ImageFrame, TagFamily, TagRecord
 
 __all__ = [
     "DEFAULT_POLL_HZ",
@@ -210,15 +210,18 @@ class DisplayFrame:
     or PNG) plus an optional advisory line for the window chrome, never
     drawn onto the image itself (see ``Window.set_status``).
 
-    ``tags`` (sprint 032 ticket 002) is the current frame's full tag
-    list for :meth:`Window.update_tags` to refresh a side panel from --
+    ``tags`` (sprint 032 ticket 002) is the current frame's tag list
+    for :meth:`Window.update_tags` to refresh a side panel from --
     additive and default-``None``, so every construction site that
     predates this field (``_convert_raw_frame``,
     ``_convert_bare_playfield_frame``) keeps compiling and behaving
     identically without being touched. Only
     ``_make_playfield_converter``'s non-bare ``convert`` populates it,
     from the same ``frame.tags`` it already reads to render the overlay
-    -- no second subscription, no new daemon call.
+    -- no second subscription, no new daemon call. As of sprint 033
+    ticket 001, that population is AprilTag-family only -- ArUco
+    records are filtered out before assignment, so this field never
+    carries one on the real (post-filter) path.
     """
 
     data: bytes
@@ -667,6 +670,16 @@ def _make_playfield_converter(renderer: RendererBase) -> Callable[[ImageFrame], 
     ``frame_dark`` both surface as the window's advisory status line --
     never drawn onto the image itself, same as :func:`_convert_raw_frame`'s
     ``frame_dark`` handling.
+
+    AprilTag-family only for the sidebar (sprint 033 ticket 001):
+    ``DisplayFrame.tags`` is filtered to ``TagFamily.APRILTAG`` records
+    before assignment, so the field's ArUco calibration corner markers
+    are never listed. This is independent of the equivalent guard in
+    ``client/renderer.py``'s ``Renderer.render()`` (sprint 033
+    sprint.md Design Rationale: two inline checks at the two points
+    that each read a frame's tag list, not a shared predicate) --
+    *renderer* above still receives the frame's unfiltered ``tags`` and
+    applies its own guard when drawing the overlay.
     """
 
     def convert(frame: ImageFrame) -> DisplayFrame:
@@ -681,7 +694,12 @@ def _make_playfield_converter(renderer: RendererBase) -> Callable[[ImageFrame], 
             status_parts.append("frame dark -- image may be hard to see")
         status = "; ".join(status_parts) if status_parts else None
 
-        tags = frame.tags.tags if frame.tags is not None else None
+        if frame.tags is None:
+            tags = None
+        else:
+            tags = tuple(
+                record for record in frame.tags.tags if record.tag.family == TagFamily.APRILTAG
+            )
         return DisplayFrame(data=data, status=status, tags=tags)
 
     return convert

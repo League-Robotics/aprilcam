@@ -296,6 +296,34 @@ def _tag_frame_with_one_tag() -> TagFrame:
     return TagFrame(tags=(record,), timestamp=0.0, frame_index=0)
 
 
+def _mixed_family_tag_frame() -> TagFrame:
+    """A ``TagFrame`` carrying one AprilTag record and one ArUco record
+    -- for asserting ``_make_playfield_converter``'s ``convert()``
+    populates ``DisplayFrame.tags`` with the AprilTag record only
+    (sprint 033 ticket 001)."""
+    apriltag_record = TagRecord(
+        tag=TagId(TagFamily.APRILTAG, 7),
+        world=None,
+        heading_rad=None,
+        world_velocity=None,
+        speed=None,
+        timestamp=0.0,
+        pixel=PixelPoint(1.0, 2.0),
+        calibrated=False,
+    )
+    aruco_record = TagRecord(
+        tag=TagId(TagFamily.ARUCO, 3),
+        world=None,
+        heading_rad=None,
+        world_velocity=None,
+        speed=None,
+        timestamp=0.0,
+        pixel=PixelPoint(9.0, 9.0),
+        calibrated=False,
+    )
+    return TagFrame(tags=(apriltag_record, aruco_record), timestamp=0.0, frame_index=0)
+
+
 def _tiny_png() -> bytes:
     buf = io.BytesIO()
     Image.new("RGB", (4, 4), color=(10, 20, 30)).save(buf, format="PNG")
@@ -846,6 +874,27 @@ def test_run_playfield_view_populates_display_frame_tags_in_the_default_annotate
     )
 
     assert window.tags_updates == [tag_frame.tags]
+
+
+def test_run_playfield_view_populates_display_frame_tags_apriltag_family_only():
+    """Sprint 033 ticket 001: ``_make_playfield_converter``'s
+    ``convert()`` filters ``DisplayFrame.tags`` to AprilTag-family
+    records only -- an ArUco record present in the streamed frame's own
+    embedded ``TagFrame`` must never reach the sidebar."""
+    tag_frame = _mixed_family_tag_frame()
+    apriltag_record = tag_frame.tags[0]
+    stream = _ScriptedImageStream([_image_frame(data=b"f1", tags=tag_frame)])
+    daemon = _FakeStreamDaemon(stream=stream)
+    window = _FakeWindow(close_after_frames=1)
+
+    viewer.run_playfield_view(
+        "cam",
+        daemon,
+        renderer_factory=_PassThroughRenderer,
+        window_factory=lambda title, **kwargs: window,
+    )
+
+    assert window.tags_updates == [(apriltag_record,)]
 
 
 def test_run_playfield_view_bare_mode_never_calls_the_renderer_factory():

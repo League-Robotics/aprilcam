@@ -79,6 +79,19 @@ unit-tested without a display; `TkWindow`'s own widget wiring gets a
 thin `@pytest.mark.camera` smoke test instead (this project's existing
 convention for anything needing a real window).
 
+**AprilTag-family only (sprint 033 ticket 001).** `_make_playfield_converter`'s
+`convert()` filters `frame.tags.tags` to `TagFamily.APRILTAG` records
+before assigning `DisplayFrame.tags`, so the field's ArUco calibration
+corner markers never reach the sidebar — `_format_tag_row`'s own
+`AR3`-style abbreviation stays reachable as a pure function (still
+exercised directly by its own unit test) but is never invoked from the
+real, post-filter `convert()` path any more. This filter is independent
+of the equivalent guard in `client/renderer.py`'s `render()` — two
+inline checks at the two points that each read a frame's tag list, not
+a shared exported predicate (sprint 033 sprint.md Design Rationale).
+`_convert_raw_frame`/`_convert_bare_playfield_frame` need no equivalent
+filter — neither ever populates `.tags` at all.
+
 `bare=True` is the fully undecorated deskewed stream: the window is
 built with `show_sidebar=False`, frames are shown via
 `_convert_bare_playfield_frame` (`data=frame.data` unmodified, no

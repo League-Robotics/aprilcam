@@ -274,6 +274,103 @@ def test_render_skips_a_record_with_no_world_corners_on_a_deskewed_frame():
 
 
 # ---------------------------------------------------------------------------
+# AprilTag-family filter (sprint 033 ticket 001): the field's ArUco 4x4
+# calibration corner markers are detected but must never be boxed,
+# hatted, ID-labeled, or crosshaired by this renderer.
+# ---------------------------------------------------------------------------
+
+#: A second boundary quad, well clear of the default AprilTag fixture's
+#: own footprint ((5,15)-(15,25)), used only for the ArUco-family
+#: record below so its "nothing was drawn here" checks cannot be
+#: confused with the AprilTag record's own drawn pixels. Kept inside
+#: this module's own field extent (+-50cm x, +-40cm y) so the predicted
+#: pixels actually land on the image.
+_ARUCO_FRONT_LEFT = WorldPoint(x=-45.0, y=-25.0)
+_ARUCO_FRONT_RIGHT = WorldPoint(x=-35.0, y=-25.0)
+_ARUCO_BACK_RIGHT = WorldPoint(x=-35.0, y=-35.0)
+_ARUCO_BACK_LEFT = WorldPoint(x=-45.0, y=-35.0)
+_ARUCO_WORLD = WorldPoint(x=-40.0, y=-30.0)  # corrected position -- would-be crosshair site
+
+
+def _aruco_record(**overrides) -> TagRecord:
+    fields = dict(
+        tag=TagId(TagFamily.ARUCO, 3),
+        world=_ARUCO_WORLD,
+        heading_rad=None,
+        world_velocity=None,
+        speed=None,
+        timestamp=0.0,
+        pixel=None,
+        calibrated=True,
+        yaw_rad=0.0,
+        world_corners=(_ARUCO_FRONT_LEFT, _ARUCO_FRONT_RIGHT, _ARUCO_BACK_RIGHT, _ARUCO_BACK_LEFT),
+        pixel_corners=None,
+    )
+    fields.update(overrides)
+    return TagRecord(**fields)
+
+
+def test_render_skips_an_aruco_record_entirely_in_a_mixed_family_frame():
+    """No ArUco record is boxed, hatted, ID-labeled, or crosshaired --
+    checked by sampling every neighbourhood this renderer would have
+    drawn to had the family guard not been applied -- while the
+    AprilTag record in the same frame still draws exactly as sprint 032
+    left it (regression guard)."""
+    apriltag_record = _tag_record()
+    aruco_record = _aruco_record()
+    frame = _deskewed_frame(
+        tags=TagFrame(tags=(apriltag_record, aruco_record), timestamp=0.0, frame_index=0)
+    )
+
+    png_bytes = Renderer().render(frame)
+
+    image = _decode(png_bytes)
+    background = np.array(_BACKGROUND, dtype=np.float64)
+
+    # The AprilTag record still draws -- boundary, hat apex, id label
+    # (at its own centroid/world position, which coincide by default),
+    # and crosshair.
+    back_edge_midpoint = _predicted(WorldPoint(x=10.0, y=15.0))
+    patch = _mean_color_near(image, back_edge_midpoint.x, back_edge_midpoint.y, radius=3)
+    assert np.linalg.norm(patch.astype(np.float64) - background) > 30
+    apex = _expected_apex(_FRONT_LEFT, _FRONT_RIGHT, _BACK_RIGHT, _BACK_LEFT)
+    apex_patch = _mean_color_near(image, apex.x, apex.y, radius=3)
+    assert np.linalg.norm(apex_patch.astype(np.float64) - background) > 30
+
+    # Nothing at all is drawn anywhere near the ArUco record's own
+    # boundary quad, apex, centroid, or corrected-position crosshair
+    # site -- no stray pixels from any of the four draw routines.
+    aruco_back_edge_midpoint = _predicted(WorldPoint(x=-40.0, y=-35.0))
+    assert (
+        _mean_color_near(image, aruco_back_edge_midpoint.x, aruco_back_edge_midpoint.y, radius=3)
+        == np.array(_BACKGROUND)
+    ).all()
+    aruco_apex = _expected_apex(_ARUCO_FRONT_LEFT, _ARUCO_FRONT_RIGHT, _ARUCO_BACK_RIGHT, _ARUCO_BACK_LEFT)
+    assert (
+        _mean_color_near(image, aruco_apex.x, aruco_apex.y, radius=3) == np.array(_BACKGROUND)
+    ).all()
+    aruco_centroid = _predicted(WorldPoint(x=-40.0, y=-30.0))
+    assert (
+        _mean_color_near(image, aruco_centroid.x, aruco_centroid.y, radius=6) == np.array(_BACKGROUND)
+    ).all()
+    aruco_crosshair = _predicted(_ARUCO_WORLD)
+    assert (
+        _mean_color_near(image, aruco_crosshair.x, aruco_crosshair.y, radius=3) == np.array(_BACKGROUND)
+    ).all()
+
+
+def test_render_with_an_all_aruco_tag_frame_draws_nothing():
+    """A frame whose ``tags.tags`` is entirely ArUco draws nothing at
+    all -- no exception, no stray pixels anywhere in the image."""
+    frame = _deskewed_frame(tags=TagFrame(tags=(_aruco_record(),), timestamp=0.0, frame_index=0))
+
+    png_bytes = Renderer().render(frame)
+
+    image = _decode(png_bytes)
+    assert (image == np.array(_BACKGROUND)).all()
+
+
+# ---------------------------------------------------------------------------
 # Hat apex clamp bounds -- fixtures deliberately sized so
 # 0.35 * |front edge| falls below the 6px floor and above the 80px
 # ceiling, per the acceptance criteria.
