@@ -68,16 +68,21 @@ our actual OV9281. Camera 5's exposure was tuned empirically instead
 worked well visually and for detection, an unrelated value from a
 different sensor, don't cross-apply it to camera 3 or vice versa).
 
-## Known gotcha: config pushes often don't persist to disk
+## Known gotcha: config pushes are ephemeral by design, not persisted at all
 
 `aprilcam camera config <file>` reports success and the live daemon
 genuinely applies the new settings (verified: the very next capture is
-correctly exposed), but the on-disk
-`<config_dir>/cameras/<slug>/config.json` frequently does **not**
-reflect the push — seen on both a linked and an unlinked camera, both
-for setting new values and for clearing a field to `null`. A daemon
-restart silently reverts to the stale on-disk value with no warning.
-Tracked in `clasi/issues/camera-config-clearing-a-field-does-not-persist-to-disk.md`
-(despite the name, now covers more than clearing). Until that's fixed:
-after any live config push you actually want to keep, verify the
-on-disk file directly and hand-edit it if the push didn't take.
+correctly exposed) — but this is a **live-only override**. RPC-pushed
+config is always in-memory only and is never written to
+`<config_dir>/cameras/<slug>/config.json`, by deliberate design
+(`docs/design/configuration.md` §5 — `/etc`-equivalent config is not
+writable by the daemon at all). A daemon restart silently reverts to
+whatever the file already says, with no warning from the CLI that the
+push was never durable. (An earlier version of this note described
+this as inconsistent/bug-like persistence — it isn't; see
+`clasi/issues/later/camera-config-push-looks-persistent-but-is-ephemeral-with-no-warning.md`.)
+Practical rule: after any live config push you actually want to keep,
+either hand-edit the on-disk file directly, or push then
+`aprilcam camera config <camera> --dump > FILE` and copy `FILE` into
+`config_dir/cameras/<slug>/config.json` yourself (UC-24) — the daemon
+will never do this for you.
