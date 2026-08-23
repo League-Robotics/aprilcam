@@ -296,6 +296,34 @@ def _tag_frame_with_one_tag() -> TagFrame:
     return TagFrame(tags=(record,), timestamp=0.0, frame_index=0)
 
 
+def _mixed_family_tag_frame() -> TagFrame:
+    """A ``TagFrame`` carrying one AprilTag record and one ArUco record
+    -- for asserting ``_make_playfield_converter``'s ``convert()``
+    populates ``DisplayFrame.tags`` with the AprilTag record only
+    (sprint 033 ticket 001)."""
+    apriltag_record = TagRecord(
+        tag=TagId(TagFamily.APRILTAG, 7),
+        world=None,
+        heading_rad=None,
+        world_velocity=None,
+        speed=None,
+        timestamp=0.0,
+        pixel=PixelPoint(1.0, 2.0),
+        calibrated=False,
+    )
+    aruco_record = TagRecord(
+        tag=TagId(TagFamily.ARUCO, 3),
+        world=None,
+        heading_rad=None,
+        world_velocity=None,
+        speed=None,
+        timestamp=0.0,
+        pixel=PixelPoint(9.0, 9.0),
+        calibrated=False,
+    )
+    return TagFrame(tags=(apriltag_record, aruco_record), timestamp=0.0, frame_index=0)
+
+
 def _tiny_png() -> bytes:
     buf = io.BytesIO()
     Image.new("RGB", (4, 4), color=(10, 20, 30)).save(buf, format="PNG")
@@ -398,6 +426,138 @@ def test_format_sidebar_text_with_no_tags_is_header_only():
     assert viewer._format_sidebar_text(()) == viewer._SIDEBAR_HEADER
 
 
+# ---------------------------------------------------------------------------
+# _TagRoster -- sticky per-tag-id live/ghost/drop bookkeeping (sprint 033
+# ticket 002). Pure and Tk-free throughout: an injected fake clock, no
+# real window anywhere in this section (the ticket's own acceptance
+# criterion).
+# ---------------------------------------------------------------------------
+
+
+class _FakeClock:
+    """A controllable monotonic-clock double for :class:`viewer._TagRoster`
+    tests -- advances only when told to, so a test can cross the 30s
+    ghost horizon without sleeping."""
+
+    def __init__(self, start: float = 0.0) -> None:
+        self._now = start
+
+    def __call__(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+
+def _tag_record(number: int, family: TagFamily = TagFamily.APRILTAG, **overrides) -> TagRecord:
+    return _bare_tag_record(tag=TagId(family, number), **overrides)
+
+
+def test_tag_roster_reports_a_present_tag_as_live():
+    roster = viewer._TagRoster(clock=_FakeClock())
+    record = _tag_record(4)
+
+    roster.update((record,))
+
+    assert roster.snapshot() == ((record, False),)
+
+
+def test_tag_roster_ghosts_a_tag_immediately_on_the_first_absent_frame():
+    """No multi-frame grace period -- one ``update()`` call with the tag
+    missing is enough (ticket's own acceptance criterion)."""
+    roster = viewer._TagRoster(clock=_FakeClock())
+    record = _tag_record(4)
+    roster.update((record,))
+
+    roster.update(())  # the tag is simply absent from this frame's tags
+
+    ((snapshot_record, ghosted),) = roster.snapshot()
+    assert ghosted is True
+    assert snapshot_record == record  # last-seen values retained, not blanked
+
+
+def test_tag_roster_keeps_a_ghosted_tags_last_seen_values_until_dropped():
+    clock = _FakeClock()
+    roster = viewer._TagRoster(clock=clock)
+    record = _tag_record(4, speed=7.0)
+    roster.update((record,))
+    roster.update(())
+
+    clock.advance(viewer._GHOST_HORIZON_S - 1.0)
+    roster.update(())
+
+    ((snapshot_record, ghosted),) = roster.snapshot()
+    assert ghosted is True
+    assert snapshot_record.speed == 7.0
+
+
+def test_tag_roster_does_not_drop_a_ghosted_tag_before_the_horizon_elapses():
+    clock = _FakeClock()
+    roster = viewer._TagRoster(clock=clock)
+    roster.update((_tag_record(4),))
+    roster.update(())
+
+    clock.advance(viewer._GHOST_HORIZON_S - 0.01)
+    roster.update(())
+
+    assert len(roster.snapshot()) == 1
+
+
+def test_tag_roster_drops_a_tag_once_the_ghost_horizon_elapses():
+    clock = _FakeClock()
+    roster = viewer._TagRoster(clock=clock)
+    roster.update((_tag_record(4),))
+    roster.update(())
+
+    clock.advance(viewer._GHOST_HORIZON_S)
+    roster.update(())
+
+    assert roster.snapshot() == ()
+
+
+def test_tag_roster_restores_a_reappearing_tag_to_live_with_refreshed_values():
+    clock = _FakeClock()
+    roster = viewer._TagRoster(clock=clock)
+    stale = _tag_record(4, speed=1.0)
+    roster.update((stale,))
+    roster.update(())  # ghosted
+
+    clock.advance(5.0)  # well before the 30s horizon
+    fresh = _tag_record(4, speed=9.0)
+    roster.update((fresh,))
+
+    ((snapshot_record, ghosted),) = roster.snapshot()
+    assert ghosted is False
+    assert snapshot_record.speed == 9.0
+
+
+def test_tag_roster_orders_live_and_ghosted_rows_together_by_tag_number():
+    """Sprint.md's "no separate stale section": one ordered list, live
+    and ghosted rows interleaved by tag number."""
+    roster = viewer._TagRoster(clock=_FakeClock())
+    low = _tag_record(1)
+    high = _tag_record(5)
+    roster.update((low, high))
+    roster.update((high,))  # low goes absent this frame -> ghosted
+
+    snapshot = roster.snapshot()
+
+    assert [record.tag.number for record, _ in snapshot] == [1, 5]
+    assert snapshot[0][1] is True  # tag 1: ghosted
+    assert snapshot[1][1] is False  # tag 5: still live
+
+
+def test_tag_roster_never_admits_an_aruco_record():
+    """Defense in depth (ticket's own acceptance criterion): even if an
+    ArUco record somehow reached this class despite ticket 001's own
+    upstream filter, it is never tracked."""
+    roster = viewer._TagRoster(clock=_FakeClock())
+
+    roster.update((_tag_record(3, family=TagFamily.ARUCO),))
+
+    assert roster.snapshot() == ()
+
+
 @pytest.mark.camera
 def test_tkwindow_with_sidebar_builds_a_side_panel_and_updates_it_from_tags():
     """A thin smoke-level check of the real Tk widget wiring (the
@@ -405,7 +565,15 @@ def test_tkwindow_with_sidebar_builds_a_side_panel_and_updates_it_from_tags():
     directly above, with no Tk root at all; this is the one test that
     actually builds the ``tk.Text`` side panel and reads its content
     back). Not about camera hardware, but reuses the one marker this
-    project's GUI-test rule already deselects from the baseline run."""
+    project's GUI-test rule already deselects from the baseline run.
+
+    Sprint 033 ticket 002: a tag going absent must not clear its row --
+    the sticky roster keeps it listed with its last-seen values, greyed
+    via the real ``_GHOST_TK_TAG`` Tk text tag, until dropped. The
+    roster's own live/ghost/drop transitions are proven above with no
+    Tk root at all; this test proves only the rendering side -- that the
+    grey tag actually lands on a real widget's line range, which no pure
+    unit test can observe."""
     window = viewer.TkWindow("aprilcam sidebar test", show_sidebar=True)
     try:
         record = _bare_tag_record(
@@ -419,10 +587,20 @@ def test_tkwindow_with_sidebar_builds_a_side_panel_and_updates_it_from_tags():
         window.update_tags((record,))
         content = window._sidebar_text.get("1.0", "end")
         assert "AT4" in content
+        assert window._sidebar_text.tag_ranges(viewer._GHOST_TK_TAG) == ()
 
         window.update_tags(None)
-        cleared = window._sidebar_text.get("1.0", "end")
-        assert "AT4" not in cleared
+        ghosted_content = window._sidebar_text.get("1.0", "end")
+        # Sticky roster: absent this frame, still listed with its
+        # last-seen values -- not cleared -- and now rendered grey.
+        assert "AT4" in ghosted_content
+        assert window._sidebar_text.tag_ranges(viewer._GHOST_TK_TAG) != ()
+
+        window.update_tags((record,))
+        restored_content = window._sidebar_text.get("1.0", "end")
+        assert "AT4" in restored_content
+        # Reappeared -- restored to live, grey tag no longer applied.
+        assert window._sidebar_text.tag_ranges(viewer._GHOST_TK_TAG) == ()
     finally:
         window.close()
 
@@ -846,6 +1024,27 @@ def test_run_playfield_view_populates_display_frame_tags_in_the_default_annotate
     )
 
     assert window.tags_updates == [tag_frame.tags]
+
+
+def test_run_playfield_view_populates_display_frame_tags_apriltag_family_only():
+    """Sprint 033 ticket 001: ``_make_playfield_converter``'s
+    ``convert()`` filters ``DisplayFrame.tags`` to AprilTag-family
+    records only -- an ArUco record present in the streamed frame's own
+    embedded ``TagFrame`` must never reach the sidebar."""
+    tag_frame = _mixed_family_tag_frame()
+    apriltag_record = tag_frame.tags[0]
+    stream = _ScriptedImageStream([_image_frame(data=b"f1", tags=tag_frame)])
+    daemon = _FakeStreamDaemon(stream=stream)
+    window = _FakeWindow(close_after_frames=1)
+
+    viewer.run_playfield_view(
+        "cam",
+        daemon,
+        renderer_factory=_PassThroughRenderer,
+        window_factory=lambda title, **kwargs: window,
+    )
+
+    assert window.tags_updates == [(apriltag_record,)]
 
 
 def test_run_playfield_view_bare_mode_never_calls_the_renderer_factory():

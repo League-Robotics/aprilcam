@@ -129,6 +129,7 @@ from aprilcam.types import (
     PathShape,
     Polygon,
     Style,
+    TagFamily,
     TagRecord,
     Text,
     WorldPoint,
@@ -541,6 +542,16 @@ class Renderer(_RendererBase):
     ) -> bytes:
         """See ``client.interfaces.Renderer.render``.
 
+        AprilTag-family only (sprint 033 ticket 001): a record whose
+        ``tag.family`` is not ``TagFamily.APRILTAG`` is skipped before
+        any geometry is computed for it -- the field's ArUco 4x4
+        calibration corner markers are detected (unaffected) but never
+        boxed, hatted, ID-labeled, or crosshaired here. This check is
+        independent of the equivalent filter in ``view/viewer.py``'s
+        ``convert()`` (sprint 033 sprint.md Design Rationale: two
+        inline checks, not a shared predicate), since this method reads
+        the raw, unfiltered ``ImageFrame`` directly.
+
         Per tag (module docstring, ticket 032-001): the red 3-sided
         boundary, the green hat, and the id label draw together from
         ``_tag_points`` -- a record with no drawable corners in this
@@ -568,6 +579,8 @@ class Renderer(_RendererBase):
 
         if frame.tags is not None:
             for record in frame.tags.tags:
+                if record.tag.family != TagFamily.APRILTAG:
+                    continue
                 points = _tag_points(record, frame)
                 if points is None:
                     continue
