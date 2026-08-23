@@ -71,6 +71,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import sys
 import threading
 import time
@@ -97,6 +98,7 @@ from aprilcam.config.interfaces import CameraConfig, Directories, Feature
 from aprilcam.config.interfaces import ConfigLoader as ConfigLoaderIface
 from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitionIface
 from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
+from aprilcam.daemon.broadcast import Broadcaster
 from aprilcam.daemon.detection import DetectionEngine
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus, ImageStream, MountRegistration, TagStream
 from aprilcam.daemon.streaming import (
@@ -769,13 +771,26 @@ class DaemonService(Daemon):
         constructing the producer once and subscribing to it.
         """
         cam = self._camera_for(camera)
-        with self._lock:
-            producer = self._tag_stream_producers.get(cam.slug)
-            if producer is None:
-                producer = TagStreamProducer(cam.slug, cam, self._detection)
-                self._tag_stream_producers[cam.slug] = producer
+        producer = self._tag_stream_producer_for(cam.slug, cam)
         subscriber_queue = producer.broadcaster.subscribe()
         return BroadcasterTagStream(producer.broadcaster, subscriber_queue)
+
+    def _tag_stream_producer_for(self, slug: str, cam: Camera) -> TagStreamProducer:
+        """Lazily builds (and this service tracks) one
+        ``TagStreamProducer`` per camera slug, reused across every
+        subsequent caller for that slug -- factored out of
+        :meth:`stream_tags` so :meth:`_build_deskewed_image_producer`'s
+        internal keep-alive subscription (see that method's docstring)
+        shares the *identical* detection loop a real ``stream_tags``
+        caller for the same camera would get, rather than each starting
+        an independent one.
+        """
+        with self._lock:
+            producer = self._tag_stream_producers.get(slug)
+            if producer is None:
+                producer = TagStreamProducer(slug, cam, self._detection)
+                self._tag_stream_producers[slug] = producer
+            return producer
 
     # -- streams: images (ticket 027-004, UC-07/SUC-002) ---------------------
 
@@ -813,7 +828,18 @@ class DaemonService(Daemon):
         background thread on *this* (camera, deskewed) pair's
         ``Broadcaster``'s first-subscriber/last-unsubscriber transition
         -- this method does no lifecycle management of its own beyond
-        constructing the producer once and subscribing to it.
+        constructing the producer once and subscribing to it, **except**
+        for a deskewed request: :meth:`_build_deskewed_image_producer`
+        wires that one producer's transitions to *also*
+        acquire/release a keep-alive subscription to the camera's
+        ``TagStreamProducer`` (see that method's docstring for why --
+        confirmed real-hardware bug: without this, a deskewed image
+        stream's embedded ``tags`` never updates unless some unrelated
+        caller happens to be polling ``get_tags``/``stream_tags`` on the
+        same camera at the same time). A raw stream does not need this
+        -- nothing reads a raw frame's embedded ``tags`` today
+        (``view.viewer``'s "raw means raw" contract) -- so it keeps the
+        original, simpler wiring.
         """
         cam = self._camera_for(camera)
         if deskewed:
@@ -831,18 +857,96 @@ class DaemonService(Daemon):
         with self._lock:
             producer = self._image_stream_producers.get(key)
             if producer is None:
-                producer = ImageStreamProducer(
-                    cam.slug,
-                    cam,
-                    self._detection,
-                    deskewed=deskewed,
-                    calibration_lookup=self.get_calibration,
-                    playfield_lookup=self._playfield_for_calibration,
-                    annotations_lookup=self.get_annotations,
+                producer = (
+                    self._build_deskewed_image_producer(cam)
+                    if deskewed
+                    else ImageStreamProducer(cam.slug, cam, self._detection)
                 )
                 self._image_stream_producers[key] = producer
         subscriber_queue = producer.broadcaster.subscribe()
         return BroadcasterImageStream(producer.broadcaster, subscriber_queue)
+
+    def _build_deskewed_image_producer(self, cam: Camera) -> ImageStreamProducer:
+        """Builds the deskewed ``ImageStreamProducer`` for *cam*, wired
+        so *cam*'s slug's ``TagStreamProducer`` -- the only thing that
+        ever calls ``DetectionEngine.run_burst`` for a streamed camera
+        (``daemon/streaming.py``'s module docstring; ``daemon/
+        detection.py``'s "demand-driven, no background thread" note) --
+        stays alive for as long as this deskewed image stream has at
+        least one subscriber.
+
+        **Why this exists: a confirmed bug, not speculative
+        hardening.** ``ImageStreamProducer`` embeds tags via
+        ``DetectionEngine.latest``, a pure buffer read (ticket 027-004's
+        completion notes: "used here read-only ... to embed tags
+        without ever calling run_burst itself") -- deliberately, so two
+        independent producers publishing detection results never double
+        the vision workload. That design assumed *something else* kept
+        the buffer warm: originally the pre-streaming viewer's own
+        ``get_tags`` call before every ``get_frame`` (sprint 022's
+        ``_fetch_playfield``), and after ticket 027-007's migration, a
+        ``stream_tags`` subscriber. But ticket 027-007 deliberately
+        dropped the former -- ``view.viewer.run_playfield_view``
+        subscribes to ``stream_images`` only, by its own acceptance
+        criteria -- without anything supplying the latter. The result:
+        a `playfield view` session run on its own drives zero
+        ``run_burst`` calls, so every frame's embedded ``tags`` freezes
+        at whatever ``DetectionEngine.latest`` last held (calibration-
+        time state, or ``None``) for the entire life of the stream,
+        even while a genuinely new physical tag is confirmed and
+        visible to a concurrent ``get_tags``/``camera tags`` poll on
+        the same camera. Confirmed against real hardware
+        (``arducam-ov9281-usb-camera``) and reproduced headlessly in
+        ``tests/aprilcam/daemon/test_service.py``'s
+        ``test_stream_images_deskewed_alone_keeps_detection_running_and_tags_update``.
+
+        The fix, applied here rather than inside ``ImageStreamProducer``
+        itself (preserving that class's "never calls run_burst" design):
+        this deskewed producer's own 0->1/1->0 subscriber transitions --
+        the identical idle-gating hook ``ImageStreamProducer`` already
+        uses to start/stop its own thread -- also acquire/release an
+        internal, never-drained subscription to *cam*'s slug's
+        ``TagStreamProducer`` via :meth:`_tag_stream_producer_for`, the
+        same per-slug instance a real ``stream_tags`` caller for this
+        camera would get. A concurrent real ``stream_tags`` subscriber
+        and this keep-alive therefore share one detection loop rather
+        than each starting an independent one -- unchanged "one
+        computation, N subscribers" contract, just extended from warps
+        (ticket 027-004's own headline claim) to detection bursts. The
+        keep-alive queue is subscribed and never read:
+        ``Broadcaster.publish``'s silent-drop-on-full backpressure
+        (``daemon/broadcast.py``) makes an undrained queue harmless to
+        every other subscriber, so this costs nothing beyond keeping
+        the background thread itself alive.
+        """
+        slug = cam.slug
+        keepalive: Dict[str, "queue.Queue[TagFrame]"] = {}
+
+        def on_active() -> None:
+            tag_producer = self._tag_stream_producer_for(slug, cam)
+            keepalive["queue"] = tag_producer.broadcaster.subscribe()
+            image_producer.start()
+
+        def on_idle() -> None:
+            image_producer.stop()
+            tag_queue = keepalive.pop("queue", None)
+            if tag_queue is not None:
+                tag_producer = self._tag_stream_producers.get(slug)
+                if tag_producer is not None:
+                    tag_producer.broadcaster.unsubscribe(tag_queue)
+
+        broadcaster: "Broadcaster[ImageFrame]" = Broadcaster(on_active=on_active, on_idle=on_idle)
+        image_producer = ImageStreamProducer(
+            slug,
+            cam,
+            self._detection,
+            broadcaster,
+            deskewed=True,
+            calibration_lookup=self.get_calibration,
+            playfield_lookup=self._playfield_for_calibration,
+            annotations_lookup=self.get_annotations,
+        )
+        return image_producer
 
     def status(self) -> DaemonStatus:
         """See ``daemon.interfaces.Daemon.status``.

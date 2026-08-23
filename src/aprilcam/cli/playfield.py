@@ -39,11 +39,18 @@ and pre-capture checks (UC-17, extended to UC-19 here) almost exactly
 destination, an attached terminal without ``--force``) runs *before*
 any capture RPC, not after.
 
-**``playfield view`` (ticket 022-006, UC-18).** ``cmd_view`` makes no
-RPC call directly -- like ``camera.py``'s ``cmd_view``, it resolves the
+**``playfield view`` (ticket 022-006, UC-18; annotated-by-default and
+``--bare`` added sprint 032 ticket 003).** ``cmd_view`` makes no RPC
+call directly -- like ``camera.py``'s ``cmd_view``, it resolves the
 camera (this module's own convention, above) and connects, then hands
 the connected ``Daemon`` to ``view/viewer.py``'s ``run_playfield_view``,
-which owns the poll loop and the ``client/renderer.py`` rendering. Two
+which subscribes to the daemon's image stream -- it does not poll,
+ticket 027-007 -- and owns the ``client/renderer.py`` rendering. The
+window opens **annotated by default**: tag ids, orientation "hats", and
+world-position crosshairs drawn over the deskewed frame, plus the tag
+sidebar (sprint 032, tickets 001/002). ``--bare`` opts out of both --
+the plain deskewed stream, no overlay, no sidebar -- and is passed
+straight through as ``run_view(camera, daemon, bare=args.bare)``. Two
 exceptions get a UC-18-specific message rather than the generic
 ``report_error`` text: ``view.viewer.NoDisplayAvailable`` (pointing at
 ``playfield image``, mirroring UC-16.S-3) and ``errors.NotCalibrated``
@@ -51,7 +58,9 @@ exceptions get a UC-18-specific message rather than the generic
 substitute a raw frame; ``run_playfield_view`` itself never falls back,
 this only adds the pointer to the message). ``--all`` is refused up
 front, before any connection is attempted, matching ``camera view``'s
-single-target rule.
+single-target rule -- unaffected by ``--bare``, which only changes what
+is drawn once a window is already open, not whether/how the camera or
+connection are resolved.
 
 **``playfield annotations`` (ticket 024-004, UC-28).** List/clear only
 -- authoring (``put``/``draw``) stays Python-client-only this sprint,
@@ -124,7 +133,6 @@ from aprilcam.cli._common import (
 from aprilcam.client.discovery import Discovery
 from aprilcam.config.interfaces import ConfigLoader, Feature
 from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
-from aprilcam.daemon.interfaces import Daemon
 from aprilcam.errors import AprilCamError, NotCalibrated
 from aprilcam.playfield.interfaces import Playfield
 from aprilcam.types import (
@@ -274,25 +282,33 @@ def cmd_view(
     args: argparse.Namespace,
     *,
     discovery_factory: Callable[[], Discovery] = Discovery,
-    run_view: Callable[[str, Daemon], None] = viewer.run_playfield_view,
+    run_view: Callable[..., None] = viewer.run_playfield_view,
 ) -> int:
-    """``aprilcam playfield view [--camera CAMERA] [-d HOST]`` (UC-18,
-    ticket 022-006).
+    """``aprilcam playfield view [--camera CAMERA] [--bare] [-d HOST]``
+    (UC-18, ticket 022-006; ``--bare`` added sprint 032 ticket 003).
 
-    Opens a poll-driven window (``view/viewer.py``'s
-    ``run_playfield_view``) showing the deskewed, calibrated field with
-    detected tags drawn -- north up, east right, ``client/renderer.py``'s
-    tag boundaries and "hats". No camera positional: resolved via
-    ``--camera`` or, when omitted, ``cli._common.resolve_playfield_camera``
-    -- the same convention :func:`cmd_image` uses.
+    Opens a streaming window (``view/viewer.py``'s
+    ``run_playfield_view``, subscribed to the daemon's image stream --
+    it does not poll, ticket 027-007) showing the deskewed, calibrated
+    field -- north up, east right. By default the view is
+    **annotated**: detected tags' boundaries, ids, and orientation
+    "hats" (``client/renderer.py``) drawn over the frame, plus the tag
+    sidebar (sprint 032). ``--bare`` opts out of both, showing the
+    plain deskewed stream unmodified -- passed straight through as
+    ``run_view(camera, daemon, bare=args.bare)``. No camera positional:
+    resolved via ``--camera`` or, when omitted,
+    ``cli._common.resolve_playfield_camera`` -- the same convention
+    :func:`cmd_image` uses.
 
     ``--all`` is refused up front, before any connection is attempted --
     a live video window has no sensible multi-daemon meaning, matching
-    ``camera view``'s single-target rule. A headless host fails with a
-    message pointing at ``playfield image`` instead of a GUI-toolkit
-    backtrace (mirroring UC-16.S-3). An uncalibrated camera's
-    :class:`~aprilcam.errors.NotCalibrated` -- raised from the first
-    poll tick's ``get_frame(deskewed=True)``, never caught by
+    ``camera view``'s single-target rule; unaffected by ``--bare``,
+    which only changes what is drawn once a window is already open. A
+    headless host fails with a message pointing at ``playfield image``
+    instead of a GUI-toolkit backtrace (mirroring UC-16.S-3). An
+    uncalibrated camera's :class:`~aprilcam.errors.NotCalibrated` --
+    raised from the stream subscription itself
+    (``daemon.stream_images(camera, deskewed=True)``), never caught by
     ``run_playfield_view`` to substitute a raw frame -- is caught here
     only to add the ``camera calibrate`` pointer (UC-18.S-2).
     """
@@ -317,7 +333,7 @@ def cmd_view(
     assert camera is not None  # resolve_playfield_camera's contract: exactly one of the pair is None
 
     try:
-        run_view(camera, daemon)
+        run_view(camera, daemon, bare=args.bare)
     except viewer.NoDisplayAvailable as exc:
         print(
             f"error: no display available ({exc}) -- run 'aprilcam "
@@ -654,6 +670,13 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     )
     add_daemon_option(p_view)
     add_all_option(p_view, note=" (refused -- viewing is single-target)")
+    p_view.add_argument(
+        "--bare",
+        action="store_true",
+        help="show the deskewed stream unmodified -- no tag overlay, no "
+        "sidebar (default: the annotated view with the tag overlay and "
+        "sidebar)",
+    )
     p_view.set_defaults(func=cmd_view)
 
     p_annotations = sub.add_parser(

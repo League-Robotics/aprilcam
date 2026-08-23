@@ -21,7 +21,7 @@ all, to put them on screen rather than to process them).
 
 ## 2. Orientation
 
-`view/viewer.py` (~580 lines) is the entire subsystem; `view/__init__.py`
+`view/viewer.py` (~780 lines) is the entire subsystem; `view/__init__.py`
 is a docstring pointer to it. Three pieces:
 
 - **`Window`** (base class) / **`TkWindow`** (real implementation) — a
@@ -29,7 +29,12 @@ is a docstring pointer to it. Three pieces:
   decodes and displays; `set_status(text)` sets an advisory chrome
   line, never drawn onto the image itself; `pump()` processes one
   toolkit event-loop tick and reports whether the window is still
-  open; `close()` is idempotent.
+  open; `close()` is idempotent; `update_tags(tags)` (sprint 032
+  ticket 002) refreshes an optional side panel — a **concrete no-op
+  default** on `Window` itself (the one deliberate exception to this
+  class's raise-`NotImplementedError` convention: a window with no
+  panel has no wrong way to handle a tag update), overridden by
+  `TkWindow` only when built with `show_sidebar=True`.
 - **`StreamLoop`** — the loop plumbing shared by both view kinds. A
   background daemon-mode thread (`_read_stream`) iterates an
   `ImageStream`, converts each yielded `ImageFrame` via a caller-supplied
@@ -37,14 +42,18 @@ is a docstring pointer to it. Three pieces:
   lock-protected single attribute (`_latest`), replacing — never
   queuing — whatever was there before. The calling thread (Tk's own,
   via `run()`) samples that cell non-blockingly on `_PUMP_INTERVAL_S`'s
-  cadence (0.05s) and pumps the window.
+  cadence (0.05s), pumps the window, and calls `Window.update_tags(frame.tags)`
+  unconditionally alongside `show`/`set_status` — safe for both view
+  kinds because `Window.update_tags`'s no-op default absorbs the call
+  for any window without a panel.
 - **`run_raw_view`** / **`run_playfield_view`** — the two public entry
   points. Each opens a window, subscribes to `daemon.stream_images`
   with the matching `deskewed` flag, builds a view-specific `convert`
-  callable (`_convert_raw_frame` / `_make_playfield_converter`), and
-  drives a `StreamLoop`. This is the reuse seam: `Window` and
-  `StreamLoop` know nothing about which view kind they serve; only the
-  `deskewed` flag and the conversion callable differ.
+  callable (`_convert_raw_frame` / `_make_playfield_converter` /
+  `_convert_bare_playfield_frame`), and drives a `StreamLoop`. This is
+  the reuse seam: `Window` and `StreamLoop` know nothing about which
+  view kind they serve; only the `deskewed` flag and the conversion
+  callable differ — with one deliberately narrow exception, below.
 
 `run_playfield_view` subscribes with `deskewed=True` **only** — no
 second `get_tags`/`stream_tags` call — because a deskewed `ImageFrame`
@@ -52,6 +61,32 @@ already embeds its own `TagFrame` (`frame.tags`) and `AnnotationSet`
 (`frame.annotations`); `_make_playfield_converter` hands each frame
 straight to `client.renderer.Renderer.render()`, which draws tag
 boundaries/hats and annotations from what the frame already carries.
+
+**The tag sidebar and `bare` mode (sprint 032 ticket 002).**
+`run_playfield_view` gained a keyword-only `bare: bool = False`. In the
+default, annotated mode, the window is built with `show_sidebar=True`
+and `DisplayFrame.tags` is populated from the same `frame.tags` the
+renderer already reads — no second subscription — feeding a `TkWindow`
+side panel (a `tk.Text` in a monospace font, packed into a second
+`tk.Frame` beside the image, both inside the one `tk.Tk()` root) that
+lists every currently-detected tag, one row per tag, ordered by tag
+number: ID (family-abbreviated, e.g. `AT7`/`AR3`), pixel x/y, world x/y
+(cm), orientation (degrees, from `yaw_rad`), and speed (cm/s) —
+`"--"` for any field a record does not carry. Row formatting
+(`_format_tag_row`/`_format_sidebar_text`) is a pure function of a
+`TagRecord` tuple, independent of any real Tk widget, so it is
+unit-tested without a display; `TkWindow`'s own widget wiring gets a
+thin `@pytest.mark.camera` smoke test instead (this project's existing
+convention for anything needing a real window).
+
+`bare=True` is the fully undecorated deskewed stream: the window is
+built with `show_sidebar=False`, frames are shown via
+`_convert_bare_playfield_frame` (`data=frame.data` unmodified, no
+`Renderer.render()` call at all — mirroring `_convert_raw_frame`'s
+zero-overhead shape), and `DisplayFrame.tags` stays at its `None`
+default. It is a new capability, not a preserved old one: the
+lime-box/single-hat overlay `bare` replaces was retired
+project-wide, not made optional (sprint.md Design Rationale).
 
 ## 3. Constraints and Invariants
 
@@ -172,16 +207,29 @@ conversion callable differ between the two views.
   entry point `cli/camera.py`'s `cmd_view` (`aprilcam camera view`)
   hands its connected `Daemon` to. Opens a window titled with the
   `[RAW]` marker, subscribes raw, displays every streamed frame's bytes
-  unmodified.
-- **`run_playfield_view(camera, daemon, *, renderer_factory=PillowRenderer, window_factory=TkWindow)`**
+  unmodified. Unchanged by sprint 032 ticket 002: its `window_factory`
+  call passes no `show_sidebar` kwarg (`TkWindow`'s default, `False`,
+  applies), and its converter still never reads `frame.tags`.
+- **`run_playfield_view(camera, daemon, *, renderer_factory=PillowRenderer, window_factory=TkWindow, bare=False)`**
   — the entry point `cli/playfield.py`'s `cmd_view` (`aprilcam
   playfield view`) hands its connected `Daemon` and resolved camera to.
-  Opens a window subscribed deskewed, rendering embedded tags and
-  annotations through `client/renderer.py`. As a side effect, opening
-  this view is what makes the target camera's ring buffer start filling
-  for as long as the window stays open and at least one subscriber
-  remains — the streaming subsystem's idle-gating, superseding sprint
-  022's per-poll `get_tags` side effect.
+  Opens a window subscribed deskewed. When `bare` is `False` (the
+  default), the window is built with `show_sidebar=True`, frames are
+  rendered through `client/renderer.py`, and `DisplayFrame.tags` feeds
+  the sidebar every frame. When `bare` is `True`, the window has no
+  sidebar and frames are shown unmodified — no `Renderer` call, no
+  `DisplayFrame.tags`. As a side effect (either mode — `bare` only
+  changes presentation, not the subscription), opening this view is
+  what makes the target camera's ring buffer start filling for as long
+  as the window stays open and at least one subscriber remains — the
+  streaming subsystem's idle-gating, superseding sprint 022's per-poll
+  `get_tags` side effect.
+- **`Window.update_tags(tags)`** — refreshes a side panel from the
+  current frame's full tag list, or `None`. A concrete no-op on
+  `Window` itself (deliberate exception to this module's
+  raise-`NotImplementedError` convention); `TkWindow` overrides it to
+  update its `tk.Text` sidebar only when built with `show_sidebar=True`,
+  otherwise inherits the no-op unchanged.
 - Both raise `NoDisplayAvailable` before any daemon call is made if no
   display can be opened, and propagate any `aprilcam.errors.AprilCamError`
   raised mid-view (e.g. a mid-session disconnect, or `NotCalibrated` for
