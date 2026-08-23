@@ -554,9 +554,21 @@ def run_playfield_view(
 
     As a side effect, opening this view is what makes the target
     camera's ring buffer start filling for as long as the window stays
-    open and the daemon keeps at least one subscriber -- the streaming
-    subsystem's own idle-gating (``daemon/streaming.py``), the
-    successor to sprint 022's per-poll ``get_tags`` side effect.
+    open and the daemon keeps at least one subscriber -- **not** simply
+    because ``ImageStreamProducer`` publishes, but because
+    ``daemon.service.DaemonService``'s deskewed-producer wiring
+    (``DaemonService._build_deskewed_image_producer``) piggybacks a
+    keep-alive subscription onto the camera's ``TagStreamProducer`` for
+    the life of this view's stream. ``ImageStreamProducer`` itself never
+    calls ``DetectionEngine.run_burst`` -- it only reads whatever the
+    tag stream (this keep-alive, a real ``stream_tags`` caller, or nothing)
+    has already put in the buffer (``daemon/streaming.py``'s own
+    docstring) -- so a fix confirmed against real hardware (a `playfield
+    view` session that showed a newly-appeared, already-confirmed tag
+    only via a separate `get_tags` poll, never via the view itself)
+    landed the keep-alive wiring specifically because subscribing to
+    the image stream alone used to *not* do this, contrary to what an
+    earlier draft of this note claimed.
 
     Raises :class:`NoDisplayAvailable` if no display can be opened
     (propagated from *window_factory*, i.e. before any daemon call is

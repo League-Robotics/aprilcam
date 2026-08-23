@@ -590,22 +590,55 @@ def test_stream_images_deskewed_returns_a_stream_that_publishes_real_deskewed_fr
 
 def test_stream_images_deskewed_embed_matches_get_frame_for_the_same_moment(directories, registry):
     """The literal 'embedded tags/annotations match what get_frame would
-    return for the same moment' check: neither the streaming path nor
-    the one-shot path ever triggers its own detection burst (sprint 021
-    Decision 4), so both must be embedding the *same* already-buffered
-    ``TagFrame`` -- not independently-arrived-at equal-looking ones."""
+    return for the same moment' check: neither :meth:`DaemonService.
+    stream_images` nor :meth:`DaemonService.get_frame` ever triggers its
+    own detection burst *synchronously as part of serving that call*
+    (sprint 021 Decision 4) -- both still only ever read
+    ``DetectionEngine.latest``. Both therefore embed content from the
+    *same* shared ring buffer, not two independently-arrived-at,
+    coincidentally-equal answers.
+
+    Unlike before this ticket's fix, a subscribed deskewed image stream
+    now keeps a real ``TagStreamProducer`` alive for the camera in the
+    background (:meth:`DaemonService._build_deskewed_image_producer` --
+    the fix for a confirmed real-hardware bug where a `playfield view`
+    session's embedded tags never updated at all). That producer's own
+    bursts land on a real cadence while this test runs, so ``streamed``
+    and ``one_shot`` are no longer guaranteed to be the exact same
+    ``TagFrame`` *object* (``timestamp``/``frame_index`` may have ticked
+    between the two reads, taken microseconds apart) -- this asserts
+    content equality of the buffered detection result instead, which is
+    what "matches for the same moment" actually means once a live
+    background loop is in the picture.
+    """
     service, slug = _calibrated_streaming_service(directories, registry)
-    burst = service.get_tags(slug)  # exactly one burst runs; becomes "latest" for both paths below
 
     stream = service.stream_images(slug, deskewed=True)
     try:
-        streamed = next(iter(stream))
+        # The keep-alive TagStreamProducer's very first burst has not
+        # necessarily landed by the time the image producer's own first
+        # tick runs (two independently-scheduled background threads) --
+        # wait for the first frame whose ``tags`` is actually populated,
+        # rather than assuming ``next(iter(stream))`` already is one.
+        streamed = None
+        deadline = time.monotonic() + 5.0
+        for candidate in stream:
+            if candidate.tags is not None:
+                streamed = candidate
+                break
+            if time.monotonic() > deadline:
+                break
+        assert streamed is not None, "no frame with populated tags within 5s"
+        # Taken immediately after, while the stream (and its keep-alive
+        # TagStreamProducer) is still open -- both reads see the same
+        # live detection state, modulo an at-most-one-tick race.
+        one_shot = service.get_frame(slug, deskewed=True)
     finally:
         stream.close()
-    one_shot = service.get_frame(slug, deskewed=True)
 
-    assert streamed.tags == burst
-    assert one_shot.tags == burst
+    assert streamed.tags is not None and one_shot.tags is not None
+    assert streamed.tags.tags == one_shot.tags.tags
+    assert streamed.tags.calibration_stale == one_shot.tags.calibration_stale
     # Content, not wall-clock ``timestamp`` (each ``get_annotations`` call
     # stamps its own -- content equality is what "matches" means here).
     assert streamed.annotations is not None and one_shot.annotations is not None
@@ -614,6 +647,102 @@ def test_stream_images_deskewed_embed_matches_get_frame_for_the_same_moment(dire
     assert streamed.px_per_cm == pytest.approx(one_shot.px_per_cm)
     assert streamed.world_extent == pytest.approx(one_shot.world_extent)
     assert streamed.deskewed is True and one_shot.deskewed is True
+
+
+def test_stream_images_deskewed_alone_keeps_detection_running_and_tags_update(directories, registry):
+    """Regression test for a confirmed real-hardware bug (aprilcam
+    `playfield view --camera arducam-ov9281-usb-camera`): a viewer
+    session subscribes to ``stream_images(camera, deskewed=True)`` only
+    -- ``view.viewer.run_playfield_view``'s own acceptance criteria
+    (ticket 027-007) forbid it from ever calling ``get_tags``/
+    ``stream_tags`` too. Before this ticket's fix,
+    ``ImageStreamProducer`` embedding tags via ``DetectionEngine.latest``
+    (a pure read -- it never calls ``run_burst`` itself, by ticket
+    027-004's own design) meant *nothing* ever advanced detection for a
+    camera whose only active consumer was a deskewed image stream: the
+    embedded ``tags`` froze at whatever state existed when the stream
+    started (typically stale calibration-time state) for the entire life
+    of the view, even while a real, already-confirmed tag was newly
+    visible and correctly reported by a concurrent ``get_tags`` poll on
+    the same camera -- exactly the divergence reported live.
+
+    Proven here with a scripted detector standing in for real vision (no
+    real tag needs to be found in the synthetic frame -- the frame's
+    pixel content is irrelevant to a scripted double): absent for the
+    first few detection bursts, present from then on. This test never
+    calls ``get_tags``/``get_tag``/``stream_tags`` anywhere -- the only
+    thing that can possibly be advancing detection is
+    ``stream_images(deskewed=True)``'s own keep-alive wiring.
+    """
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_looping(registry, frame)
+
+    new_tag = TagId(family=TagFamily.APRILTAG, number=7)
+    calls_before_hit = 4
+
+    class _NewTagAfterAFewBursts:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def detect(self, gray: np.ndarray, *, scale: float = 1.0) -> List[Detection]:
+            hits = [] if self.calls < calls_before_hit else [_detection(7)]
+            self.calls += 1
+            return hits
+
+    scripted_detector = _NewTagAfterAFewBursts()
+    # confirmation_streak=1: this test is about "does detection run at
+    # all for a deskewed-image-stream-only subscriber", not about
+    # temporal confirmation (test_detection.py's own concern) -- matches
+    # this file's established pattern (``_build_tag_service``'s
+    # docstring) for tests genuinely about something else entirely.
+    detection = DetectionEngine(detector_factory=lambda: scripted_detector, confirmation_streak=1)
+
+    cameras: Dict[str, Camera] = {slug: cam}
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(cameras.keys()),
+        identity_source=lambda: {0: identity},
+        backend_factory=lambda index: FakeBackend(),
+    )
+    service = DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        cameras=cameras,
+        identity_source=lambda: {0: identity},
+        detection=detection,
+    )
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True  # Calibrator has its own detector -- unaffected
+
+    stream = service.stream_images(slug, deskewed=True)
+    seen_new_tag = False
+    try:
+        deadline = time.monotonic() + 10.0
+        for streamed in stream:
+            if streamed.tags is not None and any(
+                record.tag == new_tag for record in streamed.tags.tags
+            ):
+                seen_new_tag = True
+                break
+            if time.monotonic() > deadline:
+                break
+    finally:
+        stream.close()
+
+    assert seen_new_tag, (
+        "stream_images(deskewed=True) never showed the new tag within "
+        "10s of real time even though nothing else in this test ever "
+        "called get_tags/stream_tags -- the deskewed image stream's "
+        "keep-alive TagStreamProducer wiring "
+        "(DaemonService._build_deskewed_image_producer) is not driving "
+        "detection as it should"
+    )
+    # And the scripted detector really did run more than once -- proof
+    # this was driven by an active background loop, not a lucky single
+    # call that happened to already know about the new tag.
+    assert scripted_detector.calls > calls_before_hit
 
 
 def test_stream_images_reuses_the_same_producer_across_repeated_calls(service, held_camera):
