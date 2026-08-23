@@ -4,9 +4,10 @@
 See docs/test-plans/camera-image-matrix.md (§3/§4) for the full design.
 
 For a given camera this tool:
-  1. Verifies the daemon is not holding the device (refuses on contention).
-  2. Identifies the camera (registry lookup, config.json baseline) and reads
-     its own baseline hardware controls -- NEVER a hardcoded baseline.
+  1. Verifies the daemon is not holding its machine-global lock (refuses on
+     contention).
+  2. Identifies the camera (registry lookup against the LIVE hardware) and
+     reads its own baseline hardware controls -- NEVER a hardcoded baseline.
   3. Selects a variation matrix from ``capture_matrix.yaml`` by device-name
      pattern (or falls back to a generic exposure/gain/WB sweep built from
      whatever controls ``uvc-util -c`` reports live).
@@ -19,9 +20,60 @@ For a given camera this tool:
      effective controls, camera identity, resolution, playfield, capture
      timestamp, package version, and field-state id for every image.
 
-This tool deliberately opens the camera directly (bypassing the
-daemon-sole-owner rule) -- it is offline test tooling, not a runtime
-client, and predates the finished v2 daemon (plan §4).
+Ported onto the v2 surface (sprint 031 ticket 007). Five v1-era imports were
+missing/renamed after the v2 rebuild (``aprilcam.camera.camutil``,
+``aprilcam.camera.camera_config``, ``aprilcam.camera.registry.dir_slug``,
+``aprilcam.config.Config``, ``aprilcam.core.detector``); this tool's contract
+is unchanged, but it is now wired to their v2 replacements:
+``camera/identity.py`` (``resolve_all`` -- live enumeration) +
+``camera/registry.py`` (``CameraRegistry`` -- persisted identity -> slug,
+read-only from this tool's side) for identity/slugs,
+``camera/backends/opencv_backend.py`` (``OpenCVBackend``) for capture,
+``config/directories.py`` (``Directories``) for roots, and
+``vision/detector.py`` (``TagDetector``/``DetectorConfig``) for the baseline
+image's informational detection summary.
+
+**Design decision -- direct-open, not daemon RPC** (recorded in sprint 031's
+``sprint.md`` Architecture section; this module implements it). This tool
+opens cameras directly rather than routing through the daemon's gRPC
+control plane. ``SetCameraConfig``/``GetFrame`` are whole-document
+push/single-frame-read RPCs with no shape for this tool's actual operation
+-- "apply one raw UVC control in isolation, capture, restore baseline,
+repeat per matrix row." Building that RPC shape into the daemon's config
+service would add an RPC surface serving exactly one caller (this offline
+tool) and would also make the tool depend on a running daemon, breaking its
+documented ability to run standalone -- before a daemon exists, or while one
+is down for maintenance -- which is exactly the sanctioned exception
+``docs/design/design.md`` §8 carves out for offline test tooling ("it opens
+cameras directly with the daemon's own ``camera/`` code... it refuses to run
+when the daemon holds a device"). Direct-open is not a stopgap here; it is
+the right shape for what this tool does. The daemon-contention refusal below
+(``check_daemon_not_running``) is what keeps this compatible with that
+exception rather than fighting a live daemon for the hardware.
+
+**Config-schema note (v1 -> v2).** v1's on-disk camera config stored a raw
+``settings.controls`` block keyed by literal ``uvc-util`` control names
+(``exposure-time-abs``, ...), which this tool used to trust as the baseline
+when present. v2's self-naming ``CameraConfig`` (``config/interfaces.py``)
+has no such block at all -- ``settings`` is keyed by ``Camera.apply_config``'s
+small abstracted vocabulary (``exposure``, ``gain``, ...) instead, a
+different vocabulary this tool's raw-per-control sweep cannot use directly.
+So this tool now *always* reads the true, current hardware state as its
+baseline rather than ever consulting the on-disk document for it -- a
+strictly stronger reading of its own pre-existing "read its own baseline
+hardware controls -- NEVER a hardcoded baseline" contract, not a weaker one.
+
+**No v2 counterpart for v1's per-camera busy diagnosis.** v1's
+``camutil.diagnose_camera_failure`` (an OS-level "who is holding this
+device" probe) has no v2 replacement -- no module in ``camera/`` does that
+diagnosis; even ``camera/discovery.py``'s own ``probe()`` only learns
+"unopenable" from a raised exception, the same way the rest of v2 does. This
+tool now relies on the same signal: an ``OpenCVBackend.open()`` failure
+(after the daemon-contention check above has already ruled out the one
+cause this tool can name with confidence) is reported with the honest
+diagnosis available -- a macOS TCC permission denial, an absent device, or
+some other non-daemon process holding it -- rather than a precise
+process-table answer v2 has nothing to offer.
 
 Usage:
     python testdev/capture_matrix.py                 # every configured camera
@@ -33,10 +85,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -45,18 +95,22 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import cv2 as cv
 import numpy as np
 import yaml
 
-from aprilcam.camera import camutil
-from aprilcam.camera import identity as camera_identity
-from aprilcam.camera.camera_config import load_camera_config
-from aprilcam.camera.registry import CameraRegistry, dir_slug
-from aprilcam.config import Config
-from aprilcam.core.detector import DetectorConfig, TagDetector
+from aprilcam.camera.backends.opencv_backend import OpenCVBackend
+from aprilcam.camera.identity import CameraIdentity, resolve_all
+from aprilcam.camera.registry import CameraRegistry
+from aprilcam.client.discovery import probe_lock_holder
+from aprilcam.config.directories import Directories
+from aprilcam.config.interfaces import CameraConfig
+from aprilcam.config.loader import ConfigLoader
+from aprilcam.daemon.lifecycle import LOCK_FILENAME
+from aprilcam.errors import MalformedDocument
+from aprilcam.vision.detector import DetectorConfig, TagDetector
 
 log = logging.getLogger("capture_matrix")
 
@@ -82,77 +136,74 @@ def _package_version() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Contention checks (plan §4.1) -- refuse rather than fight the daemon.
+# Contention check -- refuse rather than fight the daemon (design.md §8's
+# sanctioned direct-open exception for offline test tooling).
 # ---------------------------------------------------------------------------
 
 
 class ContentionError(RuntimeError):
-    """Raised when the daemon or another process is holding a camera."""
+    """Raised when the daemon is holding its machine-global lock."""
 
 
-def check_daemon_not_running(config: Config) -> None:
+def check_daemon_not_running(directories: Directories) -> None:
     """Refuse to proceed if the aprilcam daemon holds its machine-global lock.
 
-    Uses the same ``config.daemon_lock_path`` flock the daemon itself takes
-    (sprint 018 singleton guard) -- a non-blocking exclusive-lock attempt
-    that fails means a daemon is alive right now.
+    Uses ``client.discovery.probe_lock_holder`` -- the same non-blocking
+    flock read ``client/lifecycle.py``'s own pre-flight ``start()`` probe
+    uses -- against ``directories.socket_dir / daemon.lifecycle.LOCK_FILENAME``,
+    exactly the lock file ``daemon/lifecycle.py``'s ``DaemonLifecycle.
+    _acquire_lock`` takes. A non-``None`` result means a v2 daemon is alive
+    right now; ``probe_lock_holder`` itself already reports "nothing running"
+    for a missing/never-locked lock file, so no separate existence check is
+    needed here.
     """
-    lock_path = config.daemon_lock_path
+    lock_path = directories.socket_dir / LOCK_FILENAME
     try:
-        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+        holder = probe_lock_holder(lock_path)
     except OSError as exc:
-        log.warning("could not open daemon lock path %s: %s -- proceeding without this check", lock_path, exc)
+        log.warning(
+            "could not probe daemon lock at %s: %s -- proceeding without this check",
+            lock_path, exc,
+        )
         return
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        fcntl.flock(fd, fcntl.LOCK_UN)
-    except BlockingIOError:
-        pid = None
-        try:
-            pid = int(config.daemon_pidfile.read_text().strip())
-        except Exception:
-            pass
-        pid_str = f" (pid {pid})" if pid else ""
+    if holder is not None:
         raise ContentionError(
-            f"the aprilcam daemon appears to be running{pid_str} (lock held at "
+            f"the aprilcam daemon appears to be running ({holder}, lock held at "
             f"{lock_path}). Stop it first: aprilcam daemon stop"
         )
-    finally:
-        os.close(fd)
-
-
-def check_camera_not_busy(index: int, device_name: str) -> None:
-    """Refuse to open *index* if another process is already holding it."""
-    diag = camutil.diagnose_camera_failure(index)
-    if diag.get("exists") is False:
-        raise ContentionError(f"camera index {index} ('{device_name}') is not present")
-    blocking = diag.get("blocking_processes") or []
-    if blocking:
-        procs = ", ".join(f"{p.get('name', '?')}(pid {p.get('pid', '?')})" for p in blocking)
-        raise ContentionError(
-            f"'{device_name}' (index {index}) appears busy -- {procs}. "
-            "Close whatever holds it (e.g. 'aprilcam daemon stop') and retry."
-        )
 
 
 # ---------------------------------------------------------------------------
-# uvc-util helpers -- reuses the daemon's shell-out contract
-# (daemon.camera_pipeline._apply_camera_settings), factored so each control
-# apply/read reports success independently (needed to skip a variation on a
-# partial failure rather than aborting the whole run).
+# uvc-util helpers -- raw per-control shelling. Mirrors the subprocess
+# conventions ``camera/backends/uvc_util.py``'s ``UvcUtilBackend`` uses
+# (always an argument list, never a shell string; a bounded timeout; never
+# raises for an ordinary failure) -- but that class only exposes a fixed
+# five-key vocabulary (``exposure``, ``gain``, ...) via ``get_property``/
+# ``set_property``, not arbitrary raw ``uvc-util`` control names. This
+# tool's fallback sweep needs whatever control names ``uvc-util -c`` reports
+# live for a given camera, so it keeps its own thin, raw-control-name
+# shelling here rather than routing through that class.
 # ---------------------------------------------------------------------------
 
 
-def locate_uvc_util(config: Config) -> Path:
-    """Find the ``uvc-util`` binary: ``<env_dir>/bin/uvc-util`` first, then PATH."""
-    if config.env_dir:
-        candidate = config.env_dir / "bin" / "uvc-util"
-        if candidate.exists() and os.access(candidate, os.X_OK):
-            return candidate
+def locate_uvc_util() -> Path:
+    """Find the ``uvc-util`` binary on ``PATH``.
+
+    Mirrors ``camera.backends.uvc_util.UvcUtilBackend``'s own resolution
+    convention exactly (``shutil.which("uvc-util")``, never a hardcoded
+    path). v2 dropped v1's project-local ``<env_dir>/bin`` search tier along
+    with the rest of the old ``aprilcam.config.Config`` object, so this tool
+    now resolves the binary the same way the daemon's own control backend
+    does.
+    """
     found = shutil.which("uvc-util")
     if found:
         return Path(found)
-    raise RuntimeError("uvc-util not found (checked <env_dir>/bin and PATH)")
+    raise RuntimeError(
+        "uvc-util not found on PATH (required for exposure/gain/white-balance "
+        "control -- camera.backends.uvc_util.UvcUtilBackend needs the same "
+        "binary). Install uvc-util and ensure it is on PATH."
+    )
 
 
 def _run_uvc(uvc_bin: Path, device_name: str, *args: str, timeout: float = 5.0):
@@ -235,74 +286,110 @@ def list_supported_controls(uvc_bin: Path, device_name: str) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# Camera discovery -- config.json (baseline source of truth) matched against
-# the LIVE device_name (never a hardcoded camera list, plan §7).
+# Camera discovery -- registry-mediated identity match against the LIVE
+# hardware (never a hardcoded camera list).
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class ConfiguredCamera:
+    slug: str
     config_dir: Path
-    dir_name: str
-    config: dict
+    config: CameraConfig
     device_name: str
     live_index: int
+    hardware_key: str
+    registry_number: Optional[int]
 
 
-def discover_target_cameras(config: Config, pattern: Optional[str]) -> List[ConfiguredCamera]:
-    """Every camera in the config dir that has a ``playfield`` link AND is live.
+def discover_target_cameras(
+    directories: Directories, registry: CameraRegistry, pattern: Optional[str]
+) -> List[ConfiguredCamera]:
+    """Every camera dir under ``config_dir/cameras/`` that (a) has a
+    ``playfield`` link and (b) is currently connected.
 
-    A config.json entry is only included when its ``device_name`` matches a
-    currently-connected camera's live device_name -- this naturally skips
-    stale/duplicate registry-adopted config dirs (e.g. a
-    ``<slug>-<enum>`` dir left behind by a re-plug) without needing to
-    special-case them, since their ``device_name`` field won't match
-    anything currently enumerated.
+    v1 matched a config's on-disk ``device_name`` field against a live
+    enumeration's device name directly. v2's self-naming ``CameraConfig``
+    (``config/interfaces.py``) carries no ``device_name`` field at all --
+    the config directory name *is* the slug, and a bare slug is not itself a
+    stable hardware match key (two identical camera models can propose the
+    same slug prefix and get disambiguated by the registry). So this now
+    goes through the registry instead, mirroring ``camera/discovery.py``'s
+    own two-step shape: resolve each live identity, then reconcile against
+    what is configured.
+
+    For each ``cameras/<slug>/config.json`` with a ``playfield`` link: look
+    up the *registry* record for that slug -- **read-only**, this function
+    never calls ``registry.resolve()``/mutates ``registry.json`` as a side
+    effect of an offline capture, matching the tool's pre-existing
+    contract -- then check whether that record's ``hardware_key`` is among
+    the identities enumerated *right now*. A slug with no registry record
+    (never seen by ``camera/discovery.py``'s ``probe()``/``watch()``) or
+    whose hardware is not currently connected is skipped, with a log line
+    naming why.
     """
-    live_cams = camutil.list_cameras(detailed_names=True)
-    by_name: Dict[str, camutil.CameraInfo] = {}
-    for c in live_cams:
-        key = (c.device_name or c.name or "").strip().lower()
-        if key and key not in by_name:
-            by_name[key] = c
+    identities = resolve_all()
+    by_hardware_key: Dict[str, Tuple[int, CameraIdentity]] = {
+        identity.hardware_key: (index, identity) for index, identity in identities.items()
+    }
+    by_slug = {record.slug: record for record in registry.records()}
 
-    cameras_root = config.effective_config_dir / "cameras"
+    cameras_root = directories.config_dir / "cameras"
     results: List[ConfiguredCamera] = []
     claimed_indices: set = set()
     if not cameras_root.is_dir():
         return results
 
+    loader = ConfigLoader()
     for cam_dir in sorted(p for p in cameras_root.iterdir() if p.is_dir()):
-        cfg = load_camera_config(cam_dir)
-        if not cfg or not cfg.get("playfield"):
+        config_path = cam_dir / "config.json"
+        if not config_path.exists():
             continue
-        cfg_device_name = cfg.get("device_name") or cam_dir.name
-        live = by_name.get(cfg_device_name.strip().lower())
+        try:
+            cfg = loader.load_camera_config(config_path)
+        except MalformedDocument as exc:
+            log.warning("skipping %s: %s", cam_dir.name, exc)
+            continue
+        if not cfg.playfield:
+            continue
+
+        slug = cam_dir.name
+        record = by_slug.get(slug)
+        if record is None:
+            log.info(
+                "skipping %s: no registry record for this slug -- this camera "
+                "has never been seen by camera discovery (probe/watch)",
+                slug,
+            )
+            continue
+        live = by_hardware_key.get(record.hardware_key)
         if live is None:
             log.info(
-                "skipping %s: device_name %r is not currently connected",
-                cam_dir.name, cfg_device_name,
+                "skipping %s: not currently connected (hardware_key %s not enumerated)",
+                slug, record.hardware_key,
             )
             continue
-        if live.index in claimed_indices:
+        live_index, identity = live
+        if live_index in claimed_indices:
             log.warning(
                 "skipping %s: live index %d already claimed by another config dir",
-                cam_dir.name, live.index,
+                slug, live_index,
             )
             continue
-        live_device_name = live.device_name or cfg_device_name
         if pattern:
-            haystack = f"{live_device_name} {cam_dir.name}".lower()
+            haystack = f"{identity.device_name} {slug}".lower()
             if pattern.strip().lower() not in haystack:
                 continue
-        claimed_indices.add(live.index)
+        claimed_indices.add(live_index)
         results.append(
             ConfiguredCamera(
+                slug=slug,
                 config_dir=cam_dir,
-                dir_name=cam_dir.name,
                 config=cfg,
-                device_name=live_device_name,
-                live_index=live.index,
+                device_name=identity.device_name,
+                live_index=live_index,
+                hardware_key=record.hardware_key,
+                registry_number=record.number,
             )
         )
     return results
@@ -419,17 +506,21 @@ def build_fallback_variations(
     return variations
 
 
-def snapshot_fallback_baseline(uvc_bin: Path, device_name: str, fb_spec: dict, supported: set) -> Dict[str, str]:
-    """Snapshot the live value of every control the fallback sweep will touch."""
-    ctrls = [
-        fb_spec.get("exposure_control", "exposure-time-abs"),
-        fb_spec.get("gain_control", "gain"),
-        fb_spec.get("auto_exposure_control", "auto-exposure-mode"),
-        fb_spec.get("white_balance_control", "white-balance-temp"),
-        fb_spec.get("auto_white_balance_control", "auto-white-balance-temp"),
-    ]
+def snapshot_baseline(
+    uvc_bin: Path, device_name: str, control_names: Set[str], supported: Set[str],
+) -> Dict[str, str]:
+    """Snapshot the live value of every name in *control_names* that
+    *supported* confirms this device actually exposes.
+
+    v2's on-disk ``CameraConfig.settings`` carries no raw-uvc-util-keyed
+    baseline block at all (see the module docstring's "Config-schema note")
+    -- this tool therefore always reads the true, current hardware state as
+    its baseline, never the on-disk document, for every camera regardless of
+    whether a ``capture_matrix.yaml`` entry matched it or the generic
+    fallback sweep applies.
+    """
     baseline: Dict[str, str] = {}
-    for ctrl in ctrls:
+    for ctrl in control_names:
         if ctrl not in supported:
             continue
         val = read_control(uvc_bin, device_name, ctrl)
@@ -499,23 +590,22 @@ def ensure_field_state_stub(output_root: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _settle(cap: "cv.VideoCapture", seconds: float) -> None:
+def _settle(backend: OpenCVBackend, seconds: float) -> None:
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        cap.read()
+        backend.read()
 
 
-def _grab_frame(cap: "cv.VideoCapture", attempts: int = 5) -> Optional[np.ndarray]:
+def _grab_frame(backend: OpenCVBackend, attempts: int = 5) -> Optional[np.ndarray]:
     frame = None
     for _ in range(attempts):
-        ret, f = cap.read()
-        if ret and f is not None:
+        f = backend.read()
+        if f is not None:
             frame = f
     return frame
 
 
-def _mean_luminance(frame_bgr: np.ndarray) -> float:
-    gray = cv.cvtColor(frame_bgr, cv.COLOR_BGR2GRAY)
+def _mean_luminance(gray: np.ndarray) -> float:
     return float(np.mean(gray))
 
 
@@ -539,54 +629,32 @@ class CameraRunResult:
 
 def run_camera(
     cam: ConfiguredCamera,
-    config: Config,
     uvc_bin: Path,
     matrix_spec: dict,
     output_root: Path,
     field_state_id: str,
     settle_override: Optional[float],
     detector: TagDetector,
-    registry: CameraRegistry,
 ) -> CameraRunResult:
-    result = CameraRunResult(device_name=cam.device_name, dir_name=cam.dir_name)
+    result = CameraRunResult(device_name=cam.device_name, dir_name=cam.slug)
     t0 = time.monotonic()
 
-    try:
-        check_camera_not_busy(cam.live_index, cam.device_name)
-    except ContentionError as exc:
-        result.error = str(exc)
-        return result
-
-    # -- identify (plan §4.2): registry lookup is best-effort/informational
-    # only -- this tool never calls registry.resolve()/upsert(), so it never
-    # mutates the live registry.json as a side effect of an offline capture.
-    unique_id = None
-    try:
-        w_cfg, h_cfg = (cam.config.get("resolution") or [None, None])[:2]
-        ident = camera_identity.resolve_identity(
-            cam.live_index, name=cam.device_name, width=w_cfg, height=h_cfg
-        )
-        unique_id = ident.unique_id
-    except Exception:
-        log.debug("identity resolution failed for %s", cam.device_name, exc_info=True)
-    registry_record = registry.get(unique_id) if unique_id else None
-
-    fixture_slug = dir_slug(cam.device_name)
+    fixture_slug = cam.slug
     fixture_dir = output_root / fixture_slug
     result.fixture_dir = fixture_slug
 
-    settings_block = cam.config.get("settings") or {}
-
-    cap = cv.VideoCapture(cam.live_index)
-    if not cap.isOpened():
-        cap.release()
+    backend = OpenCVBackend(cam.live_index)
+    try:
+        backend.open()
+    except Exception as exc:
         result.error = (
-            f"cv2.VideoCapture({cam.live_index}) could not open '{cam.device_name}'. "
+            f"OpenCVBackend(index={cam.live_index}) could not open '{cam.device_name}': {exc}. "
             "If this reports 'not authorized to capture video', it is a macOS TCC "
             "camera-permission denial for the process running this script (check "
-            "System Settings > Privacy & Security > Camera), not a device-busy or "
-            "code problem -- 'uvc-util -d' enumeration succeeding does not imply "
-            "capture access is granted."
+            "System Settings > Privacy & Security > Camera). It can also mean the "
+            "device is physically absent, or held by some other, non-daemon process "
+            "-- this tool already refused above if the aprilcam daemon itself holds "
+            "it, and v2 has no per-process busy diagnosis to say more than that."
         )
         return result
 
@@ -596,34 +664,51 @@ def run_camera(
 
     try:
         for _ in range(5):  # let AVFoundation finish initialising, per daemon convention
-            cap.read()
+            backend.read()
 
-        if settings_block.get("controls"):
-            baseline_controls: Dict[str, str] = {
-                k: str(v) for k, v in settings_block["controls"].items()
-            }
-            supported = set(list_supported_controls(uvc_bin, cam.device_name))
-        else:
-            supported = set(list_supported_controls(uvc_bin, cam.device_name))
-            fb_spec = matrix_spec.get("fallback", {})
-            baseline_controls = snapshot_fallback_baseline(uvc_bin, cam.device_name, fb_spec, supported)
+        resolution = backend.frame_size()
+
+        supported = set(list_supported_controls(uvc_bin, cam.device_name))
+        matrix_entry = select_matrix_entry(matrix_spec, cam.device_name)
+        fb_spec = matrix_spec.get("fallback", {})
+
+        # Baseline must cover every control name any variation this run
+        # might touch, whether that variation comes from a matched
+        # `cameras:` entry or the generic fallback sweep -- see
+        # snapshot_baseline's docstring for why this is always a live
+        # hardware read now, never the on-disk config.
+        default_names = {
+            fb_spec.get("exposure_control", "exposure-time-abs"),
+            fb_spec.get("gain_control", "gain"),
+            fb_spec.get("auto_exposure_control", "auto-exposure-mode"),
+            fb_spec.get("white_balance_control", "white-balance-temp"),
+            fb_spec.get("auto_white_balance_control", "auto-white-balance-temp"),
+        }
+        variation_names: Set[str] = set()
+        if matrix_entry is not None:
+            for v in matrix_entry.get("variations", []):
+                variation_names.update(v.get("controls", {}).keys())
+        baseline_controls = snapshot_baseline(
+            uvc_bin, cam.device_name, default_names | variation_names, supported
+        )
 
         default_settle = matrix_spec.get("settle_s", 1.5)
 
         try:
             # Establish a known-good starting point before doing anything else.
             apply_controls(uvc_bin, cam.device_name, baseline_controls)
-            _settle(cap, settle_override if settle_override is not None else default_settle)
+            _settle(backend, settle_override if settle_override is not None else default_settle)
 
             manifest_images = []
 
             def _capture_one(name: str, effective_controls: Dict[str, str], settle_s: float) -> bool:
-                frame = _grab_frame(cap)
+                frame = _grab_frame(backend)
                 if frame is None:
                     log.warning("no frame available for %s/%s", cam.device_name, name)
                     result.skipped_no_frame.append(name)
                     return False
-                lum = _mean_luminance(frame)
+                gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+                lum = _mean_luminance(gray)
                 dark = lum < DARK_LUMINANCE_FLOOR
                 washed = lum > WASHED_LUMINANCE_CEIL
                 if dark:
@@ -647,10 +732,10 @@ def run_camera(
                 result.captured += 1
                 if name == "baseline":
                     result.baseline_luminance = lum
-                    dets = detector.detect(frame)
+                    dets = detector.detect(gray)
                     by_family: Dict[str, int] = {}
                     for d in dets:
-                        by_family[d.family] = by_family.get(d.family, 0) + 1
+                        by_family[d.family.value] = by_family.get(d.family.value, 0) + 1
                     result.baseline_detections = by_family
                 return True
 
@@ -658,13 +743,11 @@ def run_camera(
             _capture_one("baseline", dict(baseline_controls), settle_override or default_settle)
 
             # -- select + build variations --
-            matrix_entry = select_matrix_entry(matrix_spec, cam.device_name)
             if matrix_entry is not None:
                 log.info("%s: using matrix entry match=%r", cam.device_name, matrix_entry.get("match"))
                 variations = _variations_from_matrix_entry(matrix_entry)
             else:
                 log.info("%s: no matrix entry matched -- using generic fallback sweep", cam.device_name)
-                fb_spec = matrix_spec.get("fallback", {})
                 variations = build_fallback_variations(uvc_bin, cam.device_name, fb_spec, supported)
             variations = dedupe_against_baseline(variations, baseline_controls)
 
@@ -692,7 +775,7 @@ def run_camera(
                 if var.settle_s is None and settle_override is None:
                     if any("auto" in k for k in var.controls):
                         settle_s = settle_auto
-                _settle(cap, settle_s)
+                _settle(backend, settle_s)
                 effective = {**baseline_controls, **var.controls}
                 _capture_one(var.name, effective, settle_s)
 
@@ -700,12 +783,12 @@ def run_camera(
             manifest = {
                 "camera": {
                     "device_name": cam.device_name,
-                    "config_dir": cam.dir_name,
-                    "unique_id": unique_id,
-                    "registry_enum": registry_record.enum if registry_record else None,
-                    "resolution": cam.config.get("resolution"),
+                    "config_dir": cam.slug,
+                    "unique_id": cam.hardware_key,
+                    "registry_enum": cam.registry_number,
+                    "resolution": list(resolution) if resolution else None,
                 },
-                "playfield": cam.config.get("playfield"),
+                "playfield": cam.config.playfield,
                 "package_version": _package_version(),
                 "daemon_version": _package_version(),
                 "field_state_id": field_state_id,
@@ -739,7 +822,7 @@ def run_camera(
             else:
                 log.info("restore verified for %s", cam.device_name)
     finally:
-        cap.release()
+        backend.close()
         result.wall_time_s = time.monotonic() - t0
 
     return result
@@ -779,7 +862,7 @@ def _print_summary(results: List[CameraRunResult]) -> None:
     print("SUMMARY")
     print("=" * 72)
     for r in results:
-        print(f"\n{r.device_name} (config dir: {r.dir_name})")
+        print(f"\n{r.device_name} (slug: {r.dir_name})")
         if r.error:
             print(f"  ERROR: {r.error}")
             continue
@@ -803,16 +886,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    config = Config.load()
+    directories = Directories()
+    log.info("directories: %s", directories.describe())
 
     try:
-        check_daemon_not_running(config)
+        check_daemon_not_running(directories)
     except ContentionError as exc:
         print(f"REFUSING: {exc}", file=sys.stderr)
         return 2
 
+    registry = CameraRegistry(directories.state_dir / "cameras")
     pattern = None if args.all else args.camera
-    cams = discover_target_cameras(config, pattern)
+    cams = discover_target_cameras(directories, registry, pattern)
     if not cams:
         print(
             "No configured, currently-connected camera with a playfield link "
@@ -827,20 +912,18 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     matrix_spec_path = Path(args.matrix_spec) if args.matrix_spec else DEFAULT_MATRIX_SPEC
     matrix_spec = load_matrix_spec(matrix_spec_path)
-    uvc_bin = locate_uvc_util(config)
-    registry = CameraRegistry(config.cameras_dir)
-    detector = TagDetector(DetectorConfig(family="all", detect_aruco_4x4=True))
+    uvc_bin = locate_uvc_util()
+    detector = TagDetector(DetectorConfig())
 
     print(f"Targeting {len(cams)} camera(s):")
     for cam in cams:
-        print(f"  - {cam.device_name}  (config dir: {cam.dir_name}, live index {cam.live_index})")
+        print(f"  - {cam.device_name}  (slug: {cam.slug}, live index {cam.live_index})")
 
     results: List[CameraRunResult] = []
     for cam in cams:
         print(f"\n=== capturing {cam.device_name} ===")
         result = run_camera(
-            cam, config, uvc_bin, matrix_spec, output_root, field_state_id,
-            args.settle, detector, registry,
+            cam, uvc_bin, matrix_spec, output_root, field_state_id, args.settle, detector,
         )
         results.append(result)
         if result.error:

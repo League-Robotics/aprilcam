@@ -1,1 +1,1 @@
-/Volumes/Proj/proj/RobotProjects/AprilTags/.agents/skills/report/SKILL.md
+/Volumes/Proj/proj/RobotProjects/aprilcam/.agents/skills/report/SKILL.md

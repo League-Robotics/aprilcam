@@ -115,6 +115,19 @@ aprilcam arucogen   # Generate 4x4 ArUco marker images
 aprilcam cameras    # List available cameras
 ```
 
+## Development
+
+```
+uv sync --group dev --extra daemon   # install dev tools + full server stack
+uv run pytest                        # full test suite (includes the mypy gate below)
+uv run mypy                          # type check src/aprilcam on its own
+```
+
+`uv run pytest` always runs `tests/test_typing.py`, which shells out to
+`mypy` over `src/aprilcam` (scope and strictness are configured in
+`pyproject.toml`'s `[tool.mypy]` section) — a type error fails the test
+suite the same way a failing unit test would.
+
 ## License
 
 MIT

@@ -1,13 +1,13 @@
 ---
 name: dispatch-subagent
-description: Controller/worker pattern for dispatching isolated subagents via the Agent tool with curated context, directory scope, and dispatch logging
+description: Controller/worker pattern for dispatching isolated subagents via the Agent tool with curated context and directory scope
 ---
 
 # Dispatch Subagent Skill
 
 This skill defines the controller/worker dispatch pattern. The
-controller curates context, declares a directory scope, logs the full
-dispatch prompt, and sends a fresh subagent to do the work.
+controller curates context, declares a directory scope, and sends a
+fresh subagent to do the work.
 
 ## Process
 
@@ -52,39 +52,17 @@ Include in the subagent prompt:
 - The specific task and acceptance criteria
 - Instructions for how to report results
 
-### 4. Log the dispatch (MANDATORY)
-
-**Before sending the prompt, you MUST call `log_subagent_dispatch`.**
-This is not optional. Every dispatch at every tier must be logged. Pass:
-- `parent_agent`: your agent name (e.g., "sprint-executor")
-- `child_agent`: the subagent being dispatched (e.g., "code-monkey")
-- `sprint_id`: the sprint ID (if applicable)
-- `ticket_id`: the ticket ID (if applicable)
-- `prompt`: the full prompt text being sent
-
-This creates an audit trail with a dispatch ID you will use in step 6.
-
-**If `log_subagent_dispatch` is unavailable or fails, STOP and report
-the failure. Do not dispatch without logging.**
-
-### 5. Dispatch
+### 4. Dispatch
 
 Send the subagent via the Agent tool with the composed prompt.
 
-### 6. Log the result and review (MANDATORY)
+### 5. Review the result
 
 When the subagent returns:
-- **First, call `update_dispatch_log`** with the dispatch ID from step 4,
-  the outcome (success/failure), a summary of what the subagent
-  produced (files modified, key results), and the subagent's **response
-  text** (via the `response` parameter). This preserves both sides of
-  the conversation in the log. This is mandatory — do not skip it.
 - Read the output
 - Check that the work meets the task requirements
 - If issues found, compose a new prompt with feedback and re-dispatch
-  (max 2 retries, then escalate to the controller's parent). **Log
-  every re-dispatch** with `log_subagent_dispatch` and
-  `update_dispatch_log` as well.
+  (max 2 retries, then escalate to the controller's parent).
 
 ## Notes
 
@@ -94,3 +72,14 @@ When the subagent returns:
   controller's conversation.
 - Scope enforcement is prompt-level + rule-level. Path-scoped rules
   reinforce the constraint when the subagent accesses files.
+- **No dispatch logging is currently mandated or MCP-tool-backed.**
+  Earlier versions of this skill required calling `log_subagent_dispatch`
+  / `update_dispatch_log` before and after every dispatch; neither tool
+  exists on the current MCP tool surface (confirmed by grep across
+  `src/clasi` and by `tests/unit/test_dispatch_log.py`, which asserts
+  their absence). `src/clasi/dispatch_log.py` still provides
+  file-writing helpers (`log_dispatch()` / `update_dispatch_result()`)
+  with their own test coverage, but nothing calls them in production —
+  they are plain Python functions, not registered MCP tools, so no
+  agent following this skill can actually invoke them. Do not follow
+  stale instructions elsewhere that reference the old tool names.

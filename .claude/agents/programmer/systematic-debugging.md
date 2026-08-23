@@ -99,8 +99,11 @@ Once a hypothesis is confirmed and you understand the root cause:
    produces the wrong value. Trace the problem to its origin.
 2. **Verify the fix.** Run the originally failing test and confirm it
    passes.
-3. **Check for regressions.** Run the full test suite. Confirm that
-   your fix did not break anything else.
+3. **Check for regressions.** Run your ticket's scoped tests (the
+   modules you touched), in the foreground -- never backgrounded. The
+   full suite runs exactly once per sprint, inside `close_sprint`
+   itself (031/008), not a per-ticket step. Confirm your fix did not
+   break anything in scope.
 4. **Review the fix.** Does it make sense? Is it the right fix, or a
    workaround that will cause problems later? If it feels like a hack,
    consider whether a better fix exists.

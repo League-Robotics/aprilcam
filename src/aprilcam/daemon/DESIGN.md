@@ -1,224 +1,91 @@
-# Daemon (`aprilcam.daemon`)
+# daemon/
 
-**Owner:** Eric Busboom · **Last reviewed:** 2026-07-29 · **Status:** stable
+**Owner:** Eric Busboom · **Last reviewed:** 2026-08-21 · **Status:** stable
 
 ---
 
 ## 1. Purpose
 
-The daemon is the single camera owner and single vision authority: the only
-process that opens capture devices, runs OpenCV, and computes derived
-perception products (tag detections, world coordinates, velocities). The seam
-is a *process* boundary, not just a module boundary — every other component
-(MCP server, CLI, viewer, remote robots) is a thin client speaking gRPC and
-binary streams. The daemon alone owns camera hardware contention, singleton
-discipline, stream fan-out/backpressure, and the per-frame world-coordinate
-post-processing (origin shift, parallax, mobile-tag mount correction).
+`daemon/` is `aprilcamd` — the one process in the system that owns cameras and does vision. It exists as its own subsystem because two hard constraints only hold if exactly one process obeys them: **single vision authority** (all OpenCV work — capture, detection, tracking, homography, deskew, calibration — runs here and nowhere else) and **compute once, publish to all** (a deskewed image or a tag stream is computed once and every subscriber reads the same result). Every other component in the codebase — MCP server, CLI, viewer, robot client library — is a thin gRPC client of this process.
+
+`interfaces.py`'s module docstring states the admission test directly: capability belongs in `daemon/` only when it needs camera or vision access, when two adapters would otherwise duplicate it, or when it must be computed once and shared. Everything else — vision math, calibration math, camera backend mechanics, config document parsing — is intentionally kept in other subsystems and only *orchestrated* from here; `daemon/` owns *when* things run and *who gets the result*, not the underlying algorithms.
+
+Concretely, this directory owns: camera lifecycle glue on top of `camera/` (held-open handles, apply-on-open config, self-heal-triggered staleness), the per-camera detection pipeline (ring buffer, burst orchestration, confirmation, mount/parallax correction, drift checking), the gRPC control plane and its raw-socket stream transport, the in-memory config service (playfield/camera-config documents), the mobile-tag (robot mount) registry, and the annotation store. At ~7,400 lines across 10 files it is the largest subsystem in the codebase.
 
 ## 2. Orientation
 
-`server.py:DaemonServer` is the process skeleton: acquires the machine-global
-flock, writes a convenience pidfile, builds the gRPC server, installs signal
-handlers, starts mDNS, and blocks on a shutdown event. `grpc_server.py:
-AprilCamServicer` implements every RPC as a thin delegation layer over a
-shared `{cam_name: CameraPipeline}` dict; `make_grpc_server()` binds the unix
-socket and TCP transports with reflection enabled. `camera_pipeline.py:
-CameraPipeline` is the per-camera workhorse: one background capture thread
-per open camera that reads frames, calls `core.AprilCam.process_frame()`,
-applies world post-processing, appends to a 300-entry ring buffer, and hands
-results to stream producers. `stream.py` owns all stream sockets:
-`ImageStreamProducer` (JPEG frames) and `TagStreamProducer` (change-driven
-`TagFrame`s with heartbeat), each with accept-loop and per-subscriber sender
-threads. `mdns.py` advertises the TCP endpoint; `mobile_tags.py` persists the
-client-registered mobile-tag registry; `v4l2_reader.py` is the Raspberry Pi
-loopback capture shim. `protocol.py` and `client.py` are **dead legacy
-transport** (msgpack framing, newline-JSON control client) — unreferenced by
-any live code; do not build on them.
+- **`__main__.py`** — process entry point (`python -m aprilcam.daemon`). `build()` is the single place a real daemon's full object graph is assembled: `CameraRegistry` + `CameraDiscovery` (sharing one `held_cameras` dict so `probe()` never disturbs an actively-subscribed camera) → `DaemonService` → boot-time config load (`_load_config_dir`, replaying every document under `config_dir` into `service.set_playfield`/`set_camera_config` before the listener exists) → `StreamTransportManager` (`build_stream_transport`) → `MdnsAdvertiser` → `DaemonLifecycle`. `main()` just calls `lifecycle.start()` and blocks on `SIGTERM`/`SIGINT`.
+- **`lifecycle.py`** — `DaemonLifecycle`: the flock singleton (`daemon.lock`), the control-plane listener's start/stop, and the *local* process-readiness view. Also defines `ControlPlaneListener`, the minimal base class `rpc.py`'s gRPC wrapper implements, kept here so this module stays gRPC-free.
+- **`service.py`** — `DaemonService(Daemon)`: the actual RPC method bodies. Holds every piece of daemon-owned mutable state and delegates camera mechanics to `camera/`, vision math to `vision/` (via `detection.py`), calibration/deskew math to `calibration/`, and config parsing to `config/`.
+- **`detection.py`** — `DetectionEngine`: per-camera ring buffers (`RING_BUFFER_SIZE=300`) plus one-burst-per-call orchestration (`run_burst`). First module to import both `camera/` and `vision/`.
+- **`rpc.py`** — the gRPC servicer (`_Servicer`): pure marshalling (Python dataclass ↔ proto message) and typed-error-to-status-code mapping. `build_server()`/`build_stream_transport()` are the two factories `__main__.py` calls.
+- **`streaming.py`** — `TagStreamProducer` / `ImageStreamProducer`: idle-gated background threads that drive the same `run_burst`/capture-encode calls the one-shot RPCs use, but on a steady cadence, for as long as at least one stream subscriber exists.
+- **`broadcast.py`** — `Broadcaster`: a generic bounded-queue fan-out primitive with no camera/vision/proto knowledge — the mechanism that makes "N subscribers, one computation" true by construction.
+- **`stream_transport.py`** — `StreamTransportManager`/`_Listener`: bridges an in-process `ImageStream`/`TagStream` to a real remote socket (`[uint32 BE length][protobuf]` framing), one reused listener per `(camera, product)` key.
+- **`mdns.py`** — `MdnsAdvertiser`: `_aprilcam._tcp.local.` self-advertisement, never load-bearing.
+- **`interfaces.py`** — the `Daemon`/`DaemonLifecycle` behavioral base classes, `ImageStream`/`TagStream` stream base classes, and the `DaemonStatus`/`MountRegistration` value dataclasses every implementation here derives from or constructs directly.
 
-Data flow per frame: `cap.read()` → `process_frame()` (detection/tracking in
-`core/`) → stale/dark advisory checks → world correction (A1 origin shift →
-parallax → mount offset) → ring buffer → `ImageStreamProducer.publish()` +
-`TagStreamProducer.publish_if_changed()`.
+Control flow, end to end: an RPC arrives on the gRPC thread pool → `rpc.py`'s `_Servicer` marshals the request and calls a `DaemonService` method → that method takes `self._lock`, mutates or reads one of its in-memory stores, and (for camera-addressed calls) resolves/opens a `Camera` via `_camera_for` → for tag queries it delegates to `DetectionEngine.run_burst`, which reads one frame, runs `vision/`'s pipeline+detector, confirms, optionally converts to world coordinates via `calibration/`, applies mount correction, and appends to its own ring buffer → the result flows back through `rpc.py`'s proto converters. For streams, `GetImageStream`/`GetTagStream` never touch `DaemonService` directly — they only allocate a socket endpoint via `StreamTransportManager`; the real `stream_images`/`stream_tags` call (and the `TagStreamProducer`/`ImageStreamProducer` background thread it may start) happens lazily, inside the first accepted connection's own sender thread.
 
 ## 3. Constraints and Invariants
 
-- **The lock file is never unlinked** (`server.py:442`) — unlinking reopens a
-  create/lock race between unlink and the next open+flock. Stale-lock
-  recovery is lock-first-then-rewrite on the *existing* file: a dead holder's
-  flock is already released by the kernel.
-- **The flock on `daemon_lock_path` (default `/tmp/aprilcamd.lock`) is the
-  sole singleton guard**; the pidfile is a discovery cache only. Treating the
-  pidfile as a lock reintroduces duplicate daemons across `socket_dir`s.
-- **`grpc.so_reuseport` must stay 0** and every `add_insecure_port` return
-  value checked (`grpc_server.py:1163-1191`) — otherwise a second daemon can
-  silently co-bind port 5280 and the kernel load-balances RPCs between two
-  daemons (observed pre-sprint-018).
-- **World origin shift is a pure subtraction on both axes — NEVER a y-flip**
-  (`camera_pipeline.py:1023-1044`). The def-driven homography is already
-  A1-centred with +y=north; a stale `origin_y - y` inverted north/south. Any
-  consumer of `world_xy` must use the daemon-published `origin_x`/`origin_y`.
-- **Per-tag world correction is wrapped in try/except** — a bad correction
-  must never kill the capture thread (that bricks the camera until restart);
-  the uncorrected record is emitted instead.
-- **The daemon reads `config.json` but never writes it**, except through the
-  sanctioned `SetCameraConfig` proxy (writes to the config root via
-  `camera_config.save_camera_config`). Violating this breaks the
-  developer-owned config / regenerable state split.
-- **Stream backpressure is silent drop**: per-subscriber `Queue(maxsize=2)`;
-  a slow consumer loses frames, never blocks the pipeline. Do not "fix" the
-  drop by blocking — one stalled viewer would stall detection for everyone.
-- **`info.json` flags (`calibration_stale`, `frame_dark`) are purely
-  advisory** — nothing may gate or refuse an operation on them.
-- **`GetObjects` must use the same `_a1_origin()` as the tag path** —
-  subtracting `fw/2, fh/2` independently double-shifted objects (fixed;
-  `grpc_server.py:464`).
-- **Dependency quirk**: `daemon/stream.py` imports `client.models`
-  (`StreamEndpoint`) — the daemon depends on the client package's Pydantic
-  models. Don't add heavier daemon→client imports.
-- **Non-goal**: no HTTP/WS surface, no path/annotation state in the daemon
-  (v2 removes the vestigial `GetPaths`/`SetPaths`/`PublishOverlay`).
+- **Configuration is ephemeral; disk is the source of record.** `Daemon`'s own docstring: "the config root is not writable by [the daemon]." `_playfields`, `_camera_configs`, `_annotations`, `_mount_params` are plain in-memory dicts with no write-to-disk path at all — this is structural, not policy. Consequence: a restart wipes all of them; `__main__.py`'s `_load_config_dir` is what makes a *previously installed* `config_dir` document reappear after restart. `calibration.json` is the one deliberate exception — it is file-backed (`service._persist_calibration`/`_load_calibrations`), because a calibration surviving a restart is a UC-01 requirement.
+- **Lock, then enumerate, then listen, then advertise — in that exact order.** `DaemonLifecycle.start()` acquires the flock first; only then runs the synchronous half of camera discovery (`discovery.probe()`); only then builds and starts the gRPC listener; only then calls `advertise` if TCP bound. This order fixed a real regression (sprint 020-007): starting the listener before enumeration let a client's `camera list` reach a daemon whose registry was still empty, because "the socket accepts a connection" was being treated as the sole readiness signal. Violating this order silently reintroduces that race.
+- **The lock is never unlinked** (matches v1) — removing it on release would reopen a create+lock race between the unlink and the next daemon's open+flock.
+- **A background producer thread does not exist with zero subscribers — it is not "exists but throttles."** `Broadcaster`'s `on_active`/`on_idle` (fired exactly on the 0↔1 subscriber transition) is *the* idle-gating mechanism, not a policy layered on top of an always-running loop. This applies transitively through `stream_transport.py`: binding a listener socket costs nothing; only an *accepted connection's* sender thread calls `stream_images`/`stream_tags`, which is what actually starts a producer.
+- **Presence-based tag confirmation, never position-based — do not "fix" this.** `DetectionEngine._confirm_detections` requires `CONFIRMATION_STREAK` (3) strictly consecutive bursts of the *same tag id*, checked by id alone. Adding a same-place-twice check would look like a reasonable extra safeguard but would reintroduce the exact bug (a phantom ArUco decode recurring at a *different* world position each time) this mechanism exists to fix, while also rejecting legitimate fast-moving tags.
+- **Corner reordering is a verified no-op, not a skipped step.** `_pixel_corners` carries `Detection.corners` straight into `TagRecord.pixel_corners` with zero permutation, because OpenCV's native corner order for both AprilTag 36h11 and ArUco 4×4 was empirically confirmed to already match `design.md` §6's front-left/front-right/back-right/back-left convention. If a future tag family's native order ever differs, this silently produces wrong boundary/hat geometry — there is no runtime check.
+- **`mount_z` (parallax correction) is silently inert until a camera is located.** `_camera_geometry_for` falls back to ground `(0,0)`/height `0.0` for any camera with no `CameraConfig.camera_position` — `project_tag_to_field_plane`'s own "nothing to correct" sentinel. A registered `mount_z` therefore has zero observable effect until an operator runs `aprilcam camera locate`. This is surfaced only via `register_tag`'s returned warning string and `list_tag_parameters`'s `mount_z_applied` flag (ticket 030-004) — there is no push notification when a camera later becomes located.
+- **Everything mutable in `DaemonService` shares one `threading.Lock`; the gRPC server is a thread pool (`max_workers=10` default).** Concurrent RPCs against the same or different cameras are real, not theoretical. `DetectionEngine` guards its own buffers/streaks/detectors with a *separate* lock; `Broadcaster` and `stream_transport._Listener` each have their own again. No single global lock exists, and `Broadcaster.subscribe()` deliberately fires `on_active` *outside* its own lock — holding it would deadlock against a producer whose first tick publishes back into the same `Broadcaster`.
+- **Stream geometry is snapshotted once per stream life, not recomputed per tick.** `ImageStreamProducer` builds exactly one `Deskewer` at the 0→1 subscriber transition and reuses it for the stream's entire life (UC-07's "frame geometry stable for the life of a stream"). Consequence: a `set_playfield` push that changes `width_cm`/`height_cm` mid-stream has zero effect on an already-running stream's `px_per_cm`/`world_extent` — only a fresh `start()` (last subscriber left, new one arrived) picks up the change. `calibration_stale` is deliberately *not* part of this snapshot — it is read fresh every tick.
+- **A deskewed request must fail before any hardware access, never substitute a raw frame.** Both `_get_deskewed_frame` and `stream_images(deskewed=True)` check calibration (and that the calibrated-against playfield is still held) *before* `_camera_for`/producer construction. `Daemon.get_frame`'s docstring: "a raw frame that looks plausible but is not deskewed is how someone starts trusting wrong coordinates."
+- **TCP bind and mDNS registration failures are never fatal.** `build_server` catches the pinned `grpc` (1.80.0) library's `RuntimeError` from a failed `add_insecure_port`; `MdnsAdvertiser` catches `OSError`/`zeroconf.Error`. Both log at WARNING and the daemon continues unix-socket-only. `grpc.so_reuseport` is explicitly disabled — without this, two independent daemon processes could both silently bind the same TCP port with the kernel load-balancing between them, a worse failure mode than an observable bind error.
+- **Annotation store bounds are fixed constants, not configurable document fields.** `_MAX_ANNOTATIONS_PER_LAYER=1000`, `_MAX_POINTS_PER_SHAPE=10000` (ticket 031-010) — a deliberate scope decision, sized against the installed `main-playfield` (134.3×89.3 cm). `put_annotation`/`replace_layer` raise `AnnotationLimitExceeded` (mapped to gRPC `RESOURCE_EXHAUSTED`) *before* touching `self._annotations` at all, so a rejected write leaves the store completely unchanged; an upsert of an id already present never counts against the per-layer count bound.
+- **Two same-named `DaemonLifecycle` classes exist by design — do not conflate them.** `daemon.lifecycle.DaemonLifecycle` runs *inside* the daemon process (this directory); `client.lifecycle.DaemonLifecycle` runs in the *caller's* process and spawns/signals `daemon/__main__.py` as a subprocess. Both derive from the same `daemon.interfaces.DaemonLifecycle` base but have genuinely different mechanics.
+- **`DaemonStatus.other_daemon_processes` is declared here but populated elsewhere.** `daemon/interfaces.py`'s `DaemonStatus` dataclass carries this field (ticket 031-002's orphan-daemon-process report), and its own docstring says so explicitly — but the *only* call site in the codebase that ever fills it with a real process-table scan is `client.lifecycle.DaemonLifecycle.status()`. Every status this directory itself produces — `daemon.lifecycle.DaemonLifecycle.status()` and `daemon.service.DaemonService.status()` (the RPC-answered value) — always reports it as the default empty tuple `()`. A reader expecting the orphan-scan logic to live in `daemon/lifecycle.py` will not find it there.
 
 ## 4. Design
 
-**Singleton & takeover.** `--force` performs a local SIGTERM → 5 s wait →
-SIGKILL takeover, then retries the flock once (`server.py:_force_takeover`).
-The graceful Shutdown-RPC-first step is deliberately layered in
-`cli/daemon_cli.py`, keeping `daemon/server.py` a leaf module with no
-`client/` import.
+**Key data structures and ownership.** `DaemonService` holds seven in-memory stores under one `threading.Lock`: `_cameras` (held-open `Camera` by slug — this dict doubles as `CameraDiscovery`'s `active_slugs` source, which is what makes `probe_cameras()`'s "never disturbs a live camera" guarantee real rather than just testable), `_playfields`, `_camera_configs`, `_calibrations` (the one disk-backed store), `_annotations` (`playfield → layer → id → Annotation`) plus `_annotation_revisions` (one monotonic counter per playfield), `_mount_params` (`TagId → MountParameters`), and the two stream-producer caches `_tag_stream_producers` (keyed by slug) / `_image_stream_producers` (keyed by `(slug, deskewed)`). `DetectionEngine` separately owns per-camera ring buffers (`Dict[str, Deque[TagFrame]]`, `maxlen=300`), one lazily-built `TagDetector` per slug, and per-slug confirmation-streak counters, under its own lock.
 
-**Transports.** gRPC control plane on `unix:/tmp/aprilcam/control.sock` and
-TCP `[::]:5280` (both default-on), with server reflection for grpcurl. mDNS
-advertises `_aprilcam._tcp.local.` using the UDP-connect trick
-(`mdns.py:_primary_routable_ipv4` — connect a SOCK_DGRAM to 192.0.2.1, read
-`getsockname()`), avoiding Ubuntu's `/etc/hosts` 127.0.1.1 hostname alias.
-All zeroconf failures are swallowed; mDNS is never load-bearing.
+**Lifecycle.** Init: `__main__.build()` wires the object graph and replays `config_dir` into the service before any RPC is possible; `DaemonLifecycle.start()` then does lock → enumerate → listen → advertise (Constraints §3). Per-frame tick has two paths: (1) **demand-driven** — `DetectionEngine.run_burst`, called synchronously and exactly once per `get_tags`/`get_tag` RPC, with no loop or timer of its own; (2) **streamed** — once a `TagStreamProducer`/`ImageStreamProducer` exists (because a stream has at least one subscriber), it drives the identical underlying call (`run_burst`, or `camera.read()` + optional `Deskewer.deskew` + `cv2.imencode`) on a private background thread at a fixed cadence (`TAG_STREAM_INTERVAL_S` ≈ 1/30 s, `IMAGE_STREAM_INTERVAL_S` ≈ 1/15 s — both explicitly flagged provisional, never tuned against real hardware). Teardown: `DaemonLifecycle.stop()` stops watching, stops mDNS, stops the listener (bounded grace), runs `on_stop` (`transport.stop()` then `service.close()`), then releases (never unlinks) the lock. `service.close()` stops every tracked stream producer — joining its thread — *before* closing any camera handle, specifically so no producer thread is mid-`Camera.read()` when a backend is torn down.
 
-**Streams.** Allocated on demand by `GetImageStream`/`GetTagStream` (one
-producer per camera per type, cached); each producer binds a uuid-suffixed
-unix socket under `socket_dir/<cam>/` plus a TCP socket on an OS-assigned
-ephemeral port (0.0.0.0 so LAN clients reach a Pi), returned in
-`StreamEndpoint`. Wire framing for both streams: `[uint32 BE length][protobuf]`
-— `ImageFrame` raw, `TagFrame`/`OverlayFrame` wrapped in `StreamMessage`.
-Threads per producer: one accept loop per socket + one sender thread per
-subscriber; `TagStreamProducer` adds a heartbeat thread.
+**Concurrency model.** The gRPC server runs on a `ThreadPoolExecutor` (`max_workers=10`), so concurrent RPCs are real. Each stateful class in this subsystem owns exactly one lock scoped to its own state — `DaemonService._lock`, `DetectionEngine._lock`, each `Broadcaster._lock`, each `stream_transport._Listener._lock` — and no lock here is ever held across a call into another lock-owning object's public method.
 
-**Tag publish policy** (`stream.py:TagStreamProducer`): publish when the
-visible ID set changed or any tag moved > 8 px, rate-capped at 20 Hz
-(`max_hz=0` = uncapped); a heartbeat force-publishes the latest frame after
-1 s of silence so subscribers can distinguish "static scene" from "dead
-stream".
-
-**Idle gating.** The capture loop resolves subscribers up front each
-iteration; with no image/tag subscribers and no pull RPC within a 3 s grace
-window it drops to 1 fps and skips JPEG encoding entirely. `capture_frame()`
-encodes lazily from the cached raw ndarray (frame-id-matched) so a pull
-always gets a current frame without the loop paying encode cost for nobody.
-
-**Self-heal** (`_capture_loop`): after 5 consecutive read failures, a
-loopback capture (has `.reopen()` — the Pi bridge's v4l2loopback feed via
-`V4l2CtlCapture`) reconnects *forever* (the bridge watchdog may restart it
-any time); a plain USB `cv.VideoCapture` is re-opened at most 10 times
-(re-applying UVC settings — the OV9782's manual exposure — each time), and
-the budget resets to 0 on any healthy frame. Only a persistently dead USB
-camera stops the pipeline. Rationale for the asymmetry: loopback dropouts
-are routine and external; a USB device that won't reopen is unplugged.
-
-**World post-processing order** (fixed, per tag): (1) A1 origin shift
-(`_a1_origin()` prefers the calibrated `apriltag:1` static-marker world
-position, falls back to field centre); (2) parallax via
-`calibration.correct_world_for_height` when `camera_position` and a
-registered tag height exist; (3) mobile-tag mount offset — offset (mm→cm)
-rotated by robot heading is subtracted from the tag position, heading
-rotated by mount yaw, so the reported pose is the *robot centre*
-(`_robot_centre_from_tag`).
-
-**Mobile-tag registry** (`mobile_tags.py`): `{tag_id: MobileTag(x_mm, y_mm,
-z_cm, yaw_deg, owner)}` persisted atomically to `data_dir/tags.json` under
-`"tags"`; legacy `{"tag_heights": …}` files read transparently and migrated
-on next write. Register/Clear RPCs push the whole registry into every
-running pipeline; `apply_mobile_registry` swaps whole dicts (atomic under
-the GIL) so the capture thread reads lock-free.
-
-**Advisory signals.** `calibration_stale` is surfaced from the playfield
-boundary's movement-invalidation flag; `frame_dark` is a windowed signal
-(mean luminance of a strided-downsample every 5th frame < 25.0 AND zero
-tags, 30 consecutive samples to set, one non-dark sample to clear).
-`info.json` is rewritten only on flag transitions, atomically (tmp+rename).
-
-**Restart detection.** `AprilCamServicer.boot_id` (uuid4 per process) rides
-on `ListPlayfieldsResponse` so long-lived clients distinguish a daemon
-restart from a transient channel reconnect.
-
-**Camera naming.** `OpenCamera` resolves index → stable identity →
-`CameraRegistry.resolve()` → the record's `dir` as `cam_name`, so per-camera
-data dirs are registry-owned and survive replug. Falls back to
-`device_name_slug`/`cam-<index>` only if the registry fails.
+**Load-bearing decisions and rejected alternatives:**
+- *Demand-driven bursts by default, not an always-on poll loop* — an idle daemon runs zero detections by construction, not because a scheduler decided not to. A background thread per camera regardless of subscribers was rejected as wasted CPU.
+- *One producer instance per `(camera[, deskewed])` key, reused across subscribers* — makes "compute once, publish to all" true structurally rather than by a dedup check; N subscribers cause exactly one warp/one burst per tick, never N.
+- *`Broadcaster`'s backpressure is silent drop from a bounded per-subscriber queue (`DEFAULT_SUBSCRIBER_QUEUE_DEPTH=2`)*, adapted from v1's `_MAX_SENDER_QUEUE`. A blocking alternative was rejected because one slow subscriber must never stall the pipeline or any other subscriber.
+- *`stream_transport.py` does zero eager validation at endpoint-allocation time* (`GetImageStream`/`GetTagStream`). Validating there was rejected on two grounds: it would either start a real producer with zero actual socket clients, or require a second, independently-maintained implementation of `_camera_for`'s slug/number resolution. Instead, every precondition (`UnknownCamera`, `CameraNotPresent`, `NotCalibrated`) surfaces inside the first accepted connection's sender thread — a caller that mistypes a camera name gets a socket that connects then immediately closes, not a gRPC-level error at allocation time.
+- *Presence-only tag confirmation over position-similarity* — see Constraints §3; the rejected alternative was directly identified as reintroducing the original bug.
+- *`grpc.so_reuseport` disabled* — trading "TCP bind failure is observable" for "silently identical to a load-balanced pair of daemons," see Constraints §3.
 
 ## 5. Interfaces
 
 ### Exposes
 
-**gRPC `AprilCam` service** (proto in `aprilcam/proto/`), grouped:
+**gRPC control plane** (`proto/aprilcam_v2.proto`, translated by `rpc.py`'s `_Servicer`, built by `build_server`): `ListCameras`, `ProbeCameras`, `GetFrame` (raw or `deskewed=True`; `encoding` `"jpeg"`/`"png"`), `GetStatus` (now carries `protocol_version` — ticket 031-001, a constant `PROTOCOL_VERSION=1` in `rpc.py`, independent of `aprilcam.__version__`, bumped only on a breaking/renumbering wire change), `GetTags`/`GetTag`/`GetTagHistory`, `SetPlayfield`/`GetPlayfield`/`ListPlayfields`, `SetCameraConfig`/`GetCameraConfig`/`ResetCameraConfig`, `Calibrate`/`GetCalibration`, `PutAnnotation`/`RemoveAnnotation`/`ReplaceLayer`/`ClearAnnotations`/`GetAnnotations`, `FindFeature`, `RegisterTag`/`UnregisterTag`/`ListTagParameters`, `GetGuide`, and the two stream-allocation RPCs `GetImageStream`/`GetTagStream` (return a `StreamEndpoint`, never touch `DaemonService` directly). Every RPC method body is a thin call into the matching `DaemonService`/`Daemon` method — the pre/post/error contract for each is authoritatively documented on the `Daemon` base-class method in `interfaces.py`, not duplicated here.
 
-- *Lifecycle*: `ListCameras` (open cameras), `EnumerateCameras` (hardware
-  probe + stable enum numbers; the only sanctioned enumeration path for
-  clients), `OpenCamera(index) → cam_name, camera_dir` (idempotent),
-  `CloseCamera`, `ReloadCalibration`, `Shutdown`.
-- *One-shot queries*: `GetCameraInfo`, `CaptureFrame` (latest JPEG, 3 s
-  wait), `GetTags` (latest `TagFrameResponse` with homography, corners,
-  field dims, origin), `GetObjects` (one-shot HSV object detection with
-  60 px polygon inset, aspect ≤ 2.0, min dim ≥ 15 px filters), `WhereIs`
-  (keyword search over the playfield map, live-tag merge, full-map fallback).
-- *Streams*: `GetImageStream` / `GetTagStream` → `StreamEndpoint
-  {socket_path, tcp_port}`; then length-prefixed protobuf on the socket.
-- *Config proxies* (whole JSON blobs, atomic writes): `GetCameraConfig` /
-  `SetCameraConfig` (config root), `GetCalibration` / `SetCalibration`
-  (state root; write triggers live pipeline reload; injects the `camera`
-  slug key so RPC and direct writes produce the same schema), `GetPaths` /
-  `SetPaths` (legacy), `ListPlayfields` (+ `boot_id`).
-- *Mobile tags*: `RegisterMobileTag`, `ClearMobileTags`, `ListMobileTags`.
-- `PublishOverlay` — broadcast an `OverlayFrame` to tag-stream subscribers
-  (legacy; removed in v2).
+Error mapping (`rpc.py`'s `_STATUS_CODES`/`_abort`): `AlreadyRunning`→`ALREADY_EXISTS`; `UnknownCamera`/`UnknownPlayfield`/`UnknownGuide`→`NOT_FOUND`; `NotCalibrated`/`CameraNotPresent`/`NoPlayfieldLinked`→`FAILED_PRECONDITION`; `AnnotationLimitExceeded`→`RESOURCE_EXHAUSTED`; anything else→`INTERNAL`. Every `AprilCamError` carries trailing metadata (`aprilcam-error-type` plus type-specific fields) so a client reconstructs the same typed exception rather than pattern-matching status text.
 
-Contract notes: NOT_FOUND for unopened cameras; errors as gRPC status
-codes; all file writes atomic; `OpenCameraResponse.camera_dir` is the one
-place a path leaks to clients (legacy — MCP must not forward it).
+**Bulk streams** (raw sockets, `[uint32 BE length][protobuf]` framing, allocated via `GetImageStream`/`GetTagStream`, served by `stream_transport.StreamTransportManager`): a raw or deskewed image stream per camera, and a tag stream per camera. One socket connection is exactly one `Broadcaster` subscriber. Contract: connecting before the underlying precondition is satisfiable (bad camera name, uncalibrated deskewed request) yields a socket that accepts then immediately closes with nothing sent — never a synchronous allocation-time error, since allocation never touches `DaemonService`.
 
 ### Consumes
 
-- `aprilcam.camera` — device enumeration, identity, registry, libcam
-  backend, `config.json` load/save (owns camera identity; see its DESIGN).
-- `aprilcam.core` — `AprilCam.process_frame`, `TagRecord`/`FrameRecord`/
-  `RingBuffer`, `playfield_query` (owns detection/geometry).
-- `aprilcam.calibration` — calibration load, `correct_world_for_height`,
-  `corner_pixels_from_homography` (owns pixel→world math).
-- `aprilcam.vision.color_classifier` — `GetObjects` classification.
-- `aprilcam.client.models` — `StreamEndpoint` (dependency quirk, §3).
-- `aprilcam.config` — directory resolution (`effective_config_dir` fallback
-  for legacy single-tree installs), flags (`static_deskew`, `undistort`).
+- **`camera/`** — `Camera`, `CameraDiscovery`, `CameraRegistry`, `CameraIdentity`/`resolve_all`, and backend selection (`OpenCVBackend`, `UvcUtilBackend`, `LibcameraDevice`, `resolve_capture_backend`). `daemon/` never derives camera identity or persists the registry itself; it only opens, holds, and configures already-resolved `Camera` handles.
+- **`vision/`** — `TagDetector`/`Detection`, `run_pipeline`/`PipelineConfig`, `compute_motion`/`MIN_RELIABLE_DISPLACEMENT_CM`. Stateless per-frame vision math; `daemon/detection.py` owns only *when* it runs and the buffered state across calls.
+- **`calibration/`** — `Calibrator`, `Calibration`/`CalibrationResult`, `Deskewer`, `correct_tag_pose`/`project_tag_to_field_plane`, `compute_drift_cm`. All homography-solving, deskew-warp, mount/parallax correction, and drift-measurement math.
+- **`config/`** — `Directories`, `ConfigLoader`, `CameraConfig`/`PlayfieldDefinition`/`Feature`/`CameraPosition`. Document parsing/validation and directory resolution; `daemon/` touches disk only at a few targeted points (boot-time `config_dir` scan in `__main__.py`, `Camera.reset`'s stored-config read, `calibration.json` read/write).
+- **`playfield/`** — `Playfield` (the served definition + linked-cameras wrapper) and `FeatureQuery` (backs `find_feature`/`WhereIs`).
+- **`proto/`** — `aprilcam_v2_pb2`/`aprilcam_v2_pb2_grpc`, imported only by `rpc.py` (the sole owner of the proto boundary on the server side, per `design.md` §6).
+- **Top-level `errors.py`/`types.py`** — the typed exceptions (`NotCalibrated`, `UnknownCamera`, `AnnotationLimitExceeded`, etc.) and shared value dataclasses (`TagRecord`, `TagFrame`, `ImageFrame`, `CameraState`, `Annotation`/`AnnotationSet`, `MountParameters`, `ProbeReport`) that cross every boundary described above.
 
 ## 6. Open Questions / Known Limitations
 
-- **Dead code**: `daemon/protocol.py` and `daemon/client.py` are the
-  pre-gRPC transport, referenced by nothing. **Deprecated — v2 removes them
-  outright** (spec §4.1, §6).
-- **Stale-registry bug**: `OpenCamera`'s registry resolve can orphan a
-  re-plugged camera from its calibration dir when a stale record owns the
-  bare slug (see `clasi/issues/stale-registry-record-orphans-camera-from-
-  its-calibration-dir.md`) — the daemon then runs uncalibrated with
-  `world_xy=(0,0)`. Root cause lives in `camera/registry.py`.
-- **Every client warps its own deskew** today. v2 adds a daemon-computed
-  **deskewed playfield stream** (fixed bounding box, default 800×800,
-  px-per-cm derived and reported in stream metadata) published like the raw
-  stream (spec §4.1).
-- **Calibration runs client-side** today (CLI/MCP import cv2). v2 moves it
-  into the daemon behind a `Calibrate` RPC (spec §4.4).
-- **v2 config service**: `SetPlayfield`/`GetPlayfield` and
-  `ResetCameraConfig` join the whole-document proxies; the daemon becomes
-  the rendezvous point for all shared configuration (spec §4.1, §4.5).
-- **v2 removals** from this package's surface: `GetPaths`/`SetPaths`,
-  `PublishOverlay`/`OverlayFrame` push, and the `paths_file` key in
-  `info.json` (spec §6 — drawing becomes a client-side library).
-- `CameraPipeline` still constructs the full `AprilCam` object (which drags
-  in `ui.display.PlayfieldDisplay` even headless); v2's pipeline
-  consolidation into `daemon/` should shed that (spec §4.3).
+- **Cadence constants are honestly unvalidated.** `TAG_STREAM_INTERVAL_S` (~30 Hz) and `IMAGE_STREAM_INTERVAL_S` (~15 Hz) are both explicitly documented in `streaming.py` as provisional starting guesses, never tuned against real detection/encode CPU cost. No coordinated backpressure exists between a camera's tag-stream and image-stream producers if both run concurrently.
+- **`CONFIRMATION_STREAK=3` rests on a bounded sample.** A longer real-hardware campaign could in principle observe a longer phantom-detection streak than the one this value was set against — which is exactly why it stays constructor-injectable rather than hardcoded.
+- **`mount_z` inertness has no push notification.** A tag registered with a nonzero `mount_z` before any camera is located gets a one-time warning string from `register_tag` and a queryable `mount_z_applied` flag from `list_tag_parameters` — but nothing alerts a client when a *later* `aprilcam camera locate` call finally makes a previously-inert registration active.
+- **Annotation store limits are fixed and playfield-specific by scope decision.** `_MAX_ANNOTATIONS_PER_LAYER`/`_MAX_POINTS_PER_SHAPE` were sized against one installed playfield's real dimensions; a genuinely larger field or a busier multi-robot session would need these revisited, and there is deliberately no per-playfield or pushed-document override yet.
+- **No `stream_annotations` RPC, by design.** A client wanting live annotation updates on an *undeskewed* (raw) image stream has no channel at all — annotations only ride embedded in deskewed frames or via polling `GetAnnotations`, since raw frames carry no world→pixel mapping (UC-16).
+- **`DaemonStatus.other_daemon_processes`'s home is split across two subsystems.** The field is declared in this directory's `interfaces.py` but is only ever populated by `client/lifecycle.py`; nothing server-side in `daemon/` performs the process-table scan. This is documented in the code but easy to miss when reasoning about ticket 031-002 from the interface declaration alone.
+- **Corner-order equivalence between OpenCV's native detector output and `design.md`'s boundary convention is asserted from empirical verification, not enforced by a runtime check.** If a future tag family or OpenCV version ever changes native corner ordering, `_pixel_corners`' zero-permutation pass-through would silently produce wrong geometry with no test catching it structurally (only fixture-based regression tests would notice).

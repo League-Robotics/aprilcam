@@ -1,74 +1,350 @@
-# CLI
+# cli/
 
-**Owner:** Eric Busboom · **Last reviewed:** 2026-07-29 · **Status:** in-flux
+**Owner:** Eric Busboom · **Last reviewed:** 2026-08-21 · **Status:** stable
 
 ---
 
 ## 1. Purpose
 
-The `aprilcam` command: a single dispatcher (`cli/__init__.py`) plus one thin module per subcommand. The seam is *human entry points* — everything a person types lives here, and each module is expected to be either a pure daemon client (via `client/`) or a local utility, never a camera opener or vision engine. The subsystem alone owns argv conventions: global `--host`/`--port` handling, the base-vs-`[daemon]` install boundary (actionable install hints instead of tracebacks), and the shared daemon-connection helpers (`_daemon.py`) every subcommand reuses.
+`cli/` is the `aprilcam` command-line entry point: the argparse dispatcher
+plus one thin module per subcommand. It is a pure adapter in the sense
+`docs/design/adapters.md` §1 defines the term — "a translation layer and
+nothing more" between argv/exit-codes and the daemon's RPC contract. It
+holds no authoritative state and does no vision (`adapters.md` §1's rule,
+quoted verbatim in nearly every module docstring in this package).
+
+Concretely, `cli/` owns:
+
+- **Argument parsing** — one `argparse` subparser tree per noun
+  (`daemon`, `camera`, `playfield`, `tags`, `guide`, `mcp`), each
+  subcommand module building its own leaf parsers.
+- **Output formatting** — turning whatever the client library returns
+  (`CameraState`, `TagFrame`, `Playfield`, `AnnotationSet`, ...) into
+  aligned human-readable lines, with a consistent `(no X)` convention
+  for empty results.
+- **Exit codes** — mapping a successful call to 0 and a typed
+  `aprilcam.errors.AprilCamError` to 1, uniformly, via
+  `cli/_common.py`'s `report_error`.
+
+Every actual capability — camera enumeration, calibration, deskew,
+tag detection, annotation storage — lives in the daemon and is reached
+exclusively through `client/`. `cli/` never opens a camera, never talks
+gRPC directly, and (with one narrow, explicitly-recorded exception in
+`locate.py` — see §3) never touches vision/geometry code itself. This
+is what makes it a subsystem boundary: everything below this layer is
+daemon or client-library responsibility; everything at this layer is
+presentation.
 
 ## 2. Orientation
 
-`main()` in `cli/__init__.py` handles `--help`/`--version`/`--agent`, strips global daemon flags, then lazily imports the target module from the `SUBCOMMANDS` dict and calls its `main(remaining)`. Subcommands and their jobs:
+| File | Lines | Owns |
+|---|---|---|
+| `__init__.py` | 160 | `main()` — the single dispatch seam. Builds the top-level parser, wires every subcommand module's `add_subparser`, resets `SIGPIPE` to default disposition, and is the one place `BrokenPipeError` is caught. |
+| `_common.py` | 257 | Shared plumbing: `EXIT_OK`/`EXIT_ERROR`, `add_daemon_option`/`add_all_option` (the `-d`/`--all` flags), `incomplete_command` (a subparser-tree default), `report_error`, `format_camera_row`/`print_cameras`/`print_probe_report`, `fan_out`, `resolve_playfield_camera`. |
+| `camera.py` | 521 | `camera list\|probe\|image\|tags\|config\|view` — camera-addressed commands. Also wires in `calibrate.py` and `locate.py` as sub-subcommands of its own `camera` subparser tree. |
+| `calibrate.py` | 146 | `camera calibrate` — a pure RPC orchestrator around the `Calibrate` RPC; grouped under `camera` but kept in its own file. |
+| `locate.py` | 431 | `camera locate` — solves camera ground nadir/height from surveyed AprilTag references. The one file in this package with a client-side geometry dependency (§3). |
+| `daemon.py` | 313 | `daemon start\|stop\|restart\|status\|list` — process lifecycle (local-only) plus remote status/discovery. |
+| `playfield.py` | 688 | `playfield list\|config\|image\|view\|annotations\|where` — playfield-addressed commands, including client-side camera resolution for the ones that need a camera but name none. |
+| `tags.py` | 429 | `tags mount register\|clear\|list` (mobile-tag mount registry, daemon-backed) and `tags generate` (offline AprilTag/ArUco image generation, no daemon). |
+| `guide.py` | 75 | `guide [name]` — prints a packaged usage guide. Deliberately makes no daemon connection at all (§3). |
+| `mcp.py` | 54 | `mcp [-d HOST]` — starts the MCP stdio server; passes `-d` through as the server's connection-manager default and blocks for the process lifetime. |
 
-- `daemon` — start/status/stop the daemon (the one command that runs vision).
-- `mcp` — run the MCP stdio server (dispatches to `aprilcam.server.mcp_server`).
-- `view` — tkinter live viewer fed by daemon streams (`view_cli.py`, 1,185 lines).
-- `calibrate` — playfield calibration for one or more cameras (currently runs the cv2 math client-side).
-- `cameras` — list cameras via daemon enumerate.
-- `tags` — one-shot detect/list of all markers on a camera.
-- `probe` — discover daemons via mDNS and update the `hosts.json` code store.
-- `mobile` — manage the daemon's mobile-tag registry.
-- `config` — print version and resolved configuration.
-- `init` — write MCP server entries for Claude Code / VS Code.
-- `taggen` — generate AprilTag/ArUco images or PDFs (offline; needs cv2).
-- `tool` — list/inspect/run MCP tools from the command line.
-- `migrate-dirs` — move legacy co-located config files into `config_dir`.
-- `web` — start the HTTP/WS server (removed in v2; currently broken, see §6).
+Total: ~3,100 lines across 9 modules (no `interfaces.py` — see §5).
 
-`_daemon.py` supplies `add_daemon_args` (adds `--host`/`--port` with `--daemon-host`/`--daemon-port` aliases, dest `daemon_host`/`daemon_port`), `connect_from_args` (resolve → connect → probe `ListCameras`), and `resolve_camera_code` (alpha codes like `A`/`FB` → host + camera).
+**Dispatch mechanism.** `cli/__init__.py:_build_parser()` builds one
+top-level `argparse.ArgumentParser` and calls each subcommand module's
+`add_subparser(subparsers)`. Every subcommand module owns its own
+argparse shape and `cmd_*` functions; `__init__.py` itself "only
+assembles them and routes `argv` to whichever `func` argparse
+resolved — itself zero business logic" (its own module docstring). A
+subparser tree entered without a leaf command (e.g. `aprilcam daemon`)
+falls through to `_common.incomplete_command(parser)`'s default, which
+prints that parser's help and returns `EXIT_ERROR` rather than
+succeeding silently. `calibrate.py` and `locate.py` are grouped under
+`camera` structurally (their `add_subparser` takes `camera.py`'s own
+`sub` subparsers action, not the top-level one) while remaining
+separate files — the same "one thin module, hooked in by its parent"
+shape `playfield.py` uses at the top level.
 
 ## 3. Constraints and Invariants
 
-- **Dispatch is lazy** — subcommand modules import only when named, so a base (cv2-free) install can run `cameras`/`tags`/`view`/`mcp` without tripping over daemon-only dependencies. Adding a module-level heavy import to `cli/__init__.py` breaks the base install for every command.
-- **`DAEMON_COMMANDS = {daemon, taggen, calibrate}`** is the exact set that gets the "install `aprilcam[daemon]`" hint on `ModuleNotFoundError`; every other command re-raises. Adding a cv2 dependency to a command without updating this set gives users raw tracebacks (this is live today for `view`, see §6).
-- **Global `--host`/`--port` are extracted from *any* argv position** (`_extract_global_flags`, both `--flag VALUE` and `--flag=VALUE`, all four alias spellings) **and re-exported as `APRILCAM_DAEMON_HOST` / `APRILCAM_DAEMON_PORT` env vars** before dispatch. Downstream commands pick them up through the normal `Config` precedence — no plumbing of a namespace through every module. Trap: any subcommand wanting its *own* `--host`/`--port` semantics (e.g. a bind address) never sees the flag; the root dispatcher eats it as a daemon target.
-- **CLI commands never open cameras or probe local hardware** — enumeration and frames come from the daemon (`aprilcam calibrate` enumerates via RPC and reads frames through a `CaptureFrame` adapter). The daemon's `CameraPipeline` is the only camera owner.
-- **User-facing camera numbers are the persistent enumeration numbers** (what `aprilcam cameras` prints), resolved to live OS indices via daemon enumerate / `resolve_enum_to_index` — never the volatile OS index.
-- **Alpha camera codes resolve by slug first, stored enum second** (`resolve_camera_code` contract) — stored enums go stale across replug; slug is the reliable key.
-- **`--host` accepts a single-letter host code** — `connect_from_args` runs `resolve_host_token` on the *final* resolved host, so `A`/`F` works from the flag, the env var, or config alike.
+- **No vision, no daemon logic, no authoritative state** — every
+  `cmd_*` function either shapes argv, calls exactly one (or a small,
+  fixed sequence of) client-library methods, or formats an
+  already-computed result. This is `adapters.md` §1's rule, restated
+  in nearly every module docstring here rather than left implicit.
+- **One dispatch seam for `BrokenPipeError` (ticket 031-003,
+  SUC-003).** `main()` in `__init__.py` is the single point every
+  subcommand's `func(args)` funnels through, so pipe-safety handling
+  (`_reset_sigpipe_to_default` + the `except BrokenPipeError` wrapping
+  `func(args)` + `_handle_broken_pipe`'s stdout-to-`/dev/null` redirect
+  before interpreter shutdown) lives there once instead of at each of
+  the ~20 individual `print()` call sites scattered across `cli/*.py`.
+  Two-layer mechanism: `SIGPIPE` is reset to `SIG_DFL` at startup so
+  the OS can kill the process outright on a broken-pipe write before
+  any Python exception machinery runs; the `except BrokenPipeError`
+  in `main()` is belt-and-suspenders for the cases where a
+  `BrokenPipeError` still reaches Python (a write racing past the
+  signal, or a context that doesn't deliver `SIGPIPE` the same way).
+- **`camera view` is signposted as raw (ticket 031-004, SUC-004).**
+  `camera.py`'s `cmd_view` prints a startup line — before the daemon
+  connection is even attempted, so it is seen even if the connection
+  later fails — naming the view `RAW` and pointing at
+  `playfield view` as the deskewed alternative. This is purely a
+  visibility fix; UC-16's underlying "raw means raw" guarantee (no
+  deskew/homography applied by `camera view`) is unchanged. The
+  companion half — an explicit `[RAW]` marker baked into the window
+  title for the whole session — lives in `view/viewer.py`'s
+  `run_raw_view`, not in this subsystem; this package's contribution
+  is the one printed line.
+- **`camera locate` is the one file that touches non-daemon vision
+  code, deliberately and explicitly.** Every other command triggers an
+  RPC and formats the result. `locate.py` does the same for detection
+  (`GetTag`, entirely daemon-side), but the least-squares geometry
+  *solve* itself
+  (`aprilcam.calibration.geometry.solve_camera_geometry`) runs
+  client-side, here, because it is pure NumPy algebra over
+  already-vision-processed `WorldPoint`s — no cv2, no pixel access, no
+  camera (sprint 029's Design Rationale: "client-side pure function,
+  not a new `LocateCamera` RPC"). This is `cli/`'s first-ever
+  dependency on `calibration/`. One wrinkle worth flagging: the
+  imported function lives in `calibration/geometry.py`, a module that
+  *does* `import cv2 as cv` at module scope (for unrelated
+  `undistort_point`/`distort_point` helpers elsewhere in that file),
+  so importing `locate.py` transitively pulls cv2 into the `cli/`
+  process even though `solve_camera_geometry` itself never calls it.
+  `tests/test_no_cv2_in_client_modules.py`'s `_CV2_FREE_PACKAGES`
+  enforces a hard "no cv2" import ban on `client/`, `view/`, and
+  `mcp/` — `cli/` is *not* in that set, so this transitive import is
+  currently unchecked (see §6).
+- **`guide` makes no daemon connection at all, on purpose.** Every
+  other module connects via `client.discovery.Discovery` and accepts
+  `-d`/`--daemon`. `guide.py` does neither: UC-27.S-1 requires the
+  guide to be readable with no daemon running anywhere, so it reads
+  straight from `client.guides.Guides`, which touches only the
+  package's bundled text. Its own docstring warns explicitly against
+  "fixing" this to route through `Discovery`/`Daemon` like everything
+  else — that would defeat the point.
+- **`tags generate` is the other daemon-free command**, for a
+  different reason: it is a purely offline operation (`TagGenerator`)
+  with nothing to target, so it takes no `-d`/`--all` flags at all.
+- **Fan-out (`--all`) is restricted to read-only commands**
+  (`docs/design/use-cases/cli.md` §"Fan-out"). Every write-shaped
+  command (`camera calibrate`, `camera locate`, `camera view`,
+  `playfield view`, `camera config` push, `playfield annotations
+  --clear`, `tags mount register`/`clear`) refuses `--all` up front,
+  before any connection is attempted, with a message naming the
+  restriction — never a silent single-target fallback. This refusal
+  shape (`cmd_view`'s in `camera.py`) is the template every later
+  single-target command in this package copies verbatim.
+- **Destination/precondition checks run before any RPC that would
+  cost a resource.** `camera image`/`playfield image` check output
+  writability and terminal-attachment *before* calling `get_frame` —
+  "error before capture, not after" (UC-17) — so a doomed destination
+  never costs a camera a frame it can't keep. `camera config`/
+  `playfield config` validate the pushed document client-side
+  (`ConfigLoader.load_*`) before any RPC, so "a bad file never reaches
+  the daemon" (UC-23.S-4).
+- **Camera/playfield resolution is client-side, deliberately, not a
+  daemon shortcut.** `playfield image`/`view` take no camera
+  positional; `_common.resolve_playfield_camera` reads
+  `CameraState.playfield` links from a fresh `list_cameras()` call and
+  resolves silently only when exactly one linked, present camera
+  exists — zero or several is a reported ambiguity, never an arbitrary
+  pick. The daemon's own RPCs remain camera-addressed, always; there
+  is no daemon-side "the playfield's camera" convenience method
+  (`daemon.interfaces.Daemon.get_frame`'s own docstring, per
+  `playfield.py`'s module docstring).
+- **Errors are typed, never string-matched.** Every `cmd_*` catches
+  `aprilcam.errors.AprilCamError` and hands it to `_common.report_error`
+  — never re-derives fatality or reconstructs a message from text,
+  matching `errors.py`'s own stated rule that adapters dispatch on
+  exception type, not message content.
+- **Success/failure can be data, not an exception**, where a use case
+  calls for it: `camera calibrate`'s `CalibrationResult` with
+  `succeeded=False` is a normal RPC return value (missing ids or a
+  named degenerate-geometry reason), distinct from a precondition or
+  transport failure that *does* raise (`NoPlayfieldLinked`, unknown
+  camera, connection failure).
+- **Units convert at the CLI boundary and nowhere else.**
+  `tags.py`'s `--yaw-deg` <-> `MountParameters.mount_yaw_rad` conversion
+  happens only in `cli/tags.py`; the wire and every layer below it
+  stay in radians. Each CLI module owns its own small argv-shaping
+  helpers rather than sharing them across modules where the coupling
+  isn't worth it — e.g. `_unwritable_reason` is duplicated verbatim in
+  `camera.py` and `playfield.py` rather than factored into
+  `_common.py`, the same "each side owns its own small conversion"
+  posture `client/models.py` states for the proto boundary.
+- **Empty results are success, not silence.** Every listing prints an
+  explicit `(no cameras)` / `(no tags detected)` / `(no playfields)` /
+  `(no annotations)` / `(no matches)` / `(no registered tags)` /
+  `(no daemons found)` rather than nothing — a deliberate, repeated
+  convention so an empty daemon reads as "genuinely empty," not as a
+  command that silently produced no output.
 
 ## 4. Design
 
-**Dispatcher.** Deliberately not argparse-with-subparsers: a dict of `{name: {help, module}}` and string dispatch keeps startup at import-nothing speed and lets `--help` render from static metadata. The env-var re-export for global flags is the load-bearing design decision — it decouples the root parser from thirteen subcommand parsers at the cost of the `web` bind-flag collision noted above.
+**Argument parsing conventions.** Every daemon-targeting command
+accepts `-d`/`--daemon HOST` via `_common.add_daemon_option`; omitted
+means the local daemon. `-h` is reserved for `--help` everywhere,
+which is exactly why the daemon flag is `-d` and not something that
+would collide. Fan-out-eligible commands additionally get `--all` via
+`_common.add_all_option`; commands the fan-out table excludes simply
+never get the flag, so attempting it is argparse's ordinary
+unrecognised-argument error rather than a hand-rolled message.
+Camera/playfield/tag identity arguments are positional; flags are used
+for everything optional or modal (`--dump`, `--reset`, `--clear`,
+`--force`, `--dry-run`, `--base64`).
 
-**Daemon connection.** All subcommands share `connect_from_args`: `resolve_daemon_target` (client-owned four-level precedence) → host-code resolution → `DaemonControl.connect()` → probe. Failure surfaces as `DaemonNotFoundError` with start-the-daemon guidance; nothing in `cli/` ever spawns the daemon implicitly.
+**Output-format conventions.** Image-returning commands
+(`camera image`, `playfield image`) support three destinations: a file
+(`-o FILE`), base64 to stdout (`--base64`), or raw bytes to stdout
+(the default, refused against an attached terminal unless `--force`).
+`--all` combined with `camera image` is restricted to the base64
+destination only — a single `-o FILE` can't hold more than one
+daemon's frame, and concatenated raw binary from several daemons isn't
+a valid image in any format — refused up front with a message naming
+`--base64` as the alternative (`camera.py`'s
+`_cmd_image_all`/`cmd_image`, a documented exception carved out of the
+general "read-only commands fan out" rule, not an oversight). `--dump`
+on `camera config`/`playfield config` prints the live document as
+exact on-disk JSON (`json.dumps(..., indent=2, sort_keys=True)`) via
+the corresponding `Get*` RPC — the read half of a push/read pair
+sharing one positional argument and one noun, the same shape `--reset`
+uses for `camera config`.
 
-**`calibrate_cli.py`.** Loads the playfield definition registry from the *local* config root (`config_playfields_dir`), enumerates cameras via the daemon, warms up capture (retrying `UNAVAILABLE: no frame captured yet`), wraps the daemon in `_DaemonCapture` (a minimal `cv2.VideoCapture` mimic over `capture_frame`), and runs `calibrate_from_playfield_def` locally — writing `calibration.json` into the local `cameras_dir` and then `reload_calibration` on the daemon. This works only when the CLI runs on the daemon host (shared filesystem); it is the CLI half of the vision-boundary violation the v2 `Calibrate` RPC removes. A `--joint` two-camera mode calibrates a secondary camera from the primary's homography.
+**Error -> exit-code mapping.** Two exit codes cover every `cmd_*`
+outcome: `EXIT_OK = 0`, `EXIT_ERROR = 1` (`_common.py`). Argparse's own
+parse failures use its standard code 2, untouched by this package.
+Every typed `AprilCamError` maps to `EXIT_ERROR` via `report_error`,
+which prints `f"error: {exc}"` to stderr — `str(exc)` is exactly the
+message the error's own `__init__` already built (holder name,
+unknown-camera-plus-available-list, etc.), so no adapter ever
+re-derives or parses a message. `fan_out()` returns `EXIT_ERROR` if
+*any* discovered daemon failed to answer, even though the successful
+rows were still printed — so a script can detect a partial result —
+and `EXIT_OK` for the trivial "found zero daemons" case, which is
+success, not failure.
 
-**`view_cli.py`.** A self-contained tkinter application: connects via `connect_from_args` (with legacy `--unix-path`/`--tcp-port` back-compat), resolves the camera (alpha code, enum, or pattern), opens it via RPC, then runs two reader threads (image stream, tag stream) feeding queues drained by a tk `_poll` loop. Rendering delegates deskew/overlay drawing to `ui.PlayfieldDisplay`, seeded per-frame from the *stream's* published `playfield_corners`/`homography`/origin — the viewer holds no calibration of its own. Collapsible panels (`CollapsibleFrame`) lazily enable object detection and the paths panel; paths are read from the camera's local `paths.json` (daemon-written via `SetPaths`), another shared-filesystem assumption.
+**The `fan_out` helper** (`_common.py`) is the one piece of real logic
+in this package, because it's shared by nine different commands rather
+than because it does anything domain-specific: it calls
+`discovery.find_all()`, then, for each `DaemonInfo`, connects and
+calls the caller-supplied `call(daemon)`, rendering successes via
+`render(label, result)` and printing (not raising past) any individual
+`ConnectionFailed`. A `DiscoveryFailed` from `find_all()` itself aborts
+the whole command, since there's nothing left to iterate — distinct
+from "enumerated zero," which is a normal empty result.
+
+**Rejected alternative, recorded in code:** `daemon.py`'s module
+docstring records that `daemon status --all` was in-scope per
+`cli.md`'s general fan-out table but was deliberately deferred out of
+the sprint that first shipped fan-out, because there was no
+`daemon list` yet to make multi-daemon status especially useful, and
+that sprint's own discovery implementation couldn't find more than the
+local daemon anyway — "recorded here as a scope decision, not an
+oversight." `daemon list` (added later) needs no `-d`/`--all` flags at
+all, unlike every other command's default-single/opt-in-fan-out shape,
+because listing daemons is inherently "every daemon" — it reuses
+`fan_out()` unmodified and needed no new RPC or `.proto` change.
+
+**Rejected spelling, recorded in code:** `playfield tags` is the
+eventual, documented command-surface spelling for listing detected
+tags playfield-addressed (resolved client-side, mirroring
+`playfield image`/`view`), but it depends on `CameraState.playfield`
+links that don't exist until the config-service work lands. `camera
+tags <camera>` ships instead, camera-addressed like `camera image`,
+with the deferred spelling and the reasoning recorded directly in
+`camera.py`'s module docstring rather than silently improvised.
 
 ## 5. Interfaces
 
 ### Exposes
 
-- The `aprilcam` executable and `python -m aprilcam`: subcommands listed in §2; global flags `--host HOST` (hostname, IP, or host-code letter), `--port PORT`, `--agent [NAME]`, `-V/--version`. Exit codes: subcommand `main()` return value (0 default), 1 on unknown command or missing-dependency hint.
-- `cli._daemon.add_daemon_args(parser)` / `connect_from_args(config, args)` / `resolve_camera_code(camera_arg, config, args) -> (host, enum, slug) | None` — the shared connection surface for any new subcommand (and used by `server/mcp_server.main`).
-- `SUBCOMMANDS` / `DAEMON_COMMANDS` — the registration point for new commands and their install-hint classification.
+The `aprilcam` command, one subcommand tree per noun:
+
+```
+aprilcam daemon   start|stop|restart|status|list
+aprilcam camera   list|probe|image|tags|config|view|calibrate|locate
+aprilcam playfield list|config|image|view|annotations|where
+aprilcam tags     mount register|clear|list | generate
+aprilcam guide    [name]
+aprilcam mcp      [-d HOST]
+```
+
+Conventions shared across the whole surface (detailed in §4 and in
+`docs/design/use-cases/cli.md`'s "Global conventions" section, not
+repeated here): `-d`/`--daemon HOST` targeting (omitted = local);
+`--all` fan-out on read-only commands only; a camera is addressable by
+persistent registry number or slug; `playfield`-addressed commands
+that need a camera resolve it client-side rather than taking a
+positional. Every subcommand returns `EXIT_OK`/`EXIT_ERROR` (or
+argparse's own code 2 for a parse failure) and writes human-readable
+text to stdout/stderr — there is no machine-readable output mode
+(`--json`, etc.) anywhere in this package today.
 
 ### Consumes
 
-- `client/` — `DaemonControl`, `resolve_daemon_target`, host_codes store, stream consumers (view). Owning: client.
-- `server/mcp_server`, `server/web_server` — the `mcp` and `web` subcommands' targets. Owning: server.
-- `ui/PlayfieldDisplay` — viewer rendering (pulls in cv2). Owning: ui.
-- `calibration/` (`calibrate_from_playfield_def`, `calibrate_single`, `calibrate_secondary`) and `camera/` (registry, identity, `camutil.select_camera_by_pattern`, `camera_config`) — calibrate/cameras paths. Owning: calibration, camera.
-- `config.Config`, `guides.read_guide`. Owning: top-level.
+- **`client/`** (`docs/design/design.md` §3) — the only real
+  dependency, and the whole reason this package can stay thin:
+  `client.discovery.Discovery` (`connect`, `find_all`),
+  `client.lifecycle.DaemonLifecycle` (local-only process control),
+  `client.guides.Guides`. Every RPC-shaped call in this package is one
+  line into a `Daemon` handle `Discovery.connect()` returns.
+- **`daemon.interfaces`** — not the daemon implementation (`cli/`
+  never runs daemon code or touches cv2 through it), but the shared,
+  cv2-free `Daemon`/`DaemonStatus`/`MountRegistration` interface and
+  value types that both `client/` and this package type against.
+- **`config/`** — `config.interfaces.ConfigLoader`/`Feature`/
+  `CameraPosition`/`Directories` and `config.loader.ConfigLoader`, for
+  client-side document loading/validation before a push RPC, and for
+  `locate.py`'s on-disk `camera_position` write.
+- **`view/`** (`docs/design/design.md` §3) — `view.viewer.run_raw_view`
+  / `run_playfield_view`, the streaming windows `camera view`/
+  `playfield view` hand a connected `Daemon` to; this package's own
+  contribution is resolving the camera/daemon and reporting
+  `viewer.NoDisplayAvailable`/`errors.NotCalibrated` with a
+  command-specific pointer.
+- **`calibration.geometry`** — `locate.py` only, for
+  `solve_camera_geometry`/`ReferenceObservation` (§3's documented
+  exception).
+- **`tags.generator.TagGenerator`** — `tags generate` only, the one
+  offline, daemon-free capability in this package.
+- **`errors.py`** — the typed `AprilCamError` taxonomy every `cmd_*`
+  catches and hands to `report_error`.
+- **`mcp.server.build_server`** — `mcp.py` only, to construct and run
+  the MCP stdio server object.
 
 ## 6. Open Questions / Known Limitations
 
-- **BUG — `calibrate --joint` raises `NameError`**: the joint path references `field_width`/`field_height` (calibrate_cli.py ~lines 287–312) which are never assigned anywhere in `main()` — the variables died when dimensions moved into the playfield definition. The single-camera path is unaffected. Fix or delete `--joint`; v2 makes the whole command a pure RPC orchestrator (spec §4.4).
-- **BUG — `aprilcam web` crashes at startup**: `web_cli.py` registers its own `--port`/`--host` (bind address) and then calls `add_daemon_args`, which registers `--host`/`--port` again → `argparse.ArgumentError: conflicting option string: --host` before any request is served (verified by execution). Additionally, its banner prints an `/mcp/sse` URL no route implements, and `create_app()` is called with no arguments, so daemon-connection flags would be dropped even if parsing succeeded. **v2 removes `web` entirely** (spec §4.9, §6) — delete rather than fix.
-- **`view` is not actually cv2-free**: `cli/__init__.py`'s comment classifies it as an OpenCV-free thin client, but `view_cli.main` imports `aprilcam.ui.display`, which imports cv2 at module level — on a base install this is a raw `ModuleNotFoundError` (view is not in `DAEMON_COMMANDS`). Resolved in v2: the daemon publishes the deskewed stream and the viewer's cv2 dependency disappears (spec §4.8).
-- **`calibrate` reads playfield definitions and writes calibration from/to local disk**, contradicting the daemon-as-rendezvous principle for remote daemons; v2 moves execution into the daemon behind a `Calibrate` RPC (spec §4.4).
-- **v2 layout changes**: `view_cli.py` + the `ui/` draw helpers become the `view/` subsystem (spec §4.8); `web` is deleted; the remaining commands stay thin daemon clients under `cli/` (spec §4.9); `homocal`-era leftovers referenced from calibration go with spec §6.
+- **No machine-readable output mode.** Every command prints
+  human-aligned text; there is no `--json`/`--format` flag anywhere in
+  this package, so scripting against `cli/` output means parsing the
+  same text a human reads (`fan_out`'s exit code is the one thing
+  designed for script consumption).
+- **`cli/` is not enforced cv2-free**, unlike `client/`, `view/`, and
+  `mcp/` (`tests/test_no_cv2_in_client_modules.py`'s
+  `_CV2_FREE_PACKAGES`). `locate.py`'s import of
+  `calibration.geometry` is today the one path by which cv2 enters the
+  `cli/` process (transitively, via that module's unrelated
+  `undistort_point`/`distort_point` helpers — `solve_camera_geometry`
+  itself never calls cv2). This is called out explicitly in
+  `locate.py`'s own docstring as accepted, not accidental, but it
+  means the vision-boundary guarantee for this package rests on
+  discipline and code review, not a test gate.
+- **`_unwritable_reason` is duplicated** between `camera.py` and
+  `playfield.py` rather than shared via `_common.py` — a deliberate
+  choice per each module's docstring, but it means the two copies can
+  drift if one is edited without the other.
+- **No structured logging or `--verbose`/`--quiet` flags.** All
+  output is the one fixed verbosity level baked into each `cmd_*`.
+- **`playfield tags`, the documented eventual spelling for
+  playfield-addressed tag listing, does not exist yet** — `camera tags
+  <camera>` is the shipped stand-in (§4's "rejected spelling," which
+  is really "deferred spelling"). Adding it later means retiring or
+  aliasing the camera-addressed form, an open design question this
+  package's code does not resolve.
+- **`playfield annotations` is list/clear only** — authoring
+  (`put`/`draw`) is Python-client-library-only by explicit scope
+  decision; there is no CLI path to author an annotation today.

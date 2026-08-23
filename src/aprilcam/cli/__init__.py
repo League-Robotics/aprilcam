@@ -1,257 +1,186 @@
-"""Unified CLI dispatcher for aprilcam."""
+"""``aprilcam`` — the single CLI entry point (spec §4.9).
 
+``pyproject.toml`` declares ``aprilcam = "aprilcam.cli:main"`` in
+``[project.scripts]``; this module is where that name resolves to, so
+an editable install (``pip install -e .``) gives a working ``aprilcam``
+command.
+
+Wires the ``daemon`` and ``camera`` subcommands (ticket 020-006,
+``cli/daemon.py`` / ``cli/camera.py``) into the ``-h``/``--help``-only
+stub ticket 001 left here, plus ``playfield`` (ticket 022-001,
+``cli/playfield.py``), ``tags`` (ticket 025-005, ``cli/tags.py``),
+``guide`` (ticket 025-007, ``cli/guide.py`` -- the one subcommand that
+deliberately never talks to a daemon; see that module's docstring), and
+``mcp`` (ticket 026-001, ``cli/mcp.py`` -- starts the MCP stdio server,
+UC-22).
+Each subcommand module owns its own argparse shape and dispatch
+functions; this module only assembles them and routes ``argv`` to
+whichever ``func`` argparse resolved — itself zero business logic, per
+``adapters.md``'s "adapters hold no authoritative state" rule.
+
+**Pipe safety (ticket 031-003, SUC-003).** ``main()`` is the single
+dispatch seam every subcommand's ``func(args)`` funnels through, so
+``BrokenPipeError`` handling lives here once rather than at each of the
+~20 individual ``print()`` call sites scattered across ``cli/*.py`` --
+see :func:`main`'s own docstring for the mechanism.
+"""
+
+from __future__ import annotations
+
+import argparse
 import os
+import signal
 import sys
+from importlib.metadata import PackageNotFoundError, version
+from typing import Optional, Sequence
+
+from aprilcam.cli import camera, daemon, guide, mcp, playfield, tags
 
 
-SUBCOMMANDS = {
-    "daemon": {
-        "help": "Manage the AprilCam daemon (start, status, stop)",
-        "module": "aprilcam.cli.daemon_cli",
-    },
-    "mcp": {
-        "help": "Start the MCP server",
-        "module": "aprilcam.server.mcp_server",
-    },
-    "taggen": {
-        "help": "Generate AprilTag or ArUco marker images (PDF or PNG)",
-        "module": "aprilcam.cli.taggen_cli",
-    },
-    "calibrate": {
-        "help": "Run playfield calibration for one or more cameras",
-        "module": "aprilcam.cli.calibrate_cli",
-    },
-    "cameras": {
-        "help": "List available cameras",
-        "module": "aprilcam.cli.cameras_cli",
-    },
-    "probe": {
-        "help": "Discover daemons and update the host/camera code store",
-        "module": "aprilcam.cli.probe_cli",
-    },
-    "config": {
-        "help": "Show the version and resolved configuration",
-        "module": "aprilcam.cli.config_cli",
-    },
-    "migrate-dirs": {
-        "help": "Move legacy co-located config files into the proper config_dir",
-        "module": "aprilcam.cli.migrate_dirs_cli",
-    },
-    "tags": {
-        "help": "Detect and list all ArUco and AprilTag markers on a camera",
-        "module": "aprilcam.cli.tags_cli",
-    },
-    "mobile": {
-        "help": "Manage the daemon's mobile-tag registry (register/clear/list)",
-        "module": "aprilcam.cli.mobile_cli",
-    },
-    "init": {
-        "help": "Configure MCP server entries for Claude Code and VS Code",
-        "module": "aprilcam.cli.init_cli",
-    },
-    "tool": {
-        "help": "List, inspect, and run MCP tools from the command line",
-        "module": "aprilcam.cli.tool_cli",
-    },
-    "view": {
-        "help": "Open a live view window fed by the AprilCam daemon",
-        "module": "aprilcam.cli.view_cli",
-    },
-    "web": {
-        "help": "Start the HTTP/WebSocket server with REST API and MCP SSE",
-        "module": "aprilcam.cli.web_cli",
-    },
-}
-
-
-# Subcommands that depend on the optional `aprilcam[daemon]` stack (OpenCV,
-# mcp, mss, websockets, fpdf2, ...). The base install is the lightweight
-# client only, so importing these — or their lazily-loaded heavy deps — can
-# raise ModuleNotFoundError. `init`, `tool`, `cameras`, `tags`, `view`, `mcp`,
-# and `web` are opencv-free thin clients and are omitted here so they do not
-# falsely print the "install aprilcam[daemon]" hint.
-DAEMON_COMMANDS = frozenset({"daemon", "taggen", "calibrate"})
-
-
-def _get_version():
+def _package_version() -> str:
+    """The installed ``aprilcam`` distribution version, read from
+    package metadata -- the same mechanism ``testdev/capture_matrix.py``
+    already uses, rather than ``aprilcam.__version__`` (a hardcoded,
+    stale placeholder never wired to the ``dotconfig``-managed version
+    that ``pyproject.toml`` actually carries). Falls back to
+    ``"unknown"`` for an editable/zipapp/frozen context where package
+    metadata isn't discoverable, so ``--version`` degrades gracefully
+    instead of crashing.
+    """
     try:
-        from importlib.metadata import version
         return version("aprilcam")
-    except Exception:
+    except PackageNotFoundError:
         return "unknown"
 
 
-def _print_help():
-    print(f"aprilcam {_get_version()}")
-    print()
-    print("usage: aprilcam <command> [options]")
-    print()
-    print("AprilCam -- AprilTag detection and generation toolkit")
-    print()
-    print("commands:")
-    for name, info in SUBCOMMANDS.items():
-        print(f"  {name:<12} {info['help']}")
-    print()
-    print("Run 'aprilcam <command> --help' for command-specific options.")
-    print()
-    print("global options (accepted before OR after the command):")
-    print("  --host HOST       Daemon hostname, IP, or single-letter host code (sets APRILCAM_DAEMON_HOST)")
-    print("  --port PORT       Daemon TCP port (sets APRILCAM_DAEMON_PORT)")
-    print()
-    print("flags:")
-    print("  --agent [NAME]    Print the AI-agent instructions guide (NAME: agent [default], robot)")
-    print()
-    print("Run 'aprilcam config' for resolved paths/values and 'aprilcam config --help'")
-    print("for configuration sources and the full list of APRILCAM_* variables.")
+#: Conventional Unix exit code for a process terminated by ``SIGPIPE``
+#: (128 + signal number) -- used whether the process is actually killed
+#: by the signal itself (see :func:`_reset_sigpipe_to_default`) or a
+#: ``BrokenPipeError`` reaches :func:`main`'s own handling instead
+#: (belt-and-suspenders path, e.g. platforms/contexts where the signal
+#: reset does not apply or the write already raced past it). ``13`` is
+#: ``SIGPIPE``'s POSIX value, used as the literal fallback on platforms
+#: (Windows) that have no ``signal.SIGPIPE`` at all -- this module never
+#: reaches that fallback there, since :func:`_reset_sigpipe_to_default`
+#: is a no-op and a plain ``print()`` to a closed handle raises
+#: ``OSError``, not ``BrokenPipeError``, on Windows anyway.
+_SIGPIPE_EXIT_CODE = 128 + getattr(signal, "SIGPIPE", 13)
 
 
-_HOST_FLAGS = {"--host", "--daemon-host"}
-_PORT_FLAGS = {"--port", "--daemon-port"}
+def _build_parser() -> argparse.ArgumentParser:
+    """The top-level ``argparse`` parser: ``-h``/``--help``, ``-V``/
+    ``--version`` (argparse's standard ``action="version"``, which
+    prints and exits before any subcommand dispatch runs), plus the
+    ``daemon``, ``camera``, ``playfield``, ``tags``, ``guide``, and
+    ``mcp`` subcommand trees."""
+    parser = argparse.ArgumentParser(
+        prog="aprilcam",
+        description=(
+            "AprilCam daemon control, camera management, and fiducial "
+            "tag generation."
+        ),
+    )
+    parser.add_argument(
+        "-V",
+        "--version",
+        action="version",
+        version=f"aprilcam {_package_version()}",
+    )
+    parser.set_defaults(func=None)
+    subparsers = parser.add_subparsers(dest="command", metavar="<command>")
+    daemon.add_subparser(subparsers)
+    camera.add_subparser(subparsers)
+    playfield.add_subparser(subparsers)
+    tags.add_subparser(subparsers)
+    guide.add_subparser(subparsers)
+    mcp.add_subparser(subparsers)
+    return parser
 
 
-def _extract_global_flags(args: list[str]) -> tuple[list[str], str | None, str | None]:
-    """Scan *args* for root-level ``--host``/``--port`` flags in any position.
+def _reset_sigpipe_to_default() -> None:
+    """Restore ``SIGPIPE``'s default disposition on POSIX, undoing
+    CPython's own startup behaviour of ignoring it (``SIG_IGN``) so
+    that a write to a pipe with no reader raises ``BrokenPipeError``
+    instead of being ignored outright.
 
-    Removes matched flag+value pairs from *args* and returns the remaining
-    list along with the extracted host and port values (or ``None`` if not
-    provided).
-
-    Handles both ``--host VALUE`` and ``--host=VALUE`` forms for all four
-    accepted flag names (``--host``, ``--daemon-host``, ``--port``,
-    ``--daemon-port``).
-
-    Args:
-        args: Raw argument list (``sys.argv[1:]``).
-
-    Returns:
-        ``(remaining, host, port)`` where *remaining* is *args* with the
-        global flags stripped, and *host* / *port* are the extracted values
-        or ``None``.
+    Resetting to ``SIG_DFL`` here gives ``aprilcam`` the conventional
+    Unix-tool behaviour: the OS can kill the process directly on a
+    broken-pipe write, before any Python-level exception machinery (or
+    interpreter-shutdown stdout flush) ever runs -- no traceback is
+    possible in that path because no Python code runs at all. This is
+    belt-and-suspenders alongside :func:`main`'s own ``except
+    BrokenPipeError`` handling, which still catches the case where a
+    ``BrokenPipeError`` reaches Python anyway (e.g. the write races
+    past the signal, or a context that does not deliver the signal the
+    same way). A no-op on Windows, which has no ``SIGPIPE`` at all --
+    hence the ``getattr`` guard rather than a bare ``signal.SIGPIPE``
+    reference.
     """
-    remaining: list[str] = []
-    host: str | None = None
-    port: str | None = None
-    i = 0
-    while i < len(args):
-        token = args[i]
-
-        # -- host flags (--host VALUE or --host=VALUE) ---------------------
-        matched_host = False
-        for flag in _HOST_FLAGS:
-            if token == flag:
-                if i + 1 < len(args):
-                    host = args[i + 1]
-                    i += 2
-                    matched_host = True
-                    break
-                else:
-                    i += 1
-                    matched_host = True
-                    break
-            if token.startswith(flag + "="):
-                host = token[len(flag) + 1:]
-                i += 1
-                matched_host = True
-                break
-        if matched_host:
-            continue
-
-        # -- port flags (--port VALUE or --port=VALUE) ---------------------
-        matched_port = False
-        for flag in _PORT_FLAGS:
-            if token == flag:
-                if i + 1 < len(args):
-                    port = args[i + 1]
-                    i += 2
-                    matched_port = True
-                    break
-                else:
-                    i += 1
-                    matched_port = True
-                    break
-            if token.startswith(flag + "="):
-                port = token[len(flag) + 1:]
-                i += 1
-                matched_port = True
-                break
-        if matched_port:
-            continue
-
-        remaining.append(token)
-        i += 1
-
-    return remaining, host, port
+    sigpipe = getattr(signal, "SIGPIPE", None)
+    if sigpipe is not None:
+        signal.signal(sigpipe, signal.SIG_DFL)
 
 
-def main(argv=None):
-    """Entry point for the aprilcam CLI."""
-    args = argv if argv is not None else sys.argv[1:]
+def _handle_broken_pipe() -> int:
+    """Handle a ``BrokenPipeError`` raised by a subcommand's
+    ``func(args)`` -- the standard Python idiom for a CLI piped into a
+    truncating consumer (``| head``, a killed downstream pipeline, ...).
 
-    if not args or args[0] in ("-h", "--help"):
-        _print_help()
-        sys.exit(0)
-
-    if args[0] in ("-V", "--version"):
-        print(f"aprilcam {_get_version()}")
-        sys.exit(0)
-
-    if args[0] == "--agent":
-        guide_name = args[1] if len(args) > 1 else "agent"
-        from aprilcam.guides import read_guide
-        content = read_guide(guide_name)
-        if content is None:
-            available = "agent, robot"
-            print(
-                f"aprilcam: unknown guide '{guide_name}'. Available: {available}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        print(content)
-        sys.exit(0)
-
-    # Extract global --host/--port flags from ANY position in argv and expose
-    # them as environment variables so every downstream command picks them up
-    # via the existing Config resolver precedence.
-    args, _host, _port = _extract_global_flags(list(args))
-    if _host is not None:
-        os.environ["APRILCAM_DAEMON_HOST"] = _host
-    if _port is not None:
-        os.environ["APRILCAM_DAEMON_PORT"] = _port
-
-    if not args:
-        _print_help()
-        sys.exit(0)
-
-    command = args[0]
-    remaining = args[1:]
-
-    if command not in SUBCOMMANDS:
-        print(f"Unknown command: {command}")
-        _print_help()
-        sys.exit(1)
-
-    # Lazy import: only load the target module when actually dispatching.
-    import importlib
-
+    Redirects the ``stdout`` file descriptor to ``os.devnull`` before
+    returning: CPython's normal interpreter shutdown flushes
+    ``sys.stdout`` regardless of how ``main()`` returns, and without
+    this redirect that flush would itself raise a second
+    ``BrokenPipeError`` against the still-broken pipe -- which CPython
+    reports as "Exception ignored in: ..." noise on stderr during
+    finalization, exactly the traceback-shaped output this ticket
+    exists to suppress. Best-effort: ``sys.stdout`` may not expose a
+    real file descriptor in some contexts (e.g. a test double standing
+    in for a broken pipe without a real one), in which case there is
+    nothing at the OS level to redirect and this is a no-op.
+    """
     try:
-        mod = importlib.import_module(SUBCOMMANDS[command]["module"])
-        rc = mod.main(remaining) or 0
-    except ModuleNotFoundError as exc:
-        # The base install ships only the lightweight gRPC client. The
-        # daemon/server subcommands — and the heavy libraries they import,
-        # eagerly or lazily — live in the `aprilcam[daemon]` extra. Translate
-        # the missing-module error into an actionable install hint instead of
-        # dumping a raw traceback.
-        if command in DAEMON_COMMANDS:
-            print(
-                f"aprilcam: the '{command}' command requires the daemon/server "
-                f"dependencies, which are not installed "
-                f"(missing module '{exc.name}').\n\n"
-                f"Install the full stack with one of:\n"
-                f"    pipx install 'aprilcam[daemon]'\n"
-                f"    pip install 'aprilcam[daemon]'",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        raise
-    sys.exit(rc)
+        target_fd = sys.stdout.fileno()
+    except (AttributeError, OSError, ValueError):
+        target_fd = None
+    if target_fd is not None:
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull_fd, target_fd)
+        finally:
+            os.close(devnull_fd)
+    return _SIGPIPE_EXIT_CODE
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """CLI entry point: parse *argv* and dispatch to whichever
+    subcommand function argparse resolved.
+
+    No subcommand at all (``aprilcam`` alone) prints top-level help and
+    returns 0 — an empty invocation is not a usage error. A subcommand
+    tree entered without a leaf command (e.g. ``aprilcam daemon`` with
+    no ``start``/``stop``/``status``) is handled by that subparser's
+    own ``incomplete_command`` default (``cli/_common.py``), which
+    returns non-zero.
+
+    Pipe safety (ticket 031-003, SUC-003): every subcommand's
+    ``print()`` calls funnel through this one dispatch point, so a
+    downstream consumer closing its read end early (``camera image
+    <camera> --base64 | head``) is handled once, here -- see
+    :func:`_reset_sigpipe_to_default` and :func:`_handle_broken_pipe`
+    for the two-layer mechanism.
+    """
+    _reset_sigpipe_to_default()
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    func = args.func
+    if func is None:
+        parser.print_help()
+        return 0
+    try:
+        return func(args)
+    except BrokenPipeError:
+        return _handle_broken_pipe()
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised via console script
+    sys.exit(main())

@@ -3,6 +3,7 @@ name: close-sprint
 description: Validates and closes a completed sprint — verifies tickets, merges branch, archives sprint
 ---
 
+
 # Close Sprint Skill
 
 This skill closes a completed sprint using the `close_sprint` MCP tool,
@@ -43,25 +44,99 @@ which handles the full lifecycle.
        main_branch="master",
        push_tags=True,
        delete_branch=True,
-       test_command="uv run pytest",  # or "" to skip tests
+       test_command="NONE",   # omit/default -- see below; or "SKIP" to skip tests
    )
    ```
 
    The `test_command` parameter controls how tests are run:
-   - Omit or `None`: runs `uv run pytest` (default)
-   - Custom string (e.g., `"npm test"`): runs that command
-   - Empty string `""`: skips tests entirely (non-Python projects)
+   - Omit, `None`, or the `"NONE"` sentinel: runs the **full suite with
+     coverage** — the same invocation as `just test-all`
+     (`uv run pytest -m 'slow or not slow' --cov=src/clasi
+     --cov-report=term-missing --cov-report=lcov:lcov.info`). This is
+     deliberately *not* a bare `uv run pytest` (032/008: default
+     `addopts` now filters out `@pytest.mark.slow` tests and carries no
+     coverage flags, so a bare `uv run pytest` is the fast developer
+     loop, not the full-suite gate — see `justfile`'s `test` vs.
+     `test-all` recipes).
+   - Custom string (e.g., `"npm test"`): runs that command instead.
+   - `"SKIP"`: skips tests entirely (non-Python projects, or a
+     deliberate, explicit escape hatch). This is the sentinel string
+     `"SKIP"`, not an empty string — an empty-string argument is
+     silently dropped by a Claude Code harness bug before this tool
+     ever sees it (sprint 030 ticket 005; see
+     `.claude/rules/tool-call-empty-args.md`), so `""` can never reach
+     this parameter in practice.
 
-   The tool handles internally:
+   This is the sprint's **only** full-suite test execution (031/008) —
+   see `instructions/software-engineering.md`'s Testing Discipline
+   section for the canonical statement of that fact. Programmer agents
+   run only their own ticket's scoped tests during execution; neither
+   `execute-sprint` nor `sprint-review` run the suite a second time
+   before handing off here.
+
+   **You should not need `test_command="SKIP"` in the normal flow.** If
+   the suite already passed for the exact commit you are closing —
+   whether from a moment ago in this same call chain, or from an
+   earlier `close_sprint` attempt that failed at a later step — the
+   tool detects this itself (a HEAD-sha + test-command marker, recorded
+   only after a real passing run and only trusted when the current
+   working tree is clean) and reports a `repairs` entry like
+   `"skipped tests (already passed for HEAD <sha>...)"` instead of
+   re-running. Reach for `SKIP` only for a genuine non-Python project
+   or another case where running tests here makes no sense — never as
+   a way to avoid a redundant-feeling real run; the marker already
+   handles that honestly, without asking you to assert something the
+   tool hasn't itself verified.
+
+   The tool handles internally, in this exact order:
    - Pre-condition verification with self-repair
    - Run tests (if test_command is provided)
    - Archive sprint directory to `sprints/done/`
    - Update state DB, release execution lock
+   - **Apply the sprint's design overlay** (opt-in only — see "Design
+     Overlay Apply at Close" below)
    - Version bump and git tag
    - Merge to master, push tags, delete branch
 
+## Design Overlay Apply at Close
+
+When `Project.design_docs_opt_in` is `True` and the sprint carries a
+`design/` overlay (`sprint.design_dir.exists()`), `close_sprint` applies
+the overlay to the canonical `docs/design/` doc set as one of its
+internal steps (`design_overlay_apply`), placed immediately after
+`sprint.archive()`/the DB update and **before** the version bump/tag
+step. Concretely it copies each overlay `.md` file (excluding
+`.diff.md` files) over its same-named canonical doc, then re-runs
+`clasi design validate` against the updated canonical set.
+
+**A failed apply or a failed post-apply validation blocks the version
+bump, tag, and merge** — `close_sprint` returns an error result at the
+`design_overlay_apply` step and does not proceed further, the same
+fail-closed pattern already used for a failed test run. No partially
+applied doc set is ever tagged as a release. Recovery follows the same
+shape as any other blocked close: read the error, fix the underlying
+issue (a missing canonical target, a validation failure), and re-run
+`close_sprint`.
+
+When opt-in is unset/`False`, or the sprint has no `design/` directory
+(trivial/compact sprint under opt-in, or an opted-out project), this
+step no-ops silently — behavior is identical to today's close, no
+`design/` overlay concept exists for that sprint.
+
 5. **Report result**: On success, report the version tag and merged
    branch. On error, report the blocker and recovery steps.
+
+6. **Verify post-close state**: On success, call `review_sprint_post_close`
+   (`ToolSearch` for `select:mcp__clasi__review_sprint_post_close` first —
+   it is deferred) and interpret its `{passed, issues[]}` result. This
+   confirms the sprint directory actually landed under `sprints/done/`,
+   every ticket ended `done` and in `tickets/done/`, and the repo is
+   back on `master`/`main` — the same read-only shape as
+   `review_sprint_pre_close`, just checked after the archive instead of
+   before it. Report any `issues` to the stakeholder as a post-close
+   discrepancy to investigate; do not attempt automated repair here.
+   Skip this step on an error result from step 5 — there is no
+   post-close state to verify yet.
 
 ## Issue Sweep at Close
 

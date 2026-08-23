@@ -1,151 +1,90 @@
-# Vision
+# vision/
 
-**Owner:** Eric Busboom · **Last reviewed:** 2026-07-29 · **Status:** in-flux
+**Owner:** Eric Busboom · **Last reviewed:** 2026-08-21 · **Status:** stable
 
 ---
 
 ## 1. Purpose
 
-Stateless, frame-level computer vision for the daemon pipeline: non-tag object
-detection (squares/cubes), color classification, and the OpenCV version shim
-that lets the same detection code run on both distro OpenCV 4.6 and pip 4.7+.
-The seam is *pure pixel work vs. stateful orchestration*: everything here
-takes a frame (plus optional homography/polygon context) and returns records —
-no ring buffers, no camera ownership, no persistence. It alone owns the
-question "what non-tag objects are in this frame, and what color are they."
+`vision/` is the stateless, daemon-only frame-vision layer: OpenCV image preprocessing and raw fiducial-marker detection. Its contract, stated identically across all three real modules, is **"pixels in, raw hits out."** Given a BGR frame (or an already-preprocessed grayscale image), it returns a detection-ready image, or a list of raw tag hits in pixel space, or a velocity/heading computed from a caller-supplied position history — nothing more.
+
+It is a subsystem boundary because it deliberately stops short of everything that turns a raw pixel hit into a system-meaningful fact:
+
+- It does not build a typed `TagId` (`aprilcam.types.TagId`) — `detector.py` returns family (`TagFamily`) and the family's native non-negative dictionary number as two separate fields, never composed.
+- It does not reorder detected corners to design.md §6's boundary/hat convention (front-left, front-right, back-right, back-left) — it returns them in the detector's native order and documents (with verification evidence) that this happens to already match the convention under a stated mounting assumption, but performing that composition is explicitly out of scope.
+- It does not know about calibration, world coordinates, mount correction, or confirmation streaks (phantom-detection filtering) — those all live in `daemon/detection.py`.
+- It has no `-(N+1)` ArUco/AprilTag id-collision encoding — the hazard that encoding existed to dodge cannot occur here because `Detection.family` carries the type explicitly.
+
+That composition work — pixels → typed `TagId` → world coordinates → `TagRecord` — belongs to `daemon/detection.py` (`DetectionEngine.run_burst`), per dev-plan Stage 5's framing of this module as "the last layer where pixels are a legitimate output." `vision/` owns exactly two things: turning a raw frame into something a detector can decode reliably, and decoding it.
 
 ## 2. Orientation
 
-Three modules today:
+Four real modules, ~810 lines total, **no `interfaces.py`** — confirmed by directory listing (`__init__.py`, `aruco_compat.py`, `detector.py`, `motion.py`, `pipeline.py`; no `interfaces.py` present). Unlike every other subsystem in the map (`daemon/`, `camera/`, `calibration/`, `client/`, `config/`, `playfield/`, `tags/` all have one), `vision/` is plain functions and one plain class — nothing here is a behavioral base class implementations derive from, because there is exactly one implementation and no polymorphism boundary to declare. `__init__.py` is empty (0 bytes) — no re-export surface; callers import from the submodules directly (`aprilcam.vision.detector`, `aprilcam.vision.pipeline`, `aprilcam.vision.motion`).
 
-- **`objects.py`** — the detection dataclasses and the square detector.
-  `ObjectRecord` (frozen dataclass: pixel center, bbox, area, optional
-  world_xy, color, type, confidence) is the lingua franca for every object
-  producer/consumer. `FrameResult` wraps a frame's tag list plus `.objects`,
-  `.timestamp`, `.frame_index`. `SquareDetector` finds square-ish bright
-  contours on a dark field. `ObjectFuser` merges B&W-camera geometry with
-  color-camera color labels. `ColorCameraThread` is a daemon-only ~5 fps
-  second-camera sampling thread.
-- **`color_classifier.py`** — `LABColorClassifier` (per-color Gaussian models
-  in CIELAB, Mahalanobis winner-takes-all) and the legacy HSV-threshold
-  `ColorClassifier`.
-- **`aruco_compat.py`** — `make_aruco_detector`, the 4.6↔4.7+ ArUco API shim.
-  Every ArUco/AprilTag detector construction in the codebase goes through it.
+- **`pipeline.py`** (254 lines) — a named sequence of pure `image -> image` preprocessing stages (`to_grayscale`, `flatten_illumination`, `apply_clahe`, `sharpen`), plus `downscale_with_rescale` (the one stage that changes coordinate space, returning `image -> (image, Rescale)`), composed by `run_pipeline(image_bgr, PipelineConfig) -> (gray, Rescale)`. Fixed stage order: grayscale → downscale → illumination flattening → CLAHE → sharpen.
+- **`detector.py`** (323 lines) — `TagDetector`, a stateless AprilTag-36h11 + ArUco-4x4 detector. Built once per `DetectorConfig` (prebuilds one tuned `ArucoDetector` per family in `__init__`); `detect(gray, scale=1.0) -> list[Detection]` holds no per-call state.
+- **`motion.py`** (178 lines) — **not image-based motion/object detection.** It is pure kinematics: `compute_motion(history)` takes a chronological sequence of `(timestamp, WorldPoint)` pairs a caller already has and returns `(velocity, speed, heading_rad)` via a two-point finite difference. It has no dependency on frames, pixels, `pipeline.py`, or `detector.py` — its only import from this codebase is `aprilcam.types.WorldPoint`. (The MCP tool named `get_objects` and any color/contour "object detection" surface are not implemented anywhere in `src/aprilcam/vision/` or elsewhere in the tree today — there is no `ObjectRecord`/`detect_objects` code to find. If a sprint-planning document describes `motion.py` as "motion/object detection," that description does not match this module's actual content.)
+- **`aruco_compat.py`** (54 lines) — an OpenCV ArUco API compatibility shim. `make_aruco_detector(dictionary, params)` returns something exposing a uniform `detectMarkers(image) -> (corners, ids, rejected)` on both OpenCV 4.6 (Ubuntu 24.04's distro `python3-opencv`, free-function API only) and 4.7+ (object-oriented `cv2.aruco.ArucoDetector`). `cv2` is imported lazily inside its functions so cv2-free callers can import the module without pulling in OpenCV.
 
-Flow: the daemon pipeline hands a grayscale frame (plus current tag corners,
-playfield polygon, homography) to `SquareDetector.detect`; optionally a color
-camera thread classifies frames and feeds `ObjectFuser`, which stamps color
-names onto the B&W detections by world-coordinate proximity.
+**Deliberate absence of any cross-import between `pipeline.py` and `detector.py`.** Neither module imports the other. `detector.py`'s module docstring states this explicitly as a design decision (mirroring sprint architecture's "changes independently" module boundary): the two modules are "independently-testable, independently-reusable stages." The one fact that must cross the seam — how much a caller downscaled the image before handing it to `detect` — travels as a bare `float` (`scale`), not as a `Rescale` import. `Rescale`'s own docstring in `pipeline.py` sanctions this: "`Rescale.scale` divides directly into an `(N, 2)` corner array for the batch case," so a caller passes `rescale.scale` (or `1.0` when no pipeline ran) and that number is the entire contract between the two modules. Composition is the caller's job — verified identically in both real call sites (`daemon/detection.py:701-703` and `calibration/calibration.py:1455`): `gray, rescale = run_pipeline(frame, config); detections = detector.detect(gray, scale=rescale.scale)`.
 
 ## 3. Constraints and Invariants
 
-- **`FrameResult` subclasses `list`** so `isinstance(result, list)` holds and
-  existing tag-list consumers work unmodified while new consumers read
-  `.objects` / `.timestamp`. Changing it to a plain dataclass silently breaks
-  every caller that iterates the result as a tag list.
-- **`aruco_compat` exists because the Pi must stay on distro OpenCV 4.6** —
-  the Ubuntu `python3-opencv` build has GStreamer support (needed for the
-  libcamera capture backend) that pip wheels lack. Never "clean up" call
-  sites to use `cv2.aruco.ArucoDetector` directly; that breaks the Pi.
-  cv2 is imported lazily inside the shim so cv2-free modules can import it.
-- **`ColorCameraThread` is daemon-only** — it opens `cv2.VideoCapture`
-  directly and therefore may only run inside the process that owns the
-  hardware (the single-camera-owner rule). It must never be reachable from
-  MCP or CLI paths.
-- **`ObjectRecord` is frozen** — fusion uses `dataclasses.replace`, never
-  mutation. Records may be shared across threads (fuser map ↔ pipeline).
-- **Illumination flattening is division, not subtraction**
-  (objects.py:108-115): illumination is multiplicative, so dividing by the
-  Gaussian-blurred low-frequency field recovers reflectance — a cube in a
-  glare zone and one in shadow threshold identically. A subtractive high-pass
-  reintroduces the lighting dependence.
-- **`LABColorClassifier` exists for the colors HSV cannot separate** —
-  near-white yellow, dark black, low-saturation magenta. Winner-takes-all
-  over all models (including the optional `__background__` model) is what
-  prevents two colors claiming the same region; per-color independent
-  thresholding regresses that.
-- **Stateless-per-frame is the contract** — the only caches are advisory
-  (`SquareDetector._known_tag_corners` for flicker-proof tag exclusion,
-  `ObjectFuser._color_map` with staleness expiry). Nothing here may hold
-  camera handles (ColorCameraThread excepted, see above) or frame history.
+- **No dependency between `pipeline.py` and `detector.py`.** Enforced by omission (neither imports the other) and stated as a named rule in both module docstrings. Consequence of violating it: a change to preprocessing internals would force a change to detection internals (or vice versa), destroying the "changes independently" property the split exists to provide, and would make the two modules untestable in isolation.
+- **Purity and statelessness.** Every function in `pipeline.py` is `image -> image` (or `image -> (image, Rescale)`): no camera access, no threading, no ring buffers, no globals, no clock/file reads. Same array in always produces the same array out. `TagDetector.detect` is likewise stateless per call — the same grayscale image always produces the same output independent of call history; only construction-time state (the prebuilt per-family `ArucoDetector` objects) is retained, purely as a performance optimization, never as behavior-affecting memory. `motion.py`'s `compute_motion` is a pure function of its `history` argument.
+- **No `-(N+1)` ArUco/AprilTag id encoding.** v1 stored ArUco marker N as tid `-(N+1)` in one shared int-keyed dict to dodge collisions with AprilTag ids in that same dict. `detector.py`'s docstring names this a "leak-prone representation" (referencing sprint 021's Architecture Decision 2, which replaced it) and states it is "deliberately absent" here: `Detection.family` carries `TagFamily` explicitly, so AprilTag 5 and ArUco 5 are structurally distinguishable and `Detection.number` is always non-negative. Consequence of violating it: reintroducing exactly the collision hazard the type-carrying `Detection` design exists to eliminate.
+- **Verified corner-order / boundary-hat convention.** `detector.py`'s `Detection.corners` are returned in the detector's *native* order, not reordered — but that native order is empirically documented (not assumed) to already match design.md §6's `(front-left, front-right, back-right, back-left)` convention, under the assumption that tags are physically mounted with their canonical print orientation facing "front." See §4 for the verification method. Consequence if the convention is violated in the real world (a tag mounted with an arbitrary rotation relative to "front"): downstream "front" tracking silently reads the wrong edge as the tag's face — this is exactly why the docstring flags it as "a documented convention, not a law of physics," dependent on physical assembly outside this module's control.
+- **Detector-tuning vs. preprocessing-tuning fields never mix.** `DetectorConfig` (in `detector.py`) is explicitly scoped to detector-tunable parameters only; `PipelineConfig` (in `pipeline.py`) is scoped to preprocessing only. Both docstrings state the same rule from the opposite side: a new detector parameter must never require a pipeline change and vice versa. This is the same no-cross-import rule applied to configuration surface, not just code.
+- **`aruco_compat.py` deliberately duplicates, rather than imports, the family→dictionary mapping** that also lives in `tags/generator.py` — `tags/` is a standalone offline utility (design.md §4.10) and must not gain an import edge to this daemon-only detection module. `detector.py`'s own `_DICTIONARY_BY_FAMILY` module comment flags this duplication and says "if one changes, check the other" — an invariant maintained by convention/comment, not by the type system.
 
 ## 4. Design
 
-**SquareDetector.** Pipeline per frame: Gaussian-blur illumination estimate
-(kernel `highpass_ksize`, default 51) → divide out → binary threshold
-(default 155) → 3×3 morphological open → external contours → filter by area
-window (200–800 px²), aspect (<2.0), solidity (>0.7) → reject centers outside
-the playfield polygon shrunk inward by `border_margin` (excludes edge
-markers) → reject centers inside tag polygons expanded by `tag_margin`
-(default 1.8×, using both current-frame corners and the persistent cache via
-`update_known_tags`, so a tag that flickers out for a frame still masks its
-region) → optional exclusion point/radius → world_xy via homography when
-provided. Filters are ordered cheapest-first.
+**Preprocessing stage order is v1's actual execution order, preserved deliberately.** `pipeline.py` runs grayscale → downscale → illumination flattening → CLAHE → sharpen. v1 downscaled *before* running the highpass/CLAHE/sharpen block, not after — the module docstring calls this out explicitly: putting the most expensive per-pixel work (a large Gaussian blur for the highpass in particular) on the *smaller* image follows the "efficiency is a requirement, not a hope" rule for the camera pipeline. Reordering to downscale last "would be a plausible-looking but real behavioural change, not a refactor" — so it was not made.
 
-**Color fusion.** The B&W tag camera has the good geometry; the color camera
-has the color. `ObjectFuser` keys a map by world coordinates quantized to
-0.1 cm and matches within `match_radius` (5.0 cm, generous because the two
-cameras' calibrations disagree by a few cm). `clear_stale` expires entries
-after 5 s so a moved cube doesn't inherit a ghost color. `ColorCameraThread`
-runs classification at ~5 fps — color changes slowly; there is no reason to
-burn CPU at frame rate.
+**Illumination flattening ("highpass") algorithm and why.** `flatten_illumination` estimates the low-frequency illumination field with a large Gaussian blur (default kernel 51, odd-corrected if given even), then divides the image by that estimate and rescales around mid-grey 128. Rationale: AprilTag/ArUco detection depends on local black/white contrast, not absolute brightness, and a real playfield is rarely lit evenly — this stage makes a shadowed tag square and a well-lit one land at comparable intensity. CLAHE and sharpen are both off by default — CLAHE is an optional local-contrast boost for scenes the highpass stage alone does not flatten enough, not a stage every frame needs; sharpen (a fixed, never-parameterized 3×3 unsharp-mask kernel) is a tool for soft-focus cameras, not a universal step.
 
-**LABColorClassifier.** Calibration samples ROIs at operator-supplied pixel
-positions across a burst of frames, building per-color (mean, inverse
-covariance) in LAB with +0.5·I regularization. Classification computes the
-Mahalanobis distance from every pixel to every model, assigns each pixel to
-its nearest model, and thresholds that minimum (default 4.5); background
-pixels win the `__background__` model and are suppressed. Contours of each
-color mask become `ObjectRecord`s. `classify_at_point` answers "what color is
-here" from an ROI mean with a 3× relaxed threshold. The HSV `ColorClassifier`
-(8 named colors, red modeled as two hue ranges across the 180° wrap) is the
-zero-calibration fallback.
+**`downscale_with_rescale`'s exactness guarantee.** `scale = min(1.0, proc_width / original_width)` — never upscales; `proc_width <= 0` disables downscaling and returns the image unchanged with `Rescale(scale=1.0)`. The returned `Rescale` carries the *analytic* scale factor (before the integer rounding that picks actual output pixel dimensions), so the same value used to resize is the same value used to map coordinates back — the round trip is exact to floating-point precision rather than compounding a second rounding error on the way back. Resizing uses `cv.INTER_AREA`, OpenCV's recommended interpolation for shrinking.
+
+**`TagDetector`'s family-specific dictionary construction.** `_DICTIONARY_BY_FAMILY` fixes exactly two dictionaries — `DICT_APRILTAG_36h11` for `TagFamily.APRILTAG`, `DICT_4X4_50` for `TagFamily.ARUCO` — a narrower scope than v1's `family="all"` option covering four AprilTag families. `TagDetector.__init__` builds one tuned `ArucoDetector` per family up front (via `_build_family_detector`) and reuses it across every subsequent `detect` call, mirroring v1's own "avoid per-frame overhead" comment; `detect` iterates both prebuilt detectors every call (family-then-detection-order in the returned list — no other ordering guarantee is made).
+
+**Earned tuning constants, carried forward from v1's real-playfield tuning, not re-derived:**
+- Widened adaptive-threshold sweep: `adaptiveThreshWinSizeMin=3`, `Max=53`, `Step=4` — wider range, smaller step than OpenCV's defaults, applied unconditionally (never a config knob) — earned against uneven illumination/glare on real captures.
+- `april_min_wb_diff` (default 3.0), `april_min_cluster_pixels` (default 5), `april_max_line_fit_mse` (default 20.0) — AprilTag quad-detector thresholds, applied only where the installed OpenCV build exposes the corresponding attribute (`hasattr` guards, since 4.6 in particular predates some of them; the guard is carried from v1's own guard, not new caution).
+- `detectInvertedMarker = True` — unconditionally on, explicitly demoted from a v1 config toggle (`detect_inverted`) to "an earned constant, not a knob."
+
+**Rejected alternatives recorded in the code:**
+- Reordering the preprocessing stage sequence (downscale after highpass/CLAHE/sharpen instead of before) — rejected as a disguised behavior change, not a refactor.
+- Keeping `family`/`detect_inverted`/`detect_aruco_4x4` as `DetectorConfig` toggles (v1's shape) — rejected; family selection is fixed (36h11 + ArUco 4x4, always both, no `"all"` option) and inverted-marker detection is unconditionally on, per this sprint's explicit scope narrowing.
+- Importing `tags/generator.py`'s family→dictionary mapping into `aruco_compat.py`/`detector.py` (or vice versa) instead of duplicating it — rejected to avoid creating an import edge from the offline, standalone `tags/` utility into this daemon-only module.
+- A per-camera-adaptive `MIN_RELIABLE_DISPLACEMENT_CM` (derived from that camera's own measured `reprojection_error_cm`) instead of one fixed module constant — rejected in `motion.py` to keep the module's only dependency `(timestamp, WorldPoint)` pairs, with no `Calibration` object and no daemon import.
+
+**`motion.py`'s below-noise-floor fix.** Built inert in sprint 021 (no calibration subsystem existed yet, so every `TagRecord.world` was `None`), then activated for real in sprint 022 once calibration existed. Activation against real hardware surfaced a defect synthetic testing could not: a stationary tag's consecutive samples are never bit-identical (sub-pixel detector jitter), so naive `atan2` of that jitter produced a "confident-looking, wrong" heading. The fix separates magnitude from direction: `speed` (`hypot(vx, vy)`) is always reported honestly, even when tiny; `heading_rad` and `velocity` are instead `None` — undefined, never a fabricated zero — whenever two-sample displacement falls below `MIN_RELIABLE_DISPLACEMENT_CM = 0.5` cm. That threshold is derived, not guessed: ticket 022-003 measured this daemon's real calibration reprojection error at ~0.18–0.19 cm RMS; two independent samples combine that noise in quadrature to a ~0.25 cm floor, and the constant is set to roughly double that floor.
+
+**Corner-order verification method (empirical, not assumed).** This resolved sprint 021's Open Question 2. Method: render a synthetic tag via `cv2.aruco.generateImageMarker` (its canonical, un-rotated print orientation), composite it onto a plain canvas with a quiet-zone border, then apply known physical rotations (0°, 90°, 180°, 270°, and a non-axis-aligned 37°) before detecting — also exercised in `tests/aprilcam/vision/test_detector.py`. Finding: **OpenCV's ArUco/AprilTag corner order is stable relative to the marker's own printed pattern, not the image frame** — detected corner index 0 is always the marker's canonical top-left corner as drawn at zero rotation, regardless of physical rotation in the captured image. Confirmed identically for both families across all five tested rotations. Since neither family's bit pattern marks "this edge is front" to a human eye, "front" is necessarily a mounting convention. The module adopts: front = the marker's canonical top edge. Under that convention, the OpenCV-native corner order is *already* identical, index for index, to design.md §6's boundary/hat order — no reordering is needed anywhere in this pipeline for the convention to hold.
 
 ## 5. Interfaces
 
 ### Exposes
 
-- `ObjectRecord(center_px, bbox, area_px, world_xy=None, color="unknown", object_type="cube", confidence=1.0)` — frozen.
-- `FrameResult(tags, objects=None, timestamp=0.0, frame_index=0)` — is-a list
-  of tags; carries `.objects`, `.timestamp`, `.frame_index`.
-- `SquareDetector(min_area, max_area, threshold, tag_margin, border_margin, highpass_ksize)`
-  with `detect(gray, homography=None, tag_corners=None, exclusion_point=None, exclusion_radius=50, playfield_polygon=None) -> list[ObjectRecord]`
-  and `update_known_tags(tag_records)` (call every frame).
-- `ObjectFuser(match_radius=5.0)` — `update_colors(color_objects)`,
-  `fuse(bw_objects) -> list[ObjectRecord]`, `clear_stale(max_age_seconds=5.0)`.
-- `ColorCameraThread(camera_index, fuser, classifier, homography=None, fps=5.0)`
-  — `start()` / `stop()`. Daemon-only.
-- `LABColorClassifier(min_area, max_area, mahal_threshold)` —
-  `calibrate(frames_bgr, color_positions, roi_radius=12, background_positions=None, ...)`,
-  `classify(frame_bgr, homography=None) -> list[ObjectRecord]`,
-  `classify_at_point(frame_bgr, x, y, radius=15) -> str`.
-- `ColorClassifier(color_ranges=None, min_area, max_area)` — same `classify` /
-  `classify_at_point` shape; `DEFAULT_COLOR_RANGES` table.
-- `make_aruco_detector(dictionary, params)` — uniform
-  `detectMarkers(image) -> (corners, ids, rejected)` on OpenCV 4.6 and 4.7+.
+- **`pipeline.run_pipeline(image_bgr: np.ndarray, config: Optional[PipelineConfig] = None) -> tuple[np.ndarray, Rescale]`** — the composed preprocessing entry point. Runs the fixed stage sequence per `PipelineConfig` (`use_highpass`, `highpass_ksize`, `use_clahe`, `clahe_clip_limit`/`tile_grid_size`, `use_sharpen`, `proc_width`; `proc_width <= 0` disables downscaling). Returns the preprocessed grayscale image plus a `Rescale` (`Rescale(scale=1.0)` — a no-op — when downscaling did not run). Individual stage functions are also exported for callers that need an intermediate result.
+- **`detector.TagDetector.detect(gray: np.ndarray, *, scale: float = 1.0) -> list[Detection]`** — the raw-detection entry point. Takes an already-preprocessed single-channel grayscale image. **The `scale`/`Rescale` boundary**: the caller passes `rescale.scale` straight from `run_pipeline`'s returned `Rescale` (or leaves the default `1.0`) — this is the only piece of information that crosses from `pipeline.py`'s output to `detector.py`'s input. `detect` divides detected corner coordinates by `scale` internally so returned `Detection.corners`/`.center` are already in the caller's original frame's pixel space. Returns one `Detection` per hit (`family: TagFamily`, `number: int`, `corners: (4,2) float32 ndarray` in native order, `center: PixelPoint`), empty list when nothing found. `TagDetector(config)` construction is where the per-family `ArucoDetector`s are built; construct once per camera/session and reuse.
+- **`motion.compute_motion(history: Sequence[Tuple[float, WorldPoint]]) -> Tuple[Optional[WorldPoint], Optional[float], Optional[float]]`** — kinematics entry point, unrelated to pixels or frames. Takes oldest-to-newest `(timestamp_seconds, WorldPoint)` pairs; uses only the two most recent. Returns `(velocity, speed, heading_rad)`. `(None, None, None)` when fewer than 2 points or a zero-`dt` pair. Below `MIN_RELIABLE_DISPLACEMENT_CM` (0.5 cm), `velocity`/`heading_rad` are `None` while `speed` is still a real, honestly-reported float. `MIN_RELIABLE_DISPLACEMENT_CM` itself is exported and reused by `daemon/streaming.py` as its tag-stream change-detection publish threshold.
+- **`aruco_compat.make_aruco_detector(dictionary, params) -> ArucoDetector | _LegacyArucoDetector`** — internal-facing (used by `detector.py`) but exported for anything needing a uniform `detectMarkers` call regardless of installed OpenCV version.
+
+No object/motion-in-the-image-sense detection is exposed by this subsystem today — see §6.
 
 ### Consumes
 
-- OpenCV (cv2, hard import in objects/color_classifier; lazy in
-  aruco_compat), NumPy. Tag records passed in must expose `.id` and
-  `.corners_px` (see `aprilcam.core.detector`).
+Minimal, by design:
+
+- **`aprilcam.types`** — `TagFamily`, `PixelPoint` (used by `detector.py`); `WorldPoint` (used by `motion.py`). This is the only cross-package import anywhere in `vision/`.
+- **`cv2`/`numpy`** — external dependencies, daemon-only (design.md's principle 1 and the extras split); `aruco_compat.py` imports `cv2` lazily so cv2-free callers elsewhere in the tree can import that module without pulling in OpenCV.
+- Nothing from `daemon/`, `calibration/`, `camera/`, or `config/`. The dependency arrow runs the other way: `daemon/detection.py` imports `Detection`/`TagDetector` from `vision.detector`, `compute_motion` from `vision.motion`, and `PipelineConfig`/`run_pipeline` from `vision.pipeline`; `daemon/streaming.py` imports `MIN_RELIABLE_DISPLACEMENT_CM` from `vision.motion`; `calibration/calibration.py` independently imports `TagDetector` and `PipelineConfig`/`run_pipeline` for its own solve-time tag detection.
 
 ## 6. Open Questions / Known Limitations
 
-- **v2 consolidation:** the stateless detector/tracker/boundary code
-  currently in `core/` (detector, LK tracker, playfield boundary) moves into
-  this package, and the stateful per-camera pipeline moves into `daemon/`;
-  the duplicate second pipeline (`core/pipeline.py`, `core/motion.py`) is
-  removed (spec §4.3, §6). This package becomes the single home for
-  frame-level vision.
-- **Fusion is nearest-neighbor greedy** — two cubes closer together than the
-  calibration disagreement (~5 cm) can swap colors. Acceptable for current
-  playfields; revisit if object density grows.
-- **`ColorCameraThread` swallows all per-frame exceptions** (objects.py:304)
-  — deliberate (a flaky second camera must not kill fusion) but it hides
-  persistent failures; no health signal is surfaced.
-- **`SquareDetector._known_tag_corners` never expires** — a tag removed from
-  the field keeps masking its last region until recalibration/restart.
-  Harmless for static tag layouts; wrong if tags are frequently removed.
-- **LAB calibration is session-local** — models are not persisted; every
-  daemon restart requires re-calibration before color classification works.
+- **Corner-order convention is verified only synthetically.** The rotation test proves the OpenCV-native corner order tracks the printed pattern, not that any given real, physically-mounted tag was actually glued down with canonical print orientation facing "front." That is a physical assembly choice the module cannot see or verify.
+- **`motion.py`'s noise-floor threshold is a single fixed constant, not per-camera-adaptive.** `MIN_RELIABLE_DISPLACEMENT_CM` was derived from one camera's measured reprojection error and applied globally. A per-camera value derived from that camera's own `reprojection_error_cm` is flagged as a reasonable future refinement, not required to fix the defect at hand.
+- **No object/color/contour detection lives in this subsystem**, despite a stale sprint-planning description apparently expecting `motion.py` to cover "motion/object detection." As read, `motion.py` is pure world-position kinematics with zero pixel or frame involvement. Whatever backs the MCP `get_objects` tool is not implemented anywhere in `src/aprilcam/vision/` as of this review.
+- **AprilTag quad-detector tuning knobs are conditionally applied** (`hasattr` guards) because not every OpenCV build exposes them — behavior on a build lacking all three is untested drift risk, inherited unchanged from v1.
+- **`aruco_compat.py`'s family→dictionary duplication with `tags/generator.py`** is maintained by a code-comment convention, not by a shared source of truth or a test that would catch drift between the two mappings.

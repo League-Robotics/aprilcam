@@ -1,1805 +1,1470 @@
-"""Camera calibration types and workflow functions.
+"""``Calibrator``/``Calibration``: establish and hold one camera's
+pixel <-> world mapping (ticket 022-003).
 
-Contains :class:`FieldSpec`, :class:`CameraCalibration`, and all
-functions that drive the calibration workflow.  Pure homography math
-lives in :mod:`aprilcam.calibration.homography`.
+Implements ``calibration.interfaces.Calibrator.calibrate`` (UC-04,
+UC-15): multi-frame averaged ArUco detection (via ``vision/detector.py``
+from sprint 021, reused rather than reimplemented), id matching against
+the linked ``config.loader.PlayfieldDefinition``'s surveyed positions,
+all-or-nothing acceptance against ``PlayfieldDefinition.
+required_aruco_ids()``, homography solve, degenerate-geometry rejection,
+and ``CalibrationResult`` construction. The concrete ``Calibration``
+dataclass lives here too (next to what constructs it); its
+``to_world``/``to_pixel`` bodies delegate to ``calibration/geometry.py``'s
+pure math, per this ticket's split between "engine" (this module) and
+"point-conversion math" (``geometry.py``).
+
+**Camera frame access is handed in, never owned here** (sprint
+architecture's module boundary table: "Outside: camera frame access
+(frames are handed in)"). :class:`Calibrator` is constructed with a
+``capture_frames`` callable rather than opening cameras itself -- the
+daemon (``daemon/service.py``) is the one thing that resolves a camera
+and reads from it; this module only ever consumes whatever frames it is
+handed. This is also what makes
+:class:`~aprilcam.errors.NoPlayfieldLinked`'s "raised before any frame
+is captured" contract mechanically true rather than merely documented:
+:meth:`Calibrator.calibrate` checks the camera's playfield link via
+*its* injected ``get_camera_config`` callable and raises before
+``capture_frames`` is ever called, so a camera with no link causes
+*zero* calls into whatever backend ``capture_frames`` wraps
+(UC-15.S-2's acceptance criterion).
+
+**Archive pointers** (mined for approach, not ported wholesale --
+``specification.md`` §6 condemns v1's ``homocal`` CLI and its
+upper-left-origin corner table as a foot-gun, and neither is carried
+forward here): ``archive/src/aprilcam/calibration/calibration.py``'s
+``calibrate_from_playfield_def`` for the overall id-matching ->
+homography-solve shape (this module's homography solve goes directly
+from detected pixel positions to a playfield definition's *real*
+surveyed world coordinates -- never through an intermediate
+corner-relative table, which is exactly what keeps the origin-shift
+hazard structurally absent here, see ``geometry.py``'s docstring) and
+``_reprojection_rms`` for the reprojection-error formula;
+``archive/src/aprilcam/calibration/homography.py``'s
+``detect_all_tags``/``compute_homography`` for the multi-frame-average
+and DLT-solve approach. Not mined: ``_assign_corners_by_position``'s
+canonical upper-left-origin ID tables -- superseded entirely by
+matching detected ids directly against
+``PlayfieldDefinition.aruco_position``.
+
+**Lens distortion (sprint 030 ticket 001).** ``Calibration`` gains
+optional ``camera_matrix``/``dist_coeffs``; ``to_world``/``to_pixel``
+undistort/redistort via ``geometry.undistort_point``/``distort_point``
+when they are set. ``Calibrator.calibrate`` carries forward whatever
+lens model this camera's prior successful calibration already held
+(Design Rationale Decision 3 -- intrinsics survive a field move without
+being re-estimated) and, when one is known, undistorts every detected
+marker pixel *before* the homography solve and the reprojection-error
+measurement, both fed the identical undistorted point set -- v1's own
+earned lesson (``archive/.../calibration.py:1342-1346``) is that
+solving the homography from undistorted points while measuring RMS
+against a different (still distorted) set silently reports a healthy
+error for a solve that is not. This ticket lands the storage and
+solve-order mechanics only; *producing* intrinsics in the first place
+(``estimate_intrinsics``) is ticket 002.
+
+**Intrinsics estimation (sprint 030 ticket 002).** ``Calibrator.calibrate``
+gains ``estimate_intrinsics: bool = False``. When ``True``, this reuses
+the exact detection burst ``calibrate`` already performs, over whatever
+ground truth the linked playfield definition surveys (ArUco *and*
+AprilTag entries -- :meth:`_detect_averaged` now keeps both families,
+not ArUco alone), and runs ``cv2.calibrateCamera`` once, over that
+single view's points, via :func:`_estimate_intrinsics`.
+
+*The homography/intrinsics split.* An elevated feature
+(``Feature.height_cm > 0``) does not lie on the field plane, and the
+homography maps the field plane to pixels -- feeding an elevated point
+into the homography solve corrupts it exactly the way unmodelled
+parallax does (the error class sprint 029 exists to correct,
+reintroduced at calibration time). So: the homography solve and
+``reprojection_error_cm`` use **only** the coplanar (``height_cm == 0``)
+*ArUco* subset of ``matched_ids`` (never AprilTags -- those were never
+part of the homography before this ticket either); intrinsics
+estimation uses **every** surveyed-and-detected point, ArUco and
+AprilTag alike, with real 3D object points ``(x, y, height_cm)``.
+
+*Two degeneracies, not one.* v1's own archived
+``calibration/DESIGN.md:191`` names the first: a single coplanar view
+underconstrains a *free* ``cv2.calibrateCamera`` fit (fx, fy, cx, cy,
+k1, k2, k3, p1, p2 all free) -- v1's stored ``dist_coeffs [0.42, -2.43,
+...]`` is the concrete artefact. This ticket's own empirical
+investigation (documented at :func:`_sanity_check_intrinsics`) found a
+**second**, independent one specific to a near-exactly-nadir mount even
+under the *constrained* flag set below: for a camera looking straight
+down at a flat target, a surveyed point's image position depends on
+focal length (``fx``) and camera-to-plane distance (the solved
+extrinsic ``tvec[2]``) only through their *ratio* -- ``x_pixel =
+fx * X / Z + cx`` for fixed, known ``X`` -- so ``fx`` and ``Z`` trade off
+along an exactly flat ridge with **no** distortion coefficient
+involved at all. Synthetic sweeps (mined for this ticket, not shipped as
+a script) showed ``fx`` landing anywhere from ~20x to ~700x the
+camera's true focal length at 0 deg of mount tilt, converging to within
+a few percent of truth once genuine tilt (>= ~5 deg) or genuine
+elevated-feature z-spread (>= ~5 cm, even at *exactly* 0 deg tilt) gives
+the solve real 3D structure to anchor ``fx``/``Z`` against. Neither
+degeneracy is fixable by choosing better flags -- both are structural
+properties of what the single view actually contains -- so both are
+caught by :func:`_sanity_check_intrinsics` rejecting the *fitted
+coefficients themselves* (never a value judgement made before the fit
+runs) rather than assumed away.
+
+*Mode selection is graded, decided from the linked playfield's own
+surveyed features, never a per-call argument*: see
+:data:`MIN_ELEVATED_FEATURES_FOR_ELEVATED_MODE`/
+:data:`MIN_ELEVATED_Z_SPREAD_CM` for the concrete threshold and the
+evidence behind it (Open Question 6). ``k2`` stays fixed in the default
+coplanar-constrained model (Open Question 5) -- held-out validation
+(:func:`_held_out_split`) run during this ticket's own investigation
+showed freeing it made held-out residual *worse* on average (roughly
+4-6x, across 200 synthetic noise trials at a well-conditioned 8 deg
+mount tilt) and was only measurably better in ~1 trial in 5: with a
+single view and this few points, ``k2`` chases noise rather than
+capturing real signal.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+import math
+import threading
+import time
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+import cv2 as cv
 import numpy as np
 
-# OpenCV is needed only by the calibrate_* workflow functions (daemon/admin
-# paths). The data layer used by cv2-free thin clients — CameraCalibration,
-# FieldSpec, CameraPosition, parse_calibration_from_dict, to_camera_json, the
-# load/save helpers — does not touch cv2. Import it lazily so the MCP server,
-# web hub, and view client can import this module without OpenCV installed; the
-# cv.VideoCapture type hints are strings under `from __future__ import
-# annotations`, so they never evaluate at import time.
-try:
-    import cv2 as cv
-except ModuleNotFoundError:  # pragma: no cover - exercised only on thin installs
-    cv = None  # type: ignore[assignment]
+from aprilcam.calibration import geometry
+from aprilcam.calibration.interfaces import Calibration as _CalibrationBase
+from aprilcam.calibration.interfaces import CalibrationResult
+from aprilcam.calibration.interfaces import Calibrator as _CalibratorBase
+from aprilcam.config.interfaces import CameraConfig
+from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitionIface
+from aprilcam.config.loader import PlayfieldDefinition as _ConcretePlayfieldDefinition
+from aprilcam.errors import NoPlayfieldLinked
+from aprilcam.types import PixelPoint, TagFamily, WorldPoint
+from aprilcam.vision.detector import TagDetector
+from aprilcam.vision.pipeline import PipelineConfig, run_pipeline
 
-_log = logging.getLogger(__name__)
+__all__ = ["Calibration", "Calibrator"]
 
+logger = logging.getLogger(__name__)
+
+#: A fixed-length 3-tuple of floats -- ``Calibration.homography``'s row
+#: type. Named so it is declared once rather than repeated at every
+#: call site that builds one.
+_Row3 = Tuple[float, float, float]
+
+
+def _row3(values: Sequence[Any]) -> _Row3:
+    """*values* (any 3-element sequence) as an explicit ``_Row3`` --
+    lets mypy see a fixed-length tuple rather than the
+    variable-length ``tuple[float, ...]`` a generic
+    ``tuple(float(v) for v in values)`` produces, without an
+    ``# type: ignore``."""
+    a, b, c = values
+    return (float(a), float(b), float(c))
+
+#: v1's ``calibrate_from_playfield_def(num_frames=30)`` default -- an
+#: earned constant (real-camera averaging stability), mined as a
+#: starting point rather than re-derived. Callers that want a different
+#: count control it entirely through what their ``capture_frames``
+#: callable returns; this class never dictates a count itself (see the
+#: module/class docstrings).
+DEFAULT_CALIBRATION_FRAMES = 30
+
+#: Reprojection-error acceptance ceiling, in cm (ticket 023-006, UC-04's
+#: open question -- "completeness is necessary but may not be
+#: sufficient" -- now resolved). A solve where every required ArUco id
+#: was found (completeness holds) but whose RMS reprojection error
+#: exceeds this is still rejected: complete is not the same as good.
+#: **Confirmed 1.0 cm by the stakeholder** (sprint.md Decisions, Design
+#: Rationale Decision 4): ~5x headroom over the observed-good 0.179 cm
+#: live sprint-022 solve against the real ``main-playfield``, and 0.7%
+#: of that field's 134.3 cm width -- tight enough to catch a genuinely
+#: degenerate solve, loose enough not to fail an ordinary one. Named and
+#: overridable per :class:`Calibrator` instance
+#: (``max_reprojection_error_cm``) rather than hardcoded, since the
+#: exact number is a domain-tuning call, not a structural one -- trivial
+#: to retune once more field data exists.
+MAX_REPROJECTION_ERROR_CM = 1.0
+
+#: Staleness drift tolerance, in cm (ticket 023-007, sprint.md Decisions
+#: #2). **Confirmed 2.0 cm by the stakeholder**: ~11x the observed
+#: ~0.18 cm noise floor from the real sprint-022 solve, so ordinary
+#: detection jitter should not false-positive a still camera into
+#: reporting stale. Named and overridable
+#: (``daemon.detection.DetectionEngine.__init__``'s
+#: ``drift_tolerance_cm``), mirroring :data:`MAX_REPROJECTION_ERROR_CM`'s
+#: "domain-tuning call, not a structural one" framing above.
+DRIFT_TOLERANCE_CM = 2.0
+
+#: How often the opportunistic drift check may run per camera, in
+#: seconds (ticket 023-007, sprint.md Decision 5). **Confirmed 10 s.**
+#: This is a rate limit on repeated checks *while a camera is under
+#: active use* -- an unqueried camera already does zero extra work
+#: regardless of this number, since nothing calls
+#: ``daemon.detection.DetectionEngine.run_burst`` for it at all (no
+#: independent poll loop exists; see that module's docstring).
+DRIFT_CHECK_INTERVAL_S = 10.0
+
+#: Fewer than this many of a calibration's own matched static ArUco
+#: markers newly detected means "cannot verify," never "confirmed no
+#: drift" -- see :func:`compute_drift_cm`. Three is the same floor
+#: :func:`_is_collinear` uses for "can this even describe a 2D spread"
+#: (fewer points can trivially agree by chance), applied here to "is
+#: this reading trustworthy enough to accuse the calibration of having
+#: moved," not to a homography solve.
+MIN_DRIFT_CHECK_MARKERS = 3
+
+#: Below this ratio of the second-to-largest singular value of a
+#: (centred) correspondence point set, the points are treated as
+#: collinear -- see :func:`_is_collinear`.
+_COLLINEARITY_RATIO = 1e-3
+
+#: A homography whose determinant magnitude falls below this is treated
+#: as singular/degenerate rather than trusted numerically.
+_MIN_HOMOGRAPHY_DETERMINANT = 1e-12
 
 # ---------------------------------------------------------------------------
-# Exceptions
+# Intrinsics estimation (sprint 030 ticket 002) -- see the module
+# docstring's "Intrinsics estimation" section for the two degeneracies
+# these constants exist to police, and for the empirical evidence behind
+# each specific number.
 # ---------------------------------------------------------------------------
 
+#: The ``n_pts >= 6`` floor (sprint.md Design Rationale, Decision 2):
+#: fewer than this many ArUco+AprilTag points *surveyed by the playfield
+#: definition itself* (never points merely detected in-frame that the
+#: definition doesn't survey -- archive ``DESIGN.md``'s own warning)
+#: means ``estimate_intrinsics=True`` fails explicitly rather than
+#: attempting an even-more-underdetermined fit. v1's own earned floor
+#: (``calibrate_single``), mined as a starting point.
+MIN_SURVEYED_INTRINSICS_POINTS = 6
 
-class PlayfieldConfigError(Exception):
-    """Raised when a camera has no playfield configured or the def is missing."""
+#: Open Question 6's answer: the minimum count of surveyed-and-detected
+#: *elevated* (``height_cm > 0``) points below which the coplanar-
+#: constrained model is kept even when some elevation is present, never
+#: freed on the strength of a single elevated tag with a token height.
+#: Three, not one or two: the same "enough points to trust a spread
+#: claim" floor :data:`MIN_DRIFT_CHECK_MARKERS`/:func:`_is_collinear`
+#: already use elsewhere in this module for a 2D spread, extended here
+#: to a 3D one -- a single or a pair of elevated points cannot even be
+#: checked for mutual consistency.
+MIN_ELEVATED_FEATURES_FOR_ELEVATED_MODE = 3
+
+#: Open Question 6's other half: the minimum z-spread (max height_cm -
+#: min height_cm, across every point -- coplanar and elevated alike --
+#: fed to intrinsics estimation) below which the coplanar-constrained
+#: model is kept regardless of how many elevated points exist. Chosen
+#: with real margin above this ticket's own empirical finding: synthetic
+#: trials mixing 3 elevated points into main-playfield's real 11-point
+#: coplanar layout, at a mathematically exact 0 deg mount tilt (the
+#: single hardest case -- see the module docstring), converged to
+#: within a few percent of the true focal length/height at z-spreads as
+#: low as 3 cm; 5 cm keeps a full extra centimetre of headroom above
+#: that observed-good boundary, comfortably above any realistic
+#: surveying/detection noise floor on this project (sub-cm).
+MIN_ELEVATED_Z_SPREAD_CM = 5.0
+
+#: :func:`_estimate_intrinsics`'s fixed decision for Open Question 5:
+#: **not** freed by default. Held-out validation (this ticket's own
+#: investigation, not re-run at import time) fit the coplanar-
+#: constrained model at a well-conditioned 8 deg mount tilt across 200
+#: synthetic noise trials (4 noise levels x 50 seeds): freeing k2 raised
+#: mean held-out reprojection RMS by roughly 4-6x and was only
+#: measurably *better* than k1-only in ~18-28% of trials (worse in the
+#: rest) -- with a single view and this few points, k2 chases noise
+#: rather than capturing real signal. Not a per-instance/per-camera
+#: setting: the evidence is about this project's own point-count regime
+#: (main-playfield's 11 surveyed points, an 8/3ish fit/held-out split),
+#: not a property any one camera could override its way out of.
+_FREE_K2_IN_COPLANAR_DEFAULT = False
+
+#: :func:`_sanity_check_intrinsics`'s bound on ``|k1|`` (and, on the rare
+#: elevated-mode call where k2 is genuinely free, ``|k2|`` too).
+#: Generous relative to a real consumer/webcam lens (typically
+#: ``|k1| < 0.5`` -- this project's own falsifiable-check evidence,
+#: sprint.md's Problem section, describes a "roughly 2%" measured
+#: distortion effect, i.e. a modest lens, not a fisheye), while sitting
+#: comfortably below the wildly-implausible values this ticket's
+#: synthetic degenerate trials produced (k1 magnitudes from single to
+#: multiple thousands) and below v1's own stored k1 of 0.42 doubled
+#: over for margin.
+_MAX_ABS_DISTORTION_COEFF = 1.5
+
+#: :func:`_sanity_check_intrinsics`'s bound on ``|k2/k1|`` when k2 is
+#: free. v1's stored ``dist_coeffs [0.42, -2.43, ...]`` -- this ticket's
+#: own concrete "what the bound exists to reject" example -- has a ratio
+#: of ``abs(-2.43 / 0.42) ~= 5.79``; 3.0 rejects that with real margin
+#: while still tolerating a secondary radial term genuinely up to 3x the
+#: primary one.
+_MAX_K2_OVER_K1_RATIO = 3.0
+
+#: :func:`_sanity_check_intrinsics`'s bound on the fitted focal length
+#: (``camera_matrix[0][0]``) relative to the captured frame's width --
+#: the direct, most robust catch for this ticket's own newly-documented
+#: fx/depth degeneracy (module docstring): ordinary consumer/webcam
+#: lenses span roughly 0.3x (~100 deg+ wide) to 3.0x (narrow/telephoto)
+#: image width; a fit landing outside that band is not a plausible lens,
+#: it is the degenerate ridge. This ticket's synthetic near-nadir trials
+#: produced ratios from ~3x up to several hundred x -- comfortably
+#: outside this band -- while every well-conditioned trial (>= ~5 deg
+#: tilt, or elevated-mode z-spread present) landed inside it.
+_MIN_FX_TO_WIDTH_RATIO = 0.3
+_MAX_FX_TO_WIDTH_RATIO = 3.0
+
+CameraConfigLookup = Callable[[str], Optional[CameraConfig]]
+PlayfieldLookup = Callable[[str], Optional[PlayfieldDefinitionIface]]
+FrameSource = Callable[[str], Sequence[np.ndarray]]
+DetectorFactory = Callable[[], TagDetector]
+CalibrationLookup = Callable[[str], Optional["Calibration"]]
 
 
-# The default set of static (fixed) reference markers for a playfield.
-# Stakeholder-defined rule: static = all ArUco corner markers + AprilTag 1;
-# every other AprilTag is dynamic.  ``aruco_corners`` is a sentinel meaning
-# "all detected ArUco corners"; ``apriltag:N`` names a specific AprilTag id.
-# Recorded per-camera so each playfield can override the set.
-DEFAULT_STATIC_MARKER_IDS: List[str] = ["aruco_corners", "apriltag:1"]
+def _default_detector_factory() -> TagDetector:
+    return TagDetector()
 
 
-# ---------------------------------------------------------------------------
-# Data classes
-# ---------------------------------------------------------------------------
+@dataclass(frozen=True, kw_only=True)
+class Calibration(_CalibrationBase):
+    """Concrete ``calibration.interfaces.Calibration``.
 
+    ``homography`` is the solved pixel->world 3x3 matrix, stored as a
+    plain nested tuple of floats (row-major) rather than a
+    ``numpy.ndarray``: a numpy field would make this frozen dataclass's
+    auto-generated ``__eq__`` raise (numpy's ``==`` returns an
+    elementwise array, not a bool -- the same reason
+    ``vision.detector.Detection`` suppresses ``eq`` for its own numpy
+    field), and a tuple round-trips through JSON (:meth:`to_dict`/
+    :meth:`from_dict`) with no precision loss and no extra conversion
+    step. :meth:`to_world`/:meth:`to_pixel` convert back to an
+    ``ndarray`` internally, once per call, before delegating to
+    ``calibration/geometry.py``'s pure math.
 
-@dataclass
-class FieldSpec:
-    width_in: float  # left->right
-    height_in: float  # upper->lower
-    units: str  # "inch" or "cm"
-
-    @property
-    def width_cm(self) -> float:
-        if self.units == "inch":
-            return self.width_in * 2.54
-        return self.width_in
-
-    @property
-    def height_cm(self) -> float:
-        if self.units == "inch":
-            return self.height_in * 2.54
-        return self.height_in
-
-
-@dataclass
-class CameraPosition:
-    """Camera mounting position relative to the playfield.
-
-    All coordinates are in cm.  The origin is the playfield center.
-    Positive *x_offset* is to the right; positive *y_offset* is
-    forward/up (away from the near edge).  *height* is the vertical
-    distance above the playfield surface — used for parallax correction.
+    ``camera_matrix``/``dist_coeffs`` (sprint 030 ticket 001, Design
+    Rationale Decision 3) are this camera's optional lens model --
+    intrinsic matrix and distortion coefficients, the same shapes
+    ``cv2.calibrateCamera`` produces. Stored as plain tuples for the
+    identical reason ``homography`` is: JSON round-trip with no numpy
+    ``__eq__`` hazard. Both default to ``None`` -- "no lens model
+    known," today's exact behaviour and every ``calibration.json``
+    written before this ticket -- and are carried forward unchanged
+    across an ordinary recalibration rather than re-estimated
+    (:meth:`Calibrator.calibrate`); ticket 002 is what lets an operator
+    populate them in the first place via ``estimate_intrinsics``. They
+    live here, not on ``config.interfaces.CameraConfig``, precisely so
+    :meth:`to_world`/:meth:`to_pixel` stay pure methods over this
+    dataclass's own fields -- see sprint.md's Design Rationale Decision
+    3 for the alternative considered and rejected.
     """
 
-    x_offset: float = 0.0  # cm from field center, positive = right
-    y_offset: float = 0.0  # cm from field center, positive = up/forward
-    height: float = 0.0    # cm above playfield
+    homography: Tuple[_Row3, _Row3, _Row3]
+    matched_ids: Tuple[int, ...]
+    """ArUco ids the homography was solved from -- provenance, echoing
+    the ``CalibrationResult.matched_ids`` this calibration succeeded
+    with."""
+    reprojection_error_cm: Optional[float] = None
+    """RMS distance (cm) between each matched marker's surveyed world
+    position and where the solved homography reprojects its detected
+    pixel position. A stored :class:`Calibration` always has this at or
+    below whatever :class:`Calibrator` instance produced it was
+    configured with (``MAX_REPROJECTION_ERROR_CM`` by default, ticket
+    023-006) -- a solve above the threshold never reaches this
+    dataclass at all; see :meth:`Calibrator.calibrate`."""
+    camera_matrix: Optional[Tuple[_Row3, _Row3, _Row3]] = None
+    """This camera's 3x3 intrinsic matrix (``fx``, ``fy``, ``cx``,
+    ``cy``), if known. ``None`` means "no lens model" -- see the class
+    docstring."""
+    dist_coeffs: Optional[Tuple[float, ...]] = None
+    """This camera's distortion coefficients, if known -- ``(k1, k2,
+    p1, p2, k3)`` for the standard 5-coefficient model
+    ``cv2.calibrateCamera`` fits by default (ticket 002), though any
+    length OpenCV's distortion model accepts round-trips here
+    unchanged. ``None`` means "no lens model" -- see the class
+    docstring."""
 
+    def to_world(self, pixel: PixelPoint) -> WorldPoint:
+        if self._has_intrinsics():
+            pixel = geometry.undistort_point(
+                pixel, self._camera_matrix_array(), self._dist_coeffs_array()
+            )
+        return geometry.pixel_to_world(self._matrix(), pixel)
 
-#: Developer-owned keys that live in ``config.json``, NOT ``calibration.json``.
-#: ``calibration.json`` is regenerable; these static fields must never be
-#: duplicated into it. Enforced by :meth:`CameraCalibration.to_camera_json` and
-#: ``save_calibration_to_camera_dir`` (and verified by test_config_calibration_split).
-CONFIG_OWNED_CALIBRATION_KEYS = (
-    "device_name",
-    "resolution",
-    "settings",
-    "camera_position",
-    "static_marker_ids",
-)
+    def to_pixel(self, world: WorldPoint) -> PixelPoint:
+        pixel = geometry.world_to_pixel(self._matrix(), world)
+        if self._has_intrinsics():
+            pixel = geometry.distort_point(
+                pixel, self._camera_matrix_array(), self._dist_coeffs_array()
+            )
+        return pixel
 
+    def _matrix(self) -> np.ndarray:
+        return np.array(self.homography, dtype=np.float64)
 
-@dataclass
-class CameraCalibration:
-    """Stores everything needed to undistort + homography-transform a frame.
+    def _has_intrinsics(self) -> bool:
+        """Whether both halves of this camera's lens model are known --
+        ``camera_matrix``/``dist_coeffs`` are set (or cleared) together
+        by every producer in this codebase (:meth:`Calibrator.calibrate`,
+        :meth:`from_dict`), but :meth:`to_world`/:meth:`to_pixel` check
+        both rather than assume that invariant, so a hand-constructed
+        :class:`Calibration` with only one set behaves as "no lens
+        model" (today's behaviour) instead of raising."""
+        return self.camera_matrix is not None and self.dist_coeffs is not None
 
-    For cameras without barrel distortion, *camera_matrix* and
-    *dist_coeffs* are ``None`` and ``undistort()`` is a no-op.
+    def _camera_matrix_array(self) -> np.ndarray:
+        assert self.camera_matrix is not None  # guarded by _has_intrinsics
+        return np.array(self.camera_matrix, dtype=np.float64)
 
-    The optional *settings* dict stores hardware control values to apply
-    when the camera is opened.  Expected shape::
+    def _dist_coeffs_array(self) -> np.ndarray:
+        assert self.dist_coeffs is not None  # guarded by _has_intrinsics
+        return np.array(self.dist_coeffs, dtype=np.float64)
 
-        {
-            "program": "uvc-util",
-            "controls": {"exposure-time-abs": "10", "gain": "1", ...}
-        }
-    """
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize for ``calibration.json`` (daemon/service.py owns
+        the atomic file write; this is just the shape).
 
-    device_name: str
-    resolution: Tuple[int, int]  # (width, height)
-    homography: np.ndarray  # 3x3 pixel->world
-    camera_matrix: Optional[np.ndarray] = None  # 3x3 intrinsics
-    dist_coeffs: Optional[np.ndarray] = None  # (k1,k2,p1,p2,k3)
-    tags_used: int = 0
-    rms_error: float = 0.0
-    settings: Optional[Dict] = None  # hardware control settings
-    pipeline: Optional[Dict] = None  # DetectorConfig overrides
-    playfield_width_cm: float = 0.0
-    playfield_height_cm: float = 0.0
-    camera_position: Optional[CameraPosition] = None
-    corner_pixels: Optional[List[List[float]]] = None
-    """The four calibration-time ArUco corner pixel positions.
-
-    Ordered ``[UL, UR, LR, LL]`` as ``[[u, v], ...]``.  Captured at
-    calibration time and consumed by the static-camera deskew path
-    (sprint 011, ticket 005) to seed the deskew source polygon without
-    live corner detection.  ``None`` for records written before this
-    field existed.
-    """
-    static_markers: Optional[Dict[str, Dict[str, List[float]]]] = None
-    """Per-id pixel + world positions of the fixed reference markers.
-
-    Maps a string tag id to ``{"pixel": [u, v], "world": [x, y]}``.  The
-    static set is the ArUco corner markers plus AprilTag 1 (see
-    ``static_marker_ids``).  World positions are in real-world cm.  These
-    feed static-marker fill-in / movement-invalidation (sprint 011,
-    ticket 006).  ``None`` for legacy records.
-    """
-    static_marker_ids: Optional[List[str]] = None
-    """The configurable static-marker set recorded with this camera.
-
-    Defaults to ``aruco_corners + apriltag:1`` (see
-    :data:`DEFAULT_STATIC_MARKER_IDS`).  ``aruco_corners`` is a sentinel
-    meaning "all detected ArUco corner markers"; ``apriltag:N`` names a
-    specific AprilTag id.  ``None`` for legacy records.
-    """
-    calibrated_playfield: Optional[str] = None
-    """The playfield slug that was active when this calibration was recorded.
-
-    ``None`` for legacy records written before provenance tracking.
-    Used by :func:`load_calibration_from_camera_dir` to detect stale
-    calibrations when the camera's linked playfield has changed.
-    """
-    calibrated_camera: Optional[str] = None
-    """The camera slug that was active when this calibration was recorded.
-
-    ``None`` for legacy records written before provenance tracking.
-    """
-
-    def correct_world_for_height(
-        self, wx: float, wy: float, tag_height_cm: float
-    ) -> tuple:
-        """Apply parallax correction for a tag elevated above the playfield.
-
-        ``wx`` and ``wy`` must already be in the **A1-centred** coordinate
-        system (origin at AprilTag 1, x right, y up).  ``x_offset`` and
-        ``y_offset`` in *camera_position* are the camera's horizontal
-        displacement from being directly above A1; ``0, 0`` means centred.
-
-            wx_corrected = wx + (h/H) * (x_offset - wx)
-            wy_corrected = wy + (h/H) * (y_offset - wy)
-
-        Returns ``(wx, wy)`` unchanged when:
-        - *camera_position* is ``None``, or
-        - *camera_position.height* is ``0.0``, or
-        - *tag_height_cm* is ``0.0``.
-        """
-        if self.camera_position is None or self.camera_position.height == 0.0:
-            return wx, wy
-        if tag_height_cm == 0.0:
-            return wx, wy
-        H = self.camera_position.height
-        cx = self.camera_position.x_offset
-        cy = self.camera_position.y_offset
-        r = tag_height_cm / H
-        return (wx + r * (cx - wx), wy + r * (cy - wy))
-
-    def undistort(self, frame: np.ndarray) -> np.ndarray:
-        """Remove barrel distortion if calibration data is available."""
-        if self.camera_matrix is not None and self.dist_coeffs is not None:
-            return cv.undistort(frame, self.camera_matrix, self.dist_coeffs)
-        return frame
-
-    def pixel_to_world(self, u: float, v: float) -> Tuple[float, float]:
-        """Map a pixel coordinate to world (cm) coordinates."""
-        vec = self.homography @ np.array([u, v, 1.0])
-        return (float(vec[0] / vec[2]), float(vec[1] / vec[2]))
-
-    def to_dict(self) -> dict:
-        """Serialize to a JSON-compatible dict."""
-        d: dict = {
-            "device_name": self.device_name,
-            "resolution": list(self.resolution),
-            "homography": self.homography.tolist(),
-            "tags_used": self.tags_used,
-            "rms_error": self.rms_error,
+        ``camera_matrix``/``dist_coeffs`` are omitted entirely when
+        ``None`` -- never written as a JSON ``null`` placeholder
+        (mirrors ``config.interfaces.CameraConfig.to_dict``'s identical
+        treatment of its own optional ``camera_position``) -- so a
+        ``calibration.json`` written by a camera with no lens model is
+        byte-for-byte identical to what this method produced before
+        this ticket."""
+        data: Dict[str, Any] = {
+            "stale": self.stale,
+            "calibrated_at": self.calibrated_at,
+            "playfield": self.playfield,
+            "homography": [list(row) for row in self.homography],
+            "matched_ids": list(self.matched_ids),
+            "reprojection_error_cm": self.reprojection_error_cm,
         }
         if self.camera_matrix is not None:
-            d["camera_matrix"] = self.camera_matrix.tolist()
+            data["camera_matrix"] = [list(row) for row in self.camera_matrix]
         if self.dist_coeffs is not None:
-            d["dist_coeffs"] = self.dist_coeffs.tolist()
-        if self.settings is not None:
-            d["settings"] = self.settings
-        if self.pipeline is not None:
-            d["pipeline"] = self.pipeline
-        # Playfield real-world dimensions (cm).  These are the metric W×H the
-        # static-camera deskew warp consumes, so they must round-trip as cm.
-        if self.playfield_width_cm or self.playfield_height_cm:
-            d["playfield"] = {
-                "width": self.playfield_width_cm,
-                "height": self.playfield_height_cm,
-            }
-        if self.corner_pixels is not None:
-            d["corner_pixels"] = [list(p) for p in self.corner_pixels]
-        if self.static_markers is not None:
-            d["static_markers"] = {
-                str(tid): {
-                    "pixel": list(m["pixel"]),
-                    "world": list(m["world"]),
-                }
-                for tid, m in self.static_markers.items()
-            }
-        if self.static_marker_ids is not None:
-            d["static_marker_ids"] = list(self.static_marker_ids)
-        if self.calibrated_playfield is not None:
-            d["calibrated_playfield"] = self.calibrated_playfield
-        if self.calibrated_camera is not None:
-            d["calibrated_camera"] = self.calibrated_camera
-        return d
-
-    def to_camera_json(self) -> dict:
-        """Serialize for ``<camera_dir>/calibration.json``.
-
-        Excludes the developer-owned keys that now live in ``config.json``
-        (``device_name``, ``resolution``, ``settings``, ``camera_position``,
-        ``static_marker_ids``) so the calibration file stays regenerable and
-        does not duplicate static config. This is the canonical serializer for
-        the per-camera calibration file — use it instead of :meth:`to_dict`
-        anywhere that writes ``calibration.json`` (directly or via the daemon
-        ``SetCalibration`` RPC).
-        """
-        d = self.to_dict()
-        for key in CONFIG_OWNED_CALIBRATION_KEYS:
-            d.pop(key, None)
-        return d
+            data["dist_coeffs"] = list(self.dist_coeffs)
+        return data
 
     @classmethod
-    def from_dict(cls, d: dict) -> "CameraCalibration":
-        """Deserialize from a JSON-compatible dict.
+    def from_dict(cls, data: Dict[str, Any]) -> "Calibration":
+        """The inverse of :meth:`to_dict` -- ``daemon/service.py``'s
+        startup reload path. Raises ``KeyError``/``ValueError``/
+        ``TypeError`` on a malformed record; the daemon treats a corrupt
+        ``calibration.json`` as "no calibration held" rather than
+        failing to start (mirrors ``camera.registry.CameraRegistry``'s
+        "a corrupt file must never crash the daemon" stance).
 
-        New geometry fields (``playfield``, ``corner_pixels``,
-        ``static_markers``, ``static_marker_ids``) are optional; records
-        written before they existed load with these fields defaulting to
-        ``0.0`` / ``None``.
-        """
-        cm = np.array(d["camera_matrix"], dtype=float) if "camera_matrix" in d else None
-        dc = np.array(d["dist_coeffs"], dtype=float) if "dist_coeffs" in d else None
-
-        # Playfield block round-trips as real-world centimetres.  Fall back to
-        # legacy top-level field_*_cm keys when the playfield block is absent.
-        pf = d.get("playfield", {}) or {}
-        pw = float(pf.get("width") if pf.get("width") is not None
-                   else d.get("field_width_cm") or 0.0)
-        ph = float(pf.get("height") if pf.get("height") is not None
-                   else d.get("field_height_cm") or 0.0)
-
-        corner_pixels = d.get("corner_pixels")
-        if corner_pixels is not None:
-            corner_pixels = [[float(c) for c in p] for p in corner_pixels]
-
-        static_markers_raw = d.get("static_markers")
-        static_markers = None
-        if static_markers_raw is not None:
-            static_markers = {
-                str(tid): {
-                    "pixel": [float(c) for c in m["pixel"]],
-                    "world": [float(c) for c in m["world"]],
-                }
-                for tid, m in static_markers_raw.items()
-            }
-
-        static_marker_ids = d.get("static_marker_ids")
-        if static_marker_ids is not None:
-            static_marker_ids = [str(s) for s in static_marker_ids]
-
+        ``camera_matrix``/``dist_coeffs`` default to ``None`` when
+        absent -- true for every ``calibration.json`` written before
+        this ticket, which loads here unchanged (backward compatibility,
+        sprint.md's Migration Concerns: "no forced conversion, no schema
+        version bump")."""
+        homography_raw = data["homography"]
+        camera_matrix_raw = data.get("camera_matrix")
+        dist_coeffs_raw = data.get("dist_coeffs")
         return cls(
-            device_name=d.get("device_name", ""),
-            resolution=tuple(d["resolution"]) if "resolution" in d else (0, 0),
-            homography=np.array(d["homography"], dtype=float),
-            camera_matrix=cm,
-            dist_coeffs=dc,
-            tags_used=d.get("tags_used", 0),
-            rms_error=d.get("rms_error", 0.0),
-            settings=d.get("settings"),
-            pipeline=d.get("pipeline"),
-            playfield_width_cm=pw,
-            playfield_height_cm=ph,
-            corner_pixels=corner_pixels,
-            static_markers=static_markers,
-            static_marker_ids=static_marker_ids,
-            calibrated_playfield=d.get("calibrated_playfield"),
-            calibrated_camera=d.get("calibrated_camera"),
-        )
-
-
-# ---------------------------------------------------------------------------
-# Per-camera calibration directory helpers (new scheme)
-# ---------------------------------------------------------------------------
-
-
-def device_name_slug(device_name: str) -> str:
-    """Slugify a camera device name for use as a filename component.
-
-    ``"Arducam OV9782 USB Camera"`` → ``"arducam-ov9782-usb-camera"``
-    """
-    import re
-    return re.sub(r"[^a-z0-9]+", "-", device_name.lower()).strip("-")
-
-
-def calibration_file_for_camera(
-    calibration_dir: str | Path,
-    device_name: str,
-) -> Path:
-    """Return the path to the per-camera calibration file.
-
-    The filename is ``<device-slug>.json`` inside *calibration_dir*.
-    """
-    return Path(calibration_dir) / f"{device_name_slug(device_name)}.json"
-
-
-def load_calibration_from_dir(
-    device_name: str,
-    calibration_dir: str | Path,
-) -> Optional["CameraCalibration"]:
-    """Load calibration for *device_name* from a per-camera directory.
-
-    Reads ``<calibration_dir>/<device-slug>.json``.  Returns ``None``
-    if the file does not exist or cannot be parsed.
-
-    The file must contain at minimum ``"homography"``.  Optional fields
-    ``"field_width_cm"`` and ``"field_height_cm"`` are ignored here but
-    present in the file for operator reference.
-    """
-    cal_file = calibration_file_for_camera(calibration_dir, device_name)
-    if not cal_file.exists():
-        return None
-    try:
-        data = json.loads(cal_file.read_text())
-        # Per-camera file has the camera data at the top level (no "cameras" nesting).
-        data.setdefault("device_name", device_name)
-        return CameraCalibration.from_dict(data)
-    except Exception:
-        return None
-
-
-def load_calibration_from_camera_dir(
-    camera_dir: str | Path,
-    camera_config: "dict | None" = None,
-    playfield_def: "object | None" = None,
-    config_dir: "str | Path | None" = None,
-) -> Optional["CameraCalibration"]:
-    """Load calibration from ``<camera_dir>/calibration.json``.
-
-    Returns ``None`` if the file does not exist or cannot be parsed.
-
-    New fields populated from the JSON (all optional / backward-compatible):
-
-    - ``playfield_width_cm`` / ``playfield_height_cm``: read from
-      ``data["playfield"]["width"]`` / ``data["playfield"]["height"]``.
-      Falls back to top-level ``field_width_cm`` / ``field_height_cm``
-      for files written in the old format.
-    - ``camera_position``: constructed from ``data["camera_position"]``
-      dict when present; ``None`` otherwise.
-
-    Static configuration overlay (config split):
-
-    After loading from ``calibration.json``, static developer-owned fields
-    are overlaid from ``config.json`` (the *camera_config* param if supplied,
-    otherwise loaded from *camera_dir*).  ``config.json`` wins over any
-    legacy values that may still be present in an old ``calibration.json``:
-
-    - ``device_name`` — from ``config["device_name"]``
-    - ``resolution`` — from ``config["resolution"]`` (list → tuple)
-    - ``settings`` — from ``config["settings"]``
-    - ``static_marker_ids`` — from ``config["static_marker_ids"]``
-    - ``camera_position`` — from ``config["camera_position"]`` (dict → CameraPosition)
-
-    Legacy ``calibration.json`` files that still carry these keys will
-    continue to load correctly; their values are used as the fallback when
-    ``config.json`` does not supply a given key.
-
-    Optional mismatch detection (sprint 012):
-
-    When both *camera_config* and *playfield_def* are provided, the loaded
-    calibration is compared against the current camera config and playfield
-    geometry.  If any mismatch is detected (mismatched slug, width, or
-    height), or if the record has no ``calibrated_playfield`` (legacy), the
-    transient attribute ``calibration_stale = True`` is set on the returned
-    object and a warning is logged.
-
-    ``calibration_stale`` is **not** a dataclass field; it is never
-    serialised.  Callers check ``getattr(cal, "calibration_stale", False)``.
-
-    Parameters
-    ----------
-    camera_dir:
-        Directory containing ``calibration.json``.
-    camera_config:
-        Optional dict from ``load_camera_config(camera_dir)``.  Expected to
-        have a ``"playfield"`` key naming the linked playfield slug.
-        When ``None``, the function loads ``config.json`` itself.
-    playfield_def:
-        Optional :class:`~aprilcam.core.playfield_def.PlayfieldDefinition`.
-        Must expose ``width_cm`` and ``height_cm`` attributes.
-    config_dir:
-        Optional root directory holding per-camera config (the config/state
-        split from sprint 019).  Only consulted when *camera_config* is
-        ``None`` — the MCP path always pre-supplies *camera_config* and is
-        unaffected by this parameter.  When given, ``config.json`` is read
-        from ``<config_dir>/<camera_dir.name>/config.json`` (reconstructing
-        the per-camera slug subdirectory under the config root) instead of
-        ``<camera_dir>/config.json``.  When ``None`` (the default),
-        preserves today's exact sibling-read behavior — ``config.json`` is
-        read from *camera_dir* itself.
-    """
-    from ..camera.camera_config import load_camera_config as _load_config
-
-    cal_file = Path(camera_dir) / "calibration.json"
-    if not cal_file.exists():
-        return None
-    try:
-        data = json.loads(cal_file.read_text())
-        pf = data.get("playfield", {})
-        pw = float(pf.get("width") or data.get("field_width_cm") or 0.0)
-        ph = float(pf.get("height") or data.get("field_height_cm") or 0.0)
-        cp_dict = data.get("camera_position")
-        camera_position = CameraPosition(**cp_dict) if cp_dict else None
-        cal = CameraCalibration.from_dict(data)
-        cal.playfield_width_cm = pw
-        cal.playfield_height_cm = ph
-        cal.camera_position = camera_position
-
-        # Overlay static developer-owned fields from config.json.
-        # config wins over any legacy values already parsed from calibration.json.
-        if camera_config is not None:
-            cfg = camera_config
-        elif config_dir is not None:
-            cfg = _load_config(Path(config_dir) / Path(camera_dir).name)
-        else:
-            cfg = _load_config(camera_dir)
-        if cfg:
-            if "device_name" in cfg:
-                cal.device_name = cfg["device_name"]
-            if "resolution" in cfg:
-                cal.resolution = tuple(cfg["resolution"])
-            if "settings" in cfg:
-                cal.settings = cfg["settings"]
-            if "static_marker_ids" in cfg:
-                cal.static_marker_ids = [str(s) for s in cfg["static_marker_ids"]]
-            if "camera_position" in cfg:
-                cp = cfg["camera_position"]
-                cal.camera_position = CameraPosition(**cp)
-
-        # Mismatch detection — only when both optional params are provided.
-        if camera_config is not None and playfield_def is not None:
-            stale = False
-            reason_parts: list[str] = []
-
-            # Legacy record: no provenance field at all.
-            if cal.calibrated_playfield is None:
-                stale = True
-                reason_parts.append("legacy record (no calibrated_playfield)")
-            else:
-                # Slug mismatch.
-                expected_slug = camera_config.get("playfield")
-                if expected_slug and cal.calibrated_playfield != expected_slug:
-                    stale = True
-                    reason_parts.append(
-                        f"slug mismatch ({cal.calibrated_playfield!r} != {expected_slug!r})"
-                    )
-
-                # Dimension mismatch.
-                _TOL = 0.01  # cm
-                if abs(cal.playfield_width_cm - playfield_def.width_cm) > _TOL:
-                    stale = True
-                    reason_parts.append(
-                        f"width mismatch ({cal.playfield_width_cm} != {playfield_def.width_cm})"
-                    )
-                if abs(cal.playfield_height_cm - playfield_def.height_cm) > _TOL:
-                    stale = True
-                    reason_parts.append(
-                        f"height mismatch ({cal.playfield_height_cm} != {playfield_def.height_cm})"
-                    )
-
-            if stale:
-                _log.warning(
-                    "Calibration in %s is stale: %s",
-                    camera_dir,
-                    "; ".join(reason_parts),
+            stale=bool(data.get("stale", False)),
+            calibrated_at=float(data["calibrated_at"]),
+            playfield=str(data["playfield"]),
+            homography=(
+                _row3(homography_raw[0]),
+                _row3(homography_raw[1]),
+                _row3(homography_raw[2]),
+            ),
+            matched_ids=tuple(int(i) for i in data.get("matched_ids", ())),
+            reprojection_error_cm=(
+                float(data["reprojection_error_cm"])
+                if data.get("reprojection_error_cm") is not None
+                else None
+            ),
+            camera_matrix=(
+                (
+                    _row3(camera_matrix_raw[0]),
+                    _row3(camera_matrix_raw[1]),
+                    _row3(camera_matrix_raw[2]),
                 )
-                cal.calibration_stale = True
-
-        return cal
-    except Exception:
-        return None
-
-
-def save_calibration_to_camera_dir(
-    cal: "CameraCalibration",
-    camera_dir: str | Path,
-    field_width_cm: float,
-    field_height_cm: float,
-    detection_fps: int = 10,
-) -> Path:
-    """Write calibration to ``<camera_dir>/calibration.json``.
-
-    Creates the directory if needed.  Returns the path written.
-
-    *detection_fps* is written only when the file does not already
-    contain a ``"detection_fps"`` key, preserving per-camera overrides.
-
-    Playfield dimensions are written under ``playfield: {width, height}``
-    (new format).  The old top-level ``field_width_cm`` / ``field_height_cm``
-    keys are no longer written.  When present in an existing file they are
-    treated as owned (not user-managed) so they are dropped on the next save.
-
-    Static developer-owned fields (``device_name``, ``resolution``,
-    ``settings``, ``camera_position``, ``static_marker_ids``) are **not**
-    written to ``calibration.json`` — they now live in ``config.json``.
-    A ``"camera"`` key equal to the directory name is written so the file
-    is self-identifying.
-
-    Any other keys in an existing ``calibration.json`` that are not in the
-    owned set are preserved (user-managed keys).
-    """
-    camera_dir = Path(camera_dir)
-    camera_dir.mkdir(parents=True, exist_ok=True)
-    cal_file = camera_dir / "calibration.json"
-
-    # Keys written by calibration code — anything else in the existing file is
-    # user-managed and must be preserved.  The 5 static keys are listed here
-    # so they are treated as owned (dropped if present in a legacy file).
-    _CALIBRATION_KEYS = {
-        "camera",  # new: camera slug key
-        "device_name", "resolution",  # moved to config.json — owned so they are dropped
-        "settings", "camera_position", "static_marker_ids",  # moved to config.json
-        "homography", "tags_used", "rms_error",
-        "camera_matrix", "dist_coeffs",
-        "field_width_cm", "field_height_cm",  # old keys — owned so they are dropped
-        "playfield",
-        "corner_pixels", "static_markers",
-        "detection_fps",
-        "calibrated_playfield", "calibrated_camera",  # provenance (sprint 012)
-    }
-    preserved: dict = {}
-    if cal_file.exists():
-        try:
-            existing_data = json.loads(cal_file.read_text())
-            preserved = {k: v for k, v in existing_data.items() if k not in _CALIBRATION_KEYS}
-            if "detection_fps" in existing_data:
-                detection_fps = int(existing_data["detection_fps"])
-        except Exception:
-            pass
-
-    # Canonical calibration.json serializer — excludes the config-owned keys.
-    data = cal.to_camera_json()
-    # Add self-identifying camera slug.
-    data["camera"] = Path(camera_dir).name
-    data["playfield"] = {"width": field_width_cm, "height": field_height_cm}
-    data["detection_fps"] = detection_fps
-    data.update(preserved)
-    cal_file.write_text(json.dumps(data, indent=2))
-    return cal_file
-
-
-def load_field_dimensions_from_camera_dir(
-    camera_dir: str | Path,
-) -> Optional[tuple]:
-    """Return ``(width_cm, height_cm)`` from ``<camera_dir>/calibration.json``.
-
-    Reads new ``playfield: {width, height}`` format first; falls back to
-    top-level ``field_width_cm`` / ``field_height_cm`` for old files.
-    """
-    cal_file = Path(camera_dir) / "calibration.json"
-    if not cal_file.exists():
-        return None
-    try:
-        data = json.loads(cal_file.read_text())
-        pf = data.get("playfield", {})
-        w = pf.get("width") or data.get("field_width_cm")
-        h = pf.get("height") or data.get("field_height_cm")
-        if w is not None and h is not None:
-            return (float(w), float(h))
-    except Exception:
-        pass
-    return None
-
-
-def save_calibration_for_camera(
-    cal: "CameraCalibration",
-    calibration_dir: str | Path,
-    field_width_cm: float,
-    field_height_cm: float,
-) -> Path:
-    """Write a per-camera calibration file to *calibration_dir*.
-
-    Creates ``<calibration_dir>/<device-slug>.json`` with:
-    - ``field_width_cm``, ``field_height_cm`` — playfield dimensions
-    - all fields from *cal* (homography, resolution, camera_matrix, etc.)
-
-    Returns the path written.
-    """
-    cal_file = calibration_file_for_camera(calibration_dir, cal.device_name)
-    cal_file.parent.mkdir(parents=True, exist_ok=True)
-    data = cal.to_dict()
-    data["field_width_cm"] = field_width_cm
-    data["field_height_cm"] = field_height_cm
-    cal_file.write_text(json.dumps(data, indent=2))
-    return cal_file
-
-
-def load_field_dimensions_from_dir(
-    device_name: str,
-    calibration_dir: str | Path,
-) -> Optional[tuple]:
-    """Return ``(width_cm, height_cm)`` from a per-camera calibration file.
-
-    Returns ``None`` if the file is missing or dimensions are absent.
-    """
-    cal_file = calibration_file_for_camera(calibration_dir, device_name)
-    if not cal_file.exists():
-        return None
-    try:
-        data = json.loads(cal_file.read_text())
-        w = data.get("field_width_cm")
-        h = data.get("field_height_cm")
-        if w is not None and h is not None:
-            return (float(w), float(h))
-    except Exception:
-        pass
-    return None
-
-
-# ---------------------------------------------------------------------------
-# File paths (legacy unified-file scheme)
-# ---------------------------------------------------------------------------
-
-
-def calibration_path(data_dir: str | Path = "data") -> Path:
-    """Return the path to the unified calibration file."""
-    return Path(data_dir) / "calibration.json"
-
-
-# ---------------------------------------------------------------------------
-# Load / save
-# ---------------------------------------------------------------------------
-
-
-def load_field_dimensions(
-    data_dir: str | Path = "data",
-) -> Optional[tuple[float, float]]:
-    """Return ``(width_cm, height_cm)`` from the top-level calibration file.
-
-    Returns ``None`` if the file is missing or the keys are absent.
-    """
-    cal_file = calibration_path(data_dir)
-    if not cal_file.exists():
-        return None
-    try:
-        data = json.loads(cal_file.read_text())
-        w = data.get("field_width_cm")
-        h = data.get("field_height_cm")
-        if w is not None and h is not None:
-            return (float(w), float(h))
-    except Exception:
-        pass
-    return None
-
-
-def load_calibration_for_camera(
-    device_name: str,
-    data_dir: str | Path = "data",
-) -> Optional[CameraCalibration]:
-    """Load calibration for a specific camera from the unified file.
-
-    Looks up by device_name in ``data/calibration.json``.  Returns
-    ``None`` if the file doesn't exist or the camera isn't in it.
-    """
-    cal_file = calibration_path(data_dir)
-    if not cal_file.exists():
-        return None
-    try:
-        data = json.loads(cal_file.read_text())
-        cameras = data.get("cameras", {})
-        for _key, cam_data in cameras.items():
-            if cam_data.get("device_name") == device_name:
-                return CameraCalibration.from_dict(cam_data)
-    except Exception:
-        pass
-    return None
-
-
-def save_calibration(
-    calibrations: List[CameraCalibration],
-    data_dir: str | Path = "data",
-    field_width_cm: float = 134.3,
-    field_height_cm: float = 89.3,
-) -> Path:
-    """Save calibration for all cameras to ``data/calibration.json``.
-
-    Each camera is keyed by its device_name.  Overwrites any existing
-    file.  Returns the path written.
-    """
-    cameras = {}
-    for cal in calibrations:
-        cameras[cal.device_name] = cal.to_dict()
-
-    data = {
-        "type": "playfield",
-        "field_width_cm": field_width_cm,
-        "field_height_cm": field_height_cm,
-        "cameras": cameras,
-    }
-    path = calibration_path(data_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2))
-    return path
-
-
-def load_calibration(
-    data_dir: str | Path = "data",
-) -> Dict[str, CameraCalibration]:
-    """Load all camera calibrations from ``data/calibration.json``.
-
-    Returns:
-        Dict mapping device_name -> CameraCalibration.
-    """
-    path = calibration_path(data_dir)
-    data = json.loads(path.read_text())
-    return {
-        name: CameraCalibration.from_dict(cam_data)
-        for name, cam_data in data.get("cameras", {}).items()
-    }
-
-
-# ---------------------------------------------------------------------------
-# Calibration workflow
-# ---------------------------------------------------------------------------
-
-
-def _assign_corners_by_position(
-    tags: dict,
-    field_width_cm: float,
-    field_height_cm: float,
-) -> tuple[list, list]:
-    """Assign ArUco boundary markers to world positions.
-
-    **ID-based assignment (preferred, multi-camera consistent):** when a
-    recognised canonical ArUco layout is detected, marker IDs are used
-    directly to map pixel→world.  This guarantees every camera maps the
-    same physical marker to the same world coordinate regardless of angle.
-
-    Supported canonical layouts (ArUco ID N → tid -(N+1)):
-
-    4-marker corners-only (IDs 0–3):
-        ArUco 0 (tid -1) → (0,       0)
-        ArUco 1 (tid -2) → (W,       0)
-        ArUco 2 (tid -3) → (0,       H)
-        ArUco 3 (tid -4) → (W,       H)
-
-    8-marker perimeter, clockwise from upper-left (IDs 1–8):
-        ArUco 1 (tid -2) → (0,       0)   upper-left
-        ArUco 2 (tid -3) → (W/2,     0)   top-mid
-        ArUco 3 (tid -4) → (W,       0)   upper-right
-        ArUco 4 (tid -5) → (W,       H/2) right-mid
-        ArUco 5 (tid -6) → (W,       H)   lower-right
-        ArUco 6 (tid -7) → (W/2,     H)   bottom-mid
-        ArUco 7 (tid -8) → (0,       H)   lower-left
-        ArUco 8 (tid -9) → (0,       H/2) left-mid
-
-    **Pixel-position fallback:** when no canonical layout matches, corners
-    are sorted clockwise from upper-left by pixel coordinates.
-
-    Returns (pixel_list, world_list) as paired lists.
-    Raises RuntimeError if fewer than 4 ArUco markers are detected.
-    """
-    import math
-
-    W, H = field_width_cm, field_height_cm
-
-    # 8-marker perimeter layout: ArUco IDs 1–8 (tids -2 to -9), clockwise from UL.
-    _CANONICAL_8_TIDS = (-2, -3, -4, -5, -6, -7, -8, -9)
-    _CANONICAL_8_WORLD = [
-        (0.0,  0.0),   (W/2,  0.0),   (W,    0.0),   (W,    H/2),
-        (W,    H),     (W/2,  H),     (0.0,  H),     (0.0,  H/2),
-    ]
-    if all(tid in tags for tid in _CANONICAL_8_TIDS):
-        pixel_list = [tags[tid] for tid in _CANONICAL_8_TIDS]
-        return pixel_list, _CANONICAL_8_WORLD
-
-    # 4-corner layout: ArUco IDs 0–3 (tids -1 to -4).
-    _CANONICAL_4_TIDS = (-1, -2, -3, -4)
-    _CANONICAL_4_WORLD = [(0.0, 0.0), (W, 0.0), (0.0, H), (W, H)]
-    if all(tid in tags for tid in _CANONICAL_4_TIDS):
-        pixel_list = [tags[tid] for tid in _CANONICAL_4_TIDS]
-        return pixel_list, _CANONICAL_4_WORLD
-
-    # --- Pixel-position fallback (any ArUco IDs) ---
-    aruco_pts = [px for tid, px in tags.items() if tid < 0]
-    n = len(aruco_pts)
-    if n < 4:
-        raise RuntimeError(
-            f"Camera: only {n} ArUco corners found, need 4"
+                if camera_matrix_raw is not None
+                else None
+            ),
+            dist_coeffs=(
+                tuple(float(c) for c in dist_coeffs_raw) if dist_coeffs_raw is not None else None
+            ),
         )
 
-    W, H = field_width_cm, field_height_cm
-    world_by_n = {
-        4: [(0, 0), (W, 0), (W, H), (0, H)],
-        8: [(0, 0), (W/2, 0), (W, 0), (W, H/2),
-            (W, H), (W/2, H), (0, H), (0, H/2)],
-    }
-    if n not in world_by_n and n > 8:
-        ul = min(aruco_pts, key=lambda p:  p[0] + p[1])
-        lr = max(aruco_pts, key=lambda p:  p[0] + p[1])
-        ur = max(aruco_pts, key=lambda p:  p[0] - p[1])
-        ll = min(aruco_pts, key=lambda p:  p[0] - p[1])
-        top_mid  = min(aruco_pts, key=lambda p: p[1])
-        bot_mid  = max(aruco_pts, key=lambda p: p[1])
-        left_mid = min(aruco_pts, key=lambda p: p[0])
-        rgt_mid  = max(aruco_pts, key=lambda p: p[0])
-        aruco_pts = [ul, ur, lr, ll, top_mid, bot_mid, left_mid, rgt_mid]
-        n = 8
-    elif n not in world_by_n:
-        ul = min(aruco_pts, key=lambda p:  p[0] + p[1])
-        lr = max(aruco_pts, key=lambda p:  p[0] + p[1])
-        ur = max(aruco_pts, key=lambda p:  p[0] - p[1])
-        ll = min(aruco_pts, key=lambda p:  p[0] - p[1])
-        aruco_pts = [ul, ur, lr, ll]
-        n = 4
 
-    world_positions = world_by_n[n]
-    cx = sum(p[0] for p in aruco_pts) / n
-    cy = sum(p[1] for p in aruco_pts) / n
-    sorted_pts = sorted(aruco_pts, key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
-    ul_idx = min(range(n), key=lambda i: sorted_pts[i][0] + sorted_pts[i][1])
-    sorted_pts = sorted_pts[ul_idx:] + sorted_pts[:ul_idx]
+def _is_collinear(points: np.ndarray, *, ratio_threshold: float = _COLLINEARITY_RATIO) -> bool:
+    """True if every row of *points* (an ``(N, 2)`` array) lies
+    approximately on one line -- independent of which two axes that line
+    runs along.
 
-    return sorted_pts, world_positions
+    Uses the SVD of the *centred* point matrix: two points, or points
+    exactly on a line, produce a zero (or near-zero) second singular
+    value, since the point cloud has no meaningful extent in the
+    direction perpendicular to the line. A proper 2D spread of points
+    (the real ``main-playfield``'s 10 surveyed ArUco positions, for
+    instance) has two comparably-sized singular values.
+    """
+    if len(points) < 3:
+        return True  # fewer than 3 points can never span a plane
+    centered = points - points.mean(axis=0)
+    singular_values = np.linalg.svd(centered, compute_uv=False)
+    if singular_values[0] == 0.0:
+        return True
+    return bool(singular_values[1] / singular_values[0] < ratio_threshold)
 
 
-def _reprojection_rms(
-    H: np.ndarray, pixel_pts: np.ndarray, world_pts: np.ndarray
+def _degeneracy_reason(pixel_pts: np.ndarray, world_pts: np.ndarray) -> Optional[str]:
+    """``None`` if *pixel_pts*/*world_pts* can support a well-posed
+    homography solve; otherwise a human-readable reason naming which
+    side is degenerate, for ``CalibrationResult.reason`` (UC-04's "a
+    complete-but-degenerate solve ... must name its problem").
+
+    Checked **before** calling into OpenCV, deliberately:
+    ``cv2.findHomography`` does not reliably refuse a collinear
+    correspondence set -- for points confined to (or extremely close to)
+    one line, the perspective mapping is unconstrained in the direction
+    perpendicular to that line, so OpenCV can return a numerically
+    well-formed matrix that is nonetheless not a trustworthy 2D
+    homography. That is exactly "a valid-but-bad homography," the
+    failure mode UC-04's own text names -- silently accepting it would
+    be worse than refusing up front.
+    """
+    if len(pixel_pts) < 4:
+        return f"only {len(pixel_pts)} correspondence point(s); a homography needs at least 4"
+    if _is_collinear(world_pts):
+        return "surveyed marker positions are collinear; cannot solve a homography from them"
+    if _is_collinear(pixel_pts):
+        return "detected marker pixel positions are collinear; cannot solve a homography from them"
+    return None
+
+
+def _solve_homography(pixel_pts: np.ndarray, world_pts: np.ndarray) -> Optional[np.ndarray]:
+    """Pixel->world homography via OpenCV's DLT solver.
+
+    Regular least squares (``method=0``), not RANSAC: every
+    correspondence here comes from an id-matched detection against
+    surveyed ground truth (``Calibrator._detect_averaged`` +
+    ``PlayfieldDefinition.aruco_position``), not error-prone point
+    matching -- there are no outliers to robustly reject, only a
+    well- or ill-conditioned system to solve exactly.
+
+    Returns ``None`` (never raises) for a failed solve or a
+    post-hoc-detected singular result, so callers can turn it into a
+    named ``CalibrationResult.reason`` rather than an uncaught
+    exception.
+    """
+    homography, _mask = cv.findHomography(
+        pixel_pts.astype(np.float32), world_pts.astype(np.float32), method=0
+    )
+    if homography is None:
+        return None
+    if not np.all(np.isfinite(homography)):
+        return None
+    if abs(np.linalg.det(homography)) < _MIN_HOMOGRAPHY_DETERMINANT:
+        return None
+    return homography
+
+
+def _reprojection_error_cm(
+    homography: np.ndarray, pixel_pts: np.ndarray, world_pts: np.ndarray
 ) -> float:
-    """Compute RMS reprojection error for a homography."""
+    """RMS distance (cm) between each surveyed world position and where
+    *homography* reprojects the matching detected pixel position.
+    Mirrors ``archive/src/aprilcam/calibration/calibration.py``'s
+    ``_reprojection_rms`` formula, via ``geometry.apply_homography``
+    rather than duplicating the homogeneous-divide arithmetic."""
     errors = []
-    for px, wp in zip(pixel_pts, world_pts):
-        vec = H @ np.array([px[0], px[1], 1.0])
-        pred = np.array([vec[0] / vec[2], vec[1] / vec[2]])
-        errors.append(np.linalg.norm(pred - wp))
-    return float(np.sqrt(np.mean(np.array(errors) ** 2)))
+    for (px, py), (wx, wy) in zip(pixel_pts, world_pts):
+        x, y = geometry.apply_homography(homography, float(px), float(py))
+        errors.append(math.hypot(x - wx, y - wy))
+    return float(np.sqrt(np.mean(np.square(errors))))
 
 
-def calibrate_from_corners(
-    pixel_corners: Dict[str, Tuple[float, float]],
-    field_spec: FieldSpec,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Compute homography from four corner positions and a field spec.
+def _matrix_to_tuple(matrix: np.ndarray) -> Tuple[_Row3, _Row3, _Row3]:
+    return (_row3(matrix[0]), _row3(matrix[1]), _row3(matrix[2]))
 
-    Args:
-        pixel_corners: Dict with keys 'upper_left', 'upper_right',
-            'lower_left', 'lower_right', each a (x, y) tuple.
-        field_spec: FieldSpec with physical dimensions.
 
-    Returns:
-        Tuple of (H, pixel_pts, world_pts_cm) where H is the 3x3
-        homography matrix mapping [u,v,1] pixels to [X,Y,W] world cm,
-        pixel_pts is the 4x2 array of pixel coordinates, and
-        world_pts_cm is the 4x2 array of world coordinates in cm.
+def compute_drift_cm(
+    calibration: Calibration,
+    definition: _ConcretePlayfieldDefinition,
+    detected: Dict[int, PixelPoint],
+) -> Optional[float]:
+    """How far *calibration*'s own matched static markers appear to have
+    moved, in cm (ticket 023-007's opportunistic drift check, sprint.md
+    Decision 5).
+
+    Reuses exactly the reprojection-error idea :meth:`Calibrator.calibrate`
+    already applies to *accept* a fresh solve
+    (:func:`_reprojection_error_cm`), pointed instead at a *later*
+    frame's detections: if the camera has not moved, re-detecting each of
+    *calibration*'s ``matched_ids`` and mapping the detected pixel through
+    the still-valid ``calibration.homography`` (:meth:`Calibration.to_world`)
+    must reproduce *definition*'s surveyed ground truth
+    (``aruco_position``), up to ordinary detection noise. A real bump
+    throws every matched marker's reprojection off by roughly how far the
+    camera moved -- this is "compare to their stored positions" (the
+    ticket's own phrasing) with ``PlayfieldDefinition.aruco_position`` as
+    the stored positions, so :class:`Calibration` itself needs no new
+    field to carry them.
+
+    *detected* is one frame's ArUco hits, keyed by id -- callers pass in
+    whatever a detection pass already produced (``daemon.detection.
+    DetectionEngine`` reuses the same ``detector.detect()`` call
+    ``run_burst`` makes for tag tracking; no independent detection pass
+    exists, preserving the idle-efficiency budget by construction).
+
+    Returns ``None`` -- never ``0.0`` -- when fewer than
+    :data:`MIN_DRIFT_CHECK_MARKERS` of *calibration*'s matched markers
+    are present in *detected*: darkness, an occluded lens, or a covered
+    field (all of which this project's stakeholder hits in practice) must
+    read as "cannot verify," never as either a spurious stale flip
+    (already true here, since nothing computes without real detections)
+    or, just as important, a *false confirmation* that nothing has moved
+    -- both would be wrong for the same reason UC-11.S-3 exists: an
+    advisory a caller cannot trust is worse than no advisory. Any id
+    *detected* carries that :meth:`PlayfieldDefinition.aruco_position`
+    no longer recognises (the playfield definition changed identity
+    between calibrating and now) is silently excluded from
+    *visible* rather than raising -- the same "cannot verify" stance
+    applies if that drops the count below the minimum.
+
+    The **maximum** single-marker error, not an RMS across every visible
+    marker, decides the outcome: a genuine camera bump throws off every
+    matched marker roughly uniformly, so either statistic would catch
+    it, but a max is the more conservative (never-diluted-by-averaging)
+    choice, and does not require deciding how many markers a particular
+    burst happened to catch in frame.
     """
-    # Import compute_homography lazily to avoid circular import at module load.
-    # homography.py re-exports from this module; this module calls into
-    # homography.py only at runtime.
-    from .homography import compute_homography
-
-    world_pts_cm = np.array([
-        [0.0, 0.0],
-        [field_spec.width_cm, 0.0],
-        [0.0, field_spec.height_cm],
-        [field_spec.width_cm, field_spec.height_cm],
-    ], dtype=np.float32)
-    pixel_pts = np.array([
-        pixel_corners["upper_left"],
-        pixel_corners["upper_right"],
-        pixel_corners["lower_left"],
-        pixel_corners["lower_right"],
-    ], dtype=np.float32)
-    H = compute_homography(pixel_pts, world_pts_cm)
-    return H, pixel_pts, world_pts_cm
-
-
-def _build_static_markers(
-    tags: dict,
-    corner_pixels: list,
-    corner_worlds: list,
-    H: np.ndarray,
-    static_marker_ids: List[str],
-) -> Dict[str, Dict[str, List[float]]]:
-    """Build the per-id static-marker pixel+world record.
-
-    The static set is resolved from *static_marker_ids* (default
-    ``aruco_corners + apriltag:1``):
-
-    - ``aruco_corners`` — the four ArUco corner markers, recorded by their
-      *world* corner key (``"corner:UL"`` … ``"corner:LL"``) with the
-      calibration-time corner pixels and known world cm positions.
-    - ``apriltag:N`` — AprilTag id ``N`` (positive id), recorded with its
-      measured pixel position and the world position derived from *H*.
-      Skipped silently if that tag was not detected.
-
-    Returns ``{id_str: {"pixel": [u, v], "world": [x, y]}}``.  World
-    coordinates are real-world centimetres.
-    """
-    static_markers: Dict[str, Dict[str, List[float]]] = {}
-
-    # Derive each corner's UL/UR/LR/LL key from its PIXEL position, not from
-    # the order it arrives in.  ``corner_pixels`` / ``corner_worlds`` are
-    # paired but their ordering follows the ArUco-ID→world mapping in
-    # ``_assign_corners_by_position`` ([UL, UR, LL, LR] for the 4-corner
-    # canonical layout), which does NOT match the [UL, UR, LR, LL] label
-    # order — a naive zip mislabels LR<->LL.  The live static-marker check in
-    # core/playfield.py orders corners geometrically by PIXEL coords
-    # (``_order_poly``: top two by y, then left/right by x) and compares
-    # against these keys, so the stored key must reflect pixel geometry
-    # (image coords: x right, y DOWN), NOT world coords (which are A1-centred,
-    # +y = north — a different convention).  Keying off pixels here is what
-    # makes the stored label match what the live check computes, eliminating
-    # the spurious ~field-width "marker moved" flap.
-    def _corner_key(px_x: float, px_y: float, mid_x: float, mid_y: float) -> str:
-        left = px_x < mid_x
-        top = px_y < mid_y  # image y increases downward
-        if top:
-            return "corner:UL" if left else "corner:UR"
-        return "corner:LL" if left else "corner:LR"
-
-    for marker_id in static_marker_ids:
-        if marker_id == "aruco_corners":
-            xs = [float(p[0]) for p in corner_pixels]
-            ys = [float(p[1]) for p in corner_pixels]
-            mid_x = (min(xs) + max(xs)) / 2.0 if xs else 0.0
-            mid_y = (min(ys) + max(ys)) / 2.0 if ys else 0.0
-            for px, wp in zip(corner_pixels, corner_worlds):
-                key = _corner_key(float(px[0]), float(px[1]), mid_x, mid_y)
-                static_markers[key] = {
-                    "pixel": [float(px[0]), float(px[1])],
-                    "world": [float(wp[0]), float(wp[1])],
-                }
-        elif marker_id.startswith("apriltag:"):
-            try:
-                tid = int(marker_id.split(":", 1)[1])
-            except ValueError:
-                continue
-            if tid in tags:
-                px = tags[tid]
-                vec = H @ np.array([px[0], px[1], 1.0])
-                wx, wy = float(vec[0] / vec[2]), float(vec[1] / vec[2])
-                static_markers[marker_id] = {
-                    "pixel": [float(px[0]), float(px[1])],
-                    "world": [wx, wy],
-                }
-    return static_markers
-
-
-def calibrate_single(
-    cap: cv.VideoCapture,
-    field_width_cm: float = 134.3,
-    field_height_cm: float = 89.3,
-    num_frames: int = 30,
-    correct_distortion: bool = True,
-    camera_index: int = 0,
-) -> CameraCalibration:
-    """Calibrate a single camera using ArUco corners and AprilTags.
-
-    Detects ArUco 4x4 corner markers (known world positions) and all
-    AprilTags visible in the frame.  Computes homography from the 4
-    ArUco corners, then refines using all detected tags.  Optionally
-    estimates lens distortion if enough points are available.
-
-    Args:
-        cap: Open VideoCapture for the camera.
-        field_width_cm: Playfield width between ArUco corners in cm.
-        field_height_cm: Playfield height between ArUco corners in cm.
-        num_frames: Frames to accumulate for tag detection.
-        correct_distortion: Attempt barrel distortion correction.
-        camera_index: Camera index (for device name lookup).
-
-    Returns:
-        CameraCalibration for the camera.
-    """
-    from .homography import compute_homography, detect_all_tags
-
-    tags = detect_all_tags(cap, num_frames)
-
-    cam_w = int(cap.get(cv.CAP_PROP_FRAME_WIDTH))
-    cam_h = int(cap.get(cv.CAP_PROP_FRAME_HEIGHT))
-
-    # Assign corners by pixel position (any 4 ArUco IDs accepted)
-    corner_pixels, corner_worlds = _assign_corners_by_position(
-        tags, field_width_cm, field_height_cm
-    )
-
-    pixel_pts = np.array(corner_pixels, dtype=np.float32)
-    world_pts = np.array(corner_worlds, dtype=np.float32)
-    H = compute_homography(pixel_pts, world_pts)
-
-    # Compute world positions for AprilTags using corner-based homography
-    all_px = list(corner_pixels)
-    all_wp = list(corner_worlds)
-    for tid, px in tags.items():
-        if tid > 0:  # AprilTag (positive ID)
-            vec = H @ np.array([px[0], px[1], 1.0])
-            world_xy = (float(vec[0] / vec[2]), float(vec[1] / vec[2]))
-            all_px.append(px)
-            all_wp.append(world_xy)
-
-    all_pixel = np.array(all_px, dtype=np.float32)
-    all_world = np.array(all_wp, dtype=np.float32)
-    n_pts = len(all_px)
-
-    # Optionally correct barrel distortion
-    camera_matrix = None
-    dist_coeffs = None
-    pts_for_rms = all_pixel
-
-    if correct_distortion and n_pts >= 6:
-        obj_pts_3d = np.zeros((n_pts, 1, 3), dtype=np.float32)
-        obj_pts_3d[:, 0, :2] = all_world
-        img_pts = all_pixel.reshape(n_pts, 1, 2)
-
-        _rms, camera_matrix, dist_coeffs, _rvecs, _tvecs = cv.calibrateCamera(
-            [obj_pts_3d], [img_pts], (cam_w, cam_h), None, None
-        )
-        dist_coeffs = dist_coeffs.flatten()
-
-        undist_pts = cv.undistortPoints(
-            all_pixel.reshape(-1, 1, 2), camera_matrix, dist_coeffs, P=camera_matrix
-        ).reshape(-1, 2)
-        H = compute_homography(undist_pts, all_world)
-        pts_for_rms = undist_pts  # RMS must use same (undistorted) points as H
-    elif n_pts > 4:
-        # Recompute with all points for better accuracy
-        H = compute_homography(all_pixel, all_world)
-
-    rms = _reprojection_rms(H, pts_for_rms, all_world)
-
-    # Capture the reference geometry the static-camera deskew path needs.
-    # corner_pixels: the four calibration-time ArUco corner positions
-    # (UL, UR, LR, LL) — exactly the pixel_pts used to seed the homography.
-    corner_pixels = [[float(p[0]), float(p[1])] for p in corner_pixels]
-
-    # static_markers: the fixed reference set (ArUco corners + AprilTag 1)
-    # with their measured pixel positions and known/derived world positions.
-    static_markers = _build_static_markers(
-        tags, corner_pixels, corner_worlds, H, DEFAULT_STATIC_MARKER_IDS
-    )
-
-    from ..camera.camutil import get_device_name
-
-    return CameraCalibration(
-        device_name=get_device_name(camera_index),
-        resolution=(cam_w, cam_h),
-        homography=H,
-        camera_matrix=camera_matrix,
-        dist_coeffs=dist_coeffs,
-        tags_used=n_pts,
-        rms_error=rms,
-        playfield_width_cm=field_width_cm,
-        playfield_height_cm=field_height_cm,
-        corner_pixels=corner_pixels,
-        static_markers=static_markers,
-        static_marker_ids=list(DEFAULT_STATIC_MARKER_IDS),
-    )
-
-
-def calibrate_from_playfield_def(
-    cap: "cv.VideoCapture",
-    camera_dir: "Path | str | None",
-    camera_slug: str,
-    playfield_def_registry: "object",
-    num_frames: int = 30,
-    correct_distortion: bool = True,
-    camera_position: "CameraPosition | None" = None,
-    camera_config: "dict | None" = None,
-    skip_save: bool = False,
-    config_dir: "Path | str | None" = None,
-) -> CameraCalibration:
-    """Calibrate a camera using a named playfield definition as the source of truth.
-
-    This is the single shared calibration helper used by both the MCP
-    ``calibrate_playfield`` tool and the ``aprilcam calibrate`` CLI.  It
-    reads the camera's ``config.json`` to find the linked playfield, loads
-    corner geometry from the :class:`PlayfieldDefinition`, detects the
-    corresponding ArUco markers in the live feed, computes the homography,
-    and writes ``calibration.json`` with provenance fields.
-
-    Parameters
-    ----------
-    cap:
-        Open VideoCapture-compatible object (must support ``read()`` and
-        ``get(cv.CAP_PROP_FRAME_WIDTH/HEIGHT)``).
-    camera_dir:
-        Per-camera directory containing ``config.json`` and where
-        ``calibration.json`` will be written.  May be ``None`` when
-        *camera_config* is supplied and *skip_save* is ``True`` — in
-        that case no filesystem access is performed.
-    camera_slug:
-        Human-readable camera identifier used in error messages and the
-        ``calibrated_camera`` provenance field.
-    playfield_def_registry:
-        A :class:`~aprilcam.core.playfield_def.PlayfieldDefinitionRegistry`
-        instance.  Must expose a ``get(name)`` method and a ``list()``
-        method.
-    num_frames:
-        Number of frames to accumulate for tag detection.
-    correct_distortion:
-        Whether to attempt barrel-distortion calibration when enough points
-        are available.
-    camera_position:
-        Optional camera-mounting offset used for parallax correction; stored
-        in the calibration but not used during the calibration computation.
-    camera_config:
-        Optional pre-loaded camera config dict.  When provided, Step 1
-        (``load_camera_config``) is skipped and this dict is used instead.
-        Useful for MCP-server callers that obtained the config via a gRPC
-        ``GetCameraConfig`` RPC rather than from local disk.
-    skip_save:
-        When ``True``, Steps 12 and 13 (write ``config.json`` and
-        ``calibration.json``) are skipped.  The caller is responsible for
-        persisting the calibration (e.g. via ``SetCalibration`` /
-        ``SetCameraConfig`` RPCs).
-    config_dir:
-        Root directory to write ``config.json`` under (sprint 019
-        config/state split).  Only consulted by the daemon-local write
-        branch (``skip_save=False``); ignored when *skip_save* is ``True``.
-        Defaults to *camera_dir* when omitted, preserving today's
-        single-directory behavior.  ``calibration.json`` always writes to
-        *camera_dir* (the state root) via
-        :func:`save_calibration_to_camera_dir`; ``config.json`` writes to
-        ``<config_dir>/`` (the config root) via
-        :func:`~aprilcam.camera.camera_config.save_camera_config`.
-
-        **Write ordering / failure reporting**: the state write
-        (``calibration.json``) happens *first*, since it is the
-        higher-frequency, app-generated file that ``get_tags`` depends on
-        being fresh — it is the time-critical write. The config write
-        (``config.json``) happens second; if it raises, the exception is
-        logged as a warning and swallowed rather than propagated, since the
-        state write (the one that matters for live tag data) already
-        succeeded. A config-write failure therefore never rolls back or
-        masks a successful calibration.
-
-    Returns
-    -------
-    CameraCalibration
-        The freshly computed calibration.  When *skip_save* is ``False``
-        (the default), it has already been saved to *camera_dir*.
-
-    Raises
-    ------
-    PlayfieldConfigError
-        If ``config.json`` is absent (and *camera_config* is not provided),
-        or if the playfield slug it names is not found in
-        *playfield_def_registry*.
-    RuntimeError
-        If fewer than 4 of the expected corner ArUco markers are detected.
-    """
-    from .homography import compute_homography, detect_all_tags
-    from ..camera.camera_config import load_camera_config, save_camera_config
-
-    if camera_dir is not None:
-        camera_dir = Path(camera_dir)
-
-    # Step 1: load config.json to find the linked playfield.
-    # When camera_config is pre-supplied (MCP RPC path), skip the file read.
-    # NOTE (sprint 019 config/state split): this read intentionally stays on
-    # camera_dir, not config_dir — config_dir here is write-only (see the
-    # config_dir docstring above and the Step 12/13 write branch below).
-    # Daemon-local callers that already know config.json lives under the
-    # config root (e.g. cli/calibrate_cli.py) pre-load it via camera_config
-    # instead of relying on this fallback read.
-    if camera_config is not None:
-        config = camera_config
-    elif camera_dir is not None:
-        config = load_camera_config(camera_dir)
-    else:
-        config = None
-    if config is None:
-        available = ", ".join(playfield_def_registry.list()) or "(none)"
-        raise PlayfieldConfigError(
-            f"Camera '{camera_slug}' is not linked to a playfield. "
-            f"Call set_camera_playfield(camera_id, playfield) to link one "
-            f"(list options with list_playfields). "
-            f"Available playfields: [{available}]"
-        )
-
-    playfield_slug = config.get("playfield") or ""
-    if not playfield_slug:
-        available = ", ".join(playfield_def_registry.list()) or "(none)"
-        raise PlayfieldConfigError(
-            f"Camera '{camera_slug}' is not linked to a playfield. "
-            f"Call set_camera_playfield(camera_id, playfield) to link one. "
-            f"Available playfields: [{available}]"
-        )
-
-    # Step 2: fetch the PlayfieldDefinition.
-    try:
-        pf_def = playfield_def_registry.get(playfield_slug)
-    except KeyError:
-        available = ", ".join(playfield_def_registry.list()) or "(none)"
-        raise PlayfieldConfigError(
-            f"Playfield '{playfield_slug}' not found in registry. "
-            f"Available playfields: [{available}]"
-        )
-
-    # Step 3: get corner ArUco IDs and world coordinates from the def.
-    # corner_aruco_ids() returns positive ints (e.g. 1/3/5/7).
-    # In the detection dict, ArUco ID N is stored as tid = -(N+1).
-    corner_ids_positive = pf_def.corner_aruco_ids()   # e.g. [1, 3, 5, 7]
-    corner_world_coords = pf_def.corner_world_coords() # e.g. [(-67,44.65),...]
-    corner_tids = [-(cid + 1) for cid in corner_ids_positive]  # e.g. [-2,-4,-6,-8]
-
-    # Full ground-truth map of EVERY defined ArUco marker (diagonal corners,
-    # edge midpoints, and interior reference markers such as the west/east
-    # internal tags), keyed by detection tid (ArUco id N -> tid -(N+1)).
-    # These carry surveyed world coordinates, so any of them that are detected
-    # are used as extra homography correspondences in Step 7 below — this is
-    # what lets interior markers actually improve the calibration.
-    aruco_world_by_tid: Dict[int, Tuple[float, float]] = {
-        -(int(t["id"]) + 1): (float(t["x"]), float(t["y"]))
-        for t in (getattr(pf_def, "aruco_tags", None) or [])
-        if "id" in t and "x" in t and "y" in t
-    }
-
-    # Step 4: detect all tags over num_frames.
-    tags = detect_all_tags(cap, num_frames)
-
-    cam_w = int(cap.get(cv.CAP_PROP_FRAME_WIDTH))
-    cam_h = int(cap.get(cv.CAP_PROP_FRAME_HEIGHT))
-
-    # Step 5: match detected ArUco tags to the def's corner IDs.
-    found_tids = [tid for tid in corner_tids if tid in tags]
-    if len(found_tids) < 4:
-        expected_ids_str = ", ".join(
-            f"ArUco {cid} (tid {tid})"
-            for cid, tid in zip(corner_ids_positive, corner_tids)
-        )
-        found_ids_str = ", ".join(
-            f"ArUco {-(tid+1)} (tid {tid})"
-            for tid in sorted(t for t in tags if t < 0)
-        ) or "(none)"
-        raise RuntimeError(
-            f"Camera '{camera_slug}': only {len(found_tids)} of 4 expected corner "
-            f"ArUco markers detected.\n"
-            f"  Expected: {expected_ids_str}\n"
-            f"  Found ArUco tids: {found_ids_str}"
-        )
-
-    # Build pixel/world pairs in the same order as the def's corner list.
-    pixel_corners = [tags[tid] for tid in corner_tids]
-    world_corners = list(corner_world_coords)
-
-    pixel_pts = np.array(pixel_corners, dtype=np.float32)
-    world_pts = np.array(world_corners, dtype=np.float32)
-
-    # Step 6: initial homography from corner correspondence.
-    H = compute_homography(pixel_pts, world_pts)
-
-    # Step 7: augment the 4 diagonal corners with every other ground-truth
-    # marker for a more accurate homography (and enough points for distortion).
-    #   (a) Every other detected ArUco marker that the definition gives a
-    #       surveyed world position for — edge midpoints (2/4/6/8) and interior
-    #       reference markers (e.g. west/east internal 9/10).  These use their
-    #       TRUE world coordinates, so they genuinely constrain the fit.
-    #   (b) AprilTags, whose world positions are derived via the initial H.
-    corner_tid_set = set(corner_tids)
-    all_px = list(pixel_corners)
-    all_wp = list(world_corners)
-    extra_aruco_ids: List[int] = []
-    for tid, px in tags.items():
-        if tid in aruco_world_by_tid and tid not in corner_tid_set:
-            # Ground-truth ArUco marker (non-corner) — use its surveyed world xy.
-            all_px.append(px)
-            all_wp.append(aruco_world_by_tid[tid])
-            extra_aruco_ids.append(-(tid + 1))
-        elif tid > 0:  # AprilTag (positive ID) — world derived via initial H.
-            vec = H @ np.array([px[0], px[1], 1.0])
-            world_xy = (float(vec[0] / vec[2]), float(vec[1] / vec[2]))
-            all_px.append(px)
-            all_wp.append(world_xy)
-
-    _log.info(
-        "calibrate_from_playfield_def: %d diagonal-corner + %d ground-truth "
-        "ArUco (%s) correspondences used for homography",
-        len(corner_ids_positive), len(extra_aruco_ids), sorted(extra_aruco_ids),
-    )
-
-    all_pixel = np.array(all_px, dtype=np.float32)
-    all_world = np.array(all_wp, dtype=np.float32)
-    n_pts = len(all_px)
-
-    # Step 8: optional barrel-distortion correction.
-    camera_matrix = None
-    dist_coeffs = None
-    pts_for_rms = all_pixel
-
-    if correct_distortion and n_pts >= 6:
-        obj_pts_3d = np.zeros((n_pts, 1, 3), dtype=np.float32)
-        obj_pts_3d[:, 0, :2] = all_world
-        img_pts = all_pixel.reshape(n_pts, 1, 2)
-        _rms, camera_matrix, dist_coeffs, _rvecs, _tvecs = cv.calibrateCamera(
-            [obj_pts_3d], [img_pts], (cam_w, cam_h), None, None
-        )
-        dist_coeffs = dist_coeffs.flatten()
-        undist_pts = cv.undistortPoints(
-            all_pixel.reshape(-1, 1, 2), camera_matrix, dist_coeffs, P=camera_matrix
-        ).reshape(-1, 2)
-        H = compute_homography(undist_pts, all_world)
-        pts_for_rms = undist_pts
-    elif n_pts > 4:
-        H = compute_homography(all_pixel, all_world)
-
-    rms = _reprojection_rms(H, pts_for_rms, all_world)
-
-    # Step 9: record calibration-time corner pixel positions and static markers.
-    corner_pixels_rec = [[float(p[0]), float(p[1])] for p in pixel_corners]
-    static_markers = _build_static_markers(
-        tags, corner_pixels_rec, world_corners, H, DEFAULT_STATIC_MARKER_IDS
-    )
-
-    # Step 10: resolve camera_position — param wins; else fall back to config.
-    if camera_position is None and config and "camera_position" in config:
-        camera_position = CameraPosition(**config["camera_position"])
-
-    # Step 11: construct CameraCalibration with provenance fields.
-    cal = CameraCalibration(
-        device_name=camera_slug,
-        resolution=(cam_w, cam_h),
-        homography=H,
-        camera_matrix=camera_matrix,
-        dist_coeffs=dist_coeffs,
-        tags_used=n_pts,
-        rms_error=rms,
-        playfield_width_cm=pf_def.width_cm,
-        playfield_height_cm=pf_def.height_cm,
-        camera_position=camera_position,
-        corner_pixels=corner_pixels_rec,
-        static_markers=static_markers,
-        static_marker_ids=list(DEFAULT_STATIC_MARKER_IDS),
-        calibrated_playfield=playfield_slug,
-        calibrated_camera=camera_slug,
-    )
-
-    # Step 12: merge auto-detected device_name and resolution into config.json so
-    # freshly-calibrated cameras have them present even though they are stripped
-    # from calibration.json.  Preserve all other config keys (playfield, settings…).
-    merged_config = dict(config) if config else {}
-    # device_name is a developer-owned field (the OS device name, used as a
-    # display/identity key) — only fill it if absent; never clobber it with the
-    # camera slug on recalibration.
-    merged_config.setdefault("device_name", camera_slug)
-    merged_config["resolution"] = [cam_w, cam_h]
-
-    if not skip_save:
-        # Daemon-local path: write calibration.json to the state dir
-        # (camera_dir) and config.json to the config dir. Defaults to
-        # camera_dir when config_dir is not supplied (backward-compat,
-        # single-directory behavior).
-        if camera_dir is not None:
-            # Step 13 (state write, first — higher-frequency, time-critical
-            # for get_tags): strips the 5 static fields automatically.
-            save_calibration_to_camera_dir(cal, camera_dir, pf_def.width_cm, pf_def.height_cm)
-            # Step 12 (config write, second): failure here is logged as a
-            # warning, not raised — the state write already succeeded and is
-            # the one that matters for live tag data.
-            _cfg_dir = config_dir if config_dir is not None else camera_dir
-            try:
-                save_camera_config(_cfg_dir, merged_config)
-            except Exception:
-                _log.warning(
-                    "calibrate_from_playfield_def: failed to write config.json "
-                    "to %s (calibration.json was written successfully to %s)",
-                    _cfg_dir, camera_dir, exc_info=True,
-                )
-    else:
-        # MCP/RPC path: caller persists via SetCalibration / SetCameraConfig RPCs.
-        # Store merged_config on the cal object so the caller can access it.
-        cal._merged_config = merged_config  # type: ignore[attr-defined]
-
-    return cal
-
-
-def calibrate_secondary(
-    secondary_cap: cv.VideoCapture,
-    primary_cal: CameraCalibration,
-    primary_cap: cv.VideoCapture,
-    num_frames: int = 30,
-    correct_distortion: bool = True,
-    secondary_index: int = 3,
-) -> CameraCalibration:
-    """Calibrate a secondary camera using a fully-calibrated primary camera.
-
-    The primary camera has already been calibrated (homography + optional
-    distortion).  Its homography is used to project the world positions of
-    any AprilTags both cameras see, giving the secondary camera a set of
-    pixel→world correspondences without needing ArUco corner markers.
-
-    Args:
-        secondary_cap: Open VideoCapture for the camera to calibrate.
-        primary_cal: Completed CameraCalibration for the primary camera.
-        primary_cap: Open VideoCapture for the primary camera (for
-            simultaneous tag detection).
-        num_frames: Frames to accumulate for tag detection.
-        correct_distortion: Attempt barrel distortion correction if ≥6
-            shared points are found.
-        secondary_index: Camera index for device name lookup.
-
-    Returns:
-        CameraCalibration for the secondary camera.
-    """
-    from .homography import compute_homography, detect_all_tags
-
-    # Detect tags on both cameras simultaneously
-    primary_tags  = detect_all_tags(primary_cap,   num_frames)
-    secondary_tags = detect_all_tags(secondary_cap, num_frames)
-
-    sec_w = int(secondary_cap.get(cv.CAP_PROP_FRAME_WIDTH))
-    sec_h = int(secondary_cap.get(cv.CAP_PROP_FRAME_HEIGHT))
-
-    # Build world positions for all tags seen by the primary camera.
-    # Include both AprilTags (positive IDs) and ArUco corners (negative IDs)
-    # so the secondary calibration works even when there are few/no AprilTags.
-    primary_world: Dict[int, Tuple[float, float]] = {}
-    H_pri = primary_cal.homography
-    cm = primary_cal.camera_matrix
-    dc = primary_cal.dist_coeffs
-    for tid, px in primary_tags.items():
-        # Undistort the pixel point if primary has distortion calibration
-        if cm is not None and dc is not None:
-            pt = cv.undistortPoints(
-                px.reshape(1, 1, 2).astype(np.float32), cm, dc, P=cm
-            ).reshape(2)
-        else:
-            pt = px
-        vec = H_pri @ np.array([pt[0], pt[1], 1.0])
-        primary_world[tid] = (float(vec[0] / vec[2]), float(vec[1] / vec[2]))
-
-    # Find all tags visible in both cameras (ArUco corners + AprilTags)
-    sec_px_list, world_list = [], []
-    for tid, world_xy in primary_world.items():
-        if tid in secondary_tags:
-            sec_px_list.append(secondary_tags[tid])
-            world_list.append(world_xy)
-
-    n_pts = len(sec_px_list)
-    if n_pts < 4:
-        raise RuntimeError(
-            f"Secondary camera: only {n_pts} shared tags found (need ≥4). "
-            f"Primary sees {len(primary_world)} tags; secondary sees "
-            f"{len(secondary_tags)} tags."
-        )
-
-    sec_px = np.array(sec_px_list, dtype=np.float32)
-    world  = np.array(world_list,  dtype=np.float32)
-
-    camera_matrix = None
-    dist_coeffs   = None
-    rms           = 0.0
-
-    if correct_distortion and n_pts >= 6:
-        obj_pts_3d = np.zeros((n_pts, 1, 3), dtype=np.float32)
-        obj_pts_3d[:, 0, :2] = world
-        img_pts = sec_px.reshape(n_pts, 1, 2)
-        _cv_rms, camera_matrix, dist_coeffs, _rv, _tv = cv.calibrateCamera(
-            [obj_pts_3d], [img_pts], (sec_w, sec_h), None, None
-        )
-        dist_coeffs = dist_coeffs.flatten()
-
-    # Always compute H from raw pixel coordinates.  Every caller applies H
-    # directly to raw (non-undistorted) pixels, so H must be built the same way.
-    H = compute_homography(sec_px, world)
-    rms = _reprojection_rms(H, sec_px, world)
-
-    from ..camera.camutil import get_device_name
-
-    return CameraCalibration(
-        device_name=get_device_name(secondary_index),
-        resolution=(sec_w, sec_h),
-        homography=H,
-        camera_matrix=camera_matrix,
-        dist_coeffs=dist_coeffs,
-        tags_used=n_pts,
-        rms_error=rms,
-    )
-
-
-def calibrate_joint(
-    bw_cap: cv.VideoCapture,
-    color_cap: cv.VideoCapture,
-    field_width_cm: float = 134.3,
-    field_height_cm: float = 89.3,
-    num_frames: int = 30,
-    correct_distortion: bool = True,
-    bw_index: int = 3,
-    color_index: int = 2,
-) -> Tuple[CameraCalibration, CameraCalibration]:
-    """Run joint multi-tag calibration on two cameras.
-
-    Uses ArUco 4x4 corner markers (known world positions) and AprilTags
-    (world positions computed from the B&W camera's homography) as
-    shared reference points.  When *correct_distortion* is True and
-    enough points are available (>=6), estimates lens distortion
-    coefficients for the color camera.
-
-    Args:
-        bw_cap: Open VideoCapture for the B&W (primary) camera.
-        color_cap: Open VideoCapture for the color (secondary) camera.
-        field_width_cm: Playfield width between ArUco corners in cm.
-        field_height_cm: Playfield height between ArUco corners in cm.
-        num_frames: Frames to accumulate for tag detection.
-        correct_distortion: Attempt barrel distortion correction on color.
-
-    Returns:
-        Tuple of (bw_calibration, color_calibration).
-    """
-    from .homography import compute_homography, detect_all_tags
-
-    # Step 1: Detect tags on both cameras
-    bw_tags = detect_all_tags(bw_cap, num_frames)
-    color_tags = detect_all_tags(color_cap, num_frames)
-
-    bw_w = int(bw_cap.get(cv.CAP_PROP_FRAME_WIDTH))
-    bw_h = int(bw_cap.get(cv.CAP_PROP_FRAME_HEIGHT))
-    color_w = int(color_cap.get(cv.CAP_PROP_FRAME_WIDTH))
-    color_h = int(color_cap.get(cv.CAP_PROP_FRAME_HEIGHT))
-
-    # Step 2: B&W camera homography — assign corners by pixel position
-    bw_corner_pixels, bw_corner_world = _assign_corners_by_position(
-        bw_tags, field_width_cm, field_height_cm
-    )
-
-    bw_pixel_pts = np.array(bw_corner_pixels, dtype=np.float32)
-    bw_world_pts = np.array(bw_corner_world, dtype=np.float32)
-    bw_H = compute_homography(bw_pixel_pts, bw_world_pts)
-
-    # Step 3: Compute world positions for ALL tags using B&W homography.
-    # Seed with ArUco corners (positionally assigned) so color camera can
-    # use them as correspondence points even if no AprilTags overlap.
-    tag_world_positions: Dict[int, Tuple[float, float]] = {}
-    aruco_ids = sorted(tid for tid in bw_tags if tid < 0)
-    # Map each ArUco negative ID to its assigned world position in order
-    # (same sort order as _assign_corners_by_position: top-left, top-right,
-    #  bottom-left, bottom-right sorted by y then x)
-    by_y = sorted(((tid, bw_tags[tid]) for tid in aruco_ids), key=lambda t: t[1][1])
-    top_row = sorted(by_y[:2], key=lambda t: t[1][0])
-    bot_row = sorted(by_y[2:], key=lambda t: t[1][0])
-    corner_id_order = [top_row[0][0], top_row[1][0], bot_row[0][0], bot_row[1][0]]
-    for tid, world_xy in zip(corner_id_order, bw_corner_world):
-        tag_world_positions[tid] = world_xy
-
-    for tid, px in bw_tags.items():
-        if tid > 0:  # AprilTag (positive ID)
-            vec = bw_H @ np.array([px[0], px[1], 1.0])
-            tag_world_positions[tid] = (float(vec[0] / vec[2]), float(vec[1] / vec[2]))
-
-    # Step 4: Build color camera correspondences from shared tags
-    color_pixel_pts = []
-    color_world_pts = []
-    for tid, world_xy in tag_world_positions.items():
-        if tid in color_tags:
-            color_pixel_pts.append(color_tags[tid])
-            color_world_pts.append(world_xy)
-
-    n_color_pts = len(color_pixel_pts)
-    if n_color_pts < 4:
-        raise RuntimeError(
-            f"Color camera: only {n_color_pts} shared tags found, need >= 4"
-        )
-
-    color_px = np.array(color_pixel_pts, dtype=np.float32)
-    color_wp = np.array(color_world_pts, dtype=np.float32)
-
-    # Step 5: Color camera calibration
-    color_cm = None
-    color_dc = None
-    color_rms = 0.0
-
-    if correct_distortion and n_color_pts >= 6:
-        # Use cv.calibrateCamera for distortion + intrinsics.
-        # It needs 3D object points (add z=0 for planar).
-        obj_pts_3d = np.zeros((n_color_pts, 1, 3), dtype=np.float32)
-        obj_pts_3d[:, 0, :2] = color_wp
-        img_pts = color_px.reshape(n_color_pts, 1, 2)
-
-        color_rms, color_cm, color_dc, _rvecs, _tvecs = cv.calibrateCamera(
-            [obj_pts_3d], [img_pts], (color_w, color_h), None, None
-        )
-        color_dc = color_dc.flatten()
-
-        # Undistort the pixel points and recompute homography
-        undist_pts = cv.undistortPoints(
-            color_px.reshape(-1, 1, 2), color_cm, color_dc, P=color_cm
-        ).reshape(-1, 2)
-        color_H = compute_homography(undist_pts, color_wp)
-    else:
-        # Not enough points for distortion -- plain homography
-        color_H = compute_homography(color_px, color_wp)
-
-    # Compute B&W RMS error
-    bw_all_px = []
-    bw_all_wp = []
-    for tid, world_xy in tag_world_positions.items():
-        if tid in bw_tags:
-            bw_all_px.append(bw_tags[tid])
-            bw_all_wp.append(world_xy)
-    if len(bw_all_px) > 4:
-        # Recompute B&W homography with ALL points for better accuracy
-        bw_all_pixel = np.array(bw_all_px, dtype=np.float32)
-        bw_all_world = np.array(bw_all_wp, dtype=np.float32)
-        bw_H = compute_homography(bw_all_pixel, bw_all_world)
-
-    # Compute RMS reprojection errors
-    bw_rms = _reprojection_rms(bw_H, bw_all_pixel, bw_all_world)
-
-    from ..camera.camutil import get_device_name
-
-    bw_cal = CameraCalibration(
-        device_name=get_device_name(bw_index),
-        resolution=(bw_w, bw_h),
-        homography=bw_H,
-        tags_used=len(bw_all_px),
-        rms_error=bw_rms,
-    )
-    color_cal = CameraCalibration(
-        device_name=get_device_name(color_index),
-        resolution=(color_w, color_h),
-        homography=color_H,
-        camera_matrix=color_cm,
-        dist_coeffs=color_dc,
-        tags_used=n_color_pts,
-        rms_error=color_rms,
-    )
-    return bw_cal, color_cal
+    visible = [tag_id for tag_id in calibration.matched_ids if tag_id in detected]
+    errors: List[float] = []
+    for tag_id in visible:
+        try:
+            surveyed = definition.aruco_position(tag_id)
+        except KeyError:
+            continue
+        world = calibration.to_world(detected[tag_id])
+        errors.append(math.hypot(world.x - surveyed.x, world.y - surveyed.y))
+    if len(errors) < MIN_DRIFT_CHECK_MARKERS:
+        return None
+    return max(errors)
 
 
 # ---------------------------------------------------------------------------
-# Top-level convenience function
+# Intrinsics estimation (sprint 030 ticket 002) -- see the module
+# docstring's "Intrinsics estimation" section for the design rationale and
+# the empirical evidence behind every threshold/bound below.
 # ---------------------------------------------------------------------------
 
 
-def calibrate(
-    camera: "cv.VideoCapture | int",
+@dataclass(frozen=True)
+class _IntrinsicsFit:
+    """The outcome of one :func:`_estimate_intrinsics` call -- explicitly
+    accepted or rejected, mirroring :class:`CalibrationResult`'s own
+    "no partial success" shape at a smaller scale. ``camera_matrix``/
+    ``dist_coeffs`` are ``None`` on a rejection -- never a value
+    :meth:`Calibrator.calibrate` could mistake for something to store.
+    """
+
+    accepted: bool
+    reason: Optional[str]
+    camera_matrix: Optional[Tuple[_Row3, _Row3, _Row3]]
+    dist_coeffs: Optional[Tuple[float, ...]]
+    mode: str
+    """``"coplanar-constrained"`` or ``"elevated"`` -- which model this
+    call ran, regardless of whether the result was ultimately accepted."""
+    elevated_feature_count: int
+    """How many of the points handed to this call had ``height_cm > 0``
+    -- reported even on rejection, so a caller can still say how many
+    elevated features *contributed to the attempt*."""
+    held_out_rms_px: Optional[float]
+    """The held-out reprojection residual, in pixels (this ticket's own
+    "held-out validation... reported, not silently discarded"
+    acceptance criterion) -- informational, not itself a pass/fail gate
+    (:func:`_sanity_check_intrinsics` is the gate); ``None`` only if the
+    point set was too small to hold anything out at all."""
+
+
+def _held_out_split(n: int) -> Tuple[List[int], List[int]]:
+    """Split *n* points' indices into a fit subset and a held-out
+    subset, deterministically (no shuffling -- reproducible tests) and
+    **evenly spaced**, not a contiguous prefix/suffix block.
+
+    A block split was this function's first draft, on the assumption
+    that this project's playfield entries have no ordering that would
+    bias it -- wrong, caught by this ticket's own test suite:
+    :meth:`Calibrator.calibrate` builds its point list ArUco ids first,
+    then AprilTag ids, and an elevated-mode caller's *elevated* features
+    are conventionally the ones appended last (a playfield's original
+    coplanar corners surveyed first, elevated ground truth added later).
+    A trailing-block holdout could then hold out *every* elevated point
+    at once, leaving the fit subset with none of the very 3D structure
+    elevated mode exists to use. Evenly spaced indices
+    (``numpy.linspace``) make that systematic exclusion structurally
+    impossible regardless of input order, at the cost of no longer being
+    a legible "first N / last M" split -- an acceptable trade since nothing
+    about this split needs to be human-readable, only reproducible.
+
+    Roughly a 70/30 split, floored so the fit subset never drops below 4
+    (the minimum a homography-shaped correspondence problem needs, and
+    in practice always well above what ``cv2.calibrateCamera`` needs
+    once ``CALIB_FIX_PRINCIPAL_POINT``/``CALIB_FIX_ASPECT_RATIO`` cut the
+    coplanar-constrained model down to effectively one or two free
+    intrinsic parameters) and the held-out subset never drops below 2.
+    At the ``MIN_SURVEYED_INTRINSICS_POINTS`` floor (n=6) this yields
+    exactly 4 fit / 2 held-out; at ``main-playfield``'s real 11 points,
+    8 fit / 3 held-out -- both exercised directly by this ticket's own
+    empirical investigation (module docstring).
+    """
+    holdout_n = max(2, round(n * 0.3))
+    holdout_n = min(holdout_n, max(0, n - 4))
+    if holdout_n <= 0:
+        return list(range(n)), []
+    holdout_idx = sorted({int(round(p)) for p in np.linspace(0, n - 1, num=holdout_n)})
+    # Rounding can collide for a small n/holdout_n ratio, leaving fewer
+    # than holdout_n distinct indices -- backfill from whatever is left,
+    # preserving determinism (always the same order: index 0 upward).
+    remaining = [i for i in range(n) if i not in holdout_idx]
+    while len(holdout_idx) < holdout_n and remaining:
+        holdout_idx.append(remaining.pop(0))
+    holdout_idx = sorted(holdout_idx)
+    fit_idx = [i for i in range(n) if i not in holdout_idx]
+    return fit_idx, holdout_idx
+
+
+def _initial_camera_matrix_guess(image_size: Tuple[int, int]) -> np.ndarray:
+    """A generic starting intrinsic matrix for the elevated-mode fit.
+
+    ``cv2.calibrateCamera`` refuses a non-planar point set with no
+    initial ``cameraMatrix`` at all ("For non-planar calibration rigs
+    the initial intrinsic matrix must be specified") -- confirmed
+    directly against this project's own pinned OpenCV version during
+    this ticket's investigation, unlike the coplanar-constrained path
+    below, which OpenCV happily self-initializes (auto-centring the
+    principal point and deriving a starting focal length via its own
+    internal homography-based heuristic) when ``cameraMatrix=None``.
+    This guess is only ever a Levenberg-Marquardt *starting point* --
+    every entry remains free to move (``CALIB_USE_INTRINSIC_GUESS`` seeds
+    the optimizer here, it does not fix anything, unlike the coplanar
+    path's ``CALIB_FIX_*`` flags) -- so its exact values are not
+    load-bearing precision, just a plausible-order-of-magnitude seed:
+    focal length at the larger image dimension (a generic normal-FOV
+    guess), principal point at the image centre.
+    """
+    width, height = image_size
+    focal_guess = float(max(width, height))
+    return np.array(
+        [[focal_guess, 0.0, width / 2.0], [0.0, focal_guess, height / 2.0], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+
+
+def _sanity_check_intrinsics(
+    camera_matrix: np.ndarray, dist_coeffs: np.ndarray, image_size: Tuple[int, int], *, k2_free: bool
+) -> Optional[str]:
+    """``None`` if *camera_matrix*/*dist_coeffs* pass this ticket's
+    sanity bound; otherwise a human-readable reason naming which check
+    failed, for :class:`CalibrationResult.reason`.
+
+    Two independent degeneracies, two independent checks (module
+    docstring's "Two degeneracies, not one" section) -- **either** alone
+    is grounds for rejection:
+
+    1. **Implausible focal length** (``fx`` far outside an ordinary
+       consumer/webcam lens's range relative to the image width) -- the
+       direct signature of this ticket's own newly-documented fx/depth
+       ambiguity for a near-exactly-nadir single coplanar view. This is
+       checked *first* and independently of the distortion coefficients,
+       since that degeneracy can occur with an otherwise-small ``k1``
+       (module docstring's empirical evidence).
+    2. **Implausible distortion coefficients** -- v1's own concrete
+       failure mode (stored ``dist_coeffs [0.42, -2.43, ...]``): an
+       absolute bound on ``k1``/``k2`` individually, plus (only when
+       ``k2`` was actually freed) a bound on their ratio, matching v1's
+       own ``k2`` being ~5.79x its ``k1`` in magnitude.
+    """
+    fx = float(camera_matrix[0][0])
+    width = image_size[0]
+    ratio = fx / width if width else float("inf")
+    if not (_MIN_FX_TO_WIDTH_RATIO <= ratio <= _MAX_FX_TO_WIDTH_RATIO):
+        return (
+            f"implausible focal length: fx={fx:.1f}px is {ratio:.2f}x the {width}px image "
+            f"width (expected roughly {_MIN_FX_TO_WIDTH_RATIO}x-{_MAX_FX_TO_WIDTH_RATIO}x for "
+            "an ordinary lens) -- likely an under-constrained single coplanar view "
+            "(see calibration.calibration's module docstring's fx/depth degeneracy note)"
+        )
+
+    k1 = float(dist_coeffs[0])
+    if abs(k1) > _MAX_ABS_DISTORTION_COEFF:
+        return (
+            f"implausible k1={k1:.4f} (|k1| > {_MAX_ABS_DISTORTION_COEFF}) -- see v1's stored "
+            "dist_coeffs [0.42, -2.43, ...] as the concrete example this bound exists to reject"
+        )
+    if k2_free:
+        k2 = float(dist_coeffs[1])
+        if abs(k2) > _MAX_ABS_DISTORTION_COEFF:
+            return (
+                f"implausible k2={k2:.4f} (|k2| > {_MAX_ABS_DISTORTION_COEFF}) -- see v1's "
+                "stored dist_coeffs [0.42, -2.43, ...] as the concrete example this bound "
+                "exists to reject"
+            )
+        if abs(k1) > 1e-9 and abs(k2 / k1) > _MAX_K2_OVER_K1_RATIO:
+            return (
+                f"implausible k2/k1 ratio {k2 / k1:.2f} (> {_MAX_K2_OVER_K1_RATIO}) -- v1's "
+                f"stored dist_coeffs [0.42, -2.43, ...] had a ratio of "
+                f"{-2.43 / 0.42:.2f}, exactly the failure mode this bound rejects"
+            )
+    return None
+
+
+def _estimate_intrinsics(
+    object_points: np.ndarray,
+    image_points: np.ndarray,
+    image_size: Tuple[int, int],
     *,
-    width_cm: float = 134.3,
-    height_cm: float = 89.3,
-    frames: int = 30,
-    output: "str | Path | None" = None,
-) -> CameraCalibration:
-    """Calibrate a camera for playfield homography.
+    elevated_feature_count: int,
+    z_spread_cm: float,
+) -> _IntrinsicsFit:
+    """Fit one camera's intrinsics/distortion from a single view's
+    surveyed-and-detected points (module docstring). *object_points* is
+    ``(N, 3)`` -- ``(x, y, height_cm)`` in cm -- and *image_points* is
+    ``(N, 2)`` -- the matching **raw** (not undistorted -- that would be
+    circular) detected pixel positions, both already aligned by index
+    with *elevated_feature_count*/*z_spread_cm* describing the same set.
 
-    Args:
-        camera: An open :class:`cv.VideoCapture` or a camera index.
-        width_cm: Playfield width between ArUco corners in cm.
-        height_cm: Playfield height between ArUco corners in cm.
-        frames: Frames to accumulate for tag detection.
-        output: Optional path to save the calibration file.  If given,
-            the result is merged into (or created as) a
-            ``calibration.json`` at that path.
-
-    Returns:
-        :class:`CameraCalibration` for the camera.
+    Mode selection (Open Question 6, :data:`MIN_ELEVATED_FEATURES_FOR_ELEVATED_MODE`/
+    :data:`MIN_ELEVATED_Z_SPREAD_CM`) is graded and decided here, from
+    what was actually surveyed and detected this burst -- never a
+    per-call argument (sprint.md Design Rationale Decision 2).
     """
-    own_cap = False
-    if isinstance(camera, int):
-        # DEAD-CODE from MCP path: the MCP server's calibrate_playfield tool
-        # passes a DaemonCapture (not an int), so this branch is unreachable
-        # from MCP clients.  It remains for direct programmatic / CLI use.
-        cap = cv.VideoCapture(camera)
-        cam_index = camera
-        own_cap = True
-    else:
-        cap = camera
-        cam_index = 0
+    n = len(object_points)
+    elevated_mode = (
+        elevated_feature_count >= MIN_ELEVATED_FEATURES_FOR_ELEVATED_MODE
+        and z_spread_cm >= MIN_ELEVATED_Z_SPREAD_CM
+    )
+    mode = "elevated" if elevated_mode else "coplanar-constrained"
 
-    try:
-        cal = calibrate_single(
-            cap,
-            field_width_cm=width_cm,
-            field_height_cm=height_cm,
-            num_frames=frames,
-            camera_index=cam_index,
+    fit_idx, holdout_idx = _held_out_split(n)
+    obj_fit = object_points[fit_idx].astype(np.float32)
+    img_fit = image_points[fit_idx].astype(np.float32)
+
+    if elevated_mode:
+        # "Freed further" (sprint.md Design Rationale Decision 2): no
+        # CALIB_FIX_* constraint at all -- principal point, aspect
+        # ratio, tangential terms, and k3 are all estimated, since
+        # genuine z-spread resolves the fx/depth degeneracy the
+        # coplanar-constrained flags below exist to defend against
+        # (module docstring's empirical evidence). CALIB_USE_INTRINSIC_GUESS
+        # is required here purely because OpenCV refuses to
+        # self-initialize a non-planar rig's starting camera matrix --
+        # it does not fix anything (see _initial_camera_matrix_guess's
+        # own docstring).
+        flags = cv.CALIB_USE_INTRINSIC_GUESS
+        initial_guess = _initial_camera_matrix_guess(image_size)
+        # mypy/cv2-stubs note: the stubs declare cameraMatrix/distCoeffs as
+        # required, non-Optional arrays; distCoeffs=None here is correct OpenCV
+        # usage (self-initializes the distortion coefficients even with an
+        # explicit cameraMatrix guess) -- the stubs are simply narrower than
+        # the real C++ API.
+        rms, camera_matrix, dist_coeffs, rvecs, tvecs = cv.calibrateCamera(  # type: ignore[call-overload]
+            [obj_fit], [img_fit], image_size, initial_guess, None, flags=flags
         )
-    finally:
-        if own_cap:
-            cap.release()
+    else:
+        # The coplanar-constrained default (sprint.md Design Rationale
+        # Decision 2, this ticket's headline acceptance criterion):
+        # fixed principal point, fixed aspect ratio, zero tangential
+        # distortion, fixed k3 -- k1-only unless
+        # _FREE_K2_IN_COPLANAR_DEFAULT says otherwise (Open Question 5,
+        # module docstring: measurably worse on held-out residual, so
+        # it stays False).
+        flags = (
+            cv.CALIB_FIX_PRINCIPAL_POINT
+            | cv.CALIB_FIX_ASPECT_RATIO
+            | cv.CALIB_ZERO_TANGENT_DIST
+            | cv.CALIB_FIX_K3
+        )
+        if not _FREE_K2_IN_COPLANAR_DEFAULT:
+            flags |= cv.CALIB_FIX_K2
 
-    if output is not None:
-        out_path = Path(output)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        if out_path.exists():
-            try:
-                import json as _json
-                cal_data = _json.loads(out_path.read_text())
-            except Exception:
-                cal_data = {}
+        if np.all(obj_fit[:, 2] == 0.0):
+            # No initial cameraMatrix -- OpenCV self-initializes a
+            # planar rig's starting focal length/principal point from
+            # the correspondences themselves via its own internal
+            # homography-based heuristic. Load-bearing, not just an
+            # implementation-detail choice: this is what makes this
+            # ticket's own fx/depth-degeneracy sanity check
+            # (:func:`_sanity_check_intrinsics`) actually fire on a
+            # near-exact-nadir single coplanar view. A run with this
+            # ticket's own investigation found that seeding the
+            # optimizer with an explicit initial guess instead lets a
+            # degenerate fit converge to (or barely move from)
+            # whatever the guess said -- landing inside a "plausible"
+            # focal-length band purely because the guess did, not
+            # because the fit resolved anything -- which would silently
+            # defeat the very check this branch exists to trigger.
+            # Auto-init has no such anchor: it reliably produces wildly
+            # implausible focal lengths (tens to hundreds of times the
+            # true value, confirmed directly) precisely when the
+            # underlying fx/depth ridge is genuinely flat, which is
+            # exactly the signal :func:`_sanity_check_intrinsics` needs.
+            # mypy/cv2-stubs note: the stubs declare cameraMatrix/distCoeffs as
+            # required, non-Optional arrays; passing None for both here is correct
+            # OpenCV usage requesting full self-initialization for a planar rig
+            # (see the comment above) -- the stubs are simply narrower than the
+            # real C++ API.
+            rms, camera_matrix, dist_coeffs, rvecs, tvecs = cv.calibrateCamera(  # type: ignore[call-overload]
+                [obj_fit], [img_fit], image_size, None, None, flags=flags
+            )
         else:
-            cal_data = {}
-        cal_data.setdefault("type", "playfield")
-        cal_data.setdefault("field_width_cm", width_cm)
-        cal_data.setdefault("field_height_cm", height_cm)
-        if "cameras" not in cal_data:
-            cal_data["cameras"] = {}
-        cal_data["cameras"][cal.device_name] = cal.to_dict()
-        import json as _json
-        out_path.write_text(_json.dumps(cal_data, indent=2))
+            # The graded-threshold edge case (Open Question 6): mode
+            # selection decided elevated_mode=False (not enough elevated
+            # count/z-spread to free the model), but fit_idx still
+            # contains at least one nonzero-height point -- e.g. a
+            # below-threshold elevated feature that this ticket's own
+            # even-spread _held_out_split (see that function's own
+            # docstring) placed in the fit subset rather than the
+            # held-out one. OpenCV's planar-rig auto-initialization
+            # above only fires when every fit_idx point is genuinely
+            # z=0, so this subset needs an explicit initial guess purely
+            # to avoid "For non-planar calibration rigs the initial
+            # intrinsic matrix must be specified" -- confirmed directly
+            # by this ticket's own test suite. Rare in practice (it
+            # requires elevation to exist below the graded threshold at
+            # all), and the sanity-bound weakening the all-coplanar
+            # branch above avoids does not apply here either way: this
+            # branch already has genuine (if sub-threshold) 3D
+            # structure to anchor the fit, unlike the purely-planar case.
+            flags |= cv.CALIB_USE_INTRINSIC_GUESS
+            initial_guess = _initial_camera_matrix_guess(image_size)
+            # mypy/cv2-stubs note: the stubs declare cameraMatrix/distCoeffs as
+            # required, non-Optional arrays; distCoeffs=None here is correct OpenCV
+            # usage (self-initializes the distortion coefficients even with an
+            # explicit cameraMatrix guess, same as the elevated branch above) --
+            # the stubs are simply narrower than the real C++ API.
+            rms, camera_matrix, dist_coeffs, rvecs, tvecs = cv.calibrateCamera(  # type: ignore[call-overload]
+                [obj_fit], [img_fit], image_size, initial_guess, None, flags=flags
+            )
 
-    return cal
+    held_out_rms_px: Optional[float] = None
+    if holdout_idx:
+        # Reuses the SAME extrinsic pose calibrateCamera just solved for
+        # the fit subset -- valid because every point (fit and held-out
+        # alike) is on the same rigid field, observed by the same
+        # camera in the same single frame, so there is exactly one true
+        # pose. No separate solvePnP call: with as few as 2 held-out
+        # points that would not even be possible (solvePnP itself
+        # requires >= 4), confirmed directly during this ticket's own
+        # investigation.
+        obj_hold = object_points[holdout_idx].astype(np.float64)
+        img_hold = image_points[holdout_idx]
+        projected, _ = cv.projectPoints(obj_hold, rvecs[0], tvecs[0], camera_matrix, dist_coeffs)
+        projected = projected.reshape(-1, 2)
+        held_out_rms_px = float(
+            np.sqrt(np.mean(np.sum((projected - img_hold) ** 2, axis=1)))
+        )
+
+    dist_coeffs_flat = dist_coeffs.reshape(-1)
+    reason = _sanity_check_intrinsics(
+        camera_matrix,
+        dist_coeffs_flat,
+        image_size,
+        k2_free=elevated_mode or _FREE_K2_IN_COPLANAR_DEFAULT,
+    )
+    if reason is not None:
+        return _IntrinsicsFit(
+            accepted=False,
+            reason=reason,
+            camera_matrix=None,
+            dist_coeffs=None,
+            mode=mode,
+            elevated_feature_count=elevated_feature_count,
+            held_out_rms_px=held_out_rms_px,
+        )
+
+    return _IntrinsicsFit(
+        accepted=True,
+        reason=None,
+        camera_matrix=_matrix_to_tuple(camera_matrix),
+        dist_coeffs=tuple(float(c) for c in dist_coeffs_flat),
+        mode=mode,
+        elevated_feature_count=elevated_feature_count,
+        held_out_rms_px=held_out_rms_px,
+    )
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# Parse-from-dict helpers (for MCP file-proxy RPC clients)
-# ---------------------------------------------------------------------------
-
-
-def parse_calibration_from_dict(d: dict) -> "CameraCalibration":
-    """Deserialize a calibration dict received from a ``GetCalibration`` RPC blob.
-
-    This is a pure (no I/O) companion to :func:`load_calibration_from_camera_dir`
-    for the MCP server side: the daemon returns ``calibration.json`` content as a
-    JSON blob via gRPC, the MCP server calls ``json.loads()`` on the blob, then
-    calls this function to obtain a :class:`CameraCalibration` object.
+class Calibrator(_CalibratorBase):
+    """Concrete ``calibration.interfaces.Calibrator``.
 
     Parameters
     ----------
-    d:
-        Parsed JSON dict exactly as it appears in ``calibration.json`` on disk.
+    get_camera_config:
+        Resolves a camera slug -> its currently-held ``CameraConfig``
+        (``None`` if the camera has never been configured). Daemon-owned
+        state (``daemon.service.DaemonService._camera_configs``),
+        injected rather than imported so this module never depends on
+        the daemon -- the camera's ``.playfield`` link is checked
+        **before** *capture_frames* is ever called (see the module
+        docstring's ``NoPlayfieldLinked`` section).
+    get_playfield:
+        Resolves a playfield *name* -> its ``PlayfieldDefinition``
+        (``None`` if the daemon does not currently hold one by that
+        name). A camera config naming a playfield the daemon does not
+        hold is treated the same as no link at all -- both mean "no
+        coordinate system exists to map to right now."
+    capture_frames:
+        Camera frame access, handed in (module docstring). Returns
+        however many raw BGR frames it was able to capture for a camera
+        slug -- zero or more; this class multi-frame-averages whatever
+        it is given rather than dictating a count itself.
+    detector_factory:
+        Builds the one ``vision.detector.TagDetector`` this instance
+        reuses across every :meth:`calibrate` call, for every camera --
+        mirrors ``daemon.detection.DetectionEngine``'s "building an
+        ``ArucoDetector`` is not free, reuse it" reasoning. Overridable
+        for tests.
+    pipeline_config:
+        Passed straight through to ``vision.pipeline.run_pipeline`` for
+        every captured frame. ``None`` uses that function's own default.
+    max_reprojection_error_cm:
+        The reprojection-error acceptance ceiling (ticket 023-006) --
+        defaults to the module-level :data:`MAX_REPROJECTION_ERROR_CM`
+        (1.0 cm) but is genuinely overridable per instance, since the
+        confirmed default is a domain-tuning call (sprint.md Decisions),
+        not a structural one.
+    get_prior_calibration:
+        Resolves a camera slug -> the ``Calibration`` its *most recent
+        successful* calibration produced, if any (sprint 030 ticket
+        002) -- what an ordinary (``estimate_intrinsics=False``)
+        :meth:`calibrate` call reads to carry a lens model forward.
+        Defaults to :meth:`get_calibration` (this instance's own
+        write-only-until-now cache), reproducing ticket 001's exact
+        same-process behaviour when a caller does not override it.
 
-    Returns
-    -------
-    CameraCalibration
+        **Why this parameter exists at all -- a confirmed bug ticket 001
+        left for this ticket to close.** ``daemon.service.DaemonService``
+        holds *two* separate calibration caches: its own
+        ``self._calibrations`` (populated at construction from disk,
+        ``_load_calibrations``, and by every successful
+        ``DaemonService.calibrate`` call), and this class's
+        ``self._calibrations`` (populated *only* by a successful
+        :meth:`calibrate` call *in this process*). Before this
+        parameter existed, ticket 001's carry-forward read the latter --
+        correct for a same-process recalibration, but empty on a freshly
+        started daemon that has not yet run a single in-process
+        ``calibrate`` call, even though real intrinsics sit right there
+        in a loaded ``calibration.json``. The result: any recalibration
+        immediately after a daemon restart silently wiped a
+        previously-estimated lens model back to ``None``, discarding
+        real operator effort with no error and no warning. Injecting
+        ``DaemonService.get_calibration`` here (a bound-method reference,
+        resolved at call time -- safe to pass before that service's own
+        stores exist, the same pattern ``DetectionEngine``'s
+        ``calibration_lookup=self.get_calibration`` already uses in
+        ``daemon/service.py.__init__``) makes the carry-forward read the
+        daemon's disk-backed store instead, closing the gap. Test
+        coverage: ``tests/aprilcam/daemon/test_service.py``'s
+        restart-carries-forward-intrinsics test constructs a *fresh*
+        ``DaemonService`` against a ``calibration.json`` already on disk
+        (never touched by this process before) and recalibrates,
+        asserting the lens model survives -- a same-process-only test
+        would pass with the bug still present.
     """
-    return CameraCalibration.from_dict(d)
 
+    def __init__(
+        self,
+        *,
+        get_camera_config: CameraConfigLookup,
+        get_playfield: PlayfieldLookup,
+        capture_frames: FrameSource,
+        detector_factory: DetectorFactory = _default_detector_factory,
+        pipeline_config: Optional[PipelineConfig] = None,
+        max_reprojection_error_cm: float = MAX_REPROJECTION_ERROR_CM,
+        get_prior_calibration: Optional[CalibrationLookup] = None,
+    ) -> None:
+        self._get_camera_config = get_camera_config
+        self._get_playfield = get_playfield
+        self._capture_frames = capture_frames
+        self._pipeline_config = pipeline_config
+        self._detector = detector_factory()
+        self._max_reprojection_error_cm = max_reprojection_error_cm
+        self._calibrations: Dict[str, Calibration] = {}
+        self._lock = threading.Lock()
+        # Bound to self.get_calibration -- not resolved until first
+        # called, so this is safe even though it references a method
+        # that reads self._calibrations, set just above. See this
+        # class's own docstring ("get_prior_calibration") for why a
+        # caller (DaemonService) overrides this to fix a real carry-
+        # forward-after-restart bug.
+        self._get_prior_calibration: CalibrationLookup = (
+            get_prior_calibration if get_prior_calibration is not None else self.get_calibration
+        )
 
-# ---------------------------------------------------------------------------
-# Legacy aliases
-# ---------------------------------------------------------------------------
+    def calibrate(
+        self, camera_slug: str, *, estimate_intrinsics: bool = False
+    ) -> CalibrationResult:
+        """See ``calibration.interfaces.Calibrator.calibrate``.
 
+        On success, the resulting :class:`Calibration` is stored
+        internally and retrievable via :meth:`get_calibration` -- an
+        addition beyond the declared ``Calibrator`` base class (the same
+        "additive helper on the concrete class" pattern
+        ``config.loader.PlayfieldDefinition.aruco_position`` uses), since
+        the base class's declared return type is only
+        ``CalibrationResult``. ``daemon.service.DaemonService.calibrate``
+        reads it immediately after a successful call to get the object
+        it persists to ``calibration.json`` -- this class never touches
+        a filesystem itself (persistence is the daemon's job, sprint
+        architecture's module boundary table).
 
-def save_joint_calibration(
-    bw_cal: CameraCalibration,
-    color_cal: CameraCalibration,
-    path: Path,
-    field_width_cm: float = 134.3,
-    field_height_cm: float = 89.3,
-) -> None:
-    """Save calibration (legacy -- prefers :func:`save_calibration`)."""
-    save_calibration(
-        [bw_cal, color_cal],
-        data_dir=path.parent,
-        field_width_cm=field_width_cm,
-        field_height_cm=field_height_cm,
-    )
+        *estimate_intrinsics* (sprint 030 ticket 002) is the module
+        docstring's "Intrinsics estimation" section, end to end: when
+        ``True``, runs :func:`_estimate_intrinsics` over this burst's
+        surveyed-and-detected ArUco+AprilTag points (all of them,
+        coplanar and elevated alike) and stores the result if -- and
+        only if -- it passes :func:`_sanity_check_intrinsics`; when
+        ``False`` (the default), carries forward whatever lens model
+        *camera_slug*'s prior successful calibration already held, via
+        :attr:`_get_prior_calibration` (**not** :meth:`get_calibration`
+        directly -- see that attribute's own docstring for the
+        carry-forward-after-restart bug this distinction fixes).
+        """
+        config = self._get_camera_config(camera_slug)
+        if config is None or config.playfield is None:
+            raise NoPlayfieldLinked(camera_slug)
 
+        definition = self._get_playfield(config.playfield)
+        if definition is None:
+            # The camera names a playfield the daemon does not currently
+            # hold (e.g. pushed once, then the daemon restarted and only
+            # the camera config -- not the playfield -- was re-pushed).
+            # From this method's point of view there is, right now, no
+            # coordinate system to map to either way -- the same
+            # precondition class UC-15.S-2 names, so it gets the same
+            # error rather than a second type for a scenario with no
+            # dedicated use-case text.
+            raise NoPlayfieldLinked(camera_slug)
+        if not isinstance(definition, _ConcretePlayfieldDefinition):
+            # Every PlayfieldDefinition this daemon ever holds was built
+            # either by ConfigLoader.load_playfield or by
+            # daemon/rpc.py's _playfield_definition_from_proto -- both
+            # always produce this concrete type, so this is not reached
+            # through normal use. Guards against a future
+            # PlayfieldDefinition subclass this module would not know
+            # how to read ``aruco_position`` from -- the same defensive
+            # check ``daemon/rpc.py``'s ``_playfield_entry_to_proto`` and
+            # ``client/daemon_client.py``'s ``set_playfield`` make for
+            # the identical reason.
+            raise TypeError(
+                f"cannot calibrate against playfield {definition.name!r}: definition is "
+                f"{type(definition).__name__}, not aprilcam.config.loader.PlayfieldDefinition"
+            )
 
-def load_joint_calibration(
-    path: Path,
-) -> Tuple[CameraCalibration, CameraCalibration]:
-    """Load calibration (legacy -- prefers :func:`load_calibration`)."""
-    data = json.loads(path.read_text())
-    cams = list(data.get("cameras", {}).values())
-    if len(cams) < 2:
-        raise ValueError(f"Expected at least 2 cameras in {path}")
-    return (
-        CameraCalibration.from_dict(cams[0]),
-        CameraCalibration.from_dict(cams[1]),
-    )
+        if estimate_intrinsics:
+            # The n_pts >= 6 floor (module docstring, sprint.md Design
+            # Rationale Decision 2) counts what the playfield definition
+            # itself surveys -- never what a burst happens to detect --
+            # and is checked here, before any frame is captured, exactly
+            # like the NoPlayfieldLinked precondition above: cheap, and
+            # there is nothing a frame could tell us that would change
+            # this answer.
+            surveyed_count = len(definition.aruco_tags) + len(definition.april_tags)
+            if surveyed_count < MIN_SURVEYED_INTRINSICS_POINTS:
+                return CalibrationResult(
+                    succeeded=False,
+                    matched_ids=(),
+                    missing_ids=(),
+                    intrinsics_estimated=False,
+                    reason=(
+                        f"estimate_intrinsics requires at least "
+                        f"{MIN_SURVEYED_INTRINSICS_POINTS} ArUco+AprilTag ground-truth "
+                        f"points surveyed on the linked playfield {definition.name!r}; "
+                        f"found {surveyed_count}"
+                    ),
+                )
+
+        frames = self._capture_frames(camera_slug)
+        if not frames:
+            raise RuntimeError(f"no frames available from camera {camera_slug!r}")
+
+        detected = self._detect_averaged(frames)
+        aruco_detected = detected.get(TagFamily.ARUCO, {})
+        april_detected = detected.get(TagFamily.APRILTAG, {})
+
+        required = definition.required_aruco_ids()
+        matched_ids = tuple(sorted(i for i in required if i in aruco_detected))
+        missing_ids = tuple(sorted(i for i in required if i not in aruco_detected))
+
+        stray = sorted(set(aruco_detected) - set(required))
+        if stray:
+            logger.info(
+                "calibrate(%s): ignoring %d detected ArUco id(s) not in the "
+                "playfield definition: %s",
+                camera_slug,
+                len(stray),
+                stray,
+            )
+
+        if missing_ids:
+            return CalibrationResult(
+                succeeded=False, matched_ids=matched_ids, missing_ids=missing_ids
+            )
+
+        aruco_by_id = {entry.tag_id: entry for entry in definition.aruco_tags}
+        april_by_id = {entry.tag_id: entry for entry in definition.april_tags}
+
+        # The homography/intrinsics split (module docstring): the
+        # homography solve and reprojection_error_cm below use *only*
+        # the coplanar (height_cm == 0) subset of the matched ArUco
+        # ids -- never AprilTags (never part of the homography, before
+        # or after this ticket) and never an elevated ArUco entry, if a
+        # playfield definition ever declares one. This keeps
+        # reprojection_error_cm comparable to every calibration recorded
+        # before this sprint, regardless of estimation mode.
+        homography_ids = tuple(i for i in matched_ids if aruco_by_id[i].height_cm == 0.0)
+
+        intrinsics_estimated: Optional[bool] = None
+        intrinsics_mode: Optional[str] = None
+        elevated_features_used: Optional[int] = None
+
+        if estimate_intrinsics:
+            intrinsics_points: List[Tuple[PixelPoint, float, float, float]] = [
+                (aruco_detected[tag_id], entry.x, entry.y, entry.height_cm)
+                for tag_id, entry in ((i, aruco_by_id[i]) for i in matched_ids)
+            ]
+            intrinsics_points.extend(
+                (april_detected[tag_id], entry.x, entry.y, entry.height_cm)
+                for tag_id, entry in april_by_id.items()
+                if tag_id in april_detected
+            )
+
+            object_points = np.array(
+                [[x, y, h] for (_pixel, x, y, h) in intrinsics_points], dtype=np.float64
+            )
+            image_points = np.array(
+                [[pixel.x, pixel.y] for (pixel, _x, _y, _h) in intrinsics_points], dtype=np.float64
+            )
+            heights = object_points[:, 2]
+            elevated_count = int(np.count_nonzero(heights > 0.0))
+            z_spread_cm = float(heights.max() - heights.min()) if len(heights) else 0.0
+
+            first_frame = frames[0]
+            image_size = (int(first_frame.shape[1]), int(first_frame.shape[0]))
+
+            fit = _estimate_intrinsics(
+                object_points,
+                image_points,
+                image_size,
+                elevated_feature_count=elevated_count,
+                z_spread_cm=z_spread_cm,
+            )
+            # Held-out validation, reported -- never silently discarded
+            # (this ticket's own acceptance criterion): logged here
+            # regardless of accept/reject, since _IntrinsicsFit itself
+            # is an internal type CalibrationResult does not carry
+            # held_out_rms_px on (only the accept/reject outcome and
+            # mode/count do -- mirroring "reports what the interface
+            # promises" for the fitted numbers themselves).
+            logger.info(
+                "calibrate(%s): intrinsics fit mode=%s elevated_features=%d "
+                "held_out_rms_px=%s accepted=%s%s",
+                camera_slug,
+                fit.mode,
+                fit.elevated_feature_count,
+                f"{fit.held_out_rms_px:.4f}" if fit.held_out_rms_px is not None else "n/a",
+                fit.accepted,
+                f" reason={fit.reason!r}" if fit.reason else "",
+            )
+            if not fit.accepted:
+                return CalibrationResult(
+                    succeeded=False,
+                    matched_ids=matched_ids,
+                    missing_ids=(),
+                    intrinsics_estimated=False,
+                    intrinsics_mode=fit.mode,
+                    elevated_features_used=fit.elevated_feature_count,
+                    reason=f"intrinsics estimation rejected: {fit.reason}",
+                )
+            camera_matrix = fit.camera_matrix
+            dist_coeffs = fit.dist_coeffs
+            intrinsics_estimated = True
+            intrinsics_mode = fit.mode
+            elevated_features_used = fit.elevated_feature_count
+        else:
+            # Lens-model carry-forward (sprint 030 ticket 001, Design
+            # Rationale Decision 3): an ordinary recalibration (no
+            # intrinsics estimation of its own) neither estimates nor
+            # discards whatever lens model this camera's *prior*
+            # successful calibration already held; it carries it
+            # forward unchanged onto the fresh ``Calibration`` this call
+            # produces. ``None`` (never calibrated before, or
+            # calibrated with no known lens model) reproduces exactly
+            # today's intrinsics-free behaviour. Reads
+            # ``self._get_prior_calibration``, not ``self.
+            # get_calibration`` directly -- see that attribute's
+            # docstring for why (the restart carry-forward bug fix).
+            prior = self._get_prior_calibration(camera_slug)
+            camera_matrix = prior.camera_matrix if prior is not None else None
+            dist_coeffs = prior.dist_coeffs if prior is not None else None
+            intrinsics_estimated = False
+
+        intrinsics_known = camera_matrix is not None and dist_coeffs is not None
+
+        # Undistort-before-solve (Design Rationale Decision 1): when
+        # this camera's lens model is known, every detected marker
+        # pixel *in the coplanar homography set* is undistorted
+        # *before* it ever reaches the homography solve or the
+        # reprojection-error measurement below -- both
+        # ``_solve_homography`` and ``_reprojection_error_cm`` are
+        # handed this same already-undistorted ``pixel_pts`` array, per
+        # v1's own earned lesson (``archive/.../calibration.py:1342-
+        # 1346``): pairing the homography solved from undistorted
+        # points with an RMS measured on a *different* (still
+        # distorted) point set silently reports a healthy error for a
+        # solve that is not actually healthy. There is no separate
+        # "undistorted pixel_pts" variable for this reason -- one array
+        # feeds every downstream step, exactly like the intrinsics-free
+        # path already does.
+        if intrinsics_known:
+            camera_matrix_array = np.array(camera_matrix, dtype=np.float64)
+            dist_coeffs_array = np.array(dist_coeffs, dtype=np.float64)
+            undistorted = {
+                tag_id: geometry.undistort_point(
+                    aruco_detected[tag_id], camera_matrix_array, dist_coeffs_array
+                )
+                for tag_id in homography_ids
+            }
+            pixel_pts = np.array(
+                [[undistorted[i].x, undistorted[i].y] for i in homography_ids], dtype=np.float64
+            )
+        else:
+            pixel_pts = np.array(
+                [[aruco_detected[i].x, aruco_detected[i].y] for i in homography_ids],
+                dtype=np.float64,
+            )
+        world_pts = np.array(
+            [[aruco_by_id[i].x, aruco_by_id[i].y] for i in homography_ids], dtype=np.float64
+        )
+
+        degenerate = _degeneracy_reason(pixel_pts, world_pts)
+        if degenerate is not None:
+            return CalibrationResult(
+                succeeded=False,
+                matched_ids=matched_ids,
+                missing_ids=(),
+                reason=degenerate,
+                intrinsics_estimated=intrinsics_estimated,
+                intrinsics_mode=intrinsics_mode,
+                elevated_features_used=elevated_features_used,
+            )
+
+        homography = _solve_homography(pixel_pts, world_pts)
+        if homography is None:
+            return CalibrationResult(
+                succeeded=False,
+                matched_ids=matched_ids,
+                missing_ids=(),
+                reason="homography solve failed: singular or ill-conditioned matrix",
+                intrinsics_estimated=intrinsics_estimated,
+                intrinsics_mode=intrinsics_mode,
+                elevated_features_used=elevated_features_used,
+            )
+
+        rms = _reprojection_error_cm(homography, pixel_pts, world_pts)
+
+        if rms > self._max_reprojection_error_cm:
+            # Complete (every required id found -- missing_ids stays
+            # empty) but sloppy: UC-04's open question, resolved. Named
+            # via `reason`, not `missing_ids`, per the interface
+            # docstring's "why a failure failed when ids alone don't
+            # say" -- and nothing is stored, matching the "a failed
+            # attempt leaves the previous calibration as it was"
+            # contract every other rejection branch above already
+            # honors.
+            return CalibrationResult(
+                succeeded=False,
+                matched_ids=matched_ids,
+                missing_ids=(),
+                reprojection_error_cm=rms,
+                reason=(
+                    f"reprojection error {rms:.3f} cm exceeds the "
+                    f"{self._max_reprojection_error_cm:.3f} cm acceptance threshold"
+                ),
+                intrinsics_estimated=intrinsics_estimated,
+                intrinsics_mode=intrinsics_mode,
+                elevated_features_used=elevated_features_used,
+            )
+
+        calibration = Calibration(
+            stale=False,
+            calibrated_at=time.time(),
+            playfield=definition.name,
+            homography=_matrix_to_tuple(homography),
+            matched_ids=matched_ids,
+            reprojection_error_cm=rms,
+            camera_matrix=camera_matrix,
+            dist_coeffs=dist_coeffs,
+        )
+        with self._lock:
+            self._calibrations[camera_slug] = calibration
+
+        return CalibrationResult(
+            succeeded=True,
+            matched_ids=matched_ids,
+            missing_ids=(),
+            reprojection_error_cm=rms,
+            intrinsics_estimated=intrinsics_estimated,
+            intrinsics_mode=intrinsics_mode,
+            elevated_features_used=elevated_features_used,
+        )
+
+    def get_calibration(self, camera_slug: str) -> Optional[Calibration]:
+        """The :class:`Calibration` a successful :meth:`calibrate` call
+        for *camera_slug* most recently produced, or ``None`` if none
+        has (yet) succeeded on this instance. See :meth:`calibrate`'s
+        docstring for why this is additive rather than declared on
+        ``calibration.interfaces.Calibrator``."""
+        with self._lock:
+            return self._calibrations.get(camera_slug)
+
+    def _detect_averaged(
+        self, frames: Sequence[np.ndarray]
+    ) -> Dict[TagFamily, Dict[int, PixelPoint]]:
+        """Multi-frame averaged corner detection, **both** fiducial
+        families: run every frame through the same preprocess-then-detect
+        pipeline ``daemon/detection.py`` uses, and average each
+        ``(family, id)``'s detected pixel centre across every frame it
+        appeared in. An id missing from some frames but present in
+        others still averages over however many detections it actually
+        got (mirrors ``archive/.../homography.py``'s
+        ``detect_all_tags``).
+
+        Keyed by family first (sprint 030 ticket 002) -- before this
+        ticket, AprilTag hits were discarded here entirely, since the
+        homography solve only ever matched against ``required_aruco_ids()``
+        (ArUco only, and still true: :meth:`calibrate`'s
+        ``homography_ids`` never includes an AprilTag). AprilTags are
+        kept now because :func:`_estimate_intrinsics` uses **every**
+        surveyed-and-detected point of *either* family as calibration
+        ground truth (module docstring) -- ``main-playfield`` alone adds
+        one (AprilTag 1, field centre) beyond its 10 ArUco corners.
+        ``TagFamily.ARUCO``'s inner dict is exactly what this method
+        returned before this ticket (now reached via
+        ``detected[TagFamily.ARUCO]``); a family with zero detections
+        this burst is simply absent from the outer dict, not present
+        with an empty inner one -- callers use ``.get(family, {})``.
+        """
+        accum: Dict[TagFamily, Dict[int, List[Tuple[float, float]]]] = {}
+        for frame in frames:
+            gray, rescale = run_pipeline(frame, self._pipeline_config)
+            for detection in self._detector.detect(gray, scale=rescale.scale):
+                family_accum = accum.setdefault(detection.family, {})
+                family_accum.setdefault(detection.number, []).append(
+                    (detection.center.x, detection.center.y)
+                )
+        return {
+            family: {
+                tag_id: PixelPoint(
+                    x=float(np.mean([p[0] for p in pts])),
+                    y=float(np.mean([p[1] for p in pts])),
+                )
+                for tag_id, pts in by_id.items()
+            }
+            for family, by_id in accum.items()
+        }

@@ -1,0 +1,1951 @@
+"""``DaemonService`` -- the ``Daemon`` base class's RPC-body
+implementation for ``list_cameras``, ``probe_cameras``, ``get_frame``,
+``status`` (ticket 020-004), plus ``get_tags``/``get_tag``/
+``get_tag_history`` (ticket 021-004), plus ``set_playfield``/
+``get_playfield``/``list_playfields``/``set_camera_config``/
+``get_camera_config`` (ticket 022-001), plus ``calibrate``/
+``get_calibration`` (ticket 022-003), plus ``register_tag``/
+``unregister_tag``/``list_tag_parameters`` (ticket 025-004, UC-12 --
+the mobile-tag registry; see ``_camera_geometry_for``'s docstring for
+this ticket's one open, explicitly-flagged design decision), plus
+``find_feature`` (ticket 025-002, UC-08) and ``get_guide`` (ticket
+025-007, UC-27 -- the last method this sprint adds).
+
+**Calibration persistence** (ticket 022-003, UC-01's "calibration is
+file-backed, unlike pushed config"). All vision/homography work is
+delegated to ``calibration.calibration.Calibrator`` -- this class's job
+is exactly the three things that module boundary reserves for the
+daemon: resolving the camera and handing it frames (the ``capture_frames``
+callable ``Calibrator`` is constructed with), writing a successful
+result to ``<state_dir>/cameras/<camera>/calibration.json`` (atomic
+tmp+fsync+rename, mirroring ``camera/registry.py``'s ``_save``), and
+reloading every camera's ``calibration.json`` at construction time --
+"loaded at daemon startup", the same file-backed rule the module
+docstring above already describes for ``config.json``/registry.json.
+
+Delegates everything camera-shaped to ``camera/registry.py`` (ticket
+002) and ``Camera``/``CameraDiscovery`` (ticket 003) -- no identity
+derivation, no registry persistence, no probe/backend logic is
+duplicated here (sprint architecture's module table: this module's
+boundary is "RPC method bodies... Outside: camera hardware access").
+Everything vision-shaped -- the ring buffer, detection bursts, corner
+handling -- is delegated the same way to ``daemon/detection.py``
+(ticket 021-004): no vision logic lives inline here, matching sprint
+021's module boundary table exactly as sprint 020's did for cameras.
+
+**Only a subset of ``Daemon``'s methods are implemented.** ``daemon.
+interfaces.Daemon`` is a much larger base class -- as of sprint 027
+``stream_tags`` (ticket 003) and ``stream_images`` (ticket 004) both
+have real, in-process implementations (see their own docstrings below
+for the ``daemon/streaming.py`` producers each wires up); the RPC/socket
+transport that exposes them to a remote client is ticket 005's job, not
+this class's. Whatever of ``Daemon``'s surface remains unbuilt at any
+given point is simply absent from :class:`DaemonService`, inherited
+as-is from ``Daemon``. Calling one of *those* here raises
+``NotImplementedError`` naming the missing method (``daemon.interfaces``'s
+module docstring explains why this is a plain base class and not
+``abc.ABC``: un-instantiable until all 27 methods existed would force
+hollow stubs onto every partial implementation, which is worse than an
+honest partial one). ``isinstance(service, Daemon)`` is ``True`` --
+:class:`DaemonService` really is a ``Daemon``, just an incomplete one;
+the per-method ``NotImplementedError`` is what keeps that honest rather
+than pretending full conformance.
+
+**Long-lived ``Camera`` instances, held open.** ``get_frame`` opens a
+camera *at most once*: the first successful open is cached in
+``self._cameras`` and reused for every subsequent call, which is what
+lets ``Camera``'s self-heal (5 consecutive failures -> reopen, capped
+at 10) actually accumulate state across calls rather than resetting on
+every request. This cache **is** the daemon's live-subscriber table:
+:meth:`active_slugs` exposes its keys to ``CameraDiscovery`` as the
+``active_slugs`` callback (``camera/discovery.py``'s constructor;
+ticket 003 left this defaulting to "nothing is active" and named this
+exact wiring as this ticket's job) so ``probe_cameras()``'s
+non-disturbance guarantee (UC-25.S-7) holds for real work, not just the
+mechanism-level unit test ticket 003 could write without a service to
+wire into.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sys
+import threading
+import time
+from dataclasses import replace
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
+
+import cv2 as cv
+import numpy as np
+
+from aprilcam import guides
+from aprilcam.calibration.calibration import Calibration, Calibrator
+from aprilcam.calibration.deskew import Deskewer
+from aprilcam.calibration.interfaces import CalibrationResult
+from aprilcam.camera.backends import CaptureBackend, ControlBackend, resolve_capture_backend
+from aprilcam.camera.backends.libcamera import LibcameraDevice
+from aprilcam.camera.backends.opencv_backend import OpenCVBackend
+from aprilcam.camera.backends.uvc_util import UvcUtilBackend
+from aprilcam.camera.camera import Camera
+from aprilcam.camera.discovery import CameraDiscovery
+from aprilcam.camera.identity import CameraIdentity, resolve_all
+from aprilcam.camera.registry import CameraRecord, CameraRegistry
+from aprilcam.config.interfaces import CameraConfig, Directories, Feature
+from aprilcam.config.interfaces import ConfigLoader as ConfigLoaderIface
+from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitionIface
+from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
+from aprilcam.daemon.detection import DetectionEngine
+from aprilcam.daemon.interfaces import Daemon, DaemonStatus, ImageStream, MountRegistration, TagStream
+from aprilcam.daemon.streaming import (
+    BroadcasterImageStream,
+    BroadcasterTagStream,
+    ImageStreamProducer,
+    TagStreamProducer,
+)
+from aprilcam.errors import (
+    AnnotationLimitExceeded,
+    CameraNotPresent,
+    NotCalibrated,
+    UnknownCamera,
+    UnknownGuide,
+    UnknownPlayfield,
+)
+from aprilcam.playfield.playfield import Playfield
+from aprilcam.playfield.query import FeatureQuery
+from aprilcam.types import (
+    Annotation,
+    AnnotationSet,
+    AnnotationShape,
+    CameraState,
+    ImageFrame,
+    MountParameters,
+    PathShape,
+    Polygon,
+    ProbeReport,
+    TagFrame,
+    TagId,
+    TagRecord,
+    WorldPoint,
+)
+
+__all__ = ["DaemonService"]
+
+#: Name every camera's calibration file gets under
+#: ``<state_dir>/cameras/<camera>/`` -- design.md §7's storage layout.
+CALIBRATION_FILENAME = "calibration.json"
+
+#: How many frames :meth:`DaemonService._capture_calibration_frames`
+#: reads for one :meth:`DaemonService.calibrate` call -- see
+#: ``calibration.calibration.DEFAULT_CALIBRATION_FRAMES``'s docstring
+#: for provenance (mined from v1's real-camera-tuned default). Frames
+#: the camera fails to deliver (``Camera.read()`` returning ``None``)
+#: are simply not counted towards this budget's worth of usable frames.
+CALIBRATION_FRAME_COUNT = 30
+
+logger = logging.getLogger(__name__)
+
+#: What ``get_frame``'s ``encoding`` parameter accepts this sprint --
+#: matches ``daemon.interfaces.Daemon.get_frame``'s docstring exactly
+#: ("jpeg" default, "png" lossless).
+VALID_ENCODINGS = ("jpeg", "png")
+
+_CV_EXTENSION = {"jpeg": ".jpg", "png": ".png"}
+
+
+def _default_backend_factory(index: int) -> CaptureBackend:
+    return OpenCVBackend(index)
+
+
+def _default_control_backend_factory(device_name: str) -> Optional[ControlBackend]:
+    """The real per-control mechanism for a newly-opened camera's
+    settings surface (ticket 023-001, sprint.md Decision 2).
+
+    macOS only, unconditionally: real-hardware validation against camera
+    3 (an OV9782) found ``cv2.VideoCapture.set()`` -- ``OpenCVBackend``'s
+    settings path -- returns ``False`` for every one of
+    ``auto_exposure``/``exposure``/``gain``/``auto_white_balance``/
+    ``white_balance_temperature`` on this platform's AVFoundation capture
+    session, so ``UvcUtilBackend`` (``camera/backends/uvc_util.py``) is
+    unconditionally what a macOS ``Camera`` uses for those controls, not
+    a fallback tried only if something else fails first. Deliberately
+    **not** wrapped in a try/except that would swallow a missing
+    ``uvc-util`` binary into ``None`` -- sprint.md's Migration Concerns
+    are explicit that its absence "must surface as a clear, typed
+    error... never a silent fallback to a path that... may not actually
+    work", so :class:`~aprilcam.camera.backends.uvc_util.UvcUtilBackend`'s
+    constructor is left to raise straight through when ``uvc-util`` is
+    not on ``PATH``, rather than this factory quietly degrading to the
+    already-proven-broken ``OpenCVBackend`` control surface.
+
+    Returns ``None`` on every other platform, unchanged from before this
+    ticket -- Linux/Raspberry Pi UVC control is out of this sprint's
+    scope (sprint.md Scope); ``Camera`` falls back to *backend* itself
+    for settings exactly as it always has (``camera/camera.py``'s
+    module docstring).
+    """
+    if sys.platform != "darwin":
+        return None
+    return UvcUtilBackend(device_name)
+
+
+#: Fixed bound on how many annotations one ``(playfield, layer)`` pair
+#: may hold at once (ticket 031-010, UC-28/SUC-010, sprint.md Design
+#: Rationale). Sprint 024 shipped the annotation store with no bound at
+#: all (``types.AnnotationSet``'s own "Open" note); per sprint.md's
+#: explicit decision, this is a **fixed constant, not a configurable
+#: document field** -- even a fixed bound is new ground this sprint,
+#: and a configurable one (per-playfield or global, settable via a
+#: pushed document) is a larger design surface not needed yet.
+#:
+#: Sized against the installed real playfield
+#: (``config/aprilcam/playfields/main-playfield.json``, 134.3 x 89.3 cm)
+#: hosting a busy multi-robot session: each robot drawing a handful of
+#: annotations (a position marker, a planned path, a status label, a
+#: keep-out zone) puts a genuinely busy field on the order of 50-100
+#: annotations in one layer. 1,000 leaves an order of magnitude of
+#: headroom above that, while still bounding memory and the per-frame
+#: embedded payload against a runaway or misbehaving client.
+_MAX_ANNOTATIONS_PER_LAYER = 1000
+
+#: Fixed bound on ``PathShape.points``/``Polygon.points`` length for any
+#: one shape (ticket 031-010, UC-28/SUC-010) -- see
+#: :data:`_MAX_ANNOTATIONS_PER_LAYER` above for why this is a fixed
+#: constant, not a configurable document field.
+#:
+#: Sized against the same real playfield's ~447 cm perimeter
+#: (2 * (134.3 + 89.3)): a route traced with a waypoint every 2 cm
+#: around the whole perimeter is ~224 points; a dense multi-lap session
+#: log (ten laps at that same 2 cm spacing) is ~2,240 points. 10,000
+#: comfortably covers that with real headroom left above it.
+_MAX_POINTS_PER_SHAPE = 10000
+
+
+def _check_point_bound(shape: AnnotationShape) -> None:
+    """Reject *shape* with :class:`~aprilcam.errors.AnnotationLimitExceeded`
+    if it is a ``PathShape``/``Polygon`` whose ``points`` tuple exceeds
+    :data:`_MAX_POINTS_PER_SHAPE` (ticket 031-010).
+    ``Marker``/``Circle``/``Text`` are fixed-parametric -- a handful of
+    scalar fields, no caller-sized tuple -- so only the two
+    variable-length shapes in ``types.AnnotationShape`` can ever fail
+    this check."""
+    if isinstance(shape, (PathShape, Polygon)) and len(shape.points) > _MAX_POINTS_PER_SHAPE:
+        raise AnnotationLimitExceeded("points", _MAX_POINTS_PER_SHAPE, len(shape.points))
+
+
+class DaemonService(Daemon):
+    """Concrete ``daemon.interfaces.Daemon`` (this sprint's slice only).
+
+    Derives from ``Daemon`` (see that class's module docstring for the
+    base-class-vs-``Protocol`` design rule): the methods this sprint
+    does not implement (streams, tag parameters, guides) are inherited
+    as-is, so calling one raises ``NotImplementedError`` naming the
+    missing method rather than an ``AttributeError`` -- ``isinstance(
+    service, Daemon)`` is also simply true now, mechanically, rather
+    than a Protocol structural guess.
+
+    Parameters
+    ----------
+    registry:
+        The persistent identity -> slug/number mapping (ticket 002).
+    discovery:
+        Passive-watch + active-probe camera discovery (ticket 003).
+        Its ``active_slugs`` callback should be wired to this service's
+        :meth:`active_slugs` at construction (``daemon/__main__.py``
+        does this) so probe's non-disturbance guarantee holds.
+    directories:
+        Reported verbatim by :meth:`status` (``config_dir``/
+        ``state_dir``) -- UC-01's "which roots were chosen is never a
+        mystery," now answerable over the wire too.
+    cameras:
+        The held-open-camera cache, keyed by slug. Accepts an
+        externally-owned dict (rather than always constructing its own)
+        so ``daemon/__main__.py`` can hand the *same* dict object to
+        both this service and ``CameraDiscovery``'s ``active_slugs``
+        closure -- see the module docstring. Defaults to a fresh, empty
+        dict when not supplied (tests that do not care about this
+        wiring).
+    identity_source / backend_factory:
+        Resolve a registered camera's *current* OS-probe index on
+        demand (only needed the first time a given slug is requested
+        via :meth:`get_frame` -- see :meth:`_camera_for`). Overridable
+        for headless tests exactly like ``CameraDiscovery``'s own
+        constructor; default to real hardware enumeration.
+    list_loopback_cameras:
+        () -> ``[LibcameraDevice, ...]``. Consulted only for a
+        libcamera-identified camera (``record.hardware_key`` prefixed
+        ``"libcamera:"``) to resolve the real ``/dev/videoN`` device a
+        :class:`~aprilcam.camera.backends.v4l2_loopback.V4l2LoopbackBackend`
+        needs -- see :func:`~aprilcam.camera.backends.resolve_capture_backend`
+        (ticket 031-006, SUC-006), which :meth:`_camera_for` delegates
+        backend selection to. Defaults to the real, subprocess-free
+        ``/sys`` scan; overridable for headless tests exactly like
+        *backend_factory* above.
+    control_backend_factory:
+        Builds the optional :class:`~aprilcam.camera.backends.ControlBackend`
+        a newly-constructed ``Camera`` uses for ``apply_config``'s
+        settings surface (ticket 023-001 -- real UVC control validated
+        live on camera 3; see :func:`_default_control_backend_factory`).
+        Defaults to that real, macOS-only factory; headless tests
+        override with ``lambda device_name: None`` so a ``FakeBackend``
+        stands in for settings too, exactly like *backend_factory*
+        above.
+    detection:
+        The per-camera ring buffer plus burst orchestration
+        (``daemon/detection.py``, ticket 021-004) that
+        :meth:`get_tags`/:meth:`get_tag`/:meth:`get_tag_history`/
+        :meth:`get_frame` delegate to. Defaults to a fresh
+        ``DetectionEngine()`` (real pipeline, real detector) wired with
+        this service's own :meth:`_mount_lookup`/:meth:`_camera_geometry_for`
+        (ticket 025-004, UC-12) when not supplied -- tests that need to
+        pin exactly how many detection bursts ran, or that want a
+        non-default mount/camera-geometry lookup of their own, construct
+        their own ``DetectionEngine`` and pass it here instead.
+    calibrator:
+        The homography-solving engine (``calibration.calibration.
+        Calibrator``, ticket 022-003) that :meth:`calibrate` delegates
+        all vision/geometry work to. Defaults to a real ``Calibrator``
+        wired against this service's own ``_camera_configs``/
+        ``_playfields`` stores and :meth:`_capture_calibration_frames`
+        -- tests that want a substitutable frame source or camera-config
+        lookup construct their own ``Calibrator`` and pass it here
+        instead, the same override pattern ``detection`` above uses.
+    config_loader:
+        The :class:`~aprilcam.config.interfaces.ConfigLoader` every
+        newly-constructed ``Camera`` is given (ticket 023-004), for
+        :meth:`Camera.reset`/:meth:`Camera.stored_config` to read a
+        camera's on-disk ``config_dir/cameras/<slug>/config.json`` back.
+        This service never calls it itself -- passing it through to
+        ``Camera`` at construction is the one piece of "where configs
+        come from" knowledge this service carries, targeted reads only,
+        never the boot-time directory scan (that stays in
+        ``daemon.__main__.build()``, sprint.md Architecture "Modules"
+        point 1). Defaults to a real ``config.loader.ConfigLoader``;
+        tests substitute their own when they need to.
+    """
+
+    def __init__(
+        self,
+        *,
+        registry: CameraRegistry,
+        discovery: CameraDiscovery,
+        directories: Directories,
+        cameras: Optional[Dict[str, Camera]] = None,
+        identity_source: Callable[[], Dict[int, CameraIdentity]] = resolve_all,
+        backend_factory: Callable[[int], CaptureBackend] = _default_backend_factory,
+        control_backend_factory: Callable[[str], Optional[ControlBackend]] = (
+            _default_control_backend_factory
+        ),
+        list_loopback_cameras: Optional[Callable[[], List[LibcameraDevice]]] = None,
+        detection: Optional[DetectionEngine] = None,
+        calibrator: Optional[Calibrator] = None,
+        config_loader: Optional[ConfigLoaderIface] = None,
+    ) -> None:
+        self._registry = registry
+        self._discovery = discovery
+        self._directories = directories
+        self._cameras: Dict[str, Camera] = cameras if cameras is not None else {}
+        self._identity_source = identity_source
+        self._backend_factory = backend_factory
+        self._control_backend_factory = control_backend_factory
+        self._list_loopback_cameras = list_loopback_cameras
+        self._config_loader: ConfigLoaderIface = (
+            config_loader if config_loader is not None else JsonConfigLoader()
+        )
+        # ``calibration_lookup=self.get_calibration``/
+        # ``playfield_lookup=self._playfield_for_calibration``/
+        # ``mark_stale=self._mark_stale``: bound-method references,
+        # resolved at call time, not at this line -- safe to pass before
+        # ``self._calibrations``/``self._playfields``/``self._lock`` exist
+        # below, since ``DetectionEngine`` never calls any of them during
+        # construction, only from a later ``run_burst`` (ticket 022-004's
+        # ``calibration_lookup``; ticket 023-007's ``playfield_lookup``/
+        # ``mark_stale``, module docstring's "threaded through" section).
+        # Callers that pass their own ``detection=`` (tests pinning burst
+        # counts) own their engine's callables themselves.
+        self._detection = (
+            detection
+            if detection is not None
+            else DetectionEngine(
+                calibration_lookup=self.get_calibration,
+                playfield_lookup=self._playfield_for_calibration,
+                mark_stale=self._mark_stale,
+                mount_lookup=self._mount_lookup,
+                camera_geometry_lookup=self._camera_geometry_for,
+            )
+        )
+        self._playfields: Dict[str, PlayfieldDefinitionIface] = {}
+        self._camera_configs: Dict[str, CameraConfig] = {}
+        # playfield -> layer -> id -> Annotation (ticket 024-001, UC-28).
+        # A fourth in-memory store alongside the three above -- runtime
+        # state, never written to disk, wiped on restart like everything
+        # else this class holds. ``_annotation_revisions`` is the
+        # sibling monotonic-counter store, one entry per playfield that
+        # has ever seen a mutation; both are guarded by ``self._lock``
+        # exactly like ``_playfields``/``_camera_configs``/
+        # ``_calibrations`` already are.
+        self._annotations: Dict[str, Dict[str, Dict[str, Annotation]]] = {}
+        self._annotation_revisions: Dict[str, int] = {}
+        # TagId -> MountParameters (ticket 025-004, UC-12): a fifth
+        # in-memory store, guarded by the same ``self._lock`` -- "one
+        # more dict under the existing lock", exactly the pattern ticket
+        # 024-001 used for ``_annotations`` above. Runtime state, never
+        # written to disk, wiped on restart (UC-12's "re-register every
+        # session" contract) -- there is simply no write-to-disk path
+        # here, the same structural guarantee every other store in this
+        # class already has.
+        self._mount_params: Dict[TagId, MountParameters] = {}
+        # slug -> its live TagStreamProducer (ticket 027-003, UC-11).
+        # Populated lazily by :meth:`stream_tags` on that camera's first
+        # call, reused for every subsequent call against the same slug
+        # (sprint.md Open Question 3's recommended reuse default,
+        # applied here at the in-process layer). Entries are never
+        # removed on idle -- a producer with zero subscribers is simply
+        # a stopped thread (``TagStreamProducer.running`` is ``False``);
+        # keeping the dict entry around means :meth:`close` can still
+        # find and (harmlessly, idempotently) stop it, and a later
+        # ``stream_tags`` call for the same camera reuses the same
+        # producer object rather than constructing a second one.
+        self._tag_stream_producers: Dict[str, TagStreamProducer] = {}
+        # (slug, deskewed) -> its live ImageStreamProducer (ticket 027-004,
+        # UC-07). Keyed one dimension wider than ``_tag_stream_producers``
+        # above -- raw and deskewed are independent producers/streams for
+        # the same camera (sprint.md's per-(camera, product) idle gating) --
+        # but otherwise populated/reused/torn-down identically: lazily on
+        # :meth:`stream_images`'s first call for a given key, reused for
+        # every subsequent call against the same key, never removed on
+        # idle (a producer with zero subscribers is just a stopped thread;
+        # :meth:`close` still finds and stops it, harmlessly, if it was
+        # never restarted).
+        self._image_stream_producers: Dict[Tuple[str, bool], ImageStreamProducer] = {}
+        self._lock = threading.Lock()
+        self._calibrator = calibrator if calibrator is not None else Calibrator(
+            get_camera_config=self._camera_config_for_calibration,
+            get_playfield=self._playfield_for_calibration,
+            capture_frames=self._capture_calibration_frames,
+            # Fixes a confirmed carry-forward-after-restart bug (sprint
+            # 030 ticket 002): without this, an ordinary recalibration
+            # right after a daemon restart would read Calibrator's own
+            # empty in-process cache instead of this service's
+            # disk-loaded self._calibrations, silently wiping any
+            # previously-estimated lens model back to None. Bound to
+            # self.get_calibration -- resolved at call time, safe to
+            # pass before self._calibrations exists below, the same
+            # pattern calibration_lookup=self.get_calibration already
+            # uses a few lines up. See Calibrator.__init__'s own
+            # get_prior_calibration docstring for the full story and the
+            # test that specifically exercises the restart path.
+            get_prior_calibration=self.get_calibration,
+        )
+        self._calibrations: Dict[str, Calibration] = {}
+        self._load_calibrations()
+
+    # -- beyond the interface: CameraDiscovery's active_slugs wiring -----
+
+    def active_slugs(self) -> frozenset:
+        """Slugs this service currently holds a ``Camera`` open for.
+
+        Passed as ``CameraDiscovery(..., active_slugs=service.
+        active_slugs)`` so ``probe_cameras()`` never opens a backend
+        already held here (UC-25.S-7). See the module docstring.
+        """
+        with self._lock:
+            return frozenset(self._cameras.keys())
+
+    # -- daemon.interfaces.Daemon (this sprint's slice) --------------------
+
+    def list_cameras(self) -> Tuple[CameraState, ...]:
+        """See ``daemon.interfaces.Daemon.list_cameras``.
+
+        Answered from what is already known -- the registry (every
+        camera ever seen) plus ``discovery.known_present()`` (updated by
+        passive watching and by the last ``probe()``) -- never a fresh
+        probe. A slug this service already holds open reports its
+        *live* ``Camera.state`` (which reflects self-heal exhaustion)
+        rather than the coarser present/usable-from-enumeration guess
+        used for everything else. ``playfield`` is overlaid from
+        whatever ``CameraConfig`` :meth:`set_camera_config` last held
+        for that slug (``None`` if never configured) -- SUC-001's "``
+        camera list`` shows the camera linked" -- rather than stored on
+        ``Camera`` itself, keeping the config-service link a pure
+        ``DaemonService``-level concern (ticket 022-001).
+
+        ``calibrated``/``calibration_stale`` are overlaid the same way,
+        from :meth:`get_calibration` -- **not** read off ``Camera.state``
+        (``Camera`` has no notion of calibration; that state lives here,
+        in ``self._calibrations``, per the module boundary that keeps
+        calibration a daemon-level concern rather than something
+        ``camera/camera.py`` knows about). Bug fix, ticket 022-007: this
+        method previously hardcoded ``calibrated=False`` unconditionally
+        in both branches below (and, in the ``held`` branch, inherited a
+        second independent hardcoded ``False`` from ``Camera.state``
+        itself) -- a genuinely calibrated camera reported
+        ``uncalibrated`` forever in ``camera list``/``daemon status``,
+        even though ``get_frame(deskewed=True)``/``get_tags``/
+        ``playfield view`` all read the real calibration correctly. Pure
+        display/state-reporting bug: the calibration itself was never
+        wrong, only what this method told a caller about it.
+        """
+        present = self._discovery.known_present()
+        states = []
+        for record in self._registry.records():
+            playfield = self._playfield_link(record.slug)
+            calibrated, calibration_stale = self._calibration_flags(record.slug)
+            held = self._cameras.get(record.slug)
+            if held is not None:
+                states.append(
+                    replace(
+                        held.state,
+                        playfield=playfield,
+                        calibrated=calibrated,
+                        calibration_stale=calibration_stale,
+                    )
+                )
+                continue
+            is_present = record.slug in present
+            states.append(
+                CameraState(
+                    name=record.slug,
+                    present=is_present,
+                    usable=is_present,
+                    playfield=playfield,
+                    calibrated=calibrated,
+                    calibration_stale=calibration_stale,
+                    number=record.number,
+                )
+            )
+        return tuple(states)
+
+    def _calibration_flags(self, slug: str) -> Tuple[bool, bool]:
+        """``(calibrated, calibration_stale)`` for *slug*, from whatever
+        :meth:`get_calibration` currently holds -- ``(False, False)``
+        for a camera that has never been calibrated. The single overlay
+        point :meth:`list_cameras` uses for both its branches, so a
+        camera's reported calibration status can never drift between
+        the "held open" and "not held open" code paths."""
+        calibration = self.get_calibration(slug)
+        if calibration is None:
+            return False, False
+        return True, calibration.stale
+
+    def probe_cameras(self) -> ProbeReport:
+        """See ``daemon.interfaces.Daemon.probe_cameras``. Pure
+        delegation to ``CameraDiscovery.probe()`` -- no business logic
+        here (sprint architecture's module table)."""
+        return self._discovery.probe()
+
+    def get_frame(
+        self, camera: str, *, deskewed: bool = False, encoding: str = "jpeg"
+    ) -> ImageFrame:
+        """See ``daemon.interfaces.Daemon.get_frame``.
+
+        An unrecognised ``encoding`` is a plain ``ValueError`` (not one
+        of ``errors.py``'s named types -- it is a caller-side argument
+        mistake, not a domain failure the RPC boundary needs client
+        code to dispatch on), checked before either branch below touches
+        a camera or calibration lookup.
+
+        ``deskewed=True`` delegates to :meth:`_get_deskewed_frame`
+        (ticket 022-005): :class:`NotCalibrated` for an uncalibrated
+        camera, a real warped frame for a calibrated one -- see that
+        method's docstring. The raw (``deskewed=False``) branch is
+        unchanged from sprint 021: ``tags`` embeds *camera*'s latest
+        ring-buffer ``TagFrame`` when one exists
+        (``daemon.detection.DetectionEngine.latest`` -- a pure read) and
+        stays ``None`` when it does not -- asking for pixels never
+        triggers a detection burst of its own (sprint.md Decision 4,
+        ticket 021-004). ``calibration_stale`` (ticket 023-007) is
+        overlaid from :meth:`get_calibration` on both branches -- ``ImageFrame``'s
+        in-band carrier, so a client fetching pixels sees real staleness
+        state without a second round trip.
+        """
+        if encoding not in VALID_ENCODINGS:
+            raise ValueError(
+                f"unsupported encoding {encoding!r}; expected one of {VALID_ENCODINGS}"
+            )
+        if deskewed:
+            return self._get_deskewed_frame(camera, encoding=encoding)
+
+        cam = self._camera_for(camera)
+        frame = cam.read()
+        if frame is None:
+            raise RuntimeError(f"no frame available from camera {camera!r}")
+
+        ok, buf = cv.imencode(_CV_EXTENSION[encoding], frame)
+        if not ok:
+            raise RuntimeError(f"failed to encode frame from {camera!r} as {encoding}")
+
+        height, width = frame.shape[:2]
+        calibration = self.get_calibration(cam.slug)
+        return ImageFrame(
+            data=buf.tobytes(),
+            width=width,
+            height=height,
+            encoding=encoding,
+            timestamp=time.time(),
+            deskewed=False,
+            tags=self._detection.latest(cam.slug),
+            calibration_stale=calibration.stale if calibration is not None else False,
+        )
+
+    def _get_deskewed_frame(self, camera: str, *, encoding: str) -> ImageFrame:
+        """``get_frame(deskewed=True)``'s real body (ticket 022-005;
+        was an unconditional :class:`NotCalibrated` since sprint 020).
+
+        **Calibration is checked, and this raises, before
+        :meth:`_camera_for` is ever called** -- exactly the same
+        "precondition fails before any hardware access" discipline
+        :meth:`calibrate` already gets from ``Calibrator`` (module
+        docstring). A deskewed request on an uncalibrated camera must
+        never substitute a raw frame (``daemon.interfaces.Daemon.get_frame``'s
+        base-class docstring) -- checking first, not merely returning
+        early, is what makes "no raw frame is substituted" true by
+        construction rather than by an easily-broken ordering.
+
+        *camera* is resolved to its canonical slug via
+        :meth:`_resolve_slug_if_known` up front (SUC-005 number-or-slug
+        addressing -- the same hotfix :meth:`calibrate`/
+        :meth:`get_calibration` already apply) *before* the calibration
+        lookup, so a numbered camera's calibration is found the same way
+        a slug-addressed one is.
+
+        The playfield dimensions the warp needs come from
+        ``calibration.playfield`` (the definition this *homography* was
+        actually solved against) via :meth:`_playfield_for_calibration`,
+        not from the camera's *current* live playfield link -- those can
+        diverge (a camera re-linked to a different playfield after
+        calibrating), and the homography's own world coordinates are
+        only meaningful against the definition it was solved from.
+
+        **Embeds annotations** (ticket 024-001, UC-28, Architecture
+        resolution 1): :meth:`get_annotations` for the resolved
+        ``calibration.playfield`` is always set here, never ``None`` --
+        even an empty set (revision 0) -- since a deskewed frame off a
+        known, calibrated playfield has only "nothing drawn" to
+        represent, not an on/off state the way ``tags`` has. Safe to
+        call unconditionally: by this point ``definition is not None``
+        already proved the playfield is currently held, so this can
+        never raise ``UnknownPlayfield``. The raw branch of
+        :meth:`get_frame` is untouched -- it never sets ``annotations``,
+        by contract (UC-16, "raw means raw").
+        """
+        slug = self._resolve_slug_if_known(camera)
+        calibration = self.get_calibration(slug)
+        if calibration is None:
+            raise NotCalibrated(f"{camera!r} is not calibrated")
+
+        definition = self._playfield_for_calibration(calibration.playfield)
+        if definition is None:
+            raise NotCalibrated(
+                f"{camera!r} was calibrated against playfield "
+                f"{calibration.playfield!r}, which this daemon no longer holds"
+            )
+
+        cam = self._camera_for(camera)
+        frame = cam.read()
+        if frame is None:
+            raise RuntimeError(f"no frame available from camera {camera!r}")
+
+        deskewer = Deskewer(
+            calibration=calibration,
+            width_cm=definition.width_cm,
+            height_cm=definition.height_cm,
+        )
+        warped = deskewer.deskew(frame)
+
+        ok, buf = cv.imencode(_CV_EXTENSION[encoding], warped)
+        if not ok:
+            raise RuntimeError(f"failed to encode deskewed frame from {camera!r} as {encoding}")
+
+        height, width = warped.shape[:2]
+        return ImageFrame(
+            data=buf.tobytes(),
+            width=width,
+            height=height,
+            encoding=encoding,
+            timestamp=time.time(),
+            deskewed=True,
+            px_per_cm=deskewer.px_per_cm,
+            world_extent=deskewer.world_extent,
+            tags=self._detection.latest(cam.slug),
+            annotations=self.get_annotations(calibration.playfield),
+            calibration_stale=calibration.stale,
+        )
+
+    def get_tags(self, camera: str) -> TagFrame:
+        """See ``daemon.interfaces.Daemon.get_tags``.
+
+        Resolves *camera* via :meth:`_camera_for` (SUC-005's
+        number-or-slug addressing, and ``UnknownCamera``/
+        ``CameraNotPresent`` both apply, inherited for free -- sprint.md
+        Decision 5) and delegates the actual burst entirely to
+        ``daemon.detection.DetectionEngine.run_burst`` -- no vision logic
+        lives here (module docstring). Exactly one detection burst runs
+        per call; nothing here caches or shares a result across calls
+        (SUC-002's "twice with nothing in view = exactly two bursts"
+        pin).
+        """
+        cam = self._camera_for(camera)
+        return self._detection.run_burst(cam.slug, cam)
+
+    def get_tag(self, camera: str, tag: TagId) -> Optional[TagRecord]:
+        """See ``daemon.interfaces.Daemon.get_tag``.
+
+        Runs the same single burst :meth:`get_tags` would (via
+        :meth:`get_tags` itself, so the "exactly one burst per call"
+        contract is inherited rather than re-implemented) and filters it
+        for *tag*. Returns ``None`` -- never a zero-valued record -- when
+        *tag* is absent from this burst's results (UC-09.S-4).
+        """
+        tag_frame = self.get_tags(camera)
+        for record in tag_frame.tags:
+            if record.tag == tag:
+                return record
+        return None
+
+    def get_tag_history(
+        self, camera: str, tag: Optional[TagId] = None, frames: Optional[int] = None
+    ) -> Tuple[TagFrame, ...]:
+        """See ``daemon.interfaces.Daemon.get_tag_history``.
+
+        A pure buffer read: *camera* is still resolved via
+        :meth:`_camera_for` (SUC-005 addressing and
+        ``UnknownCamera``/``CameraNotPresent`` apply here too -- sprint.md
+        Decision 5), but no detection burst runs
+        (``DetectionEngine.history`` never calls ``run_burst``) -- the
+        buffer only grows from prior :meth:`get_tags`/:meth:`get_tag`
+        calls (sprint.md Decision 1).
+
+        A buffer with fewer entries than *frames* requested returns
+        everything available, not an error. Filtering by *tag* preserves
+        every frame's real ``timestamp``/``frame_index`` even where that
+        frame's ``.tags`` is empty for the requested tag -- gaps are
+        explicit, never dropped (UC-26.S-4).
+        """
+        cam = self._camera_for(camera)
+        buffered = self._detection.history(cam.slug)
+
+        if frames is not None:
+            buffered = buffered[-frames:] if frames > 0 else ()
+
+        if tag is not None:
+            buffered = tuple(
+                replace(frame, tags=tuple(r for r in frame.tags if r.tag == tag))
+                for frame in buffered
+            )
+
+        return buffered
+
+    # -- streams: tags (ticket 027-003, UC-11/SUC-001) ----------------------
+
+    def stream_tags(self, camera: str) -> TagStream:
+        """See ``daemon.interfaces.Daemon.stream_tags``.
+
+        **In-process only, this ticket.** No socket or gRPC endpoint is
+        allocated here -- this method hands back a ``daemon.interfaces.
+        TagStream`` any in-process caller (a test, or a future
+        ``daemon/stream_transport.py`` connection handler, ticket 005)
+        can iterate directly. ``daemon/rpc.py``'s ``GetTagStream``
+        RPC (endpoint allocation) and the raw-socket bridge that calls
+        this method per accepted connection are ticket 005's job, not
+        this one's -- exactly the production/transport split
+        ``sprint.md`` Design Rationale 1 draws.
+
+        Resolves *camera* via :meth:`_camera_for`, exactly like
+        :meth:`get_tags` -- SUC-005 number-or-slug addressing, and
+        ``UnknownCamera``/``CameraNotPresent`` both apply, inherited for
+        free. Lazily builds (and this service tracks, keyed by slug) one
+        ``daemon.streaming.TagStreamProducer`` per camera the first time
+        it is asked for, reusing it on every subsequent call for the
+        same camera rather than constructing a second, independent one
+        (sprint.md Open Question 3's recommended reuse default, applied
+        here at the in-process layer ticket 005's endpoint allocation
+        will sit on top of). The producer's own idle-gating (ticket 003)
+        starts/stops its background thread on *this* camera's
+        ``Broadcaster``'s first-subscriber/last-unsubscriber transition
+        -- this method does no lifecycle management of its own beyond
+        constructing the producer once and subscribing to it.
+        """
+        cam = self._camera_for(camera)
+        with self._lock:
+            producer = self._tag_stream_producers.get(cam.slug)
+            if producer is None:
+                producer = TagStreamProducer(cam.slug, cam, self._detection)
+                self._tag_stream_producers[cam.slug] = producer
+        subscriber_queue = producer.broadcaster.subscribe()
+        return BroadcasterTagStream(producer.broadcaster, subscriber_queue)
+
+    # -- streams: images (ticket 027-004, UC-07/SUC-002) ---------------------
+
+    def stream_images(self, camera: str, *, deskewed: bool = False) -> ImageStream:
+        """See ``daemon.interfaces.Daemon.stream_images``.
+
+        **In-process only, this ticket** -- same split as
+        :meth:`stream_tags`: ``daemon/rpc.py``'s ``GetImageStream`` RPC
+        and the raw-socket bridge are ticket 005's job (see that
+        ticket's Completion Notes reconciliation for the full
+        three-way corroboration this reading rests on, restated here
+        for this method).
+
+        **Calibration is checked, and this raises, before any producer
+        is constructed or reused** -- exactly the same two-step
+        precondition :meth:`_get_deskewed_frame` already applies to the
+        one-shot path (that method's own docstring), so a deskewed
+        stream request on an uncalibrated camera -- or one calibrated
+        against a playfield this daemon no longer holds -- fails
+        synchronously in the caller's own thread with
+        :class:`~aprilcam.errors.NotCalibrated`, never by silently
+        substituting a raw stream (UC-06.S-3's rule, extended here to
+        streams). A raw stream (``deskewed=False``) needs no
+        calibration, exactly like ``get_frame(deskewed=False)``.
+
+        Lazily builds (and this service tracks, keyed by ``(slug,
+        deskewed)``) one ``daemon.streaming.ImageStreamProducer`` per
+        pair the first time it is asked for, reusing it on every
+        subsequent call for the same pair -- the same reuse discipline
+        :meth:`stream_tags` already established, one key dimension
+        wider (sprint.md Open Question 3's recommended reuse default).
+        Raw and deskewed are independent producers: subscribing to one
+        never starts, or is affected by, the other. The producer's own
+        idle-gating (ticket 004, mirroring ticket 003) starts/stops its
+        background thread on *this* (camera, deskewed) pair's
+        ``Broadcaster``'s first-subscriber/last-unsubscriber transition
+        -- this method does no lifecycle management of its own beyond
+        constructing the producer once and subscribing to it.
+        """
+        cam = self._camera_for(camera)
+        if deskewed:
+            calibration = self.get_calibration(cam.slug)
+            if calibration is None:
+                raise NotCalibrated(f"{camera!r} is not calibrated")
+            definition = self._playfield_for_calibration(calibration.playfield)
+            if definition is None:
+                raise NotCalibrated(
+                    f"{camera!r} was calibrated against playfield "
+                    f"{calibration.playfield!r}, which this daemon no longer holds"
+                )
+
+        key = (cam.slug, deskewed)
+        with self._lock:
+            producer = self._image_stream_producers.get(key)
+            if producer is None:
+                producer = ImageStreamProducer(
+                    cam.slug,
+                    cam,
+                    self._detection,
+                    deskewed=deskewed,
+                    calibration_lookup=self.get_calibration,
+                    playfield_lookup=self._playfield_for_calibration,
+                    annotations_lookup=self.get_annotations,
+                )
+                self._image_stream_producers[key] = producer
+        subscriber_queue = producer.broadcaster.subscribe()
+        return BroadcasterImageStream(producer.broadcaster, subscriber_queue)
+
+    def status(self) -> DaemonStatus:
+        """See ``daemon.interfaces.Daemon.status``.
+
+        ``running`` is always ``True`` here: this method only executes
+        inside a live daemon process answering a live RPC, so by
+        construction the daemon *is* running (UC-05's remote-readable
+        service view -- ``DaemonLifecycle.status()`` is the separate,
+        local-only "is anything running at all" check).
+        """
+        return DaemonStatus(
+            running=True,
+            cameras=self.list_cameras(),
+            config_dir=str(self._directories.config_dir),
+            state_dir=str(self._directories.state_dir),
+        )
+
+    def get_guide(self, name: Optional[str] = None) -> str:
+        """See ``daemon.interfaces.Daemon.get_guide`` (ticket 025-007,
+        UC-27).
+
+        A thin wrapper over ``aprilcam.guides.read_guide`` -- the exact
+        same shared leaf module ``client.guides.Guides.get`` reads
+        (ticket 025-006), not a redundant reimplementation of the guide
+        text or its name-to-filename mapping. That shared leaf is what
+        makes this method and ``client.guides.Guides.get`` serve
+        byte-identical text *by construction* (sprint 025's Design
+        Rationale), not merely because both happen to agree today.
+
+        An omitted or ``None`` *name* defaults to ``aprilcam.guides.
+        DEFAULT_GUIDE`` (``"agent"``, UC-27's primary actor). An unknown
+        name raises :class:`~aprilcam.errors.UnknownGuide`, naming the
+        guides that actually exist (UC-27.S-3) -- the identical error
+        shape ``client.guides.Guides.get`` raises for the same input,
+        since both build it from the same ``guides.AVAILABLE_GUIDES``
+        tuple.
+        """
+        chosen = name if name is not None else guides.DEFAULT_GUIDE
+        text = guides.read_guide(chosen)
+        if text is None:
+            raise UnknownGuide(chosen, guides.AVAILABLE_GUIDES)
+        return text
+
+    # -- playfields / camera config (ticket 022-001; reset, ticket 023-004) -
+    #
+    # The minimal config-service slice sprint.md's Architecture Decision 1
+    # scopes for this sprint: playfields in full (held zero-or-more,
+    # keyed by name -- Decision 4), plus a camera-config slice carrying
+    # only the playfield link. Both stores are plain in-memory dicts,
+    # never written to disk (UC-01's ephemeral rule is structural here,
+    # not a policy this class has to remember -- there is simply no
+    # write path). ``reset_camera_config`` (below, ticket 023-004) is the
+    # one deliberate exception to "never written to disk" -- it *reads*
+    # disk, never writes it, so the ephemeral rule for RPC-pushed state
+    # is undisturbed.
+
+    def set_playfield(self, definition: PlayfieldDefinitionIface) -> None:
+        """See ``daemon.interfaces.Daemon.set_playfield``.
+
+        A single dict assignment, keyed by the document's own ``name``
+        -- atomic by construction, so there is no partial-apply case to
+        guard against here. Whole-document *validation* (malformed
+        JSON, no name, duplicate ArUco ids, field-size inconsistency)
+        already happened client-side in ``config.loader.ConfigLoader``
+        before *definition* was ever built (UC-23.S-4) -- by the time an
+        object reaches here it is a well-formed ``PlayfieldDefinition``.
+        Replacing an existing definition of the same name does not
+        (yet) mark any calibration against it stale -- no calibration
+        subsystem exists until ticket 003.
+        """
+        with self._lock:
+            self._playfields[definition.name] = definition
+
+    def get_playfield(self, name: str) -> Playfield:
+        """See ``daemon.interfaces.Daemon.get_playfield``. Raises
+        :class:`~aprilcam.errors.UnknownPlayfield`, naming every
+        playfield this daemon currently holds, for a name it does not
+        recognise."""
+        with self._lock:
+            definition = self._playfields.get(name)
+            camera_configs = tuple(self._camera_configs.values())
+        if definition is None:
+            raise UnknownPlayfield(name, tuple(sorted(self._playfields.keys())))
+        return Playfield(name=definition.name, definition=definition, camera_configs=camera_configs)
+
+    def list_playfields(self) -> Tuple[Playfield, ...]:
+        """See ``daemon.interfaces.Daemon.list_playfields``. Every held
+        definition (Decision 4: no single-slot limit), each wrapped
+        with the *same* camera-config snapshot so every entry's
+        ``linked_cameras()`` reflects one consistent moment."""
+        with self._lock:
+            definitions = tuple(self._playfields.values())
+            camera_configs = tuple(self._camera_configs.values())
+        return tuple(
+            Playfield(name=d.name, definition=d, camera_configs=camera_configs) for d in definitions
+        )
+
+    def find_feature(self, playfield: str, query: str) -> Tuple[Feature, ...]:
+        """See ``daemon.interfaces.Daemon.find_feature``. Ticket 025-002.
+
+        Delegates to ticket 025-001's ``playfield.query.FeatureQuery``,
+        built **fresh on every call** against the named playfield's
+        *current* ``PlayfieldDefinition`` -- cheap (a tuple of already-
+        materialized ``Feature``s, no vision, no camera), so there is
+        nothing to cache and no staleness to reason about, the same
+        "derived at serve time" discipline ``Playfield.linked_cameras()``
+        already uses. Raises :class:`~aprilcam.errors.UnknownPlayfield`,
+        naming every playfield this daemon currently holds, for a name
+        it does not recognise -- the same precedent :meth:`get_playfield`
+        established. Ambiguity returns every match (UC-08.S-2); no
+        match returns an empty tuple (UC-08.S-3) -- neither is an error
+        at this layer, matching ``FeatureQuery.find``'s own contract.
+        """
+        with self._lock:
+            definition = self._playfields.get(playfield)
+            available = tuple(sorted(self._playfields.keys()))
+        if definition is None:
+            raise UnknownPlayfield(playfield, available)
+        return FeatureQuery(features=definition.features()).find(query)
+
+    def get_camera_config(self, camera: str) -> CameraConfig:
+        """See ``daemon.interfaces.Daemon.get_camera_config``.
+
+        Answers from whatever :meth:`set_camera_config` last held for
+        *camera* when one exists -- UC-03.S-2's "re-fetching the config
+        returns the pushed values," exactly the document, never a live
+        hardware readback merged in. This is deliberate, not an
+        omission: the dump -> install -> restart -> dump round trip
+        (UC-24.S-1) must reproduce exactly what was pushed or installed
+        on disk, and the blank-template case just below must report
+        ``None`` for every unset key even when the hardware itself has
+        real factory-default values in force -- a live readback would
+        get both of those wrong. Capturing what a camera's hardware is
+        *actually* doing right now (as opposed to what document is on
+        record for it) is a different, unbuilt capability -- ticket
+        023-005 (this ticket) deliberately leaves it that way; see that
+        ticket's notes.
+
+        A camera with no stored document but **held open** in this
+        process (:attr:`_cameras` -- populated by ``get_frame``/
+        ``tags``/a config-push attempt/... via :meth:`_camera_for`)
+        falls back to that camera's own introspected-plus-blank
+        template (:meth:`~aprilcam.camera.camera.Camera.effective_config`,
+        made real per-camera by ticket 023-002) -- UC-03.S-1's "freshly
+        enumerated... never configured" scenario and UC-24.S-3's
+        dump-as-template scenario, ticket 023-005's whole reason for
+        depending on 023-002. A camera merely *registered* (known from
+        a previous session or a probe, but never opened by this
+        process) still reports :class:`~aprilcam.errors.UnknownCamera`
+        here, matching UC-24.S-4 and every restart test's existing
+        expectation -- config, pushed or blank-template, is exactly as
+        ephemeral as everything else UC-01/UC-02 already establish;
+        only calibration survives a restart.
+
+        *camera* accepts a persistent number or a slug (SUC-005),
+        resolved via :meth:`_resolve_slug_if_known` before either
+        lookup -- both ``_camera_configs`` and ``_cameras`` are keyed by
+        slug only, so an unresolved number would otherwise never match
+        a real entry in either. The error still names whatever *camera*
+        the caller actually typed, not the resolved slug.
+        """
+        slug = self._resolve_slug_if_known(camera)
+        with self._lock:
+            config = self._camera_configs.get(slug)
+            held = self._cameras.get(slug)
+            available = tuple(sorted(self._camera_configs.keys()))
+        if config is not None:
+            return config
+        if held is not None:
+            return held.effective_config()
+        raise UnknownCamera(camera, available)
+
+    def set_camera_config(self, config: CameraConfig) -> None:
+        """See ``daemon.interfaces.Daemon.set_camera_config``.
+
+        Stores *config* whole, keyed by its own ``name``, so
+        :meth:`get_camera_config`/:meth:`list_cameras`/a linked
+        playfield's ``linked_cameras()`` all see the update immediately.
+        Accepts a config for a camera this daemon has never enumerated
+        (a config outliving, or arriving before, its hardware is normal
+        -- UC-25) and for a camera not currently held open -- there is
+        nothing to reconfigure on a closed handle, only the link to
+        record (ticket 023-001 AC1). A config stored here for a camera
+        not yet open still takes effect the moment that camera is first
+        opened, via :meth:`_camera_for`'s apply-on-open step (ticket
+        023-003) -- the same mechanism that also applies a
+        boot-time-loaded config (``daemon.__main__.build()``), so a
+        pushed-while-absent config and a config installed on disk before
+        the daemon ever started are handled identically once the camera
+        actually appears.
+
+        **Applies to hardware when the camera is held open** (ticket
+        023-001, closing sprint 022's Decision 1 deferral -- UC-03's
+        "applies... immediately, not at next open"). ``Camera.
+        apply_config`` is called **before** the store, deliberately:
+        its whole-push, hard-error contract
+        (``camera.interfaces.Camera.apply_config``'s docstring) means an
+        ``UnsupportedSetting`` propagates straight out of this method
+        too, leaving *both* the hardware **and** the stored document
+        exactly as they were (UC-03.S-3's "re-fetching the config
+        returns the previous state") -- storing first and applying
+        after would leave the stored document ahead of the hardware on
+        exactly the failure path this rule exists to prevent.
+        """
+        with self._lock:
+            cam = self._cameras.get(config.name)
+        if cam is not None:
+            cam.apply_config(config)
+        with self._lock:
+            self._camera_configs[config.name] = config
+
+    def reset_camera_config(self, camera: str) -> None:
+        """See ``daemon.interfaces.Daemon.reset_camera_config`` --
+        "the RPC face of ``Camera.reset()``" (that base-class docstring's
+        own words). Ticket 023-004.
+
+        Opens *camera* if it is not already held (:meth:`_camera_for`,
+        the same on-demand-open discipline every other camera-addressed
+        method here uses -- ``UnknownCamera``/``CameraNotPresent``
+        propagate exactly as they would from ``get_frame``/``calibrate``).
+        Every ``Camera`` :meth:`_camera_for` constructs already carries
+        the ``config_loader``/``config_path`` :meth:`Camera.reset` needs
+        (wired at construction, see :meth:`_config_path_for`), so this
+        method never touches ``config.loader`` or ``self._directories``
+        itself -- disk access for reset stays entirely inside ``Camera``,
+        this service only orchestrates (sprint.md Architecture "Modules"
+        point 1: this service stays ignorant of disk beyond handing the
+        already-resolved path/loader to ``Camera`` at construction).
+
+        :meth:`Camera.reset` re-reads and re-applies whatever is at
+        `config_dir/cameras/<slug>/config.json` (or the blank
+        introspected-plus-blank template when nothing is installed --
+        sprint.md Decision 3), discarding whatever live override this
+        service held. The resulting document
+        (:meth:`Camera.stored_config`) then replaces this service's
+        ``_camera_configs`` entry for the camera, so
+        :meth:`get_camera_config`/:meth:`list_cameras` reflect the reset
+        immediately -- exactly the way a live :meth:`set_camera_config`
+        push already would (SUC-003's postcondition: fetching the config
+        after a reset returns the on-disk document, or the blank
+        template, never the discarded override).
+        """
+        cam = self._camera_for(camera)
+        cam.reset()
+        config = cam.stored_config()
+        with self._lock:
+            self._camera_configs[cam.slug] = config
+
+    def _playfield_link(self, slug: str) -> Optional[str]:
+        """The playfield *slug* is currently linked to, per the last
+        :meth:`set_camera_config` push -- ``None`` if never configured.
+        """
+        with self._lock:
+            config = self._camera_configs.get(slug)
+        return config.playfield if config is not None else None
+
+    # -- annotations (ticket 024-001) ---------------------------------------
+    #
+    # The shared drawing surface (spec section 9 decision 8, UC-28):
+    # ``self._annotations`` (playfield -> layer -> id -> Annotation) and
+    # ``self._annotation_revisions`` (playfield -> monotonic counter),
+    # both declared alongside ``_playfields``/``_camera_configs`` in
+    # ``__init__`` and guarded the same way, by ``self._lock``. Runtime
+    # state exactly like the mobile-tag registry: in-memory,
+    # record-level, gone on restart, never written to disk -- there is
+    # simply no write-to-disk path here, the same structural guarantee
+    # ``_playfields``/``_camera_configs`` already have.
+    #
+    # Unknown playfield is rejected on all five methods below
+    # (``UnknownPlayfield``, naming every playfield currently held) --
+    # matching ``get_playfield``'s own precedent exactly (sprint.md
+    # Architecture, resolved UC-28 open question 2). An unknown *layer*
+    # within a *known* playfield is never an error one level down: a
+    # no-op for ``remove_annotation``/``clear_annotations``, an empty
+    # result for ``get_annotations``.
+
+    def _known_playfields_locked(self) -> Tuple[str, ...]:
+        """Every playfield name currently held, sorted -- the
+        ``UnknownPlayfield`` ``available`` list every method below
+        raises with. Assumes :attr:`_lock` is already held by the
+        caller (mirrors :meth:`get_playfield`'s own inline check, just
+        factored out since five methods need it instead of one)."""
+        return tuple(sorted(self._playfields.keys()))
+
+    def _require_known_playfield_locked(self, playfield: str) -> None:
+        """Raise :class:`~aprilcam.errors.UnknownPlayfield` for a
+        *playfield* this daemon does not hold. Assumes :attr:`_lock` is
+        already held -- every one of the five annotation methods below
+        calls this as its very first act inside its own ``with
+        self._lock:`` block, so the known-playfield check and the
+        mutation/read it guards happen under one uninterrupted critical
+        section (no other thread's ``set_playfield``/annotation call can
+        interleave between the check and the effect)."""
+        if playfield not in self._playfields:
+            raise UnknownPlayfield(playfield, self._known_playfields_locked())
+
+    def _bump_annotation_revision_locked(self, playfield: str) -> None:
+        """Increment *playfield*'s annotation revision by one. Assumes
+        :attr:`_lock` is already held. The single mutation point every
+        actual annotation change goes through, so "revision increments
+        on every real mutation, never on a no-op" is true by
+        construction: a method that decides nothing actually changed
+        simply never calls this."""
+        self._annotation_revisions[playfield] = self._annotation_revisions.get(playfield, 0) + 1
+
+    def put_annotation(self, playfield: str, annotation: Annotation) -> None:
+        """See ``daemon.interfaces.Daemon.put_annotation``.
+
+        Upserts by *annotation*'s own ``(layer, id)`` -- last write
+        wins on a colliding key, no merge, no error (UC-28.S-6): the
+        dict assignment below simply replaces whatever was there.
+        Always bumps *playfield*'s revision -- a put is definitionally
+        a real mutation, never a no-op.
+
+        Rejects with :class:`~aprilcam.errors.AnnotationLimitExceeded`
+        (ticket 031-010), before touching ``self._annotations`` at all,
+        when *annotation*'s shape exceeds :data:`_MAX_POINTS_PER_SHAPE`,
+        or when *annotation*'s id is genuinely new to the target layer
+        and that layer already holds :data:`_MAX_ANNOTATIONS_PER_LAYER`
+        annotations -- an upsert of an id already present never counts
+        against the count bound, since it does not grow the layer.
+        """
+        with self._lock:
+            self._require_known_playfield_locked(playfield)
+            _check_point_bound(annotation.shape)
+            layer = self._annotations.get(playfield, {}).get(annotation.layer, {})
+            if annotation.id not in layer and len(layer) >= _MAX_ANNOTATIONS_PER_LAYER:
+                raise AnnotationLimitExceeded(
+                    "annotations", _MAX_ANNOTATIONS_PER_LAYER, len(layer) + 1
+                )
+            self._annotations.setdefault(playfield, {}).setdefault(
+                annotation.layer, {}
+            )[annotation.id] = annotation
+            self._bump_annotation_revision_locked(playfield)
+
+    def remove_annotation(self, playfield: str, layer: str, id: str) -> None:
+        """See ``daemon.interfaces.Daemon.remove_annotation``.
+
+        A no-op -- not an error, and no revision bump -- when *playfield*
+        has nothing stored at all, when *layer* does not exist on it, or
+        when *id* is not present in that layer. Only an actual removal
+        bumps the revision.
+        """
+        with self._lock:
+            self._require_known_playfield_locked(playfield)
+            layers = self._annotations.get(playfield)
+            if not layers:
+                return
+            annotations = layers.get(layer)
+            if not annotations or id not in annotations:
+                return
+            del annotations[id]
+            self._bump_annotation_revision_locked(playfield)
+
+    def replace_layer(
+        self, playfield: str, layer: str, annotations: Tuple[Annotation, ...]
+    ) -> None:
+        """See ``daemon.interfaces.Daemon.replace_layer``.
+
+        A single dict-assignment swap of *layer*'s entire contents,
+        atomic under :attr:`_lock` -- no consumer ever observes a
+        half-updated layer; every frame embed or ``get_annotations``
+        call sees either the layer's old contents or its new ones,
+        never a mix (UC-28.S-2). Unlike ``remove``/``clear``, this
+        always bumps the revision, including replacing an absent or
+        already-empty layer with an empty tuple -- a replace is a
+        deliberate whole-layer redraw, not a conditional mutation.
+
+        Rejects with :class:`~aprilcam.errors.AnnotationLimitExceeded`
+        (ticket 031-010), before touching ``self._annotations`` at all,
+        when *annotations* itself exceeds
+        :data:`_MAX_ANNOTATIONS_PER_LAYER`, or when any one shape in it
+        exceeds :data:`_MAX_POINTS_PER_SHAPE` -- the layer's *previous*
+        contents are left completely unchanged on rejection, matching
+        this method's existing atomicity guarantee (UC-28.S-2).
+        """
+        with self._lock:
+            self._require_known_playfield_locked(playfield)
+            if len(annotations) > _MAX_ANNOTATIONS_PER_LAYER:
+                raise AnnotationLimitExceeded(
+                    "annotations", _MAX_ANNOTATIONS_PER_LAYER, len(annotations)
+                )
+            for one in annotations:
+                _check_point_bound(one.shape)
+            self._annotations.setdefault(playfield, {})[layer] = {
+                a.id: a for a in annotations
+            }
+            self._bump_annotation_revision_locked(playfield)
+
+    def clear_annotations(self, playfield: str, layer: Optional[str] = None) -> None:
+        """See ``daemon.interfaces.Daemon.clear_annotations``.
+
+        ``layer=None`` clears every layer on *playfield*; a named
+        *layer* clears just that one. Either way, clearing something
+        that is already empty -- a nonexistent layer, an
+        already-cleared layer, or a playfield with nothing stored at
+        all -- is a no-op: not an error, and no revision bump. Only a
+        clear that actually removes at least one annotation bumps the
+        revision.
+        """
+        with self._lock:
+            self._require_known_playfield_locked(playfield)
+            layers = self._annotations.get(playfield)
+            if not layers:
+                return
+            if layer is None:
+                if not any(layers.values()):
+                    return
+                self._annotations[playfield] = {}
+                self._bump_annotation_revision_locked(playfield)
+                return
+            if not layers.get(layer):
+                return
+            del layers[layer]
+            self._bump_annotation_revision_locked(playfield)
+
+    def get_annotations(self, playfield: str, layer: Optional[str] = None) -> AnnotationSet:
+        """See ``daemon.interfaces.Daemon.get_annotations``.
+
+        ``layer=None`` flattens every layer's annotations into one
+        set (each :class:`~aprilcam.types.Annotation` still carries its
+        own ``layer`` field, so the flattening loses no information); a
+        named *layer* filters to just that one. ``revision`` is always
+        *playfield*'s whole-store revision regardless of the ``layer``
+        filter -- a caller reading one layer still learns whether
+        *anything* on the playfield changed since its last read, which
+        the (deliberately not offered) alternative of a per-layer
+        revision counter could not give it for free. A playfield that
+        has never seen a mutation reports revision 0 -- the same value
+        a freshly restarted daemon reports (UC-28.S-4), by construction:
+        ``self._annotation_revisions`` simply has no entry yet.
+        """
+        with self._lock:
+            self._require_known_playfield_locked(playfield)
+            layers = self._annotations.get(playfield, {})
+            revision = self._annotation_revisions.get(playfield, 0)
+            if layer is None:
+                annotations = tuple(
+                    annotation
+                    for layer_annotations in layers.values()
+                    for annotation in layer_annotations.values()
+                )
+            else:
+                annotations = tuple(layers.get(layer, {}).values())
+        return AnnotationSet(annotations=annotations, revision=revision, timestamp=time.time())
+
+    # -- mobile-tag registry (ticket 025-004, UC-12) -------------------------
+    #
+    # ``self._mount_params`` (``TagId -> MountParameters``), guarded by the
+    # same ``self._lock`` as every other in-memory store this class holds
+    # -- runtime state exactly like the annotation store above: in-memory,
+    # gone on restart, re-registered by clients on reconnect. The actual
+    # correction math lives in ``calibration.geometry``/``daemon.detection``
+    # (this class only holds the registrations and hands two lookups to
+    # ``DetectionEngine`` -- :meth:`_mount_lookup`/:meth:`_camera_geometry_for`
+    # below -- so it never duplicates that math itself).
+
+    def register_tag(self, tag: TagId, params: MountParameters) -> Optional[str]:
+        """See ``daemon.interfaces.Daemon.register_tag``.
+
+        Upserts by *tag* -- a second registration for the same tag
+        replaces the first outright, no merge, mirroring
+        :meth:`set_camera_config`'s own whole-document-replace
+        precedent.
+
+        UC-12.S-5: a **nonzero** ``params.mount_z`` (there is an
+        elevation for the parallax projection to actually apply) is
+        rejected with :class:`~aprilcam.errors.NotCalibrated` when this
+        daemon holds **no calibration for any camera at all** --
+        ``mount_z`` set with no calibration anywhere the tag could be
+        observed would otherwise be silently stored but permanently
+        inert, never applying to anything (this ticket's own acceptance
+        criterion). Read literally as "any camera," not one specific
+        camera, since a mobile tag is not tied to a single camera the
+        way ``get_calibration``'s query is -- it may be seen by whichever
+        camera happens to be watching. A *zero* ``mount_z`` (the
+        ``MountParameters`` default -- no elevation at all) never
+        triggers this check, calibrated or not, since there is nothing
+        for parallax to project in that case.
+
+        A partial spec (``mount_z`` set, ``mount_x``/``mount_y`` left at
+        their own ``0.0`` default) is accepted without complaint --
+        ``MountParameters``' own fields already default to zero offset,
+        so there is nothing to validate here (UC-12's own "common case"
+        failure mode). A registration for a tag never yet detected is
+        accepted unconditionally -- the tag may appear later (UC-12's
+        own failure-mode table) -- and takes effect the moment
+        ``DetectionEngine.run_burst`` next asks :meth:`_mount_lookup`
+        about it.
+
+        **Ticket 030-004, SUC-004**: this guard is deliberately left
+        exactly as it was (sprint.md's Architecture, Design Rationale
+        Decision 4) -- registering a mount before running ``camera
+        locate`` on the camera that will observe it is a legitimate,
+        order-independent workflow (UC-12) and must keep working. What
+        changed is the *return value*: when a nonzero ``mount_z`` was
+        just accepted but no camera this daemon knows about has been
+        located yet (:meth:`_any_camera_located`), a warning string
+        naming ``aprilcam camera locate`` as the fix is returned --
+        purely informational, never raised, never blocking. ``None``
+        means either ``mount_z`` was zero or at least one camera is
+        already located.
+        """
+        with self._lock:
+            if params.mount_z != 0.0 and not self._calibrations:
+                raise NotCalibrated(
+                    f"cannot register mount_z for {tag!r}: this daemon holds no "
+                    "calibration for any camera, so the parallax projection "
+                    "would be meaningless -- calibrate a camera first"
+                )
+            self._mount_params[tag] = params
+
+        if params.mount_z > 0.0 and not self._any_camera_located():
+            return (
+                f"mount_z={params.mount_z:g} for {tag.family.value} {tag.number} is "
+                "currently inert: no camera this daemon knows about has been "
+                "located yet (CameraConfig.camera_position), so the parallax "
+                "correction has nowhere to apply -- mount_x/mount_y/mount_yaw_rad "
+                "still apply normally. Ask your operator to run `aprilcam camera "
+                "locate` against the camera(s) that will observe this tag, then "
+                "re-check with list_tag_parameters (mount_z_applied)."
+            )
+        return None
+
+    def unregister_tag(self, tag: TagId) -> None:
+        """See ``daemon.interfaces.Daemon.unregister_tag``.
+
+        An absent *tag* is a no-op, matching :meth:`clear_annotations`'s
+        established no-op-on-absent convention (sprint 024) -- there is
+        nothing to undo for a tag that was never registered, or already
+        unregistered.
+        """
+        with self._lock:
+            self._mount_params.pop(tag, None)
+
+    def list_tag_parameters(self) -> Dict[TagId, MountRegistration]:
+        """See ``daemon.interfaces.Daemon.list_tag_parameters``.
+
+        A snapshot, safe for a caller to mutate freely without touching
+        this service's own store -- the same snapshot-not-live-reference
+        discipline every other collection this class hands back
+        (``list_cameras``, ``list_playfields``) already follows.
+
+        **Ticket 030-004, SUC-004**: each entry now pairs its stored
+        ``MountParameters`` with a computed ``mount_z_applied`` (see
+        :meth:`_mount_z_applied`) -- the observable flag this ticket
+        exists to add, so a stored-but-inert ``mount_z`` (a calibrated
+        but never-``locate``\\ d camera) is discoverable here instead of
+        only by cross-referencing ``get_camera_config`` by hand.
+        """
+        with self._lock:
+            snapshot = dict(self._mount_params)
+        return {
+            tag: MountRegistration(
+                params=params, mount_z_applied=self._mount_z_applied(params.mount_z)
+            )
+            for tag, params in snapshot.items()
+        }
+
+    def _mount_lookup(self, tag: TagId) -> Optional[MountParameters]:
+        """``DetectionEngine``'s ``mount_lookup`` callable (ticket
+        025-004) -- a locked read of :attr:`_mount_params`, the same
+        lock-guarded-dict-read pattern :meth:`_camera_config_for_calibration`/
+        :meth:`_playfield_for_calibration` already establish."""
+        with self._lock:
+            return self._mount_params.get(tag)
+
+    def _camera_geometry_for(self, slug: str) -> Tuple[WorldPoint, float]:
+        """``DetectionEngine``'s ``camera_geometry_lookup`` callable
+        (ticket 025-004; wired to a real source by sprint 029 ticket
+        001 -- no longer explicitly provisional).
+
+        ``calibration.geometry.project_tag_to_field_plane`` needs a
+        camera's own ground position and height above the field to
+        perform its parallax projection. This reads it from that
+        camera's configured ``config.interfaces.CameraConfig.
+        camera_position`` (``config.interfaces.CameraPosition``:
+        ``nadir``/``height_cm``) -- the same in-memory
+        :attr:`_camera_configs` store ``set_camera_config``/
+        ``get_camera_config`` already hold, set by an operator (by hand,
+        or via ``aprilcam camera locate``, sprint 029 ticket 003)
+        exactly like every other camera setting.
+
+        A camera with no known configuration at all (``config is
+        None``) or one that has never been located (``config.
+        camera_position is None``) falls back to the exact pre-029
+        stopgap: ground position ``(0, 0)``, height ``0.0`` --
+        ``project_tag_to_field_plane``'s own documented "nothing to
+        correct" sentinel (height not strictly positive short-circuits
+        to the identity). A registered ``mount_z`` for such a camera
+        remains fully wired end-to-end and covered by unit tests with
+        hand-picked geometry (``tests/aprilcam/daemon/test_detection.py``),
+        but has no observable effect until that camera is located --
+        only ``mount_x``/``mount_y``/``mount_yaw_rad``'s offset+yaw
+        composition (``calibration.geometry.apply_mount_offset``, which
+        needs no camera geometry at all) moves a reported position
+        either way.
+
+        See ``daemon/detection.py``'s ``_apply_mount_correction`` for
+        the companion guard: a registered ``mount_z`` at or above a
+        configured camera's own ``height_cm`` skips correction rather
+        than extrapolating past the camera's own nadir.
+        """
+        with self._lock:
+            config = self._camera_configs.get(slug)
+        if config is None or config.camera_position is None:
+            return WorldPoint(x=0.0, y=0.0), 0.0
+        return config.camera_position.nadir, config.camera_position.height_cm
+
+    def _any_camera_located(self) -> bool:
+        """Whether **any** camera this service knows about currently
+        has real, solved geometry rather than :meth:`_camera_geometry_for`'s
+        pre-029 stopgap (ticket 030-004, SUC-004).
+
+        Reuses :meth:`_camera_geometry_for` itself, once per configured
+        camera -- no new guard logic, just the same "known vs. stopgap"
+        read :meth:`_camera_geometry_for`'s own docstring already
+        documents (height strictly positive means real; ``0.0`` is the
+        stopgap sentinel, matching
+        ``calibration.geometry.project_tag_to_field_plane``'s own
+        ``camera_height_cm <= 0.0`` identity short-circuit).
+
+        Deliberately "any camera," not one specific camera -- the same
+        scope :meth:`register_tag`'s ``NotCalibrated`` guard already
+        uses (Decision 4, sprint.md's Architecture): a mobile tag is
+        not bound to a single observing camera, so this asks whether
+        *any* camera in the fleet is located, not whether one
+        particular camera is.
+        """
+        with self._lock:
+            slugs = tuple(self._camera_configs.keys())
+        return any(self._camera_geometry_for(slug)[1] > 0.0 for slug in slugs)
+
+    def _mount_z_applied(self, mount_z: float) -> bool:
+        """Whether a registered ``mount_z`` of this magnitude is
+        currently being applied by the parallax correction (ticket
+        030-004, SUC-004; see :class:`~aprilcam.daemon.interfaces.
+        MountRegistration`). ``mount_z <= 0.0`` is vacuously ``True`` --
+        there is nothing for parallax to project, so nothing is being
+        withheld; the check otherwise mirrors :meth:`_any_camera_located`
+        exactly, matching ``project_tag_to_field_plane``'s own
+        ``mount_z_cm <= 0.0`` no-op sentinel."""
+        if mount_z <= 0.0:
+            return True
+        return self._any_camera_located()
+
+    # -- calibration (ticket 022-003) --------------------------------------
+
+    def calibrate(self, camera: str, *, estimate_intrinsics: bool = False) -> CalibrationResult:
+        """See ``daemon.interfaces.Daemon.calibrate``.
+
+        A thin wrapper: every vision/geometry decision (multi-frame
+        averaging, id matching, all-or-nothing acceptance, homography
+        solve, degenerate-geometry rejection, and -- sprint 030 ticket
+        002 -- intrinsics estimation) lives in
+        ``calibration.calibration.Calibrator``, injected as
+        ``self._calibrator`` -- this method's only job is to run it and,
+        on success, persist the result. ``NoPlayfieldLinked`` propagates
+        straight through from the calibrator (raised there before it
+        ever calls :meth:`_capture_calibration_frames`, so an unlinked
+        camera never reaches the camera backend at all -- UC-15.S-2).
+
+        *camera* accepts a persistent number or a slug (SUC-005) --
+        resolved to the canonical slug via :meth:`_resolve_slug_if_known`
+        **before** anything else happens, and that resolved slug is what
+        gets passed to the calibrator and used as the
+        ``self._calibrations``/``calibration.json`` key. Without this,
+        a number token never matches ``_camera_configs`` (keyed by slug
+        only) and every numbered camera reports the misleading
+        ``NoPlayfieldLinked`` regardless of whether it is actually
+        linked -- ticket 022-003's addressing regression, fixed here so
+        every other camera-config-addressed method inherits the same
+        resolution rather than re-implementing it (see
+        :meth:`_resolve_slug_if_known`'s docstring).
+
+        *estimate_intrinsics* is passed straight through to
+        ``self._calibrator.calibrate`` -- this method makes no decision
+        of its own about it, matching the "pure carry a bool from
+        caller to Calibrator" framing of this parameter throughout the
+        stack (sprint.md Architecture, responsibility 4).
+
+        A failed attempt (``result.succeeded is False``) leaves
+        ``calibration.json`` and this service's in-memory
+        ``self._calibrations`` entry for *camera* completely untouched
+        -- there is simply no write path taken on that branch, so "a
+        prior-good calibration survives a failed retry" (UC-04.S-2,
+        UC-15.S-3) holds by construction rather than by an explicit
+        guard.
+        """
+        slug = self._resolve_slug_if_known(camera)
+        result = self._calibrator.calibrate(slug, estimate_intrinsics=estimate_intrinsics)
+        if result.succeeded:
+            calibration = self._calibrator.get_calibration(slug)
+            assert calibration is not None, (
+                "Calibrator.calibrate() reported succeeded=True but "
+                "get_calibration() has nothing stored -- a Calibrator bug"
+            )
+            with self._lock:
+                self._calibrations[slug] = calibration
+            self._persist_calibration(slug, calibration)
+        return result
+
+    def get_calibration(self, camera: str) -> Optional[Calibration]:
+        """See ``daemon.interfaces.Daemon.get_calibration``.
+
+        Answers from this service's in-memory cache -- populated by a
+        successful :meth:`calibrate` call in this process, or by
+        :meth:`_load_calibrations` at construction time from whatever
+        ``calibration.json`` files already existed on disk (UC-01: a
+        calibrated camera stays calibrated across a daemon restart).
+        ``None`` for a camera that has never been calibrated -- never a
+        fabricated/default ``Calibration``, mirroring
+        :meth:`get_tag`'s "``None`` means not detected, never a
+        zero-valued record" discipline.
+
+        *camera* accepts a persistent number or a slug (SUC-005),
+        resolved via :meth:`_resolve_slug_if_known` -- ``self.
+        _calibrations`` is always keyed by the resolved slug (see
+        :meth:`calibrate`), so looking it up by the raw token would
+        silently report "never calibrated" for a numbered camera that
+        actually is.
+        """
+        slug = self._resolve_slug_if_known(camera)
+        with self._lock:
+            return self._calibrations.get(slug)
+
+    def _mark_stale(self, slug: str) -> None:
+        """Flip *slug*'s currently-held calibration's ``stale`` bit, if
+        it has one (ticket 023-007) -- the single mutation point both
+        staleness triggers share: wired as ``camera.camera.Camera``'s
+        ``on_reopen`` callback in :meth:`_camera_for` (sprint.md
+        Decision 6), and as ``daemon.detection.DetectionEngine``'s
+        ``mark_stale`` callable, called from its opportunistic drift
+        check (Decision 5). *slug* is always an already-resolved
+        registry slug in both callers -- never a raw number-or-slug
+        token -- so, unlike :meth:`calibrate`/:meth:`get_calibration`,
+        this method does not call :meth:`_resolve_slug_if_known` itself.
+
+        Takes :attr:`_lock` exactly like every other ``self._calibrations``
+        mutation already does (:meth:`calibrate`) -- pinned explicitly by
+        the ticket: two concurrent bursts (or a burst racing a reopen) on
+        the same camera must not corrupt the store. A no-op for a slug
+        with no held calibration (never calibrated -- nothing to flag as
+        wrong) or one already marked stale (idempotent, and avoids a
+        redundant disk write on repeated triggers for the same still-bad
+        camera).
+
+        Persists the change to ``calibration.json`` (:meth:`_persist_calibration`,
+        the same atomic write :meth:`calibrate` already uses) so a
+        staleness flip survives a daemon restart -- ``Calibration`` is
+        file-backed (UC-01), and a restart silently un-flagging a bumped
+        camera as "not stale" would reintroduce exactly the failure mode
+        this ticket exists to close. Persisted *after* releasing
+        :attr:`_lock`, mirroring :meth:`calibrate`'s own ordering, so a
+        slow disk write never holds up a concurrent caller's unrelated
+        camera.
+        """
+        with self._lock:
+            calibration = self._calibrations.get(slug)
+            if calibration is None or calibration.stale:
+                return
+            updated = replace(calibration, stale=True)
+            self._calibrations[slug] = updated
+        self._persist_calibration(slug, updated)
+
+    def _camera_config_for_calibration(self, camera: str) -> Optional[CameraConfig]:
+        """``Calibrator``'s ``get_camera_config`` callable -- a locked
+        read of :attr:`_camera_configs`, the same store
+        :meth:`get_camera_config`/:meth:`_playfield_link` already read
+        under :attr:`_lock`."""
+        with self._lock:
+            return self._camera_configs.get(camera)
+
+    def _playfield_for_calibration(self, name: str) -> Optional[PlayfieldDefinitionIface]:
+        """``Calibrator``'s ``get_playfield`` callable -- a locked read
+        of :attr:`_playfields`."""
+        with self._lock:
+            return self._playfields.get(name)
+
+    def _capture_calibration_frames(self, camera: str) -> Tuple[np.ndarray, ...]:
+        """``Calibrator``'s ``capture_frames`` callable -- the one place
+        calibration touches a camera backend (the module boundary's
+        "camera frame access, handed in" rule). Resolves *camera* via
+        :meth:`_camera_for` (opening it on first use, exactly like
+        :meth:`get_frame`/:meth:`get_tags`) and reads up to
+        :data:`CALIBRATION_FRAME_COUNT` frames, skipping any individual
+        read that returns ``None`` (a transient capture miss) rather
+        than failing the whole capture -- ``Calibrator.calibrate`` is
+        the one that decides whether the frames actually collected are
+        enough (it raises if this returns nothing at all).
+
+        Never called for a camera with no playfield link: ``Calibrator.
+        calibrate`` raises ``NoPlayfieldLinked`` before this callable is
+        invoked, so :meth:`_camera_for` -- which can open a backend --
+        is never reached on that path (UC-15.S-2's "zero calls to the
+        camera backend").
+        """
+        cam = self._camera_for(camera)
+        frames: List[np.ndarray] = []
+        for _ in range(CALIBRATION_FRAME_COUNT):
+            frame = cam.read()
+            if frame is not None:
+                frames.append(frame)
+        return tuple(frames)
+
+    def _calibration_path(self, camera: str) -> Path:
+        """``<state_dir>/cameras/<camera>/calibration.json`` -- design.md
+        §7's storage layout, matching ``camera/registry.py``'s
+        ``<state_dir>/cameras/registry.json`` sibling layout (a
+        per-camera subdirectory, not a shared file, so one camera's
+        calibration can never collide with another's)."""
+        return self._directories.state_dir / "cameras" / camera / CALIBRATION_FILENAME
+
+    def _persist_calibration(self, camera: str, calibration: Calibration) -> None:
+        """Atomically write *calibration* to *camera*'s
+        ``calibration.json``: tmp file, ``fsync``, ``os.replace`` --
+        the same tmp+fsync+rename pattern ``camera/registry.py``'s
+        ``_save`` uses, so a crash between those steps leaves the prior
+        file (if any) exactly as it was, never half-written."""
+        path = self._calibration_path(camera)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise OSError(
+                f"cannot create calibration directory {path.parent}: {exc}"
+            ) from exc
+
+        text = json.dumps(calibration.to_dict(), indent=2, sort_keys=True) + "\n"
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except OSError as exc:
+            raise OSError(f"cannot write calibration file {path}: {exc}") from exc
+        finally:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:  # pragma: no cover - best-effort cleanup
+                pass
+
+    def _load_calibrations(self) -> None:
+        """Reload every camera's ``calibration.json`` at construction
+        time (UC-01: "reloads it at startup like any other file").
+        Scans ``<state_dir>/cameras/*/calibration.json`` directly rather
+        than going through the camera registry, so a calibration is
+        found regardless of whether this particular ``DaemonService``
+        instance has re-enumerated that camera yet -- the file, not the
+        registry, is the source of truth here. A missing ``state_dir``
+        (first run) or a corrupt/malformed calibration file is tolerated
+        by skipping it (logged as a warning), never by failing daemon
+        construction -- mirrors ``camera.registry.CameraRegistry``'s
+        "a corrupt file must never crash the daemon" stance.
+        """
+        cameras_dir = self._directories.state_dir / "cameras"
+        if not cameras_dir.is_dir():
+            return
+        for entry in sorted(cameras_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            path = entry / CALIBRATION_FILENAME
+            if not path.exists():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                calibration = Calibration.from_dict(data)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                logger.warning(
+                    "corrupt calibration file for %s at %s: %s -- ignoring",
+                    entry.name,
+                    path,
+                    exc,
+                )
+                continue
+            self._calibrations[entry.name] = calibration
+
+    # -- beyond the interface: shutdown cleanup ----------------------------
+
+    def close(self) -> None:
+        """Stop every tracked ``TagStreamProducer``/``ImageStreamProducer``,
+        then close every held-open camera. Not part of the ``Daemon``
+        base class -- ``daemon/lifecycle.py``'s ``on_stop`` hook calls
+        this during a clean shutdown so no backend handle, and no
+        background stream thread, outlives the process that opened it
+        (sprint.md Migration Concerns, "Clean daemon shutdown" -- ticket
+        027-003's own acceptance criterion, extended to image producers
+        by ticket 027-004's identical one).
+
+        **Producers stop first, cameras close second, deliberately.**
+        Both producer classes' ``stop()`` join their background thread
+        with a bounded timeout before returning -- stopping every
+        producer before any camera is closed guarantees no producer
+        thread is still mid-``Camera.read()`` when that camera's
+        backend handle is torn down. Both are already safe, idempotent
+        no-ops for a producer with no live thread (an idle one), so this
+        loop does not need to distinguish active from idle producers
+        first.
+        """
+        with self._lock:
+            tag_producers = list(self._tag_stream_producers.values())
+            self._tag_stream_producers.clear()
+            image_producers = list(self._image_stream_producers.values())
+            self._image_stream_producers.clear()
+            held = list(self._cameras.values())
+            self._cameras.clear()
+        for producer in tag_producers:
+            try:
+                producer.stop()
+            except Exception:  # pragma: no cover - defensive
+                logger.exception(
+                    "error stopping tag stream producer %s during shutdown", producer.slug
+                )
+        for image_producer in image_producers:
+            try:
+                image_producer.stop()
+            except Exception:  # pragma: no cover - defensive
+                logger.exception(
+                    "error stopping image stream producer %s (deskewed=%s) during shutdown",
+                    image_producer.slug,
+                    image_producer.deskewed,
+                )
+        for cam in held:
+            try:
+                cam.close()
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("error closing camera %s during shutdown", cam.slug)
+
+    # -- internals -----------------------------------------------------
+
+    def _camera_for(self, token: str) -> Camera:
+        """The held-open ``Camera`` addressed by *token*, opening it on
+        first use.
+
+        *token* is either form ``camera list``/``camera probe`` print
+        (ticket 021-002, SUC-005): an **all-digits token resolves by
+        persistent registry number** (``CameraRegistry.get_by_number``);
+        anything else resolves by slug, exactly as before
+        (``CameraRegistry.get``). No ambiguity is possible between the
+        two forms -- ``camera/identity.py``'s ``device_name_slug``
+        guarantees every slug contains at least one non-digit character,
+        so an all-digits token can never *be* a real slug.
+
+        Raises :class:`UnknownCamera` (naming every known camera as
+        ``"{number} {slug}"`` pairs, teaching the addressing scheme
+        rather than just rejecting) for a token -- number or slug -- the
+        registry has never seen. Raises :class:`CameraNotPresent`
+        (naming the resolved slug) for a token that *does* resolve to a
+        registry record but cannot currently be located among enumerated
+        backends (unplugged, or a transient enumeration miss) -- a
+        registry record outliving its hardware is normal (UC-25), so
+        this is distinct from "never registered," not folded into
+        :class:`UnknownCamera` the way it was before this ticket.
+
+        **Backend selection (ticket 031-006, SUC-006).** The freshly
+        opened camera's :class:`~aprilcam.camera.backends.CaptureBackend`
+        is chosen by :func:`~aprilcam.camera.backends.resolve_capture_backend`
+        against *record*'s ``hardware_key``, not unconditionally
+        ``self._backend_factory(index)`` as before this ticket: a
+        libcamera-identified camera (``hardware_key`` prefixed
+        ``"libcamera:"``) opens through
+        :class:`~aprilcam.camera.backends.v4l2_loopback.V4l2LoopbackBackend`
+        instead, since ``OpenCVBackend`` cannot read a v4l2loopback device
+        reliably (that class's own module docstring). Every other
+        identity source is unaffected.
+
+        **Apply-on-open (ticket 023-003).** A freshly-opened camera
+        checks :attr:`_camera_configs` for a config already held under
+        its slug -- populated either by a live :meth:`set_camera_config`
+        push that arrived before this camera did, or by
+        ``daemon.__main__.build()``'s boot-time load from ``config_dir``
+        -- and applies it via :meth:`Camera.apply_config` *before* the
+        camera is cached into :attr:`_cameras` and handed back to the
+        caller. This is what makes a config installed on disk (or
+        pushed while the camera was absent) take effect the instant the
+        camera is actually opened, not only on a subsequent
+        :meth:`set_camera_config` call -- closing UC-01.S-4's
+        previously-broken playfield-link half. An ``UnsupportedSetting``
+        from a stored-but-now-invalid config propagates straight through,
+        exactly like a live push would; :attr:`_cameras` is only updated
+        after this succeeds, so a camera that fails to apply its stored
+        config is not left half-registered as held-open.
+        """
+        with self._lock:
+            existing = self._cameras.get(token)
+        if existing is not None:
+            return existing
+
+        record = self._record_for(token)
+        if record is None:
+            raise UnknownCamera(token, self._available())
+
+        with self._lock:
+            existing = self._cameras.get(record.slug)
+        if existing is not None:
+            return existing
+
+        index = self._index_for(record)
+        if index is None:
+            raise CameraNotPresent(record.slug)
+
+        cam = Camera(
+            record.slug,
+            resolve_capture_backend(
+                record.hardware_key,
+                index,
+                backend_factory=self._backend_factory,
+                list_loopback_cameras=self._list_loopback_cameras,
+            ),
+            control_backend=self._control_backend_factory(record.device_name),
+            device_name=record.device_name,
+            number=record.number,
+            config_loader=self._config_loader,
+            config_path=self._config_path_for(record.slug),
+            on_reopen=lambda: self._mark_stale(record.slug),
+        )
+        cam.open()
+        with self._lock:
+            config = self._camera_configs.get(record.slug)
+        if config is not None:
+            cam.apply_config(config)
+        with self._lock:
+            self._cameras[record.slug] = cam
+        return cam
+
+    def _config_path_for(self, slug: str) -> Path:
+        """``config_dir/cameras/<slug>/config.json`` -- sprint.md
+        Decision 3's fixed reset target (``ResetCameraConfig`` always
+        means re-reading exactly this location, never whatever was last
+        pushed), matching ``configuration.md``'s documented per-camera
+        layout and ``config.loader.ConfigLoader.load_config_dir``'s own
+        boot-time scan path for the same file. Computed fresh per call
+        from :attr:`_directories`, set once at construction -- every
+        ``Camera`` :meth:`_camera_for` builds gets this wired in
+        (ticket 023-004), whether or not anything is actually installed
+        there yet."""
+        return self._directories.config_dir / "cameras" / slug / "config.json"
+
+    def _record_for(self, token: str) -> Optional[CameraRecord]:
+        """Resolve *token* against the registry: an all-digits token by
+        number, anything else by slug. See :meth:`_camera_for`."""
+        if token.isdigit():
+            return self._registry.get_by_number(int(token))
+        return self._registry.get(token)
+
+    def _resolve_slug_if_known(self, token: str) -> str:
+        """*token* (a persistent number or a slug, SUC-005 addressing)
+        resolved to its canonical registry slug when the registry
+        recognises it -- otherwise *token* itself, unchanged.
+
+        The shared number-or-slug resolution point every
+        camera-**config**-addressed method needs (:meth:`get_camera_config`,
+        :meth:`calibrate`, :meth:`get_calibration`) -- built on the same
+        :meth:`_record_for` :meth:`_camera_for` already uses, so a token
+        resolves identically everywhere rather than each method
+        re-deciding "is this a number" for itself.
+
+        **Hotfix, ticket 022-003.** ``calibrate``/``get_calibration``/
+        ``get_camera_config`` originally looked up ``self._camera_configs``/
+        ``self._calibrations`` keyed by the *raw* token -- both stores
+        are keyed by slug only (``set_camera_config``'s ``self.
+        _camera_configs[config.name] = config``, ``config.name`` always
+        a slug; :meth:`_persist_calibration`/:meth:`_load_calibrations`
+        likewise). A valid persistent number therefore matched nothing,
+        and ``calibrate`` reported the misleading ``NoPlayfieldLinked``
+        for a camera that *was* linked, addressed the only way that
+        happened not to work.
+
+        Deliberately **soft**: unlike :meth:`_camera_for` (which raises
+        :class:`~aprilcam.errors.UnknownCamera` for an unresolvable
+        token, appropriate once hardware access follows), this never
+        raises. A token the registry has never seen at all is passed
+        through unchanged, so a downstream not-found error still names
+        exactly what the caller typed and existing "unknown token"
+        error shapes are undisturbed -- e.g. :meth:`get_camera_config`'s
+        ``available`` lists cameras with a pushed config, not every
+        registered camera, and stays that way for a token this method
+        cannot resolve either.
+        """
+        record = self._record_for(token)
+        return record.slug if record is not None else token
+
+    def _available(self) -> Tuple[str, ...]:
+        """Every known camera, formatted ``"{number} {slug}"`` for
+        :class:`UnknownCamera`'s ``available`` list -- falls back to the
+        bare slug for a record somehow missing a number (not reachable
+        through normal construction, since ``CameraRecord.number`` is a
+        required field, but defensive rather than assuming a stored
+        record can never be malformed)."""
+        return tuple(
+            f"{r.number} {r.slug}" if r.number is not None else r.slug
+            for r in self._registry.records()
+        )
+
+    def _index_for(self, record: CameraRecord) -> Optional[int]:
+        """The current OS-probe index for *record*, or ``None`` if it is
+        not enumerated right now. Re-resolves fresh every call (like
+        ``CameraDiscovery.probe()`` does) rather than caching -- an
+        index is only ever used once, immediately, to open a backend
+        (it is explicitly unstable across replugs)."""
+        for index, identity in self._identity_source().items():
+            if identity.hardware_key == record.hardware_key:
+                return index
+        return None

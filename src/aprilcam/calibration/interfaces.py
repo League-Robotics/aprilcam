@@ -1,0 +1,195 @@
+"""Calibration: the pixel ↔ world mapping.
+
+**Daemon-only** (spec §4.4). In v1 the CLI and MCP server ran this math
+locally with their own OpenCV import, which broke the vision boundary; in
+v2 they trigger it over RPC and report the result.
+
+The invariants below are the ones ``docs/design/specification.md`` §7
+calls sacrosanct. They cost enormous effort to get right, and every sign
+and axis in a change here is guilty until proven innocent.
+
+See ``aprilcam.daemon.interfaces``'s module docstring for the interface
+design rule applied below: ``CalibrationResult`` and ``Calibration`` are
+value-shaped, so they are frozen ``@dataclass``\\ es declaring fields
+(``Calibration.to_world``/``to_pixel`` are real behaviour over those
+fields, so they stay methods -- not properties -- with
+``NotImplementedError`` bodies until a sprint implements them).
+``Calibrator`` and ``Deskewer`` are behavioral, so they are plain base
+classes. No concrete implementation of any of these four exists yet
+(calibration is a later sprint); converting now means that sprint
+derives from a real class instead of duck-typing against a shape.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional
+
+import numpy as np
+
+from aprilcam.types import PixelPoint, WorldPoint
+
+
+@dataclass(frozen=True, kw_only=True)
+class CalibrationResult:
+    """The outcome of a calibration attempt — explicitly good or bad.
+
+    There is **no partial calibration**. Either every ArUco fiducial the
+    playfield definition specifies was found and a homography was
+    computed, or the attempt failed and nothing was stored (UC-04).
+    """
+
+    succeeded: bool
+    matched_ids: tuple[int, ...]
+    """ArUco ids found and matched to surveyed positions."""
+    missing_ids: tuple[int, ...]
+    """Specified ids that were **not** found.
+
+    Non-empty means failure. Reported by id rather than as a count so
+    the developer knows which marker to uncover (UC-04.S-2) — "9 of
+    10 found" is not actionable; "ArUco 6 missing" is.
+    """
+    reprojection_error_cm: Optional[float] = None
+    """How far surveyed markers land from where they should.
+
+    Resolved (UC-04, ticket 023-006): completeness is necessary but
+    not sufficient. A complete-but-sloppy solve is still a bad solve,
+    so ``calibration.calibration.Calibrator`` also enforces a maximum
+    acceptable error (``MAX_REPROJECTION_ERROR_CM``, a named,
+    overridable constant — confirmed default 1.0 cm). On a
+    threshold rejection this field still carries the measured error
+    that failed the check; ``reason`` names the threshold it was
+    measured against.
+    """
+    reason: Optional[str] = None
+    """Why a failure failed, when ids alone don't say.
+
+    ``missing_ids`` covers the common case; this covers the rest —
+    a complete-but-degenerate solve (collinear markers, singular
+    homography) must name its problem, not report failure with
+    every id present and leave the developer to guess.
+    """
+    intrinsics_estimated: Optional[bool] = None
+    """Whether *this call* estimated a lens model (sprint 030 ticket
+    002's ``estimate_intrinsics``) — ``True`` (estimated and stored
+    this call), ``False`` (not estimated this call; any previously
+    stored intrinsics carry forward unchanged, whether or not one
+    existed), or ``None`` (the concept does not apply — the attempt
+    failed before reaching that decision, e.g. a missing required
+    ArUco id). Never the ``camera_matrix``/``dist_coeffs`` values
+    themselves: mirrors ``get_calibration``'s existing "reports what
+    the interface promises, never the internal homography matrix"
+    precedent — an operator gets told *whether* intrinsics changed,
+    not the numbers.
+    """
+    intrinsics_mode: Optional[str] = None
+    """Which intrinsics-estimation model ran this call —
+    ``"coplanar-constrained"`` (fixed principal point/aspect ratio,
+    zero tangential distortion, fixed k3, k1-only) or ``"elevated"``
+    (freed further once the linked playfield's surveyed elevated
+    ground truth clears a documented count-and-z-spread threshold —
+    ``calibration.calibration`` for the exact numbers and the evidence
+    behind them). ``None`` whenever :attr:`intrinsics_estimated` is not
+    ``True`` — a mode only "ran" on a call that actually estimated.
+    """
+    elevated_features_used: Optional[int] = None
+    """How many surveyed-and-detected elevated (``height_cm > 0``)
+    features contributed to this call's intrinsics estimation —
+    reported so an operator who adds an elevated tag and sees no change
+    in :attr:`intrinsics_mode` has been told something concrete rather
+    than left to guess. ``None`` under the same condition as
+    :attr:`intrinsics_mode`.
+    """
+
+
+@dataclass(frozen=True, kw_only=True)
+class Calibration:
+    """A camera's established mapping between its pixels and the world.
+
+    **File-backed**: written by the daemon to the state directory and
+    reloaded at startup, so a calibrated camera stays calibrated across
+    restarts (UC-01). This is why calibration survives while pushed
+    config does not — the rule is file-backed vs in-memory, not
+    config vs calibration.
+    """
+
+    stale: bool
+    """Whether the camera or field has moved since calibrating.
+
+    Advisory but important: stale means reported coordinates may be
+    wrong while still looking entirely reasonable. Consumers must be
+    told rather than silently served plausible garbage
+    (UC-11.S-3) — the worst failure mode in the system.
+    """
+    calibrated_at: float
+    """When this mapping was solved — provenance, not decoration.
+
+    "Ready" without "as of when, against what" is how a January
+    calibration silently serves a March field (UC-05.S-1).
+    """
+    playfield: str
+    """The playfield definition this was solved against.
+
+    The other half of provenance: replacing this definition is what
+    marks the calibration stale (UC-02), so the calibration must
+    name which definition it believes in.
+    """
+
+    def to_world(self, pixel: PixelPoint) -> WorldPoint:
+        """Map a detection to the field, in cm.
+
+        A1-centred, +x east, +y north. The origin shift is a **pure
+        subtraction on both axes — never a y-flip**. Violating this
+        silently mirrors the field north/south, which is the single
+        easiest way to break everything downstream while producing
+        plausible-looking numbers.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement Calibration.to_world")
+
+    def to_pixel(self, world: WorldPoint) -> PixelPoint:
+        """Inverse of :meth:`to_world`, for rendering."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement Calibration.to_pixel")
+
+
+class Calibrator:
+    """Runs calibration for a camera against its playfield.
+
+    A plain base class, not ``Protocol`` — see ``daemon.interfaces``'s
+    module docstring for the design rule.
+    """
+
+    def calibrate(self, camera_slug: str) -> CalibrationResult:
+        """Detect fiducials, match to surveyed positions, solve.
+
+        Requires the camera to be linked to a playfield: with no
+        playfield there is no coordinate system to map to and **nothing
+        to calibrate**, which is a precondition error rather than a
+        calibration failure (UC-15.S-2).
+
+        A failed attempt leaves any existing good calibration untouched.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement Calibrator.calibrate")
+
+
+class Deskewer:
+    """Produces the top-down playfield image (UC-06, UC-19).
+
+    A plain base class, not ``Protocol`` — see ``daemon.interfaces``'s
+    module docstring for the design rule.
+
+    Sizing is a **fixed bounding box**: the field rectangle is scaled
+    aspect-preserved to fit (default 800×800, per-playfield override), so
+    the output is uniform-scale by construction. ``main-playfield`` at
+    134.3 × 89.3 cm yields 800 × 532.
+
+    The resulting px-per-cm is **derived and reported, never chosen** —
+    clients convert world ↔ pixel using published metadata rather than a
+    constant anyone had to agree on.
+
+    On the deskewed image **north is up and east is right**. Image rows
+    grow downward, so world → pixel flips y exactly **once**, inside this
+    mapping, and never again in client code.
+    """
+
+    def deskew(self, frame: np.ndarray) -> np.ndarray:
+        raise NotImplementedError(f"{type(self).__name__} does not implement Deskewer.deskew")

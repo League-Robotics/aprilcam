@@ -1,0 +1,1159 @@
+// aprilcam_v2.proto -- the v2 daemon control plane, growing in place.
+//
+// **This file is a subset, not a placeholder.** Sprint 020 (daemon
+// bring-up) needed exactly four RPCs -- ListCameras, ProbeCameras,
+// GetFrame, GetStatus -- to satisfy UC-01, UC-13 (local-lifecycle
+// parts), UC-14, UC-17, and UC-25's in-scope scenarios. The full v1
+// surface (`archive/proto/aprilcam.proto`, 369 lines: calibration,
+// annotations, config push/pull, mobile tags, stream endpoints) was
+// deliberately not converted then -- see sprint 020's architecture
+// Decision 1. Sprint 021 is the first EXTENSION of this same file in
+// place -- GetTags/GetTag/GetTagHistory and their messages added
+// alongside sprint 020's four, existing ones only ever widened (new
+// optional fields, e.g. GetFrameResponse.tags below), never removed
+// or renumbered -- exactly the growth path this file's evolution rule
+// anticipated, not a replacement. Treat every message/field number
+// below as permanent.
+//
+// Sprint 022 ticket 001 is the second such extension: SetPlayfield /
+// GetPlayfield / ListPlayfields / SetCameraConfig / GetCameraConfig,
+// the minimal config-service slice sprint.md's Architecture Decision 1
+// scopes for this sprint (playfields in full; camera config carrying
+// only the playfield link -- hardware-settings push is sprint 023).
+// `PlayfieldDefinition`/`PlayfieldFeatureEntry` mirror
+// `aprilcam.config.loader.PlayfieldDefinition`'s actual stored shape
+// (per-section entries with an id where one exists), not the more
+// abstract `aprilcam.config.interfaces.Feature`/`required_aruco_ids()`
+// view -- `Feature` deliberately carries no numeric id, and calibration
+// (ticket 003) needs exactly that id -> position mapping to survive a
+// push/fetch round trip, so the wire shape mirrors the concrete
+// implementation instead of dropping it. `CameraConfig.settings`
+// (`dict[str, Any]` in Python) crosses the wire as a JSON-encoded
+// string rather than `google.protobuf.Struct`, avoiding a well-known-type
+// import for a value this sprint only ever stores and echoes back,
+// never applies (Decision 1).
+//
+// Ticket 003 is the third: `Calibrate` / `GetCalibration`. Every vision
+// call happens inside the daemon (UC-04 main flow step 1: "the client
+// sends a command, not pixels") -- `CalibrateRequest` carries only a
+// camera name, never a frame. `CalibrationResult` mirrors
+// `aprilcam.calibration.interfaces.CalibrationResult` field for field
+// -- `missing_ids` is always the exact ids, never a count (UC-04.S-2).
+// `Calibration` mirrors `aprilcam.calibration.calibration.Calibration`:
+// the homography crosses as 9 `double`s (row-major) rather than a
+// nested-message matrix type, since nothing else in this file needs a
+// generic NxM matrix shape.
+//
+// Sprint 023 ticket 004 is the fourth: `ResetCameraConfig`. How an
+// experiment ends without a daemon restart (UC-01's `ResetCameraConfig`
+// bullet, spec section 4.1) -- the daemon re-reads
+// `config_dir/cameras/<slug>/config.json` for the named camera and
+// re-applies it, discarding whatever live override was previously in
+// force. `ResetCameraConfigRequest` mirrors `CalibrateRequest`'s shape
+// (just a camera token, never a document -- there is nothing for the
+// caller to supply, the whole point is the daemon reads its own disk);
+// `ResetCameraConfigResponse` is empty, mirroring `SetCameraConfigResponse`.
+//
+// Sprint 024 ticket 001 is the fifth: the annotation store
+// (specification.md section 9 decision 8, UC-28) -- `Marker`/
+// `PathShape`/`Polygon`/`Circle`/`Text`/`Style`/`Annotation`/
+// `AnnotationSet`, plus `PutAnnotation`/`RemoveAnnotation`/
+// `ReplaceLayer`/`ClearAnnotations`/`GetAnnotations`, all
+// playfield-addressed. `GetFrameResponse.annotations` -- reserved in
+// comment since sprint 022 ticket 005 with "a later stage adds it here,
+// additively" -- goes live here, present only on a deskewed frame, and
+// (Architecture resolution 1) *always* set on that branch, even for an
+// empty set, never omitted -- unlike `tags`, which has a genuine
+// on/off state, annotations have only "empty" to represent once a
+// playfield link and calibration exist. `Annotation.shape` is a
+// `oneof` -- the wire's version of `aprilcam.types.AnnotationShape`'s
+// `Union[Marker, PathShape, Polygon, Circle, Text]` -- exactly one
+// shape field set, mirroring the Python union's "a state that makes no
+// sense is unrepresentable, not merely discouraged" discipline.
+// Unknown playfield -> `NOT_FOUND` uniformly across all five RPCs
+// (matching `GetPlayfield`'s existing precedent, not the mobile-tag
+// registry's accept-and-hold analogy -- sprint.md Architecture,
+// resolved UC-28 open question 2); an unknown *layer* within a known
+// playfield is never an error one level down (a no-op for `remove`/
+// `clear`, empty for `get`).
+//
+// Sprint 025 ticket 002 is the sixth: `FindFeature` (UC-08, "where is
+// the blue dot") -- answered from the named playfield's surveyed
+// definition only, via `aprilcam.playfield.query.FeatureQuery` (ticket
+// 025-001): no camera opened, no calibration required. `FeatureMatch`
+// is a new message, not a reuse of `PlayfieldFeatureEntry` above --
+// that message mirrors `config.loader.PlayfieldDefinition`'s raw
+// per-section storage (an optional numeric `id`, no `kind`), while
+// `FindFeature`'s answer is the more abstract
+// `aprilcam.config.interfaces.Feature` view (`kind` as a string,
+// deliberately no numeric id -- see that class's docstring), which is
+// exactly `PlayfieldFeatureEntry`'s wrong shape for this: calibration
+// (`GetPlayfield`) needs the id, feature lookup needs the kind. Empty
+// `FindFeatureResponse.features` means no match (UC-08.S-3) -- never an
+// error, and unknown playfield -> `NOT_FOUND` naming the playfields
+// held, matching `GetPlayfield`'s own precedent exactly.
+//
+// Sprint 025 ticket 004 is the seventh: the mobile-tag registry
+// (UC-12) -- `RegisterTag` / `UnregisterTag` / `ListTagParameters`.
+// `MountParameters` mirrors `aprilcam.types.MountParameters`
+// field-for-field (`optional double size_cm` for legitimate absence --
+// no daemon-level default this sprint, sprint.md Design Rationale
+// decision 4 -- plus `mount_x`/`mount_y`/`mount_z`/`mount_yaw_rad`,
+// none of which are ever absent since `types.MountParameters` itself
+// defaults each to `0.0`, never `None`). `TagMountEntry` pairs a `TagId`
+// with its `MountParameters`, the wire shape `ListTagParametersResponse`
+// needs to carry a whole registry snapshot (a plain `map<TagId,
+// MountParameters>` is not expressible in proto3 -- message-typed map
+// keys are disallowed -- so a repeated pair message is the standard
+// substitute, the same shape choice `TagMountEntry` makes explicit
+// rather than smuggling through a stringified key). The actual
+// correction math (parallax + offset + yaw) never crosses this wire --
+// it runs inside the daemon (`calibration.geometry`, `daemon.
+// detection`) before a `TagRecord` ever reaches `GetTagsResponse`/
+// `GetTagResponse`/`GetTagHistoryResponse` above, so those messages are
+// unchanged by this addition: a registered tag's `TagRecord.world`/
+// `.yaw_rad` are simply already the robot's pose by the time they are
+// serialized.
+//
+// Sprint 025 ticket 007 is the eighth, and this sprint's last: `GetGuide`
+// (UC-27) -- the packaged agent/robot usage guide, servable over an
+// already-open daemon connection. `aprilcam.guides.read_guide` is the
+// single leaf both this RPC (via `daemon.service.DaemonService.get_guide`)
+// and the client's no-daemon-needed `client.guides.Guides` (ticket
+// 025-006) read, so the two accessors serve byte-identical text by
+// construction. Absent `GetGuideRequest.name` means the default guide
+// (`"agent"`); an unknown name -> `NOT_FOUND`, naming the guides that
+// exist (`"agent"`, `"robot"`), matching `FindFeature`/`GetPlayfield`'s
+// established `UnknownTarget` precedent above.
+//
+// Sprint 027 ticket 001 is the ninth: `GetImageStream` / `GetTagStream`
+// -- **endpoint allocation only**. Ticket 001 added only the RPC shapes
+// below so later tickets would have a stable wire contract to build
+// against; ticket 005 (still sprint 027) is what implemented the
+// handler bodies (`daemon/rpc.py`) and the raw-socket transport they
+// point at (`daemon/stream_transport.py`, design.md section 5's
+// `[uint32 BE length][protobuf]` framing, on a socket separate from
+// this gRPC connection). Calling either RPC now genuinely allocates
+// (or reuses) a listening socket and returns where to connect for it --
+// no frame bytes ever cross this gRPC connection itself.
+// `GetImageStreamRequest`/`GetTagStreamRequest` mirror
+// `daemon.interfaces.Daemon.stream_images(camera, *, deskewed=False)`/
+// `.stream_tags(camera)` field-for-field. `StreamEndpoint` mirrors v1's
+// message of the same name (`archive/proto/aprilcam.proto`) -- unlike
+// v1's implicit-zero-is-absent `string socket_path`/`uint32 tcp_port`,
+// both fields are proto3 `optional` here, matching this file's own
+// established Optional-presence discipline elsewhere (e.g.
+// `CameraState.number`) rather than v1's convention. `GetImageStreamResponse`/
+// `GetTagStreamResponse` each wrap one `StreamEndpoint` rather than
+// inlining its two fields directly, since both RPCs need the identical
+// shape -- the same "one shared message, not two duplicates" choice
+// `CameraState` already makes across `ListCamerasResponse`/
+// `ProbeCamerasResponse`/`GetStatusResponse`.
+//
+// Sprint 029 ticket 001 is the tenth: `CameraPosition` on `CameraConfig`
+// -- a camera's ground nadir plus its optical height above the field
+// plane, the two inputs `calibration.geometry.project_tag_to_field_plane`
+// has always needed and never had (see that module's own docstring for
+// the gap this closes). `CameraPosition` mirrors `aprilcam.config.
+// interfaces.CameraPosition` field for field (`nadir` a `WorldPoint`,
+// `height_cm` a `double`). `CameraConfig` gains `optional CameraPosition
+// camera_position = 4` (`name`/`playfield`/`settings_json` already
+// occupy 1-3) -- `HasField`-guarded on both marshalling sides, mirroring
+// `GetCalibrationResponse.calibration`'s existing "absent means not yet
+// configured, never a fabricated default" presence discipline, not
+// `settings_json`'s always-present-string convention. A pre-029 camera
+// config still round-trips identically: `HasField("camera_position")`
+// is `false` on the wire until an operator (or `aprilcam camera locate`,
+// ticket 003) sets one.
+//
+// Sprint 030 ticket 002 is the eleventh: opt-in intrinsics estimation on
+// `Calibrate`, and `height_cm` on surveyed features. `CalibrateRequest`
+// gains `bool estimate_intrinsics = 2` (plain -- false already means "not
+// requested"). `CalibrationResult` gains `intrinsics_estimated`/
+// `intrinsics_mode`/`elevated_features_used`, mirroring
+// `aprilcam.calibration.interfaces.CalibrationResult`'s own three new
+// fields -- an operator/agent-visible report of what a calibration call
+// actually did, never the fitted numbers themselves. `Calibration` gains
+// `camera_matrix`/`dist_coeffs` (empty `repeated double` means "no lens
+// model", mirroring `homography`'s own flattened-matrix convention) for
+// daemon-internal round-tripping only -- `client/models.py`'s
+// `calibration_from_proto` deliberately does not surface them, the same
+// "reports what the interface promises, never the internal homography
+// matrix" precedent `homography`/`matched_ids` already set. `Playfield
+// FeatureEntry`/`FeatureMatch` both gain a plain `double height_cm = ...`
+// (never `optional` -- `0.0` already means "on the field plane"), mirroring
+// `aprilcam.config.interfaces.Feature.height_cm`'s own non-Optional
+// `float = 0.0` shape.
+//
+// Sprint 031 ticket 001 is the twelfth: `GetStatusResponse` gains a plain
+// `int32 protocol_version = 5` (`running`/`cameras`/`config_dir`/
+// `state_dir` already occupy 1-4). Exists so a v2 client can distinguish
+// "reached an incompatible daemon" from a generic connection failure: a
+// v1 daemon shares this project's conventional control-plane socket path
+// but has no `GetStatus` RPC (or any of this file's service) at all, so
+// `GetStatus` comes back `UNIMPLEMENTED` with no `aprilcam-error-type`
+// trailing metadata -- indistinguishable, before this ticket, from
+// "nothing is listening." A compatible v2 daemon now echoes
+// `daemon.rpc.PROTOCOL_VERSION` on every `GetStatus` response, the first
+// RPC any fresh client connection makes (`client/lifecycle.py`'s own
+// `status()`); no new RPC and no extra round trip on the common path.
+// Purely additive -- a pre-031 client reading an unfamiliar field from a
+// post-031 daemon ignores it per protobuf's normal forward-compatibility
+// rules.
+//
+// Wire conventions this file follows (docs/design/design.md §6):
+//   - World-cm coordinates cross this boundary only inside `TagRecord`
+//     (`world`, `world_velocity`, `world_corners`), and every camera
+//     this sprint is uncalibrated, so those fields are always absent
+//     on the wire this sprint -- never a `0.0`/`(0,0)` placeholder.
+//   - `optional` scalar fields distinguish "not applicable" from a
+//     legitimate zero/empty value (`CameraState.playfield`,
+//     `CameraState.number`, `TagRecord.heading_rad`, ...) -- the same
+//     Optional-vs-None-vs-empty discipline `types.py` enforces in
+//     Python.
+//
+// Deliberately absent this sprint (Stage 8 territory, not forgotten):
+// OpenCamera/CloseCamera (no explicit open/close verb -- `GetFrame`
+// opens on demand and the daemon holds it, see `daemon/service.py`).
+// None of this sprint's use cases need it. (This note is sprint 020's
+// own, scoped to sprint 020's original four-RPC surface -- calibration
+// trigger, config push/pull, the annotation store, `WhereIs`, the
+// mobile-tag registry, and now stream endpoint allocation have all
+// since been added by later sprints, above. Stream endpoint allocation
+// -- `GetImageStream`/`GetTagStream` -- was this note's other named
+// absence until sprint 027 ticket 001 added the RPC shapes above and
+// ticket 005 implemented them end to end; the raw-socket transport
+// those endpoints point at is, and always will be, outside this
+// file's concern -- design.md section 5's bulk streams are
+// deliberately not gRPC, so no amount of future work here will ever
+// describe them beyond the `StreamEndpoint` message already above.)
+
+syntax = "proto3";
+
+package aprilcam.v2;
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
+service AprilCamV2 {
+  // Every camera the registry knows, present or not (daemon.interfaces.
+  // Daemon.list_cameras). Cheap -- answered from what the daemon already
+  // knows, never re-probes.
+  rpc ListCameras (ListCamerasRequest) returns (ListCamerasResponse);
+
+  // Force a deep re-interrogation of every backend (UC-25). May be slow;
+  // never disturbs a camera already held open for a live caller -- such
+  // a camera is reported from cached state and named in `skipped`.
+  rpc ProbeCameras (ProbeCamerasRequest) returns (ProbeCamerasResponse);
+
+  // One raw frame from a named camera (UC-17). `deskewed=true` on an
+  // uncalibrated camera (every camera, this sprint -- no calibration
+  // subsystem exists yet) fails explicitly rather than substituting a
+  // raw frame.
+  rpc GetFrame (GetFrameRequest) returns (GetFrameResponse);
+
+  // Readiness, queryable by any client (UC-05, as scoped by this
+  // sprint's four-RPC surface).
+  rpc GetStatus (GetStatusRequest) returns (GetStatusResponse);
+
+  // Every tag currently detected on a named camera (UC-10). Triggers
+  // exactly one demand-driven detection burst per call
+  // (`daemon/detection.py`) and appends it to that camera's ring
+  // buffer; an idle field returns an empty `TagFrame`, never an error.
+  rpc GetTags (GetTagsRequest) returns (GetTagsResponse);
+
+  // One tag, by family and id (UC-09). Runs the same single burst
+  // `GetTags` would (so the "exactly one burst per call" budget is
+  // shared, not doubled) and filters it for the requested tag.
+  // Absent `GetTagResponse.record` (`HasField("record") == false`,
+  // never a zero-valued `TagRecord`) means the tag was not detected
+  // this burst.
+  rpc GetTag (GetTagRequest) returns (GetTagResponse);
+
+  // Recent per-frame history from a camera's ring buffer (UC-26). A
+  // pure buffer read -- triggers no new detection burst. A buffer with
+  // fewer entries than requested returns everything available, not an
+  // error. A frame where the (optionally) requested tag was absent is
+  // an explicit entry with an empty `TagFrame.tags` -- gaps are never
+  // interpolated or silently dropped (UC-26.S-4).
+  rpc GetTagHistory (GetTagHistoryRequest) returns (GetTagHistoryResponse);
+
+  // Adopt a playfield definition, in memory, keyed by its own `name`
+  // (UC-02). Rejected whole if malformed -- client-side validation
+  // (`config/loader.py`'s `ConfigLoader`) means a malformed document
+  // never reaches this RPC in practice (UC-23.S-4).
+  rpc SetPlayfield (SetPlayfieldRequest) returns (SetPlayfieldResponse);
+
+  // Fetch one playfield by name, plus its derived `linked_cameras`
+  // (UC-02). Unknown name -> NOT_FOUND, naming the playfields held.
+  rpc GetPlayfield (GetPlayfieldRequest) returns (GetPlayfieldResponse);
+
+  // Every playfield this daemon currently holds (Decision 4: no
+  // single-slot limit).
+  rpc ListPlayfields (ListPlayfieldsRequest) returns (ListPlayfieldsResponse);
+
+  // Push a camera config, in memory, keyed by its own `name`. This
+  // sprint's minimal slice (Decision 1): only `playfield` has any
+  // observable effect (linking the camera); `settings` round-trips
+  // through `GetCameraConfig` but is never applied to hardware.
+  rpc SetCameraConfig (SetCameraConfigRequest) returns (SetCameraConfigResponse);
+
+  // Fetch one camera's config as last pushed. A camera nobody has
+  // configured yet is NOT_FOUND, not a fabricated blank document (the
+  // introspected-plus-blank template is out of scope this sprint).
+  rpc GetCameraConfig (GetCameraConfigRequest) returns (GetCameraConfigResponse);
+
+  // Establish a camera's pixel<->world mapping against its linked
+  // playfield (UC-04, UC-15). All vision happens in the daemon; the
+  // client sends a camera name, not pixels. All-or-nothing against the
+  // playfield definition's required ArUco set -- `CalibrationResult.
+  // missing_ids` names exactly which ids were absent, never a count.
+  // `NoPlayfieldLinked` (a camera with no playfield link) maps to
+  // FAILED_PRECONDITION, distinct from an explicit-but-failed
+  // `CalibrationResult` (UC-15.S-2).
+  rpc Calibrate (CalibrateRequest) returns (CalibrateResponse);
+
+  // Fetch a camera's currently-held calibration, if any (UC-01, UC-05).
+  // Absent `GetCalibrationResponse.calibration`
+  // (`HasField("calibration") == false`) means the camera has never
+  // been successfully calibrated -- never a fabricated/default
+  // `Calibration`, mirroring `GetTagResponse.record`'s presence
+  // discipline.
+  rpc GetCalibration (GetCalibrationRequest) returns (GetCalibrationResponse);
+
+  // Discard whatever live override is in force for a camera and
+  // re-apply `config_dir/cameras/<slug>/config.json` -- how an
+  // experiment ends without a daemon restart (UC-01's
+  // `ResetCameraConfig` bullet, sprint 023 ticket 004). Never means
+  // "whatever was last pushed" -- always this fixed on-disk location.
+  // A camera with nothing installed there falls back to the
+  // introspected-plus-blank template (the same document an
+  // unconfigured camera reports) rather than erroring.
+  rpc ResetCameraConfig (ResetCameraConfigRequest) returns (ResetCameraConfigResponse);
+
+  // Upsert one annotation by its (layer, id) key (UC-28, ticket
+  // 024-001). Last write wins on a colliding key -- documented
+  // semantics, not a race bug (UC-28.S-6). Unknown playfield ->
+  // `NOT_FOUND`, naming the playfields held.
+  rpc PutAnnotation (PutAnnotationRequest) returns (PutAnnotationResponse);
+
+  // Delete one annotation. Removing an absent (layer, id) key -- or a
+  // layer that does not exist -- on a *known* playfield is a no-op,
+  // never an error; an unknown *playfield* still -> `NOT_FOUND`.
+  rpc RemoveAnnotation (RemoveAnnotationRequest) returns (RemoveAnnotationResponse);
+
+  // Atomically swap a layer's entire contents in one call (UC-28.S-2)
+  // -- no consumer ever observes a half-updated layer; every frame
+  // embeds the old set or the new one, never a mix.
+  rpc ReplaceLayer (ReplaceLayerRequest) returns (ReplaceLayerResponse);
+
+  // Clear one layer, or every layer on the playfield when `layer` is
+  // absent. Clearing an already-empty or nonexistent layer on a
+  // *known* playfield is a no-op -- a known-empty state is the
+  // caller's actual goal.
+  rpc ClearAnnotations (ClearAnnotationsRequest) returns (ClearAnnotationsResponse);
+
+  // The current annotation set for a playfield, optionally filtered to
+  // one layer (UC-28.S-3) -- how a robot reads another robot's plan
+  // without fetching pixels. After a restart this is an empty set at
+  // revision 0 (UC-28.S-4): the wipe is the contract, not a fault.
+  rpc GetAnnotations (GetAnnotationsRequest) returns (GetAnnotationsResponse);
+
+  // Fuzzy-match a free-text query against a playfield's surveyed
+  // features -- "where is the blue dot" (UC-08, ticket 025-002).
+  // Answered from the surveyed definition only: no camera opened, no
+  // calibration required. Ambiguous queries return every match, never
+  // an arbitrary pick (UC-08.S-2); no match returns an empty list
+  // (UC-08.S-3), never an error. Unknown playfield -> `NOT_FOUND`,
+  // naming the playfields held (matching `GetPlayfield`'s precedent).
+  rpc FindFeature (FindFeatureRequest) returns (FindFeatureResponse);
+
+  // Describe how a tag is mounted on its robot (UC-12, ticket 025-004)
+  // -- upserts by tag id, in memory only. Takes effect on the very next
+  // detection burst for that tag; does not survive a daemon restart.
+  rpc RegisterTag (RegisterTagRequest) returns (RegisterTagResponse);
+
+  // Forget a mount registration -- the tag reports as itself again on
+  // the next detection burst. Removing an absent registration is a
+  // no-op, never an error.
+  rpc UnregisterTag (UnregisterTagRequest) returns (UnregisterTagResponse);
+
+  // Every currently registered tag -> mount parameters, as a snapshot.
+  rpc ListTagParameters (ListTagParametersRequest) returns (ListTagParametersResponse);
+
+  // The packaged agent/robot usage guide (UC-27, ticket 025-007) -- the
+  // RPC face of `client.guides.Guides`, for a caller that already has a
+  // daemon connection. Absent `name` means the default ("agent") guide;
+  // an unknown name -> `NOT_FOUND`, naming the guides that exist
+  // ("agent", "robot"). Serves byte-identical text to the no-daemon
+  // `client.guides.Guides` accessor by construction -- both read
+  // `aprilcam.guides.read_guide`, never a second copy of the text.
+  rpc GetGuide (GetGuideRequest) returns (GetGuideResponse);
+
+  // Allocate (or reuse) a raw-socket endpoint for a camera's image
+  // stream, raw or deskewed (UC-07, sprint 027 tickets 001/005).
+  // Endpoint allocation only -- the handler body
+  // (`daemon/rpc.py::_Servicer.GetImageStream`) delegates to
+  // `daemon/stream_transport.py::StreamTransportManager`, which binds
+  // (or reuses) a listener for this (camera, deskewed) pair and
+  // returns where to connect for it; a client that never connects to
+  // the returned endpoint leaves the daemon fully idle for that
+  // product. No frame bytes ever cross this gRPC connection itself --
+  // see design.md section 5.
+  rpc GetImageStream (GetImageStreamRequest) returns (GetImageStreamResponse);
+
+  // Allocate (or reuse) a raw-socket endpoint for a camera's tag stream
+  // (UC-11, sprint 027 tickets 001/005). Same "endpoint allocation
+  // only, reused per key" scope as `GetImageStream` above.
+  rpc GetTagStream (GetTagStreamRequest) returns (GetTagStreamResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Shared messages
+// ---------------------------------------------------------------------------
+
+// Mirrors aprilcam.types.CameraState field-for-field. See that
+// dataclass's docstring for what each field means (UC-14, UC-25):
+// `present=false` with a config still held is normal, not an error;
+// `usable=false` with `present=true` is "plugged in and broken".
+message CameraState {
+  string name = 1;
+  bool present = 2;
+  bool usable = 3;
+  optional string playfield = 4;
+  bool calibrated = 5;
+  bool calibration_stale = 6;
+  bool frame_dark = 7;
+  // Stable registry enumeration number (UC-14.S-1). Absent
+  // (`HasField("number") == false`) only for a camera not yet
+  // registered -- mirrors `CameraState.number`'s `Optional[int]`.
+  optional int32 number = 8;
+}
+
+// One backend a probe could not interrogate, and why (UC-25.S-7).
+// Mirrors aprilcam.types.ProbeSkip.
+message ProbeSkip {
+  string backend = 1;
+  string reason = 2;
+}
+
+// A position in world cm, A1-centred, +x east +y north. Mirrors
+// aprilcam.types.WorldPoint.
+message WorldPoint {
+  double x = 1;
+  double y = 2;
+}
+
+// A position in an image, in pixels, origin top-left. Mirrors
+// aprilcam.types.PixelPoint -- diagnostic/render-time only, per that
+// class's docstring.
+message PixelPoint {
+  double x = 1;
+  double y = 2;
+}
+
+// Which fiducial family a tag id belongs to. Mirrors
+// aprilcam.types.TagFamily. The v1 `-(N+1)` internal ArUco encoding
+// never appears on the wire -- `TagId.number` is always the family's
+// own non-negative id (design.md §6's ID-space note describes the
+// *storage* encoding, not this wire contract).
+enum TagFamily {
+  TAG_FAMILY_UNSPECIFIED = 0;
+  APRILTAG = 1;
+  ARUCO = 2;
+}
+
+// A tag's full identity: family plus number. Mirrors
+// aprilcam.types.TagId field-for-field.
+message TagId {
+  TagFamily family = 1;
+  int32 number = 2;
+}
+
+// One tag, as observed in one frame. Mirrors aprilcam.types.TagRecord
+// field-for-field (UC-09, UC-10, UC-26) -- see that dataclass's
+// docstring for the world-first contract and the boundary/hat corner
+// convention. Every record this sprint is honestly uncalibrated:
+// `world`, `heading_rad`, `world_velocity`, `speed`, `yaw_rad`, and
+// `world_corners` are all absent (no calibration subsystem exists
+// yet) -- absence must round-trip as absence, never as a `0.0`/empty
+// placeholder that looks like a real answer. `pixel`/`pixel_corners`
+// are the only populated geometry this sprint.
+message TagRecord {
+  TagId tag = 1;
+  optional WorldPoint world = 2;
+  optional double heading_rad = 3;
+  optional WorldPoint world_velocity = 4;
+  optional double speed = 5;
+  double timestamp = 6;
+  optional PixelPoint pixel = 7;
+  bool calibrated = 8;
+  optional double yaw_rad = 9;
+  // Exactly 4 points (front-left, front-right, back-right, back-left)
+  // when present -- a valid corner quad is never empty, so an empty
+  // `repeated` here is the unambiguous "absent" encoding (unlike
+  // `GetFrameResponse.tags` below, which needs true field presence
+  // because an empty `TagFrame` is itself a valid answer).
+  repeated WorldPoint world_corners = 10;
+  repeated PixelPoint pixel_corners = 11;
+}
+
+// Every tag detected in a single frame, with when it was captured.
+// Mirrors aprilcam.types.TagFrame field-for-field.
+message TagFrame {
+  repeated TagRecord tags = 1;
+  double timestamp = 2;
+  int32 frame_index = 3;
+  bool calibration_stale = 4;
+}
+
+// ---------------------------------------------------------------------------
+// ListCameras
+// ---------------------------------------------------------------------------
+
+message ListCamerasRequest {}
+
+message ListCamerasResponse {
+  repeated CameraState cameras = 1;
+}
+
+// ---------------------------------------------------------------------------
+// ProbeCameras
+// ---------------------------------------------------------------------------
+
+message ProbeCamerasRequest {}
+
+message ProbeCamerasResponse {
+  repeated CameraState cameras = 1;
+  // Empty means the probe was genuinely complete (UC-25.S-7) -- never
+  // omit this field to mean "nothing to report".
+  repeated ProbeSkip skipped = 2;
+}
+
+// ---------------------------------------------------------------------------
+// GetFrame
+// ---------------------------------------------------------------------------
+
+message GetFrameRequest {
+  string camera = 1;
+  bool deskewed = 2;
+  // "jpeg" (default -- an empty string means "unset, use the default")
+  // or "png" (lossless, for test fixtures). See
+  // daemon.interfaces.Daemon.get_frame.
+  string encoding = 3;
+}
+
+message GetFrameResponse {
+  bytes data = 1;
+  int32 width = 2;
+  int32 height = 3;
+  // What was actually produced -- always echoes the request's resolved
+  // encoding this sprint (no server-side fallback substitution).
+  string encoding = 4;
+  double timestamp = 5;
+  bool deskewed = 6;
+  bool calibration_stale = 7;
+  bool frame_dark = 8;
+  // The detection-burst result nearest this frame's capture
+  // (`daemon/detection.py`), embedded so one fetched frame is
+  // sufficient to render an annotated view -- boundaries and hats from
+  // the records' corners, positions from world coordinates once
+  // calibrated. Presence, not an empty-vs-absent default, carries
+  // aprilcam.types.ImageFrame.tags's three-way distinction: absent
+  // (`HasField("tags") == false`) means no detection has run for this
+  // camera yet; a present-but-empty `TagFrame` means detection ran and
+  // saw nothing. `get_frame` never triggers a detection burst itself
+  // -- this is a read of whatever the ring buffer already holds.
+  //
+  optional TagFrame tags = 9;
+
+  // Ticket 022-005: derived px-per-cm and the field's world extent
+  // (width_cm, height_cm), for a deskewed frame -- present
+  // (HasField true) only when `deskewed` is true; absent for a raw
+  // frame, matching aprilcam.types.ImageFrame's own "present only for
+  // deskewed frames" contract. Both are *derived and reported*, never
+  // a chosen constant (specification.md Sec.4.1): `px_per_cm` is
+  // `frame_width / field_width_cm`, exactly as the daemon actually
+  // produced this frame's dimensions.
+  optional double px_per_cm = 10;
+  optional WorldExtent world_extent = 11;
+
+  // Ticket 024-001: the linked playfield's current annotation set
+  // (UC-28, specification.md section 9 decision 8). Present
+  // (HasField true) only on a deskewed frame, and -- unlike `tags`
+  // above -- *always* set on that branch, even for an empty set
+  // (revision 0): annotations have no on/off state to distinguish,
+  // only "empty" (Architecture resolution 1). Never set on a raw
+  // frame: annotations are world-only and a raw frame publishes no
+  // world->pixel mapping to render them with (UC-16, "raw means raw").
+  optional AnnotationSet annotations = 12;
+}
+
+// A field's world extent (width_cm, height_cm) -- distinct from
+// WorldPoint (a *position*): this is a *size*, carried only on a
+// deskewed GetFrameResponse (above), mirroring
+// aprilcam.types.ImageFrame.world_extent's `Tuple[float, float]`.
+message WorldExtent {
+  double width_cm = 1;
+  double height_cm = 2;
+}
+
+// ---------------------------------------------------------------------------
+// GetStatus
+// ---------------------------------------------------------------------------
+
+message GetStatusRequest {}
+
+message GetStatusResponse {
+  bool running = 1;
+  repeated CameraState cameras = 2;
+  string config_dir = 3;
+  string state_dir = 4;
+  // This codebase's wire protocol version (`daemon.rpc.PROTOCOL_VERSION`,
+  // ticket 031-001) -- always set by a compatible v2 daemon; absent only
+  // when a v1 daemon or other incompatible responder fails the RPC
+  // outright (see the ticket-031-001 changelog note above `GetStatus`'s
+  // "---" banner for the full detection story).
+  int32 protocol_version = 5;
+}
+
+// ---------------------------------------------------------------------------
+// GetTags
+// ---------------------------------------------------------------------------
+
+message GetTagsRequest {
+  string camera = 1;
+}
+
+message GetTagsResponse {
+  TagFrame tags = 1;
+}
+
+// ---------------------------------------------------------------------------
+// GetTag
+// ---------------------------------------------------------------------------
+
+message GetTagRequest {
+  string camera = 1;
+  TagId tag = 2;
+}
+
+message GetTagResponse {
+  // Absent (`HasField("record") == false`) means the tag was not
+  // detected this burst -- never a zero-valued TagRecord (UC-09.S-4).
+  TagRecord record = 1;
+}
+
+// ---------------------------------------------------------------------------
+// GetTagHistory
+// ---------------------------------------------------------------------------
+
+message GetTagHistoryRequest {
+  string camera = 1;
+  // Absent means "every tag" -- mirrors
+  // Daemon.get_tag_history(tag: Optional[TagId] = None).
+  optional TagId tag = 2;
+  // Absent means "every buffered frame" -- mirrors
+  // Daemon.get_tag_history(frames: Optional[int] = None).
+  optional int32 frames = 3;
+}
+
+message GetTagHistoryResponse {
+  repeated TagFrame history = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Playfields (ticket 022-001)
+// ---------------------------------------------------------------------------
+
+// One entry from a playfield definition's april_tags / aruco_tags /
+// rectangles / dots array. Mirrors aprilcam.config.loader.
+// PlayfieldFeatureEntry, not aprilcam.config.interfaces.Feature -- see
+// this file's header comment for why. `id` is set for april_tags/
+// aruco_tags entries only (calibration ground truth); `colour` for
+// rectangles/dots entries only.
+message PlayfieldFeatureEntry {
+  string slug = 1;
+  double x = 2;
+  double y = 3;
+  optional int32 id = 4;
+  optional string colour = 5;
+  // How far this feature sits above the field plane, cm (sprint 030
+  // ticket 002). Plain (not `optional`) -- 0.0 already means "on the
+  // field plane" unambiguously, matching
+  // aprilcam.config.interfaces.Feature.height_cm's own `float = 0.0`
+  // (never Optional[float]) shape.
+  double height_cm = 6;
+}
+
+// A whole playfield definition document. Mirrors aprilcam.config.
+// loader.PlayfieldDefinition field-for-field.
+message PlayfieldDefinition {
+  string name = 1;
+  double width_cm = 2;
+  double height_cm = 3;
+  repeated PlayfieldFeatureEntry april_tags = 4;
+  repeated PlayfieldFeatureEntry aruco_tags = 5;
+  repeated PlayfieldFeatureEntry rectangles = 6;
+  repeated PlayfieldFeatureEntry dots = 7;
+}
+
+// A playfield the daemon knows about, as served. Mirrors aprilcam.
+// playfield.interfaces.Playfield: name + definition, plus
+// linked_cameras derived at serve time -- never stored in the
+// definition itself, so the two can never disagree.
+message PlayfieldEntry {
+  string name = 1;
+  PlayfieldDefinition definition = 2;
+  repeated string linked_cameras = 3;
+}
+
+message SetPlayfieldRequest {
+  PlayfieldDefinition definition = 1;
+}
+
+message SetPlayfieldResponse {}
+
+message GetPlayfieldRequest {
+  string name = 1;
+}
+
+message GetPlayfieldResponse {
+  PlayfieldEntry playfield = 1;
+}
+
+message ListPlayfieldsRequest {}
+
+message ListPlayfieldsResponse {
+  repeated PlayfieldEntry playfields = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Camera config -- minimal playfield-link slice (ticket 022-001,
+// Decision 1). Mirrors aprilcam.config.interfaces.CameraConfig, except
+// `settings` (Python `dict[str, Any]`) is carried as a JSON-encoded
+// string -- see this file's header comment. `camera_position` (sprint
+// 029 ticket 001, the header comment's tenth extension) mirrors
+// aprilcam.config.interfaces.CameraPosition.
+// ---------------------------------------------------------------------------
+
+// A camera's physical position: the ground point directly below its
+// optical centre (nadir) and its optical height above the field plane.
+// Mirrors aprilcam.config.interfaces.CameraPosition field for field.
+message CameraPosition {
+  WorldPoint nadir = 1;
+  double height_cm = 2;
+}
+
+message CameraConfig {
+  string name = 1;
+  optional string playfield = 2;
+  // JSON object text, e.g. "{}" for no settings. Stored and echoed
+  // back verbatim; never applied to hardware this sprint.
+  string settings_json = 3;
+  // Absent (`HasField("camera_position") == false`) means "not
+  // configured" -- the exact pre-029 state, never a fabricated
+  // zero-valued CameraPosition (this file's header comment).
+  optional CameraPosition camera_position = 4;
+}
+
+message SetCameraConfigRequest {
+  CameraConfig config = 1;
+}
+
+message SetCameraConfigResponse {}
+
+message GetCameraConfigRequest {
+  string camera = 1;
+}
+
+message GetCameraConfigResponse {
+  CameraConfig config = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Calibration (ticket 022-003). Mirrors aprilcam.calibration.interfaces.
+// CalibrationResult / aprilcam.calibration.calibration.Calibration
+// field for field -- see this file's header comment.
+// ---------------------------------------------------------------------------
+
+message CalibrationResult {
+  bool succeeded = 1;
+  // ArUco ids matched to surveyed positions. Sorted ascending.
+  repeated int32 matched_ids = 2;
+  // Ids the playfield definition requires that were not detected --
+  // the exact ids, never a count (UC-04.S-2). Non-empty means failure.
+  repeated int32 missing_ids = 3;
+  optional double reprojection_error_cm = 4;
+  // Why a *complete-but-degenerate* solve failed (collinear markers,
+  // singular homography) -- absent when `missing_ids` alone explains
+  // the failure, or on success.
+  optional string reason = 5;
+  // sprint 030 ticket 002: whether *this call* estimated a lens model
+  // -- absent means the concept did not apply (the attempt failed
+  // before reaching that decision). Mirrors
+  // aprilcam.calibration.interfaces.CalibrationResult.intrinsics_estimated.
+  optional bool intrinsics_estimated = 6;
+  // Which intrinsics-estimation model ran this call
+  // ("coplanar-constrained" or "elevated") -- absent whenever
+  // intrinsics_estimated is not true. Mirrors
+  // CalibrationResult.intrinsics_mode.
+  optional string intrinsics_mode = 7;
+  // How many surveyed-and-detected elevated features contributed --
+  // absent under the same condition as intrinsics_mode. Mirrors
+  // CalibrationResult.elevated_features_used.
+  optional int32 elevated_features_used = 8;
+}
+
+// A camera's established pixel<->world mapping. Mirrors
+// aprilcam.calibration.calibration.Calibration field for field.
+// `homography` is the solved pixel->world 3x3 matrix, row-major
+// (h[0..2] = row 0, h[3..5] = row 1, h[6..8] = row 2) -- exactly 9
+// values, always, since a 2D homography is fixed-shape and a nested
+// matrix message type would be unused generality.
+message Calibration {
+  bool stale = 1;
+  double calibrated_at = 2;
+  string playfield = 3;
+  repeated double homography = 4;
+  repeated int32 matched_ids = 5;
+  optional double reprojection_error_cm = 6;
+  // sprint 030 ticket 002: this camera's optional lens model, for
+  // daemon-internal round-tripping -- 9 row-major doubles when known
+  // (mirrors `homography`'s own flattening), empty when not (a valid
+  // 3x3 matrix is never empty, so "empty repeated" is the unambiguous
+  // absence encoding, matching e.g. TagRecord.world_corners above).
+  // client/models.py's calibration_from_proto deliberately does not
+  // surface this to callers -- same precedent as `homography`/
+  // `matched_ids` today (mcp/tools/configuration.py's own "reports
+  // what the interface promises, never the internal homography
+  // matrix" rule).
+  repeated double camera_matrix = 7;
+  // This camera's distortion coefficients, if known -- empty means
+  // "no lens model", same discipline as `camera_matrix` above.
+  repeated double dist_coeffs = 8;
+}
+
+message CalibrateRequest {
+  string camera = 1;
+  // sprint 030 ticket 002: opt into also estimating this camera's lens
+  // model from this call's detection burst (Daemon.calibrate's
+  // estimate_intrinsics). Plain bool -- false already means "not
+  // requested", matching the Python default.
+  bool estimate_intrinsics = 2;
+}
+
+message CalibrateResponse {
+  CalibrationResult result = 1;
+}
+
+message GetCalibrationRequest {
+  string camera = 1;
+}
+
+message GetCalibrationResponse {
+  // Absent (`HasField("calibration") == false`) means this camera has
+  // never been successfully calibrated -- never a fabricated/default
+  // Calibration (see the RPC's own comment above).
+  Calibration calibration = 1;
+}
+
+// ---------------------------------------------------------------------------
+// ResetCameraConfig (ticket 023-004)
+// ---------------------------------------------------------------------------
+
+message ResetCameraConfigRequest {
+  string camera = 1;
+}
+
+message ResetCameraConfigResponse {}
+
+// ---------------------------------------------------------------------------
+// Annotations (ticket 024-001). specification.md section 9 decision 8,
+// UC-28: the daemon stores and embeds; it never renders. Every message
+// below mirrors its aprilcam.types counterpart field for field -- see
+// this file's header comment for the RPC-level design notes.
+// ---------------------------------------------------------------------------
+
+// A point of interest, optionally labelled. Mirrors aprilcam.types.Marker.
+message Marker {
+  WorldPoint at = 1;
+  optional string label = 2;
+}
+
+// An open polyline -- a route, a trajectory, a planned motion. Mirrors
+// aprilcam.types.PathShape.
+message PathShape {
+  repeated WorldPoint points = 1;
+}
+
+// A closed region -- a zone, a keep-out area. Mirrors
+// aprilcam.types.Polygon.
+message Polygon {
+  repeated WorldPoint points = 1;
+}
+
+// A circular region. `radius_cm` is world units, like everything else
+// crossing this boundary. Mirrors aprilcam.types.Circle.
+message Circle {
+  WorldPoint center = 1;
+  double radius_cm = 2;
+}
+
+// A free-standing label anchored at a world position. Mirrors
+// aprilcam.types.Text.
+message Text {
+  WorldPoint at = 1;
+  string text = 2;
+}
+
+// Presentation hints for an annotation. Geometry is world-cm, always;
+// style is presentation, and a renderer may ignore any hint -- do not
+// "fix" line_width to cm, it is pixels on the rendered image. Mirrors
+// aprilcam.types.Style.
+message Style {
+  optional string color = 1;
+  optional double line_width = 2;
+}
+
+// One drawing on a playfield, held by the daemon (UC-28). Keyed
+// (playfield, layer, id) -- `id` is client-chosen and unique *within*
+// its layer, so this message carries `layer` itself (not just the
+// enclosing request) so a flattened, whole-playfield `AnnotationSet`
+// (`GetAnnotations` with no `layer` filter) still tells every entry's
+// layer apart. Exactly one `shape` field is set -- the wire's version
+// of aprilcam.types.AnnotationShape's `Union[Marker, PathShape,
+// Polygon, Circle, Text]`: a state that makes no sense (a circle with
+// path points) is unrepresentable here, the same way the Python union
+// makes it unrepresentable there. Mirrors aprilcam.types.Annotation
+// field for field.
+message Annotation {
+  string id = 1;
+  string layer = 2;
+  oneof shape {
+    Marker marker = 3;
+    PathShape path = 4;
+    Polygon polygon = 5;
+    Circle circle = 6;
+    Text text = 7;
+  }
+  Style style = 8;
+  // Stored and served back verbatim; drives no expiry behaviour this
+  // sprint (sprint.md's Resolved UC-28 open questions, item 5 -- a
+  // deliberate deferral, not an oversight). Absent means "no TTL",
+  // mirroring aprilcam.types.Annotation.ttl_seconds's Optional[float].
+  optional double ttl_seconds = 9;
+}
+
+// A playfield's complete annotation state at one moment (UC-28).
+// Mirrors aprilcam.types.AnnotationSet field for field. `revision` is
+// monotonic per playfield and bumps on every actual mutation -- an
+// unchanged revision is a renderer's licence to skip re-rasterizing an
+// overlay it has already drawn (that dataclass's own docstring).
+message AnnotationSet {
+  repeated Annotation annotations = 1;
+  int32 revision = 2;
+  double timestamp = 3;
+}
+
+message PutAnnotationRequest {
+  string playfield = 1;
+  Annotation annotation = 2;
+}
+
+message PutAnnotationResponse {}
+
+message RemoveAnnotationRequest {
+  string playfield = 1;
+  string layer = 2;
+  string id = 3;
+}
+
+message RemoveAnnotationResponse {}
+
+message ReplaceLayerRequest {
+  string playfield = 1;
+  string layer = 2;
+  repeated Annotation annotations = 3;
+}
+
+message ReplaceLayerResponse {}
+
+message ClearAnnotationsRequest {
+  string playfield = 1;
+  // Absent means every layer on this playfield -- mirrors
+  // Daemon.clear_annotations(layer: Optional[str] = None).
+  optional string layer = 2;
+}
+
+message ClearAnnotationsResponse {}
+
+message GetAnnotationsRequest {
+  string playfield = 1;
+  // Absent means every layer's annotations -- mirrors
+  // Daemon.get_annotations(layer: Optional[str] = None).
+  optional string layer = 2;
+}
+
+message GetAnnotationsResponse {
+  // Always a real AnnotationSet, never omitted -- even an empty
+  // playfield's answer is revision 0 with an empty `annotations` list,
+  // not an absent field (the same "only empty to represent, never
+  // off" rule as GetFrameResponse.annotations above, applied to this
+  // query response too).
+  AnnotationSet annotations = 1;
+}
+
+// ---------------------------------------------------------------------------
+// FindFeature (ticket 025-002)
+// ---------------------------------------------------------------------------
+
+// One surveyed feature matched by a free-text query (UC-08). Mirrors
+// aprilcam.config.interfaces.Feature field-for-field -- deliberately
+// not PlayfieldFeatureEntry (see this file's header comment): Feature
+// carries `kind` as a string and no numeric id, which is exactly the
+// shape FindFeature's answer needs and PlayfieldFeatureEntry does not
+// have.
+message FeatureMatch {
+  string slug = 1;
+  string kind = 2;
+  WorldPoint position = 3;
+  optional string colour = 4;
+  // Mirrors aprilcam.config.interfaces.Feature.height_cm (sprint 030
+  // ticket 002) -- see PlayfieldFeatureEntry.height_cm's own comment
+  // for why this is plain, not `optional`.
+  double height_cm = 5;
+}
+
+message FindFeatureRequest {
+  string playfield = 1;
+  string query = 2;
+}
+
+message FindFeatureResponse {
+  // Empty means no match (UC-08.S-3) -- never an error and never a
+  // fabricated near-miss.
+  repeated FeatureMatch features = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Mobile-tag registry (ticket 025-004, UC-12). Mirrors
+// aprilcam.types.MountParameters field-for-field. The correction math
+// itself (parallax + offset + yaw) never crosses this wire -- see this
+// file's header comment.
+// ---------------------------------------------------------------------------
+
+message MountParameters {
+  // Physical edge length of the tag, cm. Absent means "no override" --
+  // there is no daemon-level default this sprint (sprint.md Design
+  // Rationale decision 4) -- never a fabricated value.
+  optional double size_cm = 1;
+  // Robot's own frame: +x forward, +y left, rotating with
+  // mount_yaw_rad. Never absent -- aprilcam.types.MountParameters
+  // itself defaults each of these three to 0.0, not None.
+  double mount_x = 2;
+  double mount_y = 3;
+  double mount_z = 4;
+  double mount_yaw_rad = 5;
+}
+
+message RegisterTagRequest {
+  TagId tag = 1;
+  MountParameters params = 2;
+}
+
+message RegisterTagResponse {
+  // Non-blocking, informational only (ticket 030-004, SUC-004):
+  // present when a nonzero mount_z was just registered while no
+  // camera this daemon knows about has been located
+  // (CameraConfig.camera_position), so the parallax correction has
+  // nowhere to apply yet -- registration itself always succeeds
+  // regardless. Absent means either mount_z was zero (nothing for
+  // parallax to project) or at least one camera is already located.
+  optional string warning = 1;
+}
+
+message UnregisterTagRequest {
+  TagId tag = 1;
+}
+
+message UnregisterTagResponse {}
+
+// One entry in a ListTagParameters snapshot -- proto3 disallows
+// message-typed map keys, so a repeated (tag, params) pair message is
+// the standard substitute for a TagId -> MountParameters map (this
+// file's header comment).
+message TagMountEntry {
+  TagId tag = 1;
+  MountParameters params = 2;
+  // Ticket 030-004, SUC-004: whether this registration's mount_z is
+  // currently being applied by the parallax correction, computed the
+  // same way as RegisterTagResponse.warning above -- false only when
+  // mount_z > 0 and no camera this daemon knows about has been
+  // located; true otherwise (including mount_z == 0, vacuously --
+  // there is nothing for parallax to withhold in that case).
+  bool mount_z_applied = 3;
+}
+
+message ListTagParametersRequest {}
+
+message ListTagParametersResponse {
+  repeated TagMountEntry entries = 1;
+}
+
+// ---------------------------------------------------------------------------
+// GetGuide (ticket 025-007, UC-27)
+// ---------------------------------------------------------------------------
+
+message GetGuideRequest {
+  // Absent means the default guide ("agent") -- mirrors
+  // Daemon.get_guide(name: Optional[str] = None).
+  optional string name = 1;
+}
+
+message GetGuideResponse {
+  string text = 1;
+}
+
+// ---------------------------------------------------------------------------
+// GetImageStream / GetTagStream (sprint 027 ticket 001, UC-07/UC-11).
+// Endpoint allocation only -- see this file's header comment and the RPC
+// comments above. Handlers and the raw-socket transport are ticket 005.
+// ---------------------------------------------------------------------------
+
+// Where to connect for a stream's raw framed socket ([uint32 BE
+// length][protobuf] on a bulk-stream socket, separate from this
+// control-plane gRPC connection -- design.md section 5). Mirrors v1's
+// `StreamEndpoint` (`archive/proto/aprilcam.proto`) field-for-field,
+// except both fields are proto3 `optional` here rather than v1's
+// implicit-zero-is-absent `uint32`/`string` -- see this file's header
+// comment for why.
+message StreamEndpoint {
+  // Present (HasField true) when the daemon offers a Unix-domain socket
+  // for this stream -- the same-host, lower-overhead path a local
+  // client prefers.
+  optional string socket_path = 1;
+  // Present (HasField true) when the daemon offers a TCP socket --
+  // required for a remote client. A daemon may offer both; which one a
+  // client picks is a client-side decision (ticket 006), not this
+  // message's concern.
+  optional int32 tcp_port = 2;
+}
+
+message GetImageStreamRequest {
+  string camera = 1;
+  bool deskewed = 2;
+}
+
+message GetImageStreamResponse {
+  StreamEndpoint endpoint = 1;
+}
+
+message GetTagStreamRequest {
+  string camera = 1;
+}
+
+message GetTagStreamResponse {
+  StreamEndpoint endpoint = 1;
+}

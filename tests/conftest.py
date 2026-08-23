@@ -1,87 +1,54 @@
-"""pytest configuration — marker registration and skip fixtures.
+"""Suite-wide pytest fixtures — process-global state isolation.
 
-Markers
--------
-needs_cv2
-    Skip the test if ``cv2`` (opencv-contrib-python) is not importable.
-    Absence means the package was installed with only the base extras.
-    Reason reported to the user: "requires aprilcam[imaging]".
+**SIGPIPE disposition guard.** ``aprilcam.cli.main()`` resets
+``SIGPIPE``'s disposition process-wide to ``SIG_DFL`` as the very first
+thing it does (see ``src/aprilcam/cli/__init__.py``'s
+``_reset_sigpipe_to_default()``, ticket 031-003 SUC-003) — correct and
+intentional for a real ``aprilcam`` subprocess invocation, but signal
+dispositions are process-global, not per-call. Any test that calls
+``main()`` in-process (as several tests in
+``tests/aprilcam/cli/test_main.py`` do, to exercise the dispatch/
+exception-handling seam without spawning a real subprocess) mutates
+that global state for the rest of the *entire* pytest process, not just
+for the duration of that one test.
 
-needs_daemon
-    Skip the test if the aprilcam daemon stack is not importable
-    (i.e. ``aprilcam[daemon]`` extras are absent).
-    Reason reported to the user: "requires aprilcam[daemon]".
+Left unrestored, this silently changes behaviour for every later test
+in the suite: an in-process write to an already-closed pipe or socket
+(not uncommon with imperfect thread/subprocess/socket teardown across a
+large suite) that would otherwise raise a catchable ``BrokenPipeError``
+instead kills the interpreter outright via the real signal — a bare
+``exit 141`` with no traceback and no pytest summary line, at a crash
+location that shifts depending on test execution order (whichever test
+happens to hit a closed pipe next).
+
+This autouse fixture snapshots ``SIGPIPE``'s disposition before every
+test and restores it after, unconditionally, regardless of whether the
+test touches signals at all. Placed at the top of the whole ``tests/``
+tree (not just alongside ``test_main.py``) because the failure mode is
+not specific to that file — any future test anywhere that calls
+``main()`` in-process would reintroduce the exact same class of bug.
 """
 
 from __future__ import annotations
 
-import os
+import signal
+from typing import Iterator
 
 import pytest
 
 
 @pytest.fixture(autouse=True)
-def _safe_xdg_runtime_dir(tmp_path, monkeypatch):
-    """Ensure XDG_RUNTIME_DIR points to a writable directory for every test.
-
-    On Linux, ``$XDG_RUNTIME_DIR`` is typically ``/run/user/<uid>`` — a
-    directory created by systemd-logind and always present.  On macOS it is
-    absent, so Config.load() would try to create ``/run/user/<uid>/aprilcam``
-    and fail on the read-only ``/run`` mount.
-
-    This fixture sets ``XDG_RUNTIME_DIR`` to a per-test tmp directory only
-    when the environment variable is not already defined (i.e. it never
-    overrides an explicit value set by the test itself or the system).
-    """
-    if "XDG_RUNTIME_DIR" not in os.environ:
-        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "xdg_runtime"))
-
-
-def pytest_configure(config: pytest.Config) -> None:
-    config.addinivalue_line(
-        "markers",
-        "needs_cv2: skip test if opencv-contrib-python is not installed",
-    )
-    config.addinivalue_line(
-        "markers",
-        "needs_daemon: skip test if aprilcam[daemon] dependencies are not installed",
-    )
-
-
-def _cv2_available() -> bool:
+def _restore_sigpipe_disposition() -> Iterator[None]:
+    """Undo any process-global ``SIGPIPE`` disposition change a test
+    makes (directly, or indirectly via an in-process ``aprilcam.cli.main()``
+    call) so it cannot leak into later, unrelated tests."""
+    sigpipe = getattr(signal, "SIGPIPE", None)
+    if sigpipe is None:
+        # No SIGPIPE on this platform (Windows) -- nothing to snapshot.
+        yield
+        return
+    previous = signal.getsignal(sigpipe)
     try:
-        import cv2  # noqa: F401, PLC0415
-        return True
-    except ModuleNotFoundError:
-        return False
-
-
-def _daemon_available() -> bool:
-    try:
-        import aprilcam.daemon.grpc_server  # noqa: F401, PLC0415
-        return True
-    except (ImportError, ModuleNotFoundError):
-        return False
-
-
-def pytest_collection_modifyitems(
-    config: pytest.Config, items: list[pytest.Item]
-) -> None:
-    """Apply runtime skip logic for needs_cv2 and needs_daemon markers.
-
-    Tests that have *top-level* daemon/cv2 imports must use
-    ``pytest.importorskip()`` at module level (before the import) so that
-    the module is skipped at *collection* time.  Tests that only use the
-    import inside the test function body can rely on these markers instead.
-    """
-    cv2_ok = _cv2_available()
-    daemon_ok = _daemon_available()
-
-    skip_cv2 = pytest.mark.skip(reason="requires aprilcam[imaging]")
-    skip_daemon = pytest.mark.skip(reason="requires aprilcam[daemon]")
-
-    for item in items:
-        if not cv2_ok and item.get_closest_marker("needs_cv2"):
-            item.add_marker(skip_cv2)
-        if not daemon_ok and item.get_closest_marker("needs_daemon"):
-            item.add_marker(skip_daemon)
+        yield
+    finally:
+        signal.signal(sigpipe, previous)
