@@ -1275,26 +1275,35 @@ a race bug.
 > The coverage check: every use case has at least one happy-path and one
 > failure-path scenario; every scenario eventually names a test.
 
-Tests are unassigned — the next stage of the process. This file covers 15
-use cases and 57 scenarios (including variations).
+This file covers 15 use cases and 57 scenarios (including variations).
+Tests are filled for every use case named in sprint 035's Success
+Criteria (01, 03, 04, 06, 09, 10, 11, 12, 26, 28) plus the ones ticket
+008 filled beforehand; UC-02, UC-05, UC-07, UC-08, and UC-27 remain
+unassigned — they were out of scope for sprint 035's layered test
+system and are a gap for whichever sprint tackles them, not a silent
+omission. Every node ID below was confirmed to resolve via
+`uv run pytest --collect-only -q "<node id>"` (sprint 035 ticket 018;
+`get_use_case_coverage()` itself is broken — always reports
+`total_use_cases: 0` because it reads an unpopulated `clasi/usecases.md`
+index rather than this file — so it was not used as the audit).
 
 | Use case | Job | Actor(s) | Scenarios | Subsystems | Tests |
 |---|---|---|---|---|---|
-| UC-01 Start daemon / config model | JTBD-05 | A-04, A-03 | S-1 ✓, S-2 ✓, S-3 ✗, S-4 ✓ (+4a, 4b) | daemon, camera, config | — |
+| UC-01 Start daemon / config model | JTBD-05 | A-04, A-03 | S-1 ✓, S-2 ✓, S-3 ✗, S-4 ✓ (+4a, 4b) | daemon, camera, config | `tests/aprilcam/daemon/test_lifecycle.py::test_second_start_at_the_same_lock_path_raises_already_running_naming_the_holder`, `tests/aprilcam/daemon/test_lifecycle_integration.py::test_boot_loaded_playfield_and_camera_config_need_no_manual_push`, `tests/aprilcam/daemon/test_lifecycle_integration.py::test_start_stop_and_restart_stability_against_real_cameras` |
 | UC-02 Push playfield | JTBD-05, 03 | A-03, A-01, A-02 | S-1 ✓ (+1a), S-2 ✗ | daemon, playfield | — |
-| UC-03 Configure camera | JTBD-05 | A-03 | S-1 ✓, S-2 ✓, S-3 ✗, S-4 ✓, S-5 ✓ | daemon, camera, config | — |
-| UC-04 Calibrate | JTBD-06, 01 | A-03, A-02 | S-1 ✓, S-2 ✗, S-3 ✗ | daemon, calibration, vision | `tests/image_matrix/test_calibration_robustness.py::test_calibration_robustness`, `tests/image_matrix/test_world_accuracy.py::test_world_accuracy` |
+| UC-03 Configure camera | JTBD-05 | A-03 | S-1 ✓, S-2 ✓, S-3 ✗, S-4 ✓, S-5 ✓ | daemon, camera, config | `tests/aprilcam/daemon/test_service.py::test_get_camera_config_held_open_but_never_pushed_returns_blank_template`, `tests/aprilcam/daemon/test_service.py::test_set_camera_config_manual_low_exposure_darkens_a_real_frame`, `tests/aprilcam/daemon/test_service.py::test_set_camera_config_unsupported_key_fails_whole_push_camera_unchanged_live`, `tests/aprilcam/daemon/test_service.py::test_set_camera_config_two_real_cameras_configured_independently` |
+| UC-04 Calibrate | JTBD-06, 01 | A-03, A-02 | S-1 ✓, S-2 ✗, S-3 ✗ | daemon, calibration, vision | `tests/image_matrix/test_calibration_robustness.py::test_calibration_robustness`, `tests/image_matrix/test_world_accuracy.py::test_world_accuracy`, `tests/aprilcam/daemon/test_calibration_hardware.py::test_occluding_one_marker_fails_naming_exactly_that_marker`, `tests/aprilcam/daemon/test_calibration_hardware.py::test_with_intrinsics_against_main_playfield_stores_a_lens_model` |
 | UC-05 Confirm readiness | JTBD-06 | A-03, A-01, A-02 | S-1 ✓, S-2 ✗ | daemon | — |
-| UC-06 Single image from camera | JTBD-02 | A-02, A-03 | S-1 ✓, S-2 ✓, S-3 ✗ | daemon, calibration | `tests/image_matrix/test_geometry.py::test_geometry_east_west_and_north_up` |
+| UC-06 Single image from camera | JTBD-02 | A-02, A-03 | S-1 ✓, S-2 ✓, S-3 ✗ | daemon, calibration | `tests/image_matrix/test_geometry.py::test_geometry_east_west_and_north_up`, `tests/aprilcam/daemon/test_service.py::test_get_frame_deskewed_uncalibrated_never_touches_the_camera_backend` |
 | UC-07 Stream video from camera | JTBD-02 | A-03, A-01 | S-1 ✓, S-2 ✗, S-3 ✓ | daemon, client | — |
 | UC-08 Where is a feature | JTBD-03 | A-02, A-01, A-03 | S-1 ✓, S-2 ✗, S-3 ✗ | playfield, daemon | — |
-| UC-09 One tag by id | JTBD-01 | A-01, A-02 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗, S-5 ✗ | daemon, vision, calibration | `tests/image_matrix/test_recall.py::test_recall` |
-| UC-10 All detected tags | JTBD-01, 04 | A-02, A-01 | S-1 ✓, S-2 ✓, S-3 ✗ | daemon, vision | `tests/image_matrix/test_recall.py::test_recall`, `tests/image_matrix/test_calibration_robustness.py::test_calibration_robustness` |
-| UC-11 Stream tags | JTBD-04, 01 | A-01 | S-1 ✓, S-2 ✓, S-3 ✗ | daemon, vision, client | — |
-| UC-12 Tag parameters | JTBD-01, 06 | A-01, A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✓, S-5 ✗ | daemon, calibration | — |
-| UC-26 Tag history | JTBD-04, 01 | A-02, A-01 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗ | daemon, vision | `tests/image_matrix/test_recall.py::test_recall`, `tests/image_matrix/test_synthetic_degradation.py::test_severe_degradation_documented_boundary` |
+| UC-09 One tag by id | JTBD-01 | A-01, A-02 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗, S-5 ✗ | daemon, vision, calibration | `tests/image_matrix/test_recall.py::test_recall`, `tests/aprilcam/daemon/test_detection.py::test_run_burst_on_a_family_disambiguated_field`, `tests/aprilcam/cli/test_camera_cli.py::test_tags_distinguishes_apriltag_and_aruco_of_the_same_number` |
+| UC-10 All detected tags | JTBD-01, 04 | A-02, A-01 | S-1 ✓, S-2 ✓, S-3 ✗ | daemon, vision | `tests/image_matrix/test_recall.py::test_recall`, `tests/image_matrix/test_calibration_robustness.py::test_calibration_robustness`, `tests/aprilcam/mcp/test_integration.py::test_camera_golden_path_against_real_daemon_and_camera_3` |
+| UC-11 Stream tags | JTBD-04, 01 | A-01 | S-1 ✓, S-2 ✓, S-3 ✗ | daemon, vision, client | `tests/aprilcam/daemon/test_broadcast.py::test_slow_subscriber_drop_does_not_affect_fast_subscriber`, `tests/aprilcam/daemon/test_streaming.py::test_image_producer_resubscribe_starts_fresh_and_rebuilds_geometry`, `tests/aprilcam/daemon/test_service.py::test_close_closes_every_held_camera` |
+| UC-12 Tag parameters | JTBD-01, 06 | A-01, A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✓, S-5 ✗ | daemon, calibration | `tests/aprilcam/calibration/test_geometry.py::test_uc12_s3_rotating_in_place_keeps_the_robot_position_fixed`, `tests/aprilcam/calibration/test_geometry.py::test_uc12_s4_rotated_mount_reports_the_robots_true_heading_not_the_tags`, `tests/aprilcam/daemon/test_mobile_tags_hardware.py::test_register_mount_offset_via_cli_moves_reported_position_clear_reverts_it`, `tests/aprilcam/daemon/test_service.py::test_register_tag_mount_z_with_no_calibration_anywhere_is_rejected` |
+| UC-26 Tag history | JTBD-04, 01 | A-02, A-01 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗ | daemon, vision | `tests/image_matrix/test_recall.py::test_recall`, `tests/image_matrix/test_synthetic_degradation.py::test_severe_degradation_documented_boundary`, `tests/aprilcam/daemon/test_streaming_hardware.py::test_two_real_subscribers_on_deskewed_stream_share_one_warp_per_tick`, `tests/aprilcam/daemon/test_streaming_integration.py::test_full_stack_an_unread_client_socket_does_not_stall_an_active_client_real_clock` |
 | UC-27 Packaged instructions | JTBD-01, 02, 03 | A-02, A-01 | S-1 ✓, S-2 ✓, S-3 ✗ | mcp, guides | — |
-| UC-28 Draw on the playfield | JTBD-07 | A-01, A-02, A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✓, S-5 ✗, S-6 ✓ | daemon, client, mcp | — |
+| UC-28 Draw on the playfield | JTBD-07 | A-01, A-02, A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✓, S-5 ✗, S-6 ✓ | daemon, client, mcp | `tests/aprilcam/daemon/test_annotations_integration.py::test_put_by_one_client_is_visible_to_a_second_client_and_renders_on_a_real_deskewed_frame`, `tests/aprilcam/daemon/test_annotations_integration.py::test_daemon_restart_wipes_annotations_while_the_disk_backed_playfield_and_a_re_put_survive`, `tests/aprilcam/daemon/test_service.py::test_replace_layer_never_exposes_a_torn_state_to_a_concurrent_reader`, `tests/aprilcam/mcp/test_annotations.py::test_list_annotations_round_trips_exactly_what_was_drawn` |
 
 ✓ happy path · ✗ failure path
 

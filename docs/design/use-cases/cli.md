@@ -1320,8 +1320,16 @@ writes, with or without `--force`.
 
 ## Traceability
 
-Tests are unassigned — the next stage of the process. This file covers 14
-use cases and 54 scenarios.
+This file covers 14 use cases and 54 scenarios. Tests are filled for
+every use case named in sprint 035's Success Criteria (13, 14, 15, 18,
+19, 20, 22, 25, 29); UC-16, UC-17, UC-21, UC-23, and UC-24 remain
+unassigned — out of scope for sprint 035's layered test system, named
+here as a deliberate gap rather than a silent omission. Every node ID
+below was confirmed to resolve via
+`uv run pytest --collect-only -q "<node id>"` (sprint 035 ticket 018;
+`get_use_case_coverage()` itself is broken — always reports
+`total_use_cases: 0` because it reads an unpopulated `clasi/usecases.md`
+index rather than this file — so it was not used as the audit).
 
 **The configuration lifecycle** spans four use cases in workflow order:
 **UC-25 probe** → **UC-24 dump** → edit → **UC-23 push** → loop → install
@@ -1329,20 +1337,20 @@ on disk. UC-25.S-1 walks the whole chain end to end.
 
 | Use case | Job | Actor(s) | Scenarios | Fan-out | Tests |
 |---|---|---|---|---|---|
-| UC-13 Daemon discovery/lifecycle | JTBD-05 | A-04, A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗, S-5 ✗ | list/status only | — |
-| UC-14 List cameras | JTBD-05 | A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗ | yes | — |
-| UC-15 Calibrate | JTBD-06, 01 | A-03 | S-1 ✓, S-2 ✗, S-3 ✗, S-4 ✗ | no | — |
+| UC-13 Daemon discovery/lifecycle | JTBD-05 | A-04, A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗, S-5 ✗ | list/status only | `tests/aprilcam/cli/test_daemon_cli.py::test_start_reports_already_running_naming_the_holder`, `tests/aprilcam/cli/test_daemon_cli.py::test_restart_on_a_stopped_daemon_still_starts_it`, `tests/aprilcam/cli/test_cli_integration.py::test_daemon_and_camera_round_trip_against_real_hardware` |
+| UC-14 List cameras | JTBD-05 | A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗ | yes | `tests/aprilcam/cli/test_camera_cli.py::test_list_reports_connection_failure_with_typed_message`, `tests/aprilcam/daemon/test_lifecycle_integration.py::test_start_stop_and_restart_stability_against_real_cameras` |
+| UC-15 Calibrate | JTBD-06, 01 | A-03 | S-1 ✓, S-2 ✗, S-3 ✗, S-4 ✗ | no | `tests/aprilcam/cli/test_calibrate_cli.py::test_calibrate_degenerate_geometry_failure_prints_the_named_reason`, `tests/aprilcam/cli/test_calibrate_cli.py::test_calibrate_refuses_all_before_ever_connecting`, `tests/aprilcam/daemon/test_service.py::test_calibrate_with_no_playfield_link_raises_before_touching_camera_backend` |
 | UC-16 Raw video | JTBD-02 | A-03 | S-1 ✓, S-2 ✓, S-3 ✗ | no | — |
 | UC-17 Raw frame | JTBD-02 | A-03, A-02 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗ | yes | — |
-| UC-18 Playfield video | JTBD-02, 01 | A-03 | S-1 ✓, S-2 ✗ | no | — |
-| UC-19 Playfield frame | JTBD-02 | A-03, A-02 | S-1 ✓, S-2 ✗ | yes | — |
-| UC-20 List tags | JTBD-01 | A-03, A-02 | S-1 ✓, S-2 ✓, S-3 ✗ | yes | — |
+| UC-18 Playfield video | JTBD-02, 01 | A-03 | S-1 ✓, S-2 ✗ | no | `tests/aprilcam/view/test_viewer.py::test_run_playfield_view_draws_apriltag_1_at_the_image_centre_for_a_centred_world_position`, `tests/aprilcam/view/test_viewer.py::test_run_playfield_view_surfaces_calibration_stale_as_a_status`, `tests/aprilcam/cli/test_playfield_cli.py::test_view_uncalibrated_camera_points_at_camera_calibrate` |
+| UC-19 Playfield frame | JTBD-02 | A-03, A-02 | S-1 ✓, S-2 ✗ | yes | `tests/aprilcam/cli/test_playfield_cli.py::test_config_dump_h_prints_help_not_a_missing_hostname_error`, `tests/aprilcam/daemon/test_service.py::test_get_frame_deskewed_uncalibrated_never_touches_the_camera_backend` |
+| UC-20 List tags | JTBD-01 | A-03, A-02 | S-1 ✓, S-2 ✓, S-3 ✗ | yes | `tests/aprilcam/cli/test_camera_cli.py::test_tags_prints_uncalibrated_flag_and_pixel_never_a_world_looking_number`, `tests/aprilcam/cli/test_camera_cli.py::test_tags_with_nothing_detected_prints_an_empty_result_not_an_error`, `tests/aprilcam/daemon/test_detection_hardware.py::test_camera_tags_cli_output_is_legible_against_real_hardware` |
 | UC-21 Generate tags | JTBD-05 | A-03 | S-1 ✓, S-2 ✓, S-3 ✗ | n/a (local) | — |
-| UC-22 MCP server | JTBD-01, 02, 03 | A-02, A-03 | S-1 ✓, S-2 ✓, S-3 ✗ | n/a | — |
+| UC-22 MCP server | JTBD-01, 02, 03 | A-02, A-03 | S-1 ✓, S-2 ✓, S-3 ✗ | n/a | `tests/aprilcam/mcp/test_integration.py::test_golden_path_against_a_fake_daemon`, `tests/aprilcam/mcp/test_integration.py::test_daemon_restart_mid_session_fails_then_recovers`, `tests/aprilcam/mcp/test_integration.py::test_no_daemon_at_startup_then_recovers_once_one_starts` |
 | UC-23 Push config | JTBD-05 | A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗, S-5 ✗ | no | — |
 | UC-24 Dump config | JTBD-05 | A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗ | yes | — |
-| UC-25 Probe / hotplug | JTBD-05 | A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗, S-5 ✓, S-6 ✓, S-7 ✗ | yes | — |
-| UC-29 Locate a camera's position | JTBD-06, 01 | A-03 | S-1 ✓, S-2 ✗, S-3 ✗, S-4 ✗, S-5 ✗ | no | — |
+| UC-25 Probe / hotplug | JTBD-05 | A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗, S-5 ✓, S-6 ✓, S-7 ✗ | yes | `tests/aprilcam/camera/test_discovery.py::test_probe_reports_present_usable_cameras_matching_registry_resolution`, `tests/aprilcam/camera/test_discovery.py::test_probe_reports_present_but_unopenable_camera_never_omitted`, `tests/aprilcam/cli/test_camera_cli.py::test_list_all_reports_discovery_failed_distinctly`, `tests/aprilcam/daemon/test_detection_hardware.py::test_camera_tags_by_cli_number_and_slug_agree_on_real_hardware` |
+| UC-29 Locate a camera's position | JTBD-06, 01 | A-03 | S-1 ✓, S-2 ✗, S-3 ✗, S-4 ✗, S-5 ✗ | no | `tests/aprilcam/cli/test_locate_cli.py::test_locate_dry_run_never_writes_even_with_a_poor_fit`, `tests/aprilcam/cli/test_locate_cli.py::test_locate_fail_fast_stops_at_the_first_undetected_reference`, `tests/aprilcam/daemon/test_camera_geometry_hardware.py::test_locate_reports_missing_references_or_reproduces_the_documented_fixture`, `tests/acceptance/test_inventory.py::test_where_surveyed_apriltag` |
 
 ✓ happy path · ✗ failure path
 
