@@ -2,7 +2,7 @@
   "current": "fs-20260823",
   "states": {
     "fs-20260823": {
-      "description": "Operator-assisted capture session (035-004), 2026-08-23 ~16:50-16:54 PDT, daylight/late-afternoon. Populated from live daemon polls ('aprilcam camera tags <slug>', several polls per camera to clear the confirmation-grace window) taken immediately before and after each camera's capture run, plus each run's own baseline detection count. NOT yet stakeholder-confirmed -- status stays \"unverified\" until a human reviews this against what was physically on the field. AprilTags 10, 11, 15, 100 are known transients (stakeholder decision, 2026-08-23) and are deliberately excluded from every list below even if seen during the session -- none were observed this session regardless. IMPORTANT: expected detections are genuinely per-camera (see 'per_camera' below) -- the flat visible_* arrays here are the UNION across all three cameras' fields of view, not what any single camera sees. Rectangle/dot IDs are the full main-playfield.json survey (6 rectangles, 8 dots); this agent has no rectangle/dot detector to poll live, so that part carries forward the stakeholder's same-day survey confirmation recorded in this ticket's earlier handoff note, not a fresh visual check this session.",
+      "description": "Operator-assisted capture session (035-004), 2026-08-23 ~16:50-16:54 PDT, daylight/late-afternoon. Populated from live daemon polls ('aprilcam camera tags <slug>', several polls per camera to clear the confirmation-grace window) taken immediately before and after each camera's capture run, plus each run's own baseline detection count. STAKEHOLDER-CONFIRMED 2026-08-23: (1) tags present -- AprilTag 1 + ArUco 1-10, machine-observed consistently across every poll of this capture session; (2) AprilTags 10, 11, 15, 100 are known transients -- stakeholder confirmed directly and they are deliberately excluded from every list below even though none were observed this session regardless; (3) the 6 rectangles and 8 dots at their surveyed positions -- this had been the one genuinely open item, carried forward from an earlier handoff note rather than freshly checked, but the stakeholder states the rectangles and dots are physically glued to the top of the workbench and cannot move, so the survey positions remain valid by construction and stand confirmed. IMPORTANT: expected detections are genuinely per-camera (see 'per_camera' below) -- the flat visible_* arrays here are the UNION across all three cameras' fields of view, not what any single camera sees. Rectangle/dot IDs are the full main-playfield.json survey (6 rectangles, 8 dots).",
       "per_camera": {
         "arducam-ov9281-usb-camera": {
           "baseline_detection_count": 11,
@@ -57,7 +57,7 @@
           ]
         }
       },
-      "status": "unverified",
+      "status": "confirmed",
       "visible_april_tags": [
         1
       ],
