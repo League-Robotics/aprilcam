@@ -1,9 +1,14 @@
 ---
 id: '017'
 title: Wire test-hardware.sh and test-acceptance.sh runners
-status: open
-use-cases: [UC-29]
-depends-on: ['011', '012', '013', '016']
+status: done
+use-cases:
+- UC-29
+depends-on:
+- '011'
+- '012'
+- '013'
+- '016'
 github-issue: ''
 issue: aprilcam-v2-layered-test-system.md
 completes_issue: false
@@ -24,22 +29,22 @@ three scripts (`test-gate.sh`, `test-hardware.sh`, `test-acceptance.sh`).
 
 ## Acceptance Criteria
 
-- [ ] `scripts/test-hardware.sh` runs
+- [x] `scripts/test-hardware.sh` runs
       `uv run pytest -m "(camera or integration) and not acceptance"`
       and, before running, echoes a preflight checklist (daemon stopped
       or not as appropriate, views closed, which cameras should be
       attached) matching the sprint's documented capture/test
       logistics.
-- [ ] Running `scripts/test-hardware.sh` collects L1's tests (tickets
+- [x] Running `scripts/test-hardware.sh` collects L1's tests (tickets
       009, 011, 012, 013) and explicitly zero `acceptance`-marked tests
       — verified by inspecting the collected node IDs.
-- [ ] `scripts/test-acceptance.sh` runs the `acceptance`-marked suite
+- [x] `scripts/test-acceptance.sh` runs the `acceptance`-marked suite
       and tees its output to a timestamped file under a documented
       location (e.g. `.clasi/log/acceptance-<timestamp>.log` or
       equivalent — pick one consistent with this project's existing log
       conventions).
-- [ ] Both scripts exit non-zero on any test failure.
-- [ ] A README or `docs/test-plans/` section (new or appended) explains
+- [x] Both scripts exit non-zero on any test failure.
+- [x] A README or `docs/test-plans/` section (new or appended) explains
       the three-script hierarchy: `test-gate.sh` (always, no hardware),
       `test-hardware.sh` (rig required, no acceptance risk), and
       `test-acceptance.sh` (rig + real daemon, no-write-guarded).
