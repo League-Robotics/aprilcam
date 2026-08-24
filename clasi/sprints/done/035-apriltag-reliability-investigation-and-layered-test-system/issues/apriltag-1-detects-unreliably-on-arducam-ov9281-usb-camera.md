@@ -1,5 +1,9 @@
 ---
-status: pending
+status: in-progress
+sprint: '035'
+tickets:
+- 035-001
+- 035-002
 ---
 
 # AprilTag 1 detects unreliably on `arducam-ov9281-usb-camera` while all 10 ArUco markers detect solidly

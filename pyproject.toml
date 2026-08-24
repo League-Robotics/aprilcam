@@ -89,6 +89,7 @@ asyncio_mode = "auto"
 markers = [
     "integration: end-to-end tests that start real daemon/hardware processes (deselect with -m 'not integration')",
     "camera: tests that require real capture hardware attached (deselect with -m 'not camera')",
+    "acceptance: tests against the real daemon and real field state (deselect with -m 'not acceptance')",
 ]
 
 [dependency-groups]

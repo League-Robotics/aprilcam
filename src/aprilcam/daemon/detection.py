@@ -257,7 +257,7 @@ from aprilcam.types import (
     TagRecord,
     WorldPoint,
 )
-from aprilcam.vision.detector import Detection, TagDetector
+from aprilcam.vision.detector import Detection, DetectorConfig, TagDetector
 from aprilcam.vision.motion import compute_motion
 from aprilcam.vision.pipeline import PipelineConfig, run_pipeline
 
@@ -348,12 +348,22 @@ CONFIRMATION_STREAK = 3
 #: in (sprint.md Design Rationale Decision 3).
 CONFIRMATION_GRACE = 8
 
-#: A callable that builds one ``TagDetector`` (or, in tests, a
-#: duck-typed substitute exposing the same ``detect(gray, scale=...)``
-#: method -- see ``tests/aprilcam/daemon/test_detection.py``'s
-#: burst-counting doubles). Injectable so tests can pin exactly how many
-#: times detection actually runs without needing real pixel data.
-DetectorFactory = Callable[[], TagDetector]
+#: A callable that builds one ``TagDetector`` for a given camera slug
+#: (or, in tests, a duck-typed substitute exposing the same
+#: ``detect(gray, scale=...)`` method -- see ``tests/aprilcam/daemon/
+#: test_detection.py``'s burst-counting doubles). Injectable so tests
+#: can pin exactly how many times detection actually runs without
+#: needing real pixel data.
+#:
+#: **Widened from zero-argument to slug-argument (ticket 035-001).**
+#: This ticket is pure plumbing -- the slug flows through to
+#: :func:`_default_detector_factory`'s (currently empty)
+#: :data:`_DETECTOR_CONFIG_OVERRIDES` lookup so a *future* ticket
+#: (035-002) can hand back a differently-configured ``TagDetector`` for
+#: one camera slug without affecting any other, without a second
+#: signature change. No behaviour changes yet: every slug still
+#: resolves to identical ``DetectorConfig()`` defaults.
+DetectorFactory = Callable[[str], TagDetector]
 
 #: A callable that resolves a camera slug -> its currently-held
 #: ``Calibration``, or ``None`` if that camera has never been
@@ -405,8 +415,58 @@ CameraGeometryLookup = Callable[[str], Tuple[WorldPoint, float]]
 MarkStale = Callable[[str], None]
 
 
-def _default_detector_factory() -> TagDetector:
-    return TagDetector()
+#: Per-camera-slug :class:`~aprilcam.vision.detector.DetectorConfig`
+#: overrides, keyed by camera slug (``Camera.slug``) -- the seam
+#: :func:`_default_detector_factory` uses to build a differently-tuned
+#: ``TagDetector`` for one camera without touching any other (ticket
+#: 035-001; sprint 035 sprint.md Decision 2: a small per-slug constants
+#: table here, not a global override or a new ``CameraConfig`` field).
+#:
+#: **One real entry, ticket 035-002.** ``arducam-ov9281-usb-camera``
+#: ("camera 5") decoded AprilTag 1 on only 1-3 of 10 real polls at night
+#: exposures (150-500) per the source issue
+#: (``clasi/sprints/035-.../issues/apriltag-1-detects-unreliably-on-
+#: arducam-ov9281-usb-camera.md``), while all 10 ArUco markers on the
+#: same frames decoded on effectively every poll. **Five** independent
+#: real-hardware sweeps against this exact camera (daylight, auto-swept
+#: exposure 3-25; see
+#: ``tests/aprilcam/daemon/test_detector_tuning_hardware.py`` and
+#: ``docs/knowledge/2026-08-23-camera-5-detector-tuning-blocked-by-
+#: sandbox-camera-permission.md`` for the real numbers, including one
+#: candidate -- ``corner_refine="contour"`` -- that looked like a clean
+#: winner after 3 runs and then did not hold up under 2 more) found
+#: loosening the three AprilTag-quad earned constants
+#: (``april_min_wb_diff``/``april_min_cluster_pixels``/
+#: ``april_max_line_fit_mse``) is the one candidate that never missed
+#: AprilTag 1 across all 5 runs (50/50 bursts) and never dropped ArUco
+#: recall below 9/10 -- the *default* config, by contrast, missed
+#: AprilTag 1 in 4 of the 5 runs (46/50) and dropped ArUco recall as low
+#: as 7/10. ``corner_refine`` alternatives and plain ``quad_decimate``
+#: coarsening were both tried too (this ticket's own acceptance
+#: criteria) but neither matched this candidate's consistency across all
+#: 5 runs.
+#:
+#: Every other slug still misses this lookup and falls through to
+#: ``TagDetector(None)`` -- identical to ``TagDetector()`` and to every
+#: camera's behaviour before ticket 035-001 existed.
+_DETECTOR_CONFIG_OVERRIDES: Dict[str, DetectorConfig] = {
+    "arducam-ov9281-usb-camera": DetectorConfig(
+        april_min_wb_diff=1.0, april_min_cluster_pixels=3, april_max_line_fit_mse=40.0
+    ),
+}
+
+
+def _default_detector_factory(slug: str) -> TagDetector:
+    """Build one ``TagDetector`` for *slug*, applying its per-camera
+    override from :data:`_DETECTOR_CONFIG_OVERRIDES` when one exists.
+
+    ``dict.get`` returns ``None`` for an unmapped slug, and
+    ``TagDetector(None)`` is exactly ``TagDetector()`` (that
+    constructor's own default), so a slug with no override entry --
+    every slug, this ticket, since the table is empty -- behaves
+    identically to today.
+    """
+    return TagDetector(_DETECTOR_CONFIG_OVERRIDES.get(slug))
 
 
 def _default_calibration_lookup(slug: str) -> Optional[Calibration]:
@@ -593,9 +653,16 @@ class DetectionEngine:
     detector_factory:
         Builds one detector per camera, lazily, on that camera's first
         burst (see the module docstring's "one ``TagDetector`` per
-        camera" section). Overridable so tests can substitute a
-        call-counting double without needing real pixel data or a real
-        ``cv2.aruco`` build.
+        camera" section). Called with the camera *slug* (ticket
+        035-001's ``DetectorFactory`` widening) so a per-camera tuning
+        table can hand back a differently-configured ``TagDetector``
+        for one camera without affecting any other --
+        :func:`_default_detector_factory`'s
+        :data:`_DETECTOR_CONFIG_OVERRIDES` lookup is empty this ticket,
+        so every slug still gets identical ``DetectorConfig()``
+        defaults. Overridable so tests can substitute a call-counting
+        double without needing real pixel data or a real ``cv2.aruco``
+        build.
     calibration_lookup:
         Resolves a camera slug -> its currently-held ``Calibration``, or
         ``None`` if uncalibrated (module docstring's "world coordinates,
@@ -1147,7 +1214,7 @@ class DetectionEngine:
         with self._lock:
             detector = self._detectors.get(slug)
             if detector is None:
-                detector = self._detector_factory()
+                detector = self._detector_factory(slug)
                 self._detectors[slug] = detector
             return detector
 

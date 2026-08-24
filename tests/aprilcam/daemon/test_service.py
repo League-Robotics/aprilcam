@@ -695,7 +695,7 @@ def test_stream_images_deskewed_alone_keeps_detection_running_and_tags_update(di
     # temporal confirmation (test_detection.py's own concern) -- matches
     # this file's established pattern (``_build_tag_service``'s
     # docstring) for tests genuinely about something else entirely.
-    detection = DetectionEngine(detector_factory=lambda: scripted_detector, confirmation_streak=1)
+    detection = DetectionEngine(detector_factory=lambda _slug: scripted_detector, confirmation_streak=1)
 
     cameras: Dict[str, Camera] = {slug: cam}
     discovery = CameraDiscovery(
@@ -1076,7 +1076,7 @@ def _build_tag_service(directories, registry, *, detector, frame_count: int = 10
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: FakeBackend(),
     )
-    detection = DetectionEngine(detector_factory=lambda: detector, confirmation_streak=1)
+    detection = DetectionEngine(detector_factory=lambda _slug: detector, confirmation_streak=1)
     service = DaemonService(
         registry=registry,
         discovery=discovery,
@@ -5241,6 +5241,33 @@ def real_daemon_service(tmp_path: Path):
         service.close()
 
 
+def _open_or_skip(service: DaemonService, slug: str):
+    """``_real_identity`` (above) only proves a camera is enumerated by
+    name -- never that this process can actually open it right now
+    (tests/aprilcam/hardware_camera.py's own "enumeration is not
+    availability" contract; docs/knowledge/daemon-camera-grant-and-
+    detection-priming.md). Every real-hardware test below opens its
+    camera by calling ``DaemonService.get_frame`` directly (not through
+    gRPC), so a camera-open failure surfaces here as a bare
+    ``RuntimeError`` (``opencv_backend.OpenCVBackend.open``), not an
+    ``AprilCamError``. Only the specific, known "failed to open camera"
+    signature is treated as environmental; anything else is re-raised so
+    a genuine bug still fails loudly. Returns the fetched frame so
+    callers that need it (most do, as a warm-up) get it in one call."""
+    try:
+        return service.get_frame(slug)
+    except RuntimeError as exc:
+        if "failed to open camera" not in str(exc):
+            raise
+        pytest.skip(
+            f"{slug!r} is attached but could not be opened just now -- "
+            f"{exc}. Expected when this process has no camera TCC grant "
+            f"(e.g. an agent session) or the device is genuinely busy "
+            f"elsewhere; re-run from an operator Terminal session to "
+            f"exercise this test for real."
+        )
+
+
 def _mean_brightness(jpeg_bytes: bytes) -> float:
     array = np.frombuffer(jpeg_bytes, dtype=np.uint8)
     image = cv.imdecode(array, cv.IMREAD_GRAYSCALE)
@@ -5288,7 +5315,7 @@ def test_set_camera_config_manual_low_exposure_darkens_a_real_frame(real_daemon_
     slug = identity.slug
 
     try:
-        real_daemon_service.get_frame(slug)  # open + hold -- apply_config needs this
+        _open_or_skip(real_daemon_service, slug)  # open + hold -- apply_config needs this
 
         real_daemon_service.set_camera_config(
             CameraConfig(
@@ -5329,7 +5356,7 @@ def test_set_camera_config_unsupported_key_fails_whole_push_camera_unchanged_liv
     slug = identity.slug
 
     try:
-        real_daemon_service.get_frame(slug)  # open + hold -- apply_config needs this
+        _open_or_skip(real_daemon_service, slug)  # open + hold -- apply_config needs this
 
         real_daemon_service.set_camera_config(
             CameraConfig(name=slug, playfield=None, settings={"auto_exposure": 1, "exposure": 6})
@@ -5368,7 +5395,7 @@ def test_set_camera_config_out_of_range_value_fails_whole_push_camera_unchanged_
     slug = identity.slug
 
     try:
-        real_daemon_service.get_frame(slug)  # open + hold -- apply_config needs this
+        _open_or_skip(real_daemon_service, slug)  # open + hold -- apply_config needs this
 
         real_daemon_service.set_camera_config(
             CameraConfig(name=slug, playfield=None, settings={"auto_exposure": 1, "exposure": 6})
@@ -5400,7 +5427,7 @@ def test_set_camera_config_two_real_cameras_configured_independently(real_daemon
     slug3, slug2 = id3.slug, id2.slug
 
     try:
-        real_daemon_service.get_frame(slug3)  # open + hold both -- apply_config needs this
+        _open_or_skip(real_daemon_service, slug3)  # open + hold both -- apply_config needs this
         real_daemon_service.get_frame(slug2)
 
         real_daemon_service.set_camera_config(
@@ -5467,7 +5494,7 @@ def test_reset_camera_config_reapplies_the_real_on_disk_document_live(
     )
 
     try:
-        real_daemon_service.get_frame(slug)  # open + hold -- wires config_loader/config_path
+        _open_or_skip(real_daemon_service, slug)  # open + hold -- wires config_loader/config_path
 
         real_daemon_service.set_camera_config(
             CameraConfig(
@@ -5509,7 +5536,7 @@ def test_dump_camera_config_round_trips_through_install_and_restart_live(
     slug = identity.slug
 
     try:
-        real_daemon_service.get_frame(slug)  # open + hold -- apply_config needs this
+        _open_or_skip(real_daemon_service, slug)  # open + hold -- apply_config needs this
         real_daemon_service.set_camera_config(
             CameraConfig(name=slug, playfield=None, settings=dict(_CAMERA_3_BASELINE_SETTINGS))
         )

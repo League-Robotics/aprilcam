@@ -1,5 +1,24 @@
 ---
-status: pending
+status: in-progress
+sprint: '035'
+tickets:
+- 035-003
+- 035-004
+- 035-005
+- 035-006
+- 035-007
+- 035-008
+- 035-009
+- 035-010
+- 035-011
+- 035-012
+- 035-013
+- 035-014
+- 035-015
+- 035-016
+- 035-017
+- 035-018
+- 035-019
 ---
 
 # AprilCam v2 layered test system: offline image-matrix, live system tests, acceptance runs

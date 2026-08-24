@@ -46,6 +46,7 @@ from aprilcam.client.daemon_client import GrpcDaemon
 from aprilcam.config.directories import Directories
 from aprilcam.daemon import __main__ as daemon_main
 from aprilcam.daemon.detection import CONFIRMATION_STREAK
+from aprilcam.errors import AprilCamError
 from aprilcam.proto import aprilcam_v2_pb2_grpc
 from aprilcam.tags.generator import TagGenerator
 from aprilcam.types import TagFamily, TagId
@@ -102,7 +103,30 @@ def daemon(tmp_path):
             channel = grpc.insecure_channel(f"unix:{socket_path}")
             grpc.channel_ready_future(channel).result(timeout=5)
             stub = aprilcam_v2_pb2_grpc.AprilCamV2Stub(channel)
-            yield GrpcDaemon(stub, target="localhost")
+            grpc_daemon = GrpcDaemon(stub, target="localhost")
+            # _skip_if_arducam_not_attached (above) only proves ARDUCAM_SLUG
+            # is configured/calibrated on this machine's real, persisted
+            # state -- never that this process can actually open it right
+            # now (tests/aprilcam/hardware_camera.py's own "enumeration is
+            # not availability" contract). This module's only test needs a
+            # real camera open, so gate here, matching tests/aprilcam/
+            # calibration/test_full_calibrate_hardware.py's own ``daemon``
+            # fixture.
+            try:
+                grpc_daemon.get_frame(ARDUCAM_SLUG, deskewed=False, encoding="jpeg")
+            except AprilCamError as exc:
+                pytest.skip(
+                    f"{ARDUCAM_SLUG!r} qualifies (config + calibration present "
+                    f"on this machine's real system state) but could not be "
+                    f"opened/read via the daemon just now -- {exc}. Expected "
+                    f"when the process running this test has no camera "
+                    f"permission grant (e.g. an agent session -- see "
+                    f"docs/knowledge/daemon-camera-grant-and-detection-"
+                    f"priming.md) or the device is genuinely busy elsewhere; "
+                    f"re-run from an operator Terminal session to exercise "
+                    f"this camera for real."
+                )
+            yield grpc_daemon
         finally:
             lifecycle.stop()
     finally:

@@ -184,7 +184,7 @@ def _wait_until(predicate: Callable[[], bool], *, timeout: float = 2.0, interval
 
 def test_producer_thread_does_not_exist_with_zero_subscribers():
     detector = _CallCountingDetector()
-    engine = DetectionEngine(detector_factory=lambda: detector, confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: detector, confirmation_streak=1)
     cam = _camera("cam-idle")
     producer = TagStreamProducer("cam-idle", cam, engine)
 
@@ -197,7 +197,7 @@ def test_producer_thread_does_not_exist_with_zero_subscribers():
 
 def test_subscribe_starts_the_thread_and_unsubscribe_stops_and_joins_it():
     detector = _CallCountingDetector()
-    engine = DetectionEngine(detector_factory=lambda: detector, confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: detector, confirmation_streak=1)
     cam = _camera("cam-lifecycle")
     producer = TagStreamProducer("cam-lifecycle", cam, engine, interval_s=0.01)
 
@@ -215,7 +215,7 @@ def test_subscribe_starts_the_thread_and_unsubscribe_stops_and_joins_it():
 
 def test_resubscribe_after_unsubscribe_starts_a_fresh_thread():
     detector = _CallCountingDetector()
-    engine = DetectionEngine(detector_factory=lambda: detector, confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: detector, confirmation_streak=1)
     cam = _camera("cam-resub")
     producer = TagStreamProducer("cam-resub", cam, engine, interval_s=0.01)
 
@@ -237,7 +237,7 @@ def test_resubscribe_after_unsubscribe_starts_a_fresh_thread():
 
 def test_start_and_stop_are_idempotent():
     detector = _CallCountingDetector()
-    engine = DetectionEngine(detector_factory=lambda: detector, confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: detector, confirmation_streak=1)
     cam = _camera("cam-idempotent")
     producer = TagStreamProducer("cam-idempotent", cam, engine, interval_s=0.01)
 
@@ -256,7 +256,7 @@ def test_start_and_stop_are_idempotent():
 
 def test_run_burst_runs_at_the_configured_cadence_and_ring_buffer_grows_wall_clock_bounded():
     detector = _CallCountingDetector()
-    engine = DetectionEngine(detector_factory=lambda: detector, confirmation_streak=1, buffer_size=1000)
+    engine = DetectionEngine(detector_factory=lambda _slug: detector, confirmation_streak=1, buffer_size=1000)
     cam = _camera("cam-cadence")
     n_ticks = 25
     clock, wait, reached = _clock_and_wait_stopping_after(n_ticks)
@@ -286,7 +286,7 @@ def test_run_burst_runs_at_the_configured_cadence_and_ring_buffer_grows_wall_clo
 
 def test_quiet_fixture_still_delivers_heartbeats_at_the_configured_interval():
     detector = _CallCountingDetector()  # empty tags, every tick -- a quiet field
-    engine = DetectionEngine(detector_factory=lambda: detector, confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: detector, confirmation_streak=1)
     cam = _camera("cam-quiet")
     n_ticks = 60
     clock, wait, reached = _clock_and_wait_stopping_after(n_ticks)
@@ -328,7 +328,7 @@ def test_pixel_jitter_below_threshold_is_not_published_as_a_change():
         return [_pixel_hit(1, 100.0 + offset, 100.0)]
 
     detector = _SequenceDetector(build_hits)
-    engine = DetectionEngine(detector_factory=lambda: detector, confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: detector, confirmation_streak=1)
     cam = _camera("cam-px-jitter")
     n_ticks = 20
     clock, wait, reached = _clock_and_wait_stopping_after(n_ticks)
@@ -357,7 +357,7 @@ def test_pixel_change_above_threshold_is_published_promptly_and_rate_capped():
         return [_pixel_hit(1, 20.0 * call_index, 0.0)]  # moves 20px > 8px threshold every tick
 
     detector = _SequenceDetector(build_hits)
-    engine = DetectionEngine(detector_factory=lambda: detector, confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: detector, confirmation_streak=1)
     cam = _camera("cam-px-moving")
     n_ticks = 40
     clock, wait, reached = _clock_and_wait_stopping_after(n_ticks)
@@ -403,7 +403,7 @@ def test_world_cm_jitter_below_threshold_is_not_published_as_a_change():
 
     detector = _SequenceDetector(build_hits)
     engine = DetectionEngine(
-        detector_factory=lambda: detector,
+        detector_factory=lambda _slug: detector,
         calibration_lookup=lambda slug: calibration,
         confirmation_streak=1,
     )
@@ -437,7 +437,7 @@ def test_world_cm_change_above_threshold_triggers_a_prompt_publish():
 
     detector = _SequenceDetector(build_hits)
     engine = DetectionEngine(
-        detector_factory=lambda: detector,
+        detector_factory=lambda _slug: detector,
         calibration_lookup=lambda slug: calibration,
         confirmation_streak=1,
     )
@@ -480,7 +480,7 @@ def test_calibration_going_stale_mid_stream_reaches_the_next_published_frame():
     calibrations: Dict[str, Calibration] = {"cam-stale": calibration}
     detector = _CallCountingDetector()  # content is irrelevant -- only calibration_stale matters
     engine = DetectionEngine(
-        detector_factory=lambda: detector,
+        detector_factory=lambda _slug: detector,
         calibration_lookup=lambda slug: calibrations.get(slug),
         confirmation_streak=1,
     )
@@ -536,7 +536,7 @@ def test_slow_subscriber_drops_frames_without_affecting_a_fast_subscriber():
         return [_pixel_hit(1, 20.0 * call_index, 0.0)]
 
     detector = _SequenceDetector(build_hits)
-    engine = DetectionEngine(detector_factory=lambda: detector, confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: detector, confirmation_streak=1)
     cam = _camera("cam-slow")
     n_ticks = 30
     clock = _FakeClock()
@@ -593,7 +593,7 @@ def test_slow_subscriber_drops_frames_without_affecting_a_fast_subscriber():
 
 def test_broadcaster_tag_stream_close_unsubscribes_and_is_idempotent():
     detector = _CallCountingDetector()
-    engine = DetectionEngine(detector_factory=lambda: detector, confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: detector, confirmation_streak=1)
     cam = _camera("cam-stream-close")
     producer = TagStreamProducer("cam-stream-close", cam, engine, interval_s=0.01)
 
@@ -687,7 +687,7 @@ def test_image_producer_thread_does_not_exist_with_zero_subscribers():
     backend = FakeBackend(read_queue=[_blank_frame()], loop=True)
     cam = Camera("cam-image-idle", backend)
     cam.open()
-    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: _CallCountingDetector(), confirmation_streak=1)
     producer = ImageStreamProducer("cam-image-idle", cam, engine)
 
     assert producer.running is False
@@ -697,7 +697,7 @@ def test_image_producer_thread_does_not_exist_with_zero_subscribers():
 
 
 def test_image_subscribe_starts_the_thread_and_unsubscribe_stops_and_joins_it():
-    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: _CallCountingDetector(), confirmation_streak=1)
     cam = _camera("cam-image-lifecycle")
     producer = ImageStreamProducer("cam-image-lifecycle", cam, engine, interval_s=0.01)
 
@@ -714,7 +714,7 @@ def test_image_subscribe_starts_the_thread_and_unsubscribe_stops_and_joins_it():
 
 
 def test_image_start_and_stop_are_idempotent():
-    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: _CallCountingDetector(), confirmation_streak=1)
     cam = _camera("cam-image-idempotent")
     producer = ImageStreamProducer("cam-image-idempotent", cam, engine, interval_s=0.01)
 
@@ -734,7 +734,7 @@ def test_raw_and_deskewed_producers_for_the_same_camera_are_independent():
     definition = main_playfield_definition()
     playfields = {"main-playfield": definition}
     calibrations = {"cam-independent": calibration}
-    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: _CallCountingDetector(), confirmation_streak=1)
     cam = _camera("cam-independent")
 
     raw_producer = ImageStreamProducer("cam-independent", cam, engine, interval_s=0.01)
@@ -759,7 +759,7 @@ def test_raw_and_deskewed_producers_for_the_same_camera_are_independent():
 
 
 def test_deskewed_image_stream_producer_requires_the_calibration_playfield_annotation_lookups():
-    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: _CallCountingDetector(), confirmation_streak=1)
     cam = _camera("cam-missing-lookups")
     with pytest.raises(ValueError):
         ImageStreamProducer("cam-missing-lookups", cam, engine, deskewed=True)
@@ -785,7 +785,7 @@ def test_deskewed_producer_warps_once_per_tick_shared_by_two_subscribers():
         created.append(d)
         return d
 
-    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: _CallCountingDetector(), confirmation_streak=1)
     cam = _camera("cam-shared-warp")
     n_ticks = 15
     clock, wait, reached = _clock_and_wait_stopping_after(n_ticks)
@@ -834,7 +834,7 @@ def test_deskewed_producer_warps_once_per_tick_shared_by_two_subscribers():
 
 
 def test_image_slow_subscriber_drops_frames_without_affecting_a_fast_subscriber():
-    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: _CallCountingDetector(), confirmation_streak=1)
     cam = _camera("cam-image-slow")
     n_ticks = 30
     clock = _FakeClock()
@@ -883,7 +883,7 @@ def test_deskewed_image_geometry_stays_stable_across_a_mid_stream_playfield_repl
     playfields: Dict[str, PlayfieldDefinition] = {"main-playfield": original_definition}
     calibrations: Dict[str, Calibration] = {"cam-geom-stable": calibration}
 
-    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: _CallCountingDetector(), confirmation_streak=1)
     cam = _camera("cam-geom-stable")
     n_ticks = 15
     swap_at_tick = 5
@@ -942,7 +942,7 @@ def test_image_producer_resubscribe_starts_fresh_and_rebuilds_geometry():
     definition_b = PlayfieldDefinition(name="main-playfield", width_cm=50.0, height_cm=40.0)
     playfields: Dict[str, PlayfieldDefinition] = {"main-playfield": definition_a}
     calibrations: Dict[str, Calibration] = {"cam-image-resub": calibration}
-    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: _CallCountingDetector(), confirmation_streak=1)
     cam = _camera("cam-image-resub")
 
     producer = ImageStreamProducer(
@@ -984,7 +984,7 @@ def test_deskewed_image_calibration_going_stale_mid_stream_reaches_the_next_publ
     playfields = {"main-playfield": definition}
     calibrations: Dict[str, Calibration] = {"cam-image-stale": calibration}
 
-    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: _CallCountingDetector(), confirmation_streak=1)
     cam = _camera("cam-image-stale")
     n_ticks = 12
     flip_at_tick = 5
@@ -1038,7 +1038,7 @@ def test_deskewed_image_calibration_going_stale_mid_stream_reaches_the_next_publ
 
 def test_raw_image_producer_embeds_latest_tags_but_never_annotations():
     detector = _CallCountingDetector(hits=[_pixel_hit(1, 10.0, 10.0)])
-    engine = DetectionEngine(detector_factory=lambda: detector, confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: detector, confirmation_streak=1)
     cam = _camera("cam-raw-embed")
     engine.run_burst("cam-raw-embed", cam)  # seed the buffer once, before streaming starts
     expected_tag_frame = engine.latest("cam-raw-embed")
@@ -1078,7 +1078,7 @@ def test_deskewed_image_producer_embeds_latest_tags_and_current_annotations():
     annotation_set = AnnotationSet(annotations=(), revision=3, timestamp=123.0)
 
     detector = _CallCountingDetector(hits=[_pixel_hit(1, 10.0, 10.0)])
-    engine = DetectionEngine(detector_factory=lambda: detector, confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: detector, confirmation_streak=1)
     cam = _camera("cam-embed")
     engine.run_burst("cam-embed", cam)  # seed the buffer once, before streaming starts
     expected_tag_frame = engine.latest("cam-embed")
@@ -1118,7 +1118,7 @@ def test_deskewed_image_producer_embeds_latest_tags_and_current_annotations():
 
 
 def test_broadcaster_image_stream_close_unsubscribes_and_is_idempotent():
-    engine = DetectionEngine(detector_factory=lambda: _CallCountingDetector(), confirmation_streak=1)
+    engine = DetectionEngine(detector_factory=lambda _slug: _CallCountingDetector(), confirmation_streak=1)
     cam = _camera("cam-image-stream-close")
     producer = ImageStreamProducer("cam-image-stream-close", cam, engine, interval_s=0.01)
 

@@ -52,9 +52,11 @@ from aprilcam.daemon.detection import (
     CONFIRMATION_STREAK,
     RING_BUFFER_SIZE,
     DetectionEngine,
+    _DETECTOR_CONFIG_OVERRIDES,
+    _default_detector_factory,
 )
 from aprilcam.types import MountParameters, PixelPoint, TagFamily, TagId, WorldPoint
-from aprilcam.vision.detector import Detection, TagDetector
+from aprilcam.vision.detector import Detection, DetectorConfig, TagDetector
 
 from tests.aprilcam.calibration.test_calibration import (
     MAIN_PLAYFIELD_ARUCO_POSITIONS,
@@ -107,7 +109,7 @@ def _camera(slug: str, *, frames=None) -> Camera:
 
 
 def test_run_burst_on_empty_field_returns_empty_tag_frame_and_appends_it():
-    engine = DetectionEngine(detector_factory=lambda: _CountingDetector())
+    engine = DetectionEngine(detector_factory=lambda _slug: _CountingDetector())
     cam = _camera("cam-a", frames=[_blank_frame()])
 
     tag_frame = engine.run_burst("cam-a", cam)
@@ -118,7 +120,7 @@ def test_run_burst_on_empty_field_returns_empty_tag_frame_and_appends_it():
 
 
 def test_run_burst_raises_and_appends_nothing_when_no_frame_available():
-    engine = DetectionEngine(detector_factory=lambda: _CountingDetector())
+    engine = DetectionEngine(detector_factory=lambda _slug: _CountingDetector())
     cam = _camera("cam-b", frames=[])  # empty queue -> Camera.read() returns None
 
     with pytest.raises(RuntimeError):
@@ -198,7 +200,7 @@ def test_run_burst_on_a_family_disambiguated_field():
 def test_detector_factory_called_once_per_camera_and_reused():
     built = []
 
-    def factory():
+    def factory(slug):
         detector = _CountingDetector()
         built.append(detector)
         return detector
@@ -217,7 +219,7 @@ def test_detector_factory_called_once_per_camera_and_reused():
 def test_detector_factory_called_separately_per_distinct_camera():
     built = []
 
-    def factory():
+    def factory(slug):
         detector = _CountingDetector()
         built.append(detector)
         return detector
@@ -241,13 +243,13 @@ def test_idle_engine_runs_zero_detections():
     """No ``run_burst`` call at all -> zero ``detect()`` calls, trivially
     -- there is no background loop to idle (sprint.md Decision 1)."""
     counting = _CountingDetector()
-    DetectionEngine(detector_factory=lambda: counting)
+    DetectionEngine(detector_factory=lambda _slug: counting)
     assert counting.calls == 0
 
 
 def test_each_run_burst_call_is_exactly_one_detect_call():
     counting = _CountingDetector()
-    engine = DetectionEngine(detector_factory=lambda: counting)
+    engine = DetectionEngine(detector_factory=lambda _slug: counting)
     cam = _camera("cam-f", frames=[_blank_frame() for _ in range(4)])
 
     for expected in range(1, 5):
@@ -265,7 +267,7 @@ def test_ring_buffer_size_defaults_to_v1s_300():
 
 
 def test_ring_buffer_evicts_oldest_entry_at_capacity():
-    engine = DetectionEngine(buffer_size=3, detector_factory=lambda: _CountingDetector())
+    engine = DetectionEngine(buffer_size=3, detector_factory=lambda _slug: _CountingDetector())
     cam = _camera("cam-g", frames=[_blank_frame() for _ in range(5)])
 
     frames = [engine.run_burst("cam-g", cam) for _ in range(5)]
@@ -279,7 +281,7 @@ def test_ring_buffer_evicts_oldest_entry_at_capacity():
 
 
 def test_frame_index_is_monotonic_and_independent_per_camera():
-    engine = DetectionEngine(detector_factory=lambda: _CountingDetector())
+    engine = DetectionEngine(detector_factory=lambda _slug: _CountingDetector())
     cam_a = _camera("cam-h", frames=[_blank_frame(), _blank_frame()])
     cam_b = _camera("cam-i", frames=[_blank_frame()])
 
@@ -308,7 +310,7 @@ def test_latest_on_a_never_seen_camera_is_none():
 
 
 def test_latest_reflects_the_most_recent_burst():
-    engine = DetectionEngine(detector_factory=lambda: _CountingDetector())
+    engine = DetectionEngine(detector_factory=lambda _slug: _CountingDetector())
     cam = _camera("cam-j", frames=[_blank_frame(), _blank_frame()])
 
     first = engine.run_burst("cam-j", cam)
@@ -320,7 +322,7 @@ def test_latest_reflects_the_most_recent_burst():
 
 def test_history_and_latest_do_not_call_detect():
     counting = _CountingDetector()
-    engine = DetectionEngine(detector_factory=lambda: counting)
+    engine = DetectionEngine(detector_factory=lambda _slug: counting)
     cam = _camera("cam-k", frames=[_blank_frame()])
 
     engine.run_burst("cam-k", cam)
@@ -336,6 +338,68 @@ def test_default_detector_factory_builds_a_real_tag_detector():
     engine = DetectionEngine()
     detector = engine._detector_for("cam-l")  # noqa: SLF001 - internal, testing the default wiring
     assert isinstance(detector, TagDetector)
+
+
+def test_default_detector_factory_returns_defaults_for_unmapped_slug():
+    """Ticket 035-001: ``DetectorFactory`` widens to accept the camera
+    slug, and ``_DETECTOR_CONFIG_OVERRIDES`` gained its first real entry
+    in ticket 035-002 (below) -- but any slug *not* in that table still
+    resolves to a ``TagDetector`` built from plain ``DetectorConfig()``
+    defaults, byte-identical to the pre-ticket zero-argument factory's
+    output. ``"any-slug"`` is deliberately not
+    ``"arducam-ov9281-usb-camera"`` (the one slug ticket 035-002 mapped),
+    so this pins the "every other camera is untouched" half of that
+    ticket's own acceptance criteria."""
+    assert "any-slug" not in _DETECTOR_CONFIG_OVERRIDES
+
+    detector = _default_detector_factory("any-slug")
+
+    assert isinstance(detector, TagDetector)
+    assert detector._config == DetectorConfig()  # noqa: SLF001 - internal, testing the default wiring
+
+
+def test_detector_config_overrides_has_exactly_one_entry_for_camera_5_after_ticket_035_002():
+    """Ticket 035-002 investigated whether a tuned ``DetectorConfig`` for
+    ``arducam-ov9281-usb-camera`` ("camera 5") measurably improves
+    AprilTag 1's marginal detection rate (source issue: ``apriltag-1-
+    detects-unreliably-on-arducam-ov9281-usb-camera.md`` -- AprilTag 1 at
+    1-3/10 real polls across a 150-500 exposure sweep, while all 10
+    ArUco markers detect on effectively every poll on the same frames).
+
+    A prior session could not get a real measurement (macOS TCC denied
+    camera-capture-open to that session's process -- see
+    ``docs/knowledge/2026-08-23-camera-5-detector-tuning-blocked-by-
+    sandbox-camera-permission.md``). This ticket's reopened execution
+    session resolved that (routing camera work through an
+    already-authorized Terminal.app process -- ``docs/knowledge/
+    claude-code-camera-permission-run-via-terminal.md``) and ran seven
+    independent real sweeps against camera 5: loosening the three
+    AprilTag-quad earned constants (``april_min_wb_diff``/
+    ``april_min_cluster_pixels``/``april_max_line_fit_mse`` -- the source
+    issue's own hypothesis) hit AprilTag 1 in all 70/70 real bursts
+    across every run, vs. the *default* config's 46/50 (92%) -- see
+    ``tests/aprilcam/daemon/test_detector_tuning_hardware.py``'s module
+    docstring for the full seven-run comparison table and the two-pass
+    story (an initially-promising ``corner_refine="contour"`` candidate
+    did not hold up under more real runs).
+
+    Pins the resulting production state: exactly one entry, keyed by
+    camera 5's exact slug, and every other camera's detector still
+    untouched (:func:`test_default_detector_factory_returns_defaults_for_unmapped_slug`
+    above covers the "untouched" half independently).
+    """
+    assert _DETECTOR_CONFIG_OVERRIDES == {
+        "arducam-ov9281-usb-camera": DetectorConfig(
+            april_min_wb_diff=1.0, april_min_cluster_pixels=3, april_max_line_fit_mse=40.0
+        )
+    }
+
+    detector = _default_detector_factory("arducam-ov9281-usb-camera")
+
+    assert isinstance(detector, TagDetector)
+    assert detector._config == DetectorConfig(  # noqa: SLF001 - internal, testing the override wiring
+        april_min_wb_diff=1.0, april_min_cluster_pixels=3, april_max_line_fit_mse=40.0
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +508,7 @@ def test_calibrated_camera_populates_world_fields_on_first_sighting():
     calibration = _fixture_calibration()
     hit = _detection_at(TagFamily.APRILTAG, 1, center_world=(10.0, 20.0))
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]] * CONFIRMATION_STREAK),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]] * CONFIRMATION_STREAK),
         calibration_lookup=lambda slug: calibration,
     )
     cam = _camera("cal-cam", frames=[_blank_frame()] * CONFIRMATION_STREAK)
@@ -483,7 +547,7 @@ def test_yaw_rad_matches_atan2_of_the_front_edge_at_a_known_rotation():
     known_yaw = math.radians(37.0)  # non-axis-aligned, like vision/detector.py's own convention check
     hit = _detection_at(TagFamily.APRILTAG, 1, center_world=(0.0, 0.0), yaw_rad=known_yaw)
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]] * CONFIRMATION_STREAK),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]] * CONFIRMATION_STREAK),
         calibration_lookup=lambda slug: calibration,
     )
     cam = _camera("cal-cam", frames=[_blank_frame()] * CONFIRMATION_STREAK)
@@ -522,7 +586,7 @@ def test_moving_east_across_bursts_reports_strictly_increasing_world_x():
         [_detection_at(TagFamily.APRILTAG, 1, center_world=(0.0, 0.0))],
     ]
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector(hits),
+        detector_factory=lambda _slug: _ScriptedDetector(hits),
         calibration_lookup=lambda slug: calibration,
         confirmation_streak=1,
     )
@@ -561,7 +625,7 @@ def test_moving_north_across_bursts_reports_strictly_increasing_world_y():
         [_detection_at(TagFamily.APRILTAG, 1, center_world=(0.0, 0.0))],
     ]
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector(hits),
+        detector_factory=lambda _slug: _ScriptedDetector(hits),
         calibration_lookup=lambda slug: calibration,
         confirmation_streak=1,
     )
@@ -595,7 +659,7 @@ def test_motion_fields_populate_once_a_second_calibrated_sample_exists():
         [_detection_at(TagFamily.APRILTAG, 1, center_world=(10.0, 0.0))],
     ]
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector(hits),
+        detector_factory=lambda _slug: _ScriptedDetector(hits),
         calibration_lookup=lambda slug: calibration,
         confirmation_streak=1,
     )
@@ -635,7 +699,7 @@ def test_world_corners_preserve_order_and_use_the_same_homography_as_world():
         TagFamily.APRILTAG, 1, center_world=(15.0, -8.0), yaw_rad=math.radians(20.0)
     )
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]] * CONFIRMATION_STREAK),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]] * CONFIRMATION_STREAK),
         calibration_lookup=lambda slug: calibration,
     )
     cam = _camera("cal-cam", frames=[_blank_frame()] * CONFIRMATION_STREAK)
@@ -681,7 +745,7 @@ def test_uncalibrated_camera_output_is_byte_for_byte_sprint_021_shape():
 
     hit = _detection_at(TagFamily.APRILTAG, 1, center_world=(0.0, 0.0))
     engine = DetectionEngine(
-        detector_factory=lambda: _CountingDetector(hits=[hit]),
+        detector_factory=lambda _slug: _CountingDetector(hits=[hit]),
         calibration_lookup=calibration_lookup,
     )
     cam = _camera("uncalibrated-cam", frames=[_blank_frame()] * CONFIRMATION_STREAK)
@@ -733,7 +797,7 @@ def test_drift_beyond_tolerance_marks_the_calibration_stale():
     positions[5] = (true_x + 5.0, true_y)
     mark_stale_calls: List[str] = []
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([_aruco_hits(positions)]),
+        detector_factory=lambda _slug: _ScriptedDetector([_aruco_hits(positions)]),
         calibration_lookup=lambda slug: calibration,
         playfield_lookup=lambda name: definition if name == calibration.playfield else None,
         mark_stale=lambda slug: mark_stale_calls.append(slug),
@@ -756,7 +820,7 @@ def test_drift_within_tolerance_does_not_mark_stale():
     positions[5] = (true_x + 0.5, true_y)
     mark_stale_calls: List[str] = []
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([_aruco_hits(positions)]),
+        detector_factory=lambda _slug: _ScriptedDetector([_aruco_hits(positions)]),
         calibration_lookup=lambda slug: calibration,
         playfield_lookup=lambda name: definition if name == calibration.playfield else None,
         mark_stale=lambda slug: mark_stale_calls.append(slug),
@@ -777,7 +841,7 @@ def test_no_markers_visible_does_not_mark_stale():
     definition = main_playfield_definition()
     mark_stale_calls: List[str] = []
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[]]),  # nothing detected at all
+        detector_factory=lambda _slug: _ScriptedDetector([[]]),  # nothing detected at all
         calibration_lookup=lambda slug: calibration,
         playfield_lookup=lambda name: definition if name == calibration.playfield else None,
         mark_stale=lambda slug: mark_stale_calls.append(slug),
@@ -805,7 +869,7 @@ def test_insufficient_markers_does_not_mark_stale_even_with_a_huge_shift():
     huge_shift = {1: (MAIN_PLAYFIELD_ARUCO_POSITIONS[1][0] + 50.0, MAIN_PLAYFIELD_ARUCO_POSITIONS[1][1])}
     mark_stale_calls: List[str] = []
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([_aruco_hits(huge_shift)]),
+        detector_factory=lambda _slug: _ScriptedDetector([_aruco_hits(huge_shift)]),
         calibration_lookup=lambda slug: calibration,
         playfield_lookup=lambda name: definition if name == calibration.playfield else None,
         mark_stale=lambda slug: mark_stale_calls.append(slug),
@@ -829,7 +893,7 @@ def test_drift_check_is_rate_limited_to_at_most_once_per_interval():
     hits = _aruco_hits(positions)
     mark_stale_calls: List[str] = []
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([hits, hits, hits]),
+        detector_factory=lambda _slug: _ScriptedDetector([hits, hits, hits]),
         calibration_lookup=lambda slug: calibration,
         playfield_lookup=lambda name: definition if name == calibration.playfield else None,
         mark_stale=lambda slug: mark_stale_calls.append(slug),
@@ -856,7 +920,7 @@ def test_drift_check_runs_again_once_the_interval_elapses():
     hits = _aruco_hits(positions)
     mark_stale_calls: List[str] = []
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([hits, hits]),
+        detector_factory=lambda _slug: _ScriptedDetector([hits, hits]),
         calibration_lookup=lambda slug: calibration,
         playfield_lookup=lambda name: definition if name == calibration.playfield else None,
         mark_stale=lambda slug: mark_stale_calls.append(slug),
@@ -889,7 +953,7 @@ def test_drift_check_reuses_the_burst_own_detections_no_extra_detect_call():
     hits = _aruco_hits(MAIN_PLAYFIELD_ARUCO_POSITIONS)
     counting = _CountingDetector(hits=hits)
     engine = DetectionEngine(
-        detector_factory=lambda: counting,
+        detector_factory=lambda _slug: counting,
         calibration_lookup=lambda slug: calibration,
         playfield_lookup=lambda name: definition if name == calibration.playfield else None,
         mark_stale=lambda slug: None,
@@ -915,7 +979,7 @@ def test_uncalibrated_camera_never_calls_playfield_lookup_or_mark_stale():
         return None
 
     engine = DetectionEngine(
-        detector_factory=lambda: _CountingDetector(),
+        detector_factory=lambda _slug: _CountingDetector(),
         calibration_lookup=lambda slug: None,
         playfield_lookup=playfield_lookup,
         mark_stale=lambda slug: mark_stale_calls.append(slug),
@@ -968,7 +1032,7 @@ def test_tag_frame_calibration_stale_reflects_a_just_flipped_calibration():
         calibrations[slug] = replace(calibrations[slug], stale=True)
 
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([_aruco_hits(positions)]),
+        detector_factory=lambda _slug: _ScriptedDetector([_aruco_hits(positions)]),
         calibration_lookup=calibration_lookup,
         playfield_lookup=lambda name: definition if name == calibration.playfield else None,
         mark_stale=mark_stale,
@@ -985,7 +1049,7 @@ def test_tag_frame_calibration_stale_is_false_when_nothing_drifted():
     calibration = _fixture_calibration("cal-camera")
     definition = main_playfield_definition()
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([_aruco_hits(MAIN_PLAYFIELD_ARUCO_POSITIONS)]),
+        detector_factory=lambda _slug: _ScriptedDetector([_aruco_hits(MAIN_PLAYFIELD_ARUCO_POSITIONS)]),
         calibration_lookup=lambda slug: calibration,
         playfield_lookup=lambda name: definition if name == calibration.playfield else None,
         mark_stale=lambda slug: None,
@@ -998,7 +1062,7 @@ def test_tag_frame_calibration_stale_is_false_when_nothing_drifted():
 
 
 def test_tag_frame_calibration_stale_is_false_for_an_uncalibrated_camera():
-    engine = DetectionEngine(detector_factory=lambda: _CountingDetector())
+    engine = DetectionEngine(detector_factory=lambda _slug: _CountingDetector())
     cam = _camera("cam-n", frames=[_blank_frame()])
 
     tag_frame = engine.run_burst("cam-n", cam)
@@ -1039,7 +1103,7 @@ def test_unconfirmed_single_sighting_never_appears_in_tags_or_the_buffer():
     makes it into the ring buffer either, since only confirmed records
     are ever built and appended."""
     hit = _detection_at(TagFamily.ARUCO, 17, center_world=(-59.4, -19.6))
-    engine = DetectionEngine(detector_factory=lambda: _ScriptedDetector([[hit], []]))
+    engine = DetectionEngine(detector_factory=lambda _slug: _ScriptedDetector([[hit], []]))
     cam = _camera("phantom-cam", frames=[_blank_frame(), _blank_frame()])
 
     first = engine.run_burst("phantom-cam", cam)
@@ -1060,7 +1124,7 @@ def test_phantom_recurring_at_different_positions_across_gaps_is_never_reported(
     sighting_a = _detection_at(TagFamily.ARUCO, 17, center_world=(-59.4, -19.6))
     sighting_b = _detection_at(TagFamily.ARUCO, 17, center_world=(50.1, -30.3))
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[], [sighting_a], [], [], [sighting_b]])
+        detector_factory=lambda _slug: _ScriptedDetector([[], [sighting_a], [], [], [sighting_b]])
     )
     cam = _camera("phantom-cam-2", frames=[_blank_frame() for _ in range(5)])
 
@@ -1074,7 +1138,7 @@ def test_confirmation_streak_strictly_consecutive_sightings_confirm_on_the_final
     consecutive bursts is sufficient -- the id appears starting on the
     *last* of those bursts' ``TagFrame.tags``, never any earlier one."""
     hit = _detection_at(TagFamily.APRILTAG, 3, center_world=(0.0, 0.0))
-    engine = DetectionEngine(detector_factory=lambda: _ScriptedDetector([[hit]] * CONFIRMATION_STREAK))
+    engine = DetectionEngine(detector_factory=lambda _slug: _ScriptedDetector([[hit]] * CONFIRMATION_STREAK))
     cam = _camera("confirm-cam", frames=[_blank_frame()] * CONFIRMATION_STREAK)
 
     frames = [engine.run_burst("confirm-cam", cam) for _ in range(CONFIRMATION_STREAK)]
@@ -1097,7 +1161,7 @@ def test_a_gap_of_one_burst_restarts_confirmation_not_carrying_over_a_prior_stre
     genuinely completes."""
     hit = _detection_at(TagFamily.APRILTAG, 4, center_world=(0.0, 0.0))
     script = [[hit], []] + [[hit]] * CONFIRMATION_STREAK
-    engine = DetectionEngine(detector_factory=lambda: _ScriptedDetector(script))
+    engine = DetectionEngine(detector_factory=lambda _slug: _ScriptedDetector(script))
     cam = _camera("gap-cam", frames=[_blank_frame() for _ in script])
 
     frames = [engine.run_burst("gap-cam", cam) for _ in script]
@@ -1126,7 +1190,7 @@ def test_confirmation_is_presence_only_consecutive_different_positions_still_con
     # working whatever that constant is tuned to.
     positions = [(-40.0 + 20.0 * i, 10.0 - 15.0 * i) for i in range(CONFIRMATION_STREAK)]
     hits = [_detection_at(TagFamily.APRILTAG, 9, center_world=pos) for pos in positions]
-    engine = DetectionEngine(detector_factory=lambda: _ScriptedDetector([[hit] for hit in hits]))
+    engine = DetectionEngine(detector_factory=lambda _slug: _ScriptedDetector([[hit] for hit in hits]))
     cam = _camera("mobile-cam", frames=[_blank_frame()] * CONFIRMATION_STREAK)
 
     frames = [engine.run_burst("mobile-cam", cam) for _ in hits]
@@ -1151,7 +1215,7 @@ def test_steady_state_reporting_is_unaffected_by_confirmation_once_past_the_thre
     hit = _detection_at(TagFamily.APRILTAG, 5, center_world=(0.0, 0.0))
     total_bursts = CONFIRMATION_STREAK + 2
     script = [[hit]] * total_bursts
-    engine = DetectionEngine(detector_factory=lambda: _ScriptedDetector(script))
+    engine = DetectionEngine(detector_factory=lambda _slug: _ScriptedDetector(script))
     cam = _camera("steady-cam", frames=[_blank_frame() for _ in range(total_bursts)])
 
     frames = [engine.run_burst("steady-cam", cam) for _ in range(total_bursts)]
@@ -1181,7 +1245,7 @@ def test_an_unconfirmed_detection_never_carries_motion_or_seeds_motion_history()
     real = _detection_at(TagFamily.APRILTAG, 1, center_world=(0.0, 0.0))
     script = [[phantom], []] + [[real]] * CONFIRMATION_STREAK
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector(script),
+        detector_factory=lambda _slug: _ScriptedDetector(script),
         calibration_lookup=lambda slug: calibration,
     )
     cam = _camera("motion-cam", frames=[_blank_frame() for _ in script])
@@ -1208,7 +1272,7 @@ def test_confirmation_streak_is_genuinely_overridable_to_one_reports_immediately
     in ``test_service.py`` relies on)."""
     hit = _detection_at(TagFamily.APRILTAG, 6, center_world=(0.0, 0.0))
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]), confirmation_streak=1
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]]), confirmation_streak=1
     )
     cam = _camera("override-cam-1", frames=[_blank_frame()])
 
@@ -1226,7 +1290,7 @@ def test_confirmation_streak_is_genuinely_overridable_to_three_requires_three_bu
     path must actually work, not just accept the parameter."""
     hit = _detection_at(TagFamily.APRILTAG, 8, center_world=(0.0, 0.0))
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit], [hit], [hit]]),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit], [hit], [hit]]),
         confirmation_streak=3,
     )
     cam = _camera("override-cam-3", frames=[_blank_frame() for _ in range(3)])
@@ -1275,7 +1339,7 @@ def test_confirmed_tag_missing_within_grace_is_reported_immediately_on_redetecti
     hit = _detection_at(TagFamily.APRILTAG, 10, center_world=(0.0, 0.0))
     script = [[hit]] * CONFIRMATION_STREAK + [[], []] + [[hit]]
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector(script),
+        detector_factory=lambda _slug: _ScriptedDetector(script),
         confirmation_grace=grace,
     )
     cam = _camera("grace-cam", frames=[_blank_frame() for _ in script])
@@ -1305,7 +1369,7 @@ def test_confirmed_tag_missing_beyond_grace_drops_and_requires_full_reconfirmati
     misses = [[]] * (grace + 1)
     script = [[hit]] * CONFIRMATION_STREAK + misses + [[hit]] * CONFIRMATION_STREAK
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector(script),
+        detector_factory=lambda _slug: _ScriptedDetector(script),
         confirmation_grace=grace,
     )
     cam = _camera("grace-drop-cam", frames=[_blank_frame() for _ in script])
@@ -1335,7 +1399,7 @@ def test_grace_burst_never_builds_or_buffers_a_record_for_the_missing_tag():
     that the immediate return value looks right."""
     hit = _detection_at(TagFamily.APRILTAG, 12, center_world=(0.0, 0.0))
     script = [[hit]] * CONFIRMATION_STREAK + [[]]
-    engine = DetectionEngine(detector_factory=lambda: _ScriptedDetector(script))
+    engine = DetectionEngine(detector_factory=lambda _slug: _ScriptedDetector(script))
     cam = _camera("grace-buffer-cam", frames=[_blank_frame() for _ in script])
 
     frames = [engine.run_burst("grace-buffer-cam", cam) for _ in script]
@@ -1357,7 +1421,7 @@ def test_confirmation_grace_zero_reproduces_the_pre_ticket_instant_drop_behaviou
     hit = _detection_at(TagFamily.APRILTAG, 13, center_world=(0.0, 0.0))
     script = [[hit]] * CONFIRMATION_STREAK + [[]] + [[hit]] * CONFIRMATION_STREAK
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector(script),
+        detector_factory=lambda _slug: _ScriptedDetector(script),
         confirmation_grace=0,
     )
     cam = _camera("grace-zero-cam", frames=[_blank_frame() for _ in script])
@@ -1386,7 +1450,7 @@ def test_confirmation_grace_is_genuinely_overridable_to_a_larger_value_tolerates
     hit = _detection_at(TagFamily.APRILTAG, 15, center_world=(0.0, 0.0))
     script = [[hit]] * CONFIRMATION_STREAK + [[]] * grace + [[hit]]
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector(script),
+        detector_factory=lambda _slug: _ScriptedDetector(script),
         confirmation_grace=grace,
     )
     cam = _camera("grace-override-cam", frames=[_blank_frame() for _ in script])
@@ -1412,7 +1476,7 @@ def test_grace_does_not_shortcut_appearance_for_an_unconfirmed_or_phantom_id():
     building path at all."""
     phantom = _detection_at(TagFamily.ARUCO, 17, center_world=(-59.4, -19.6))
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[phantom], [], [phantom], [], [phantom]]),
+        detector_factory=lambda _slug: _ScriptedDetector([[phantom], [], [phantom], [], [phantom]]),
         confirmation_grace=100,  # deliberately huge -- must still make no difference
     )
     cam = _camera("grace-no-shortcut-cam", frames=[_blank_frame() for _ in range(5)])
@@ -1434,7 +1498,7 @@ def test_steady_state_reporting_with_interleaved_grace_misses_matches_actual_det
     # so misses never accumulate past 1 consecutive.
     steady_state = [[] if i % 3 == 2 else [hit] for i in range(12)]
     script = [[hit]] * CONFIRMATION_STREAK + steady_state
-    engine = DetectionEngine(detector_factory=lambda: _ScriptedDetector(script))
+    engine = DetectionEngine(detector_factory=lambda _slug: _ScriptedDetector(script))
     cam = _camera("grace-steady-cam", frames=[_blank_frame() for _ in script])
 
     frames = [engine.run_burst("grace-steady-cam", cam) for _ in script]
@@ -1498,7 +1562,7 @@ def test_registered_mount_offset_and_yaw_corrects_the_reported_pose():
     mount = MountParameters(mount_x=8.0, mount_y=3.0, mount_yaw_rad=math.radians(15.0))
 
     raw_engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]]),
         calibration_lookup=lambda slug: calibration,
         confirmation_streak=1,
     )
@@ -1508,7 +1572,7 @@ def test_registered_mount_offset_and_yaw_corrects_the_reported_pose():
     assert raw_record.yaw_rad is not None
 
     corrected_engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]]),
         calibration_lookup=lambda slug: calibration,
         mount_lookup=lambda t: mount if t == tag else None,
         confirmation_streak=1,
@@ -1544,7 +1608,7 @@ def test_registered_mount_z_uses_the_injected_camera_geometry_lookup_for_paralla
     camera_height_cm = 100.0
 
     raw_engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]]),
         calibration_lookup=lambda slug: calibration,
         confirmation_streak=1,
     )
@@ -1554,7 +1618,7 @@ def test_registered_mount_z_uses_the_injected_camera_geometry_lookup_for_paralla
     assert raw_record.yaw_rad is not None
 
     corrected_engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]]),
         calibration_lookup=lambda slug: calibration,
         mount_lookup=lambda t: mount if t == tag else None,
         camera_geometry_lookup=lambda slug: (camera_ground_position, camera_height_cm),
@@ -1596,7 +1660,7 @@ def test_default_camera_geometry_lookup_makes_mount_z_inert_against_a_live_camer
     mount = MountParameters(mount_z=20.0)
 
     raw_engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]]),
         calibration_lookup=lambda slug: calibration,
         confirmation_streak=1,
     )
@@ -1604,7 +1668,7 @@ def test_default_camera_geometry_lookup_makes_mount_z_inert_against_a_live_camer
     raw_record = raw_frame.tags[0]
 
     stopgap_engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]]),
         calibration_lookup=lambda slug: calibration,
         mount_lookup=lambda t: mount if t == tag else None,
         confirmation_streak=1,
@@ -1638,7 +1702,7 @@ def test_mount_z_at_configured_camera_height_skips_correction_reports_raw_positi
     mount = MountParameters(mount_x=8.0, mount_y=3.0, mount_z=camera_height_cm)  # at, not above
 
     raw_engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]]),
         calibration_lookup=lambda slug: calibration,
         confirmation_streak=1,
     )
@@ -1647,7 +1711,7 @@ def test_mount_z_at_configured_camera_height_skips_correction_reports_raw_positi
     assert raw_record.world is not None
 
     guarded_engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]]),
         calibration_lookup=lambda slug: calibration,
         mount_lookup=lambda t: mount if t == tag else None,
         camera_geometry_lookup=lambda slug: (WorldPoint(x=0.0, y=0.0), camera_height_cm),
@@ -1675,7 +1739,7 @@ def test_mount_z_above_configured_camera_height_skips_correction_reports_raw_pos
     mount = MountParameters(mount_z=150.0)  # well above the configured camera height
 
     raw_engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]]),
         calibration_lookup=lambda slug: calibration,
         confirmation_streak=1,
     )
@@ -1686,7 +1750,7 @@ def test_mount_z_above_configured_camera_height_skips_correction_reports_raw_pos
     assert raw_record.world is not None
 
     guarded_engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]]),
         calibration_lookup=lambda slug: calibration,
         mount_lookup=lambda t: mount if t == tag else None,
         camera_geometry_lookup=lambda slug: (WorldPoint(x=0.0, y=0.0), camera_height_cm),
@@ -1715,7 +1779,7 @@ def test_mount_z_below_configured_camera_height_still_corrects():
     mount = MountParameters(mount_z=20.0)
 
     raw_engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]]),
         calibration_lookup=lambda slug: calibration,
         confirmation_streak=1,
     )
@@ -1727,7 +1791,7 @@ def test_mount_z_below_configured_camera_height_still_corrects():
     assert raw_record.yaw_rad is not None
 
     corrected_engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]]),
         calibration_lookup=lambda slug: calibration,
         mount_lookup=lambda t: mount if t == tag else None,
         camera_geometry_lookup=lambda slug: (WorldPoint(x=0.0, y=0.0), camera_height_cm),
@@ -1761,7 +1825,7 @@ def test_unregistered_tag_is_unaffected_by_another_tags_mount_registration():
     mount = MountParameters(mount_x=8.0, mount_y=3.0)
 
     raw_engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]]),
         calibration_lookup=lambda slug: calibration,
         confirmation_streak=1,
     )
@@ -1769,7 +1833,7 @@ def test_unregistered_tag_is_unaffected_by_another_tags_mount_registration():
     raw_record = raw_frame.tags[0]
 
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]]),
         calibration_lookup=lambda slug: calibration,
         mount_lookup=lambda t: mount if t == other_tag else None,
         confirmation_streak=1,
@@ -1793,7 +1857,7 @@ def test_mount_correction_leaves_world_corners_and_pixel_corners_unchanged():
     mount = MountParameters(mount_x=8.0, mount_y=3.0, mount_yaw_rad=math.radians(15.0))
 
     raw_engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]]),
         calibration_lookup=lambda slug: calibration,
         confirmation_streak=1,
     )
@@ -1803,7 +1867,7 @@ def test_mount_correction_leaves_world_corners_and_pixel_corners_unchanged():
     raw_record = raw_frame.tags[0]
 
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]]),
         calibration_lookup=lambda slug: calibration,
         mount_lookup=lambda t: mount if t == tag else None,
         confirmation_streak=1,
@@ -1829,7 +1893,7 @@ def test_mount_correction_is_a_no_op_on_an_uncalibrated_camera():
     mount = MountParameters(mount_x=8.0, mount_y=3.0)
 
     engine = DetectionEngine(
-        detector_factory=lambda: _ScriptedDetector([[hit]]),
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]]),
         mount_lookup=lambda t: mount if t == tag else None,
         confirmation_streak=1,
     )

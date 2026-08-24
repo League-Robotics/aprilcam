@@ -1,0 +1,232 @@
+{
+  "baseline_controls": {
+    "auto_exposure": 1,
+    "exposure": 20
+  },
+  "calibration_snapshot_sha256": "95f45a8abf24e9258be8f7bafcf9927d0c25a67544a406aeca64a5abbd7d6af1",
+  "camera": {
+    "config_dir": "arducam-ov9281-usb-camera",
+    "registry_enum": 5,
+    "resolution": [
+      1280,
+      800
+    ]
+  },
+  "capture_finished_at": "2026-08-23T23:52:22.035879+00:00",
+  "capture_started_at": "2026-08-23T23:51:33.763494+00:00",
+  "daemon_version": "0.20260823.5",
+  "field_state_id": "fs-20260823",
+  "images": [
+    {
+      "captured_at": "2026-08-23T23:51:33.763494+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 20
+      },
+      "dark": false,
+      "file": "baseline.jpg",
+      "mean_luminance": 112.42,
+      "name": "baseline",
+      "settle_s": 1.5,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:51:37.579340+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 5
+      },
+      "dark": false,
+      "file": "exp-005.jpg",
+      "mean_luminance": 33.96,
+      "name": "exp-005",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:51:41.173880+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 10
+      },
+      "dark": false,
+      "file": "exp-010.jpg",
+      "mean_luminance": 60.84,
+      "name": "exp-010",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:51:44.995192+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 15
+      },
+      "dark": false,
+      "file": "exp-015.jpg",
+      "mean_luminance": 99.86,
+      "name": "exp-015",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:51:48.845478+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 30
+      },
+      "dark": false,
+      "file": "exp-030.jpg",
+      "mean_luminance": 132.12,
+      "name": "exp-030",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:51:52.592259+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 50
+      },
+      "dark": false,
+      "file": "exp-050.jpg",
+      "mean_luminance": 184.72,
+      "name": "exp-050",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:51:56.436044+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 75
+      },
+      "dark": false,
+      "file": "exp-075.jpg",
+      "mean_luminance": 209.66,
+      "name": "exp-075",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:52:00.280293+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 100
+      },
+      "dark": false,
+      "file": "exp-100.jpg",
+      "mean_luminance": 209.55,
+      "name": "exp-100",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:52:04.092580+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 150
+      },
+      "dark": false,
+      "file": "exp-150.jpg",
+      "mean_luminance": 209.9,
+      "name": "exp-150",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:52:07.992839+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 200
+      },
+      "dark": false,
+      "file": "exp-200.jpg",
+      "mean_luminance": 209.54,
+      "name": "exp-200",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:52:11.759327+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 300
+      },
+      "dark": false,
+      "file": "exp-300.jpg",
+      "mean_luminance": 209.69,
+      "name": "exp-300",
+      "settle_s": 3.0,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:52:14.204923+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 20,
+        "gain": 1
+      },
+      "dark": false,
+      "file": "gain-01.jpg",
+      "mean_luminance": 99.54,
+      "name": "gain-01",
+      "settle_s": 1.5,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:52:16.855042+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 20,
+        "gain": 4
+      },
+      "dark": false,
+      "file": "gain-04.jpg",
+      "mean_luminance": 115.58,
+      "name": "gain-04",
+      "settle_s": 1.5,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:52:19.442427+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 20,
+        "gain": 8
+      },
+      "dark": false,
+      "file": "gain-08.jpg",
+      "mean_luminance": 137.42,
+      "name": "gain-08",
+      "settle_s": 1.5,
+      "washed": false
+    },
+    {
+      "captured_at": "2026-08-23T23:52:22.004390+00:00",
+      "controls": {
+        "auto_exposure": 1,
+        "exposure": 20,
+        "gain": 16
+      },
+      "dark": false,
+      "file": "gain-16.jpg",
+      "mean_luminance": 132.17,
+      "name": "gain-16",
+      "settle_s": 1.5,
+      "washed": false
+    }
+  ],
+  "lighting_conditions": {
+    "captured_at_local": "2026-08-23 ~16:51-16:52 PDT",
+    "condition": "daylight-late-afternoon",
+    "note": "Ambient natural daylight, late afternoon PDT. Camera 5's exposure/gain baseline is ambient-dependent (docs/knowledge/camera-5-exposure-tuning sweep) -- this generation's baseline (exposure=20, auto_exposure=1) was established under this daylight condition. A night/artificial-light recapture would likely need a different baseline exposure and should be tagged as a separate field-state/lighting condition, not folded into fs-20260823."
+  },
+  "matrix_source": "matrix",
+  "package_version": "0.20260823.5",
+  "playfield": "main-playfield",
+  "skipped_variations": {
+    "apply_failed": [],
+    "no_frame": []
+  }
+}

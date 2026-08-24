@@ -128,6 +128,26 @@ uv run mypy                          # type check src/aprilcam on its own
 `pyproject.toml`'s `[tool.mypy]` section) — a type error fails the test
 suite the same way a failing unit test would.
 
+### Test runners
+
+Three thin wrapper scripts, one per test layer — see
+[`docs/test-plans/test-runner-hierarchy.md`](docs/test-plans/test-runner-hierarchy.md)
+for the full breakdown:
+
+| Script | Needs a rig? | Run from |
+|---|---|---|
+| `bash scripts/test-gate.sh` | No | Anywhere, including CI |
+| `bash scripts/test-hardware.sh` | Yes | **Operator's Terminal only** |
+| `bash scripts/test-acceptance.sh` | Yes, real daemon already up | **Operator's Terminal only** |
+
+`test-hardware.sh` and `test-acceptance.sh` can only truly execute
+from the operator's own Terminal — a daemon started from an agent
+process inherits its macOS TCC camera grant, which has none, so
+camera opens fail even though enumeration succeeds. Each script prints
+a preflight checklist explaining this before running; read
+`docs/knowledge/daemon-camera-grant-and-detection-priming.md` for the
+full mechanism.
+
 ## License
 
 MIT
