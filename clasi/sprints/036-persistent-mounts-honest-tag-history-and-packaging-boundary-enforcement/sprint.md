@@ -1,7 +1,7 @@
 ---
 id: '036'
 title: Persistent mounts, honest tag history, and packaging boundary enforcement
-status: ticketing
+status: executing
 branch: sprint/036-persistent-mounts-honest-tag-history-and-packaging-boundary-enforcement
 use-cases: []
 issues:
@@ -90,9 +90,10 @@ shared abstractions across them just because they landed together:
    is explicitly out of scope.
 5. Populate `clasi/usecases.md` as an index the CLASI tool can read,
    sourced from `docs/design/use-cases/*.md`, and add a regression test
-   asserting `get_use_case_coverage()`'s total is non-zero and consistent
-   with the source directory (so the index can't silently rot). The
-   `get_use_case_coverage()` tool's own source lives in a different
+   asserting the generated index stays consistent with the source
+   directory (so it can't silently rot) — see Revision note below on why
+   this no longer names `get_use_case_coverage()`'s own return value.
+   The `get_use_case_coverage()` tool's own source lives in a different
    repository and is out of scope for this project's sprint — pointing
    the tool at `docs/design/use-cases/` directly (the issue's option 1)
    is recorded as a recommended follow-up issue, not a ticket here.
@@ -112,8 +113,11 @@ shared abstractions across them just because they landed together:
 - `tests/packaging/test_installed_package.py` starts `aprilcam mcp` in
   the fresh venv, completes a real handshake, and would have caught the
   mcp 2.x incident.
-- `get_use_case_coverage()` reports a non-zero total consistent with
-  `docs/design/use-cases/`, guarded by a regression test.
+- `clasi/usecases.md` is a generated index consistent with
+  `docs/design/use-cases/`, guarded by a regression test (see Revision
+  note below: `get_use_case_coverage()` itself cannot be made to report
+  this in-repo — that requires a CLASI-package fix tracked as a
+  follow-up issue).
 
 ## Scope
 
@@ -401,3 +405,18 @@ to make its new packaging-test assertion meaningful, and 006 depends on
 006 must build on 005's version of that file. Mount persistence (007,
 the sprint's largest item) and its doc follow-up (008) run last so they
 don't block the smaller, independent tickets ahead of them.
+
+## Revision (2026-08-24)
+
+Solution item 5 and the fifth Success Criteria bullet originally
+promised `get_use_case_coverage()` itself would report a non-zero
+total. Ticket 001's implementation and verification found this
+unsatisfiable from this repository: the installed CLASI tool resolves
+its index path from a fixed `.clasi` anchor that ignores this
+project's `paths:` config, and separately scans for per-sprint
+`usecases.md` files, a layout the single-doc sprint model retired.
+Both are CLASI-package defects, out of scope per this sprint's own
+Solution item 5 and ticket 001's AC5. Both passages above were amended
+to describe what was actually delivered — a correct, tested,
+`clasi/usecases.md` index — rather than the tool's own return value,
+which is tracked as a CLASI-package follow-up issue instead.

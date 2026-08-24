@@ -1,8 +1,9 @@
 ---
 id: '002'
 title: Fix get_tag_history docstring and document detection cadence in AGENT_GUIDE.md
-status: open
-use-cases: [SUC-002]
+status: in-progress
+use-cases:
+- SUC-002
 depends-on: []
 github-issue: ''
 issue: tag-history-gaps-and-jitter-speed-mislead-mcp-consumers.md
