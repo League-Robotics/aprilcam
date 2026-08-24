@@ -115,13 +115,30 @@ plausible-looking wrong number that will not announce itself. If your
 control loop depends on `register_tag` having been called, call it
 every time you connect, before you trust a reported position.
 
-## Polling
+## Reading Tags: Polling vs Streaming
 
-There is no dedicated tag-streaming RPC yet (`stream_tags` /
-`stream_images` are a later sprint) — poll `get_tag`/`get_tags` from
-your own loop. Each call is a single round trip against the daemon's
-latest detection; calling faster than your camera's own frame rate
-gains nothing.
+Two ways to read tags, and the choice changes how often the daemon
+actually detects.
+
+**Polling** — `get_tag`/`get_tags` from your own loop. Each call is a
+single round trip that runs one detection burst on demand; calling
+faster than your camera's own frame rate gains nothing.
+
+**Streaming** — `daemon.stream_tags(camera)` yields frames
+continuously (`stream_images` likewise for frames). Prefer this for a
+control loop.
+
+The difference matters beyond convenience: detection is **demand-driven
+by default**. An idle daemon runs zero detections, so with nobody
+streaming, the ring buffer grows only when someone polls — consecutive
+`get_tag_history` frames can be *minutes or hours* apart, not the
+~10 seconds the buffer's size suggests. While at least one
+`stream_tags` subscriber is active on a camera, that camera detects at
+a steady cadence and history becomes continuous for real.
+
+So: **do not compute velocity or heading from consecutive history
+frames unless a stream subscriber is running.** Check each record's own
+timestamp rather than assuming a fixed frame interval.
 
 ## Drawing on the Playfield
 
