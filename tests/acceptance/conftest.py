@@ -19,6 +19,17 @@ nadir_x_cm=3.0570142285481654, nadir_y_cm=-2.798700632324644``,
 sprint.md Decision 3). This conftest is the mechanism that makes "never
 overwritten" *provable*, not assumed.
 
+**A fourth thing, added by ticket 015:** a collection-time node-id
+allowlist (:func:`find_disallowed_calls`, wired into
+:func:`pytest_collection_modifyitems` alongside the marker audit below)
+that fails collection outright if any test module under this directory
+contains a ``Daemon.calibrate`` call or a non-dry (no ``--dry-run``)
+``locate`` call -- both mutate real, persisted state
+(``camera_position``/calibration), which is exactly what this layer's
+read-only/reversible contract forbids. See that function's own
+docstring for the two AST patterns it checks and why an AST scan is
+used instead of a plain string search.
+
 **Three things this file builds, per ticket 014:**
 
 1. **Real-roots requirement** (:func:`pytest_configure`) -- hard-refuses
@@ -84,6 +95,7 @@ zero hardware and zero real-system risk.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import os
 from pathlib import Path
@@ -102,6 +114,7 @@ __all__ = [
     "hash_tree",
     "diff_trees",
     "assert_no_writes",
+    "find_disallowed_calls",
 ]
 
 #: The two env vars that must be *absent* for this layer to run at all.
@@ -288,7 +301,8 @@ def pytest_collection_modifyitems(
     config: pytest.Config, items: List[pytest.Item]
 ) -> None:
     """Refuse to collect any ``tests/acceptance/`` test missing one of
-    the three required markers.
+    the three required markers, or any test module under this directory
+    that contains a structurally-forbidden call (:func:`find_disallowed_calls`).
 
     Only inspects items whose test file lives under this directory --
     ``pytest_collection_modifyitems`` hooks receive the *whole* session's
@@ -297,6 +311,8 @@ def pytest_collection_modifyitems(
     """
     del config  # unused -- required by the hook signature
     violations: List[str] = []
+    scanned_files: Dict[Path, None] = {}
+    allowlist_violations: List[str] = []
     for item in items:
         item_path = Path(str(getattr(item, "path", item.fspath))).resolve()
         try:
@@ -307,6 +323,15 @@ def pytest_collection_modifyitems(
         missing = _REQUIRED_MARKERS - present
         if missing:
             violations.append(f"  {item.nodeid}: missing {sorted(missing)}")
+        if item_path not in scanned_files:
+            scanned_files[item_path] = None
+            try:
+                source = item_path.read_text(encoding="utf-8")
+            except OSError:
+                source = ""
+            allowlist_violations.extend(
+                find_disallowed_calls(source, filename=str(item_path))
+            )
     if violations:
         raise pytest.UsageError(
             "every test under tests/acceptance/ must carry all three of "
@@ -315,6 +340,113 @@ def pytest_collection_modifyitems(
             "integration\" exclusion keeps excluding this whole layer "
             "without ever being edited. Missing on:\n" + "\n".join(violations)
         )
+    if allowlist_violations:
+        raise pytest.UsageError(
+            "tests/acceptance/ node-id allowlist violation(s) -- "
+            "'calibrate' and any non-dry 'locate' call are structurally "
+            "excluded from this layer (sprint 035 ticket 015: both mutate "
+            "real, persisted state, which this read-only/reversible layer "
+            "must never do). Found:\n"
+            + "\n".join(f"  {v}" for v in allowlist_violations)
+        )
+
+
+# ---------------------------------------------------------------------------
+# 4. Node-id allowlist -- structurally excludes calibrate / non-dry locate
+# ---------------------------------------------------------------------------
+
+#: Attribute names that are forbidden to call anywhere under this
+#: directory, full stop -- ``Daemon.calibrate`` mutates real,
+#: persisted calibration state unconditionally (no "dry" mode exists
+#: for it), so unlike ``locate`` there is no exception to allow for.
+_FORBIDDEN_ATTRIBUTE_CALLS = frozenset({"calibrate"})
+
+
+def _iter_call_string_constants(call: ast.Call) -> List[str]:
+    """Every string literal that appears as a direct argument to *call*
+    -- either a bare positional/keyword string constant, or one nested
+    one level inside a list/tuple literal argument (the shape
+    ``subprocess.run([str(bin_path), "camera", "locate", ...])`` takes)
+    -- so :func:`find_disallowed_calls` catches both calling
+    conventions this codebase's real-subprocess hardware tests use
+    (most go through a local ``_run(bin_path, "camera", "locate", ...,
+    env=env)`` helper, which is the flat-positional-args shape; a
+    handful call ``subprocess.run`` with an explicit list literal
+    directly).
+    """
+    strings: List[str] = []
+
+    def _collect(node: ast.AST) -> None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            strings.append(node.value)
+        elif isinstance(node, (ast.List, ast.Tuple)):
+            for elt in node.elts:
+                _collect(elt)
+
+    for arg in call.args:
+        _collect(arg)
+    for kw in call.keywords:
+        if kw.value is not None:
+            _collect(kw.value)
+    return strings
+
+
+def find_disallowed_calls(source: str, *, filename: str = "<test>") -> List[str]:
+    """Every calibrate-shaped or non-dry-locate-shaped call in *source*
+    (already-read module text; *filename* is used only to label
+    messages/violations with a real, greppable location) -- the
+    node-id allowlist ticket 015's acceptance criteria calls for:
+    "structurally excludes calibrate and any non-dry locate call ...
+    not merely avoided by convention." Returns an empty list when
+    *source* contains neither pattern.
+
+    Two independent patterns are checked, both by AST inspection --
+    never a plain string search over the raw text, which would also
+    match comments and docstrings (this module's own docstring
+    mentions both "calibrate" and "locate" by name) and produce
+    constant false positives:
+
+    1. Any attribute access named ``calibrate`` (``d.calibrate(...)``,
+       ``daemon.calibrate(...)``, or the same thing one level removed
+       inside a ``connection.call(lambda d: d.calibrate(...))``
+       closure -- the AST attribute access is identical either way) --
+       forbidden outright, no exception.
+    2. Any call whose direct arguments (see
+       :func:`_iter_call_string_constants`) include the string
+       ``"locate"`` without ``"--dry-run"`` among those same
+       arguments -- mirrors ``test_camera_geometry_hardware.py``'s own
+       ``_run(bin_path, "camera", "locate", ..., "--dry-run",
+       env=env)`` calling convention exactly, so a genuinely dry
+       ``camera locate --dry-run`` call (read-only, never writes) is
+       allowed while a bare, write-risking ``camera locate`` is not.
+
+    A malformed *source* (should never happen for a real, importable
+    test module, since pytest would already have failed to collect it)
+    propagates ``SyntaxError`` rather than being swallowed -- silently
+    skipping the scan on unparseable input would defeat the guard's
+    entire "structural, not conventional" premise.
+    """
+    tree = ast.parse(source, filename=filename)
+    violations: List[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in _FORBIDDEN_ATTRIBUTE_CALLS:
+            violations.append(
+                f"{filename}:{node.lineno}: forbidden '.{node.attr}(...)' call -- "
+                "Daemon.calibrate mutates real calibration state and is excluded "
+                "from tests/acceptance/ by design (sprint 035 ticket 015's "
+                "node-id allowlist)"
+            )
+        elif isinstance(node, ast.Call):
+            call_strings = _iter_call_string_constants(node)
+            if "locate" in call_strings and "--dry-run" not in call_strings:
+                violations.append(
+                    f"{filename}:{node.lineno}: forbidden non-dry 'locate' call -- "
+                    "'camera locate' without '--dry-run' writes real "
+                    "camera_position and is excluded from tests/acceptance/ by "
+                    "design (sprint 035 ticket 015's node-id allowlist); add "
+                    "'--dry-run' to this call or remove it"
+                )
+    return violations
 
 
 # ---------------------------------------------------------------------------
