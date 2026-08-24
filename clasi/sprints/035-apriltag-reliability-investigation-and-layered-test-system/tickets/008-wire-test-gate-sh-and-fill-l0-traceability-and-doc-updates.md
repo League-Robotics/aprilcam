@@ -1,9 +1,12 @@
 ---
-id: '008'
+id: 008
 title: Wire test-gate.sh and fill L0 traceability and doc updates
-status: open
-use-cases: [UC-10]
-depends-on: ['006', '007']
+status: in-progress
+use-cases:
+- UC-10
+depends-on:
+- '006'
+- '007'
 github-issue: ''
 issue: aprilcam-v2-layered-test-system.md
 completes_issue: false

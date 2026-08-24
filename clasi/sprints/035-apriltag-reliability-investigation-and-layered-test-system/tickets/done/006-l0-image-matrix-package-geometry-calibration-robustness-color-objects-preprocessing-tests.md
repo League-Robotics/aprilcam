@@ -44,12 +44,11 @@ exception:
     forbids for this feature class.'
   surface: user-visible
   resolved: true
-  resolution: 'Stakeholder decision (2026-08-24): drop the test_color_objects.py
-    acceptance criterion rather than build a classifier or assert a vacuous static
-    lookup. Full rationale, citations, and doc corrections recorded in this ticket''s
-    "Dropped criterion" note (under Acceptance Criteria) and "Resolution" section
-    (end of Handoff Notes). Follow-up issue filed:
-    clasi/issues/colored-object-detection-does-not-exist-needs-vision-design.md.'
+  resolution: 'Stakeholder decision (2026-08-24): drop the test_color_objects.py acceptance
+    criterion rather than build a classifier or assert a vacuous static lookup. Full
+    rationale, citations, and doc corrections recorded in this ticket''s "Dropped
+    criterion" note (under Acceptance Criteria) and "Resolution" section (end of Handoff
+    Notes). Follow-up issue filed: clasi/issues/colored-object-detection-does-not-exist-needs-vision-design.md.'
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
 

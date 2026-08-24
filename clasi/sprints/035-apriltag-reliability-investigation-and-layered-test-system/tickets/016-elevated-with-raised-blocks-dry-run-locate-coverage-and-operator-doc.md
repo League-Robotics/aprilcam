@@ -1,9 +1,11 @@
 ---
 id: '016'
 title: Elevated with-raised-blocks dry-run locate coverage and operator doc
-status: open
-use-cases: [UC-29]
-depends-on: ['015']
+status: in-progress
+use-cases:
+- UC-29
+depends-on:
+- '015'
 github-issue: ''
 issue: aprilcam-v2-layered-test-system.md
 completes_issue: false
