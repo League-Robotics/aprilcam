@@ -101,6 +101,43 @@ ARDUCAM_SLUG: str = ""
 def _skip_if_arducam_not_attached() -> None:
     global ARDUCAM_SLUG
     ARDUCAM_SLUG = resolve_hardware_camera_slug()
+    _skip_unless_camera_actually_opens(ARDUCAM_SLUG)
+
+
+def _skip_unless_camera_actually_opens(slug: str) -> None:
+    """``resolve_hardware_camera_slug`` (above) only proves *slug* is
+    configured and calibrated against main-playfield on this machine's
+    real, persisted state -- it never attempts an open (tests/aprilcam/
+    hardware_camera.py's own "enumeration is not availability" contract:
+    "a caller that needs [a real open/frame-fetch answer]... must attempt
+    a real open/frame fetch itself and skip that one case on failure").
+    A short-lived, real open/close probe -- mirroring that module's own
+    ``_probe_available`` technique -- closes that gap here; every test
+    and fixture in this module calls :func:`_skip_if_arducam_not_attached`
+    first, so this one probe gates all of them individually. Re-raises
+    any ``RuntimeError`` that is not this specific known camera-open
+    failure so a genuine bug still fails loudly."""
+    identities = resolve_all()
+    index = next((idx for idx, ident in identities.items() if ident.slug == slug), None)
+    if index is None:
+        pytest.skip(f"{slug!r} no longer enumerated on this machine")
+    probe = Camera(slug, OpenCVBackend(index))
+    try:
+        probe.open()
+    except RuntimeError as exc:
+        if "failed to open camera" not in str(exc):
+            raise
+        pytest.skip(
+            f"{slug!r} qualifies (configured + calibrated against "
+            f"main-playfield) but could not be opened just now -- {exc}. "
+            f"Expected when this process has no camera TCC grant (e.g. an "
+            f"agent session -- see docs/knowledge/daemon-camera-grant-and-"
+            f"detection-priming.md) or the device is genuinely busy "
+            f"elsewhere; re-run from an operator Terminal session to "
+            f"exercise this test for real."
+        )
+    else:
+        probe.close()
 
 
 def _short_tmp_dir(prefix: str) -> Path:

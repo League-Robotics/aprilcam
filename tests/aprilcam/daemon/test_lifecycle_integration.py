@@ -71,6 +71,31 @@ def _stub_for(socket_path: Path) -> aprilcam_v2_pb2_grpc.AprilCamV2Stub:
     return aprilcam_v2_pb2_grpc.AprilCamV2Stub(channel)
 
 
+def _skip_if_camera_open_rpc_error(exc: grpc.RpcError) -> None:
+    """``_skip_if_no_cameras_attached``/``_skip_if_arducam_not_attached``
+    (below) only prove a camera is enumerated or configured/calibrated
+    on this machine's real, persisted state -- never that this process
+    can actually open it right now (tests/aprilcam/hardware_camera.py's
+    own "enumeration is not availability" contract; docs/knowledge/
+    daemon-camera-grant-and-detection-priming.md). These tests drive the
+    daemon through a raw gRPC stub (not the typed ``GrpcDaemon`` client),
+    so a camera-open failure on the daemon side surfaces here as a bare
+    ``grpc.RpcError`` rather than ``aprilcam.errors.AprilCamError``. Only
+    the specific, known "failed to open camera" signature is treated as
+    environmental and re-raised as a skip; anything else is re-raised
+    unchanged so a genuine bug still fails loudly."""
+    details = exc.details() or ""
+    if "failed to open camera" not in details:
+        raise exc
+    pytest.skip(
+        f"a real camera qualifies on this machine but could not be opened "
+        f"just now -- {details}. Expected when this process has no camera "
+        f"TCC grant (e.g. an agent session) or the device is genuinely "
+        f"busy elsewhere; re-run from an operator Terminal session to "
+        f"exercise this test for real."
+    )
+
+
 def test_start_stop_and_restart_stability_against_real_cameras(tmp_path, short_tmp_dir):
     _skip_if_no_cameras_attached()
 
@@ -111,7 +136,10 @@ def test_start_stop_and_restart_stability_against_real_cameras(tmp_path, short_t
         assert {c.name for c in probe_response.cameras} == set(first_numbers.keys())
 
         some_camera = next(iter(first_numbers.keys()))
-        frame_response = stub.GetFrame(aprilcam_v2_pb2.GetFrameRequest(camera=some_camera))
+        try:
+            frame_response = stub.GetFrame(aprilcam_v2_pb2.GetFrameRequest(camera=some_camera))
+        except grpc.RpcError as exc:
+            _skip_if_camera_open_rpc_error(exc)
         assert len(frame_response.data) > 0
         assert frame_response.width > 0 and frame_response.height > 0
     finally:
@@ -184,7 +212,10 @@ def test_boot_loaded_playfield_and_camera_config_need_no_manual_push(tmp_path, s
 
         # No SetPlayfield/SetCameraConfig RPC anywhere above or here --
         # if the boot-time load did not run, this raises NoPlayfieldLinked.
-        calibrate_response = stub.Calibrate(aprilcam_v2_pb2.CalibrateRequest(camera=ARDUCAM_SLUG))
+        try:
+            calibrate_response = stub.Calibrate(aprilcam_v2_pb2.CalibrateRequest(camera=ARDUCAM_SLUG))
+        except grpc.RpcError as exc:
+            _skip_if_camera_open_rpc_error(exc)
         assert calibrate_response.result.succeeded is True, (
             "calibrate failed with config loaded from disk only, no "
             f"manual push -- matched {list(calibrate_response.result.matched_ids)}, "

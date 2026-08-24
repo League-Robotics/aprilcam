@@ -168,6 +168,26 @@ def _skip_if_arducam_not_attached() -> None:
     ARDUCAM_SLUG = resolve_hardware_camera_slug()
 
 
+def _skip_if_cli_camera_open_failed(result: subprocess.CompletedProcess) -> None:
+    """``camera probe``/``camera config`` (above) only prove the camera
+    is enumerated and configured -- not that this isolated daemon
+    subprocess can actually open it right now (tests/aprilcam/
+    hardware_camera.py's own "enumeration is not availability" contract,
+    docs/knowledge/daemon-camera-grant-and-detection-priming.md). Only
+    the specific, known "failed to open camera" signature is treated as
+    environmental; any other non-zero exit still fails the calling
+    assertion for real."""
+    if result.returncode != 0 and b"failed to open camera" in result.stderr:
+        pytest.skip(
+            f"{ARDUCAM_SLUG!r} qualifies but the isolated daemon could not "
+            f"open it just now -- {result.stderr.decode(errors='replace').strip()}. "
+            f"Expected when this process has no camera TCC grant (e.g. an "
+            f"agent session) or the device is genuinely busy elsewhere; "
+            f"re-run from an operator Terminal session to exercise this "
+            f"test for real."
+        )
+
+
 def _skip_if_no_local_daemon_reachable() -> None:
     """Third guard, same shape as :func:`_skip_if_arducam_not_attached`
     -- an in-process, sub-second probe of the well-known local control
@@ -397,6 +417,7 @@ def test_mount_z_is_a_noop_until_camera_position_is_pushed_then_engages_with_no_
         assert pushed_cfg.returncode == 0, pushed_cfg.stderr
 
         calibrated = _run(bin_path, "camera", "calibrate", ARDUCAM_SLUG, env=env, timeout=90.0)
+        _skip_if_cli_camera_open_failed(calibrated)
         assert calibrated.returncode == 0, calibrated.stderr
         assert b"succeeded" in calibrated.stdout, calibrated.stdout
 

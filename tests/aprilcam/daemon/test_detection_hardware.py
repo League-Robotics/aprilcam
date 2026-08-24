@@ -81,6 +81,7 @@ from aprilcam.client.daemon_client import GrpcDaemon
 from aprilcam.config.directories import Directories
 from aprilcam.daemon import __main__ as daemon_main
 from aprilcam.daemon.detection import CONFIRMATION_STREAK, DetectionEngine
+from aprilcam.errors import AprilCamError
 from aprilcam.proto import aprilcam_v2_pb2_grpc
 from aprilcam.types import TagFamily, TagId
 from aprilcam.vision.detector import TagDetector
@@ -107,6 +108,47 @@ APRILTAG_1 = TagId(family=TagFamily.APRILTAG, number=1)
 def _skip_if_arducam_not_attached() -> None:
     global ARDUCAM_SLUG
     ARDUCAM_SLUG = resolve_hardware_camera_slug()
+
+
+def _skip_if_cli_camera_open_failed(result: subprocess.CompletedProcess) -> None:
+    """Real-subprocess counterpart of :func:`_open_or_skip` -- ``camera
+    probe``/``camera list`` (above) only prove the camera is enumerated,
+    never that this isolated daemon subprocess can actually open it
+    right now. Only the specific, known "failed to open camera" signature
+    is treated as environmental; any other non-zero exit still fails the
+    calling assertion for real."""
+    if result.returncode != 0 and b"failed to open camera" in result.stderr:
+        pytest.skip(
+            f"{ARDUCAM_SLUG!r} qualifies but the isolated daemon could not "
+            f"open it just now -- {result.stderr.decode(errors='replace').strip()}. "
+            f"Expected when this process has no camera TCC grant (e.g. an "
+            f"agent session) or the device is genuinely busy elsewhere; "
+            f"re-run from an operator Terminal session to exercise this "
+            f"test for real."
+        )
+
+
+def _open_or_skip(camera: Camera) -> None:
+    """Real-open counterpart of :func:`_skip_if_arducam_not_attached` for
+    tests below that build a :class:`Camera` directly instead of going
+    through a daemon -- qualification (config + calibration on disk)
+    never proves this process can actually open the device right now
+    (tests/aprilcam/hardware_camera.py's own "enumeration is not
+    availability" contract). Re-raises any ``RuntimeError`` that is not
+    this specific known camera-open failure so a genuine bug still fails
+    loudly."""
+    try:
+        camera.open()
+    except RuntimeError as exc:
+        if "failed to open camera" not in str(exc):
+            raise
+        pytest.skip(
+            f"{ARDUCAM_SLUG!r} qualifies but could not be opened just now "
+            f"-- {exc}. Expected when this process has no camera TCC grant "
+            f"(e.g. an agent session) or the device is genuinely busy "
+            f"elsewhere; re-run from an operator Terminal session to "
+            f"exercise this test for real."
+        )
 
 
 def _short_tmp_dir(prefix: str) -> Path:
@@ -150,7 +192,31 @@ def daemon(tmp_path):
             channel = grpc.insecure_channel(f"unix:{socket_path}")
             grpc.channel_ready_future(channel).result(timeout=5)
             stub = aprilcam_v2_pb2_grpc.AprilCamV2Stub(channel)
-            yield GrpcDaemon(stub, target="localhost")
+            grpc_daemon = GrpcDaemon(stub, target="localhost")
+            # _skip_if_arducam_not_attached (above) only proves ARDUCAM_SLUG
+            # is configured/calibrated on this machine's real, persisted
+            # state -- never that this process can actually open it right
+            # now (tests/aprilcam/hardware_camera.py's own "enumeration is
+            # not availability" contract). Every test in this module that
+            # uses this fixture needs a real camera open (get_tags/
+            # get_frame), so gate here once, matching tests/aprilcam/
+            # calibration/test_full_calibrate_hardware.py's own ``daemon``
+            # fixture.
+            try:
+                grpc_daemon.get_frame(ARDUCAM_SLUG, deskewed=False, encoding="jpeg")
+            except AprilCamError as exc:
+                pytest.skip(
+                    f"{ARDUCAM_SLUG!r} qualifies (config + calibration present "
+                    f"on this machine's real system state) but could not be "
+                    f"opened/read via the daemon just now -- {exc}. Expected "
+                    f"when the process running this test has no camera "
+                    f"permission grant (e.g. an agent session -- see "
+                    f"docs/knowledge/daemon-camera-grant-and-detection-"
+                    f"priming.md) or the device is genuinely busy elsewhere; "
+                    f"re-run from an operator Terminal session to exercise "
+                    f"this camera for real."
+                )
+            yield grpc_daemon
         finally:
             lifecycle.stop()
     finally:
@@ -504,7 +570,7 @@ def test_get_tag_history_shows_explicit_gap_for_a_digitally_occluded_tag():
     backend = _OccludingBackend(OpenCVBackend(index))
     camera = Camera(ARDUCAM_SLUG, backend)
     engine = DetectionEngine()
-    camera.open()
+    _open_or_skip(camera)
     try:
         # -- priming: bring the streak counter to the doorstep of
         # confirmation before the bursts this test actually examines
@@ -652,6 +718,7 @@ def test_camera_tags_cli_output_is_legible_against_real_hardware(cli_env):
 
         _prime_cli(bin_path, env)
         result = _run(bin_path, "camera", "tags", ARDUCAM_SLUG, env=env)
+        _skip_if_cli_camera_open_failed(result)
         assert result.returncode == 0, result.stderr
         out = result.stdout.decode()
 
@@ -703,6 +770,7 @@ def test_camera_tags_by_cli_number_and_slug_agree_on_real_hardware(cli_env):
         _prime_cli(bin_path, env)
         by_slug = _run(bin_path, "camera", "tags", ARDUCAM_SLUG, env=env)
         by_number = _run(bin_path, "camera", "tags", number, env=env)
+        _skip_if_cli_camera_open_failed(by_slug)
         assert by_slug.returncode == 0, by_slug.stderr
         assert by_number.returncode == 0, by_number.stderr
 
@@ -779,8 +847,8 @@ def test_twenty_poll_clean_field_shows_no_confirmed_phantom_detections():
         return detections
 
     TagDetector.detect = _recording_detect  # type: ignore[method-assign]
-    camera.open()
     try:
+        _open_or_skip(camera)
         num_polls = 25
         confirmed_frames = [engine.run_burst(ARDUCAM_SLUG, camera) for _ in range(num_polls)]
     finally:
@@ -858,7 +926,7 @@ def test_new_tag_first_appears_in_confirmed_output_after_the_predicted_latency()
     probe_backend = OpenCVBackend(index)
     probe_camera = Camera(ARDUCAM_SLUG, probe_backend)
     probe_engine = DetectionEngine(confirmation_streak=1)
-    probe_camera.open()
+    _open_or_skip(probe_camera)
     try:
         probe_frame = probe_engine.run_burst(ARDUCAM_SLUG, probe_camera)
     finally:
@@ -884,7 +952,7 @@ def test_new_tag_first_appears_in_confirmed_output_after_the_predicted_latency()
     backend.occlude_next(3)
     camera = Camera(ARDUCAM_SLUG, backend)
     engine = DetectionEngine()
-    camera.open()
+    _open_or_skip(camera)
     try:
         for _ in range(3):
             hidden_frame = engine.run_burst(ARDUCAM_SLUG, camera)

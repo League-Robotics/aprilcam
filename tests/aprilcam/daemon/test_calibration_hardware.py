@@ -104,7 +104,7 @@ from aprilcam.camera.identity import resolve_all
 from aprilcam.client.daemon_client import GrpcDaemon
 from aprilcam.config.directories import Directories
 from aprilcam.daemon import __main__ as daemon_main
-from aprilcam.errors import NotCalibrated
+from aprilcam.errors import AprilCamError, NotCalibrated
 from aprilcam.proto import aprilcam_v2_pb2_grpc
 from aprilcam.types import TagFamily, TagId
 from aprilcam.vision.detector import TagDetector
@@ -142,6 +142,24 @@ MAIN_PLAYFIELD_JSON = (
 def _skip_if_arducam_not_attached() -> None:
     global ARDUCAM_SLUG
     ARDUCAM_SLUG = resolve_hardware_camera_slug()
+
+
+def _skip_if_cli_camera_open_failed(result: subprocess.CompletedProcess) -> None:
+    """Real-subprocess counterpart of :func:`_skip_unless_camera_actually_
+    opens` -- ``camera probe``/``camera config`` (above) only prove the
+    camera is enumerated and configured, never that this isolated daemon
+    subprocess can actually open it right now. Only the specific, known
+    "failed to open camera" signature is treated as environmental; any
+    other non-zero exit still fails the calling assertion for real."""
+    if result.returncode != 0 and b"failed to open camera" in result.stderr:
+        pytest.skip(
+            f"{ARDUCAM_SLUG!r} qualifies but the isolated daemon could not "
+            f"open it just now -- {result.stderr.decode(errors='replace').strip()}. "
+            f"Expected when this process has no camera TCC grant (e.g. an "
+            f"agent session) or the device is genuinely busy elsewhere; "
+            f"re-run from an operator Terminal session to exercise this "
+            f"test for real."
+        )
 
 
 def _short_tmp_dir(prefix: str) -> Path:
@@ -190,10 +208,41 @@ def daemon(tmp_path):
         shutil.rmtree(short_dir, ignore_errors=True)
 
 
+def _skip_unless_camera_actually_opens(daemon: GrpcDaemon) -> None:
+    """``_skip_if_arducam_not_attached`` (module-level) only proves
+    ARDUCAM_SLUG is configured and calibrated against main-playfield on
+    this machine's real, persisted state -- it never attempts an open
+    (tests/aprilcam/hardware_camera.py's own "enumeration is not
+    availability" contract). Gate on a real open/frame fetch here,
+    matching tests/aprilcam/calibration/test_full_calibrate_hardware.py's
+    own ``daemon`` fixture exactly. Called explicitly by the tests below
+    that actually need a real camera open -- not folded into the
+    ``daemon`` fixture itself, since
+    ``test_deskewed_request_on_an_uncalibrated_camera_raises_not_
+    calibrated`` shares that fixture and deliberately never needs the
+    camera to open (``NotCalibrated`` is raised before any backend
+    touch), so it must keep passing hardware-free."""
+    try:
+        daemon.get_frame(ARDUCAM_SLUG, deskewed=False, encoding="jpeg")
+    except AprilCamError as exc:
+        pytest.skip(
+            f"{ARDUCAM_SLUG!r} qualifies (config + calibration present "
+            f"on this machine's real system state) but could not be "
+            f"opened/read via the daemon just now -- {exc}. Expected "
+            f"when the process running this test has no camera "
+            f"permission grant (e.g. an agent session -- see "
+            f"docs/knowledge/daemon-camera-grant-and-detection-"
+            f"priming.md) or the device is genuinely busy elsewhere; "
+            f"re-run from an operator Terminal session to exercise "
+            f"this camera for real."
+        )
+
+
 def _link_and_calibrate(daemon: GrpcDaemon):
     """Push the real main-playfield definition, link the arducam to it,
     and calibrate -- the setup every "already calibrated" test below
     shares. Returns the real ``CalibrationResult``."""
+    _skip_unless_camera_actually_opens(daemon)
     daemon.set_playfield(main_playfield_definition())
     daemon.set_camera_config(hardware_test_camera_config(ARDUCAM_SLUG, playfield="main-playfield"))
     return daemon.calibrate(ARDUCAM_SLUG)
@@ -279,6 +328,7 @@ def test_full_set_calibration_reprojection_error_stays_under_the_new_threshold(d
 
 
 def test_with_intrinsics_against_main_playfield_stores_a_lens_model(daemon):
+    _skip_unless_camera_actually_opens(daemon)
     daemon.set_playfield(main_playfield_definition())
     daemon.set_camera_config(hardware_test_camera_config(ARDUCAM_SLUG, playfield="main-playfield"))
 
@@ -425,7 +475,23 @@ def test_occluding_one_marker_fails_naming_exactly_that_marker(tmp_path):
     # at whatever exposure the previous process left on the device.
     probe_backend = OpenCVBackend(index)
     probe_camera = Camera(ARDUCAM_SLUG, probe_backend, control_backend=UvcUtilBackend(device_name))
-    probe_camera.open()
+    # _skip_if_arducam_not_attached (above) only proves ARDUCAM_SLUG
+    # qualifies (config + calibration on disk) -- not that this process
+    # can actually open it right now. Gate on the real open itself;
+    # re-raise any RuntimeError that is not this specific known
+    # camera-open failure so a genuine bug still fails loudly.
+    try:
+        probe_camera.open()
+    except RuntimeError as exc:
+        if "failed to open camera" not in str(exc):
+            raise
+        pytest.skip(
+            f"{ARDUCAM_SLUG!r} qualifies but could not be opened just now "
+            f"-- {exc}. Expected when this process has no camera TCC grant "
+            f"(e.g. an agent session) or the device is genuinely busy "
+            f"elsewhere; re-run from an operator Terminal session to "
+            f"exercise this test for real."
+        )
     # camera=probe_camera: the sweep must drive this already-open camera
     # directly rather than opening a second, conflicting handle on the
     # same device index (tests/aprilcam/daemon/conftest.py's own
@@ -740,6 +806,7 @@ def test_calibration_survives_a_restart_but_an_rpc_only_playfield_link_does_not(
         assert pushed_cfg.returncode == 0, pushed_cfg.stderr
 
         calibrated = _run(bin_path, "camera", "calibrate", ARDUCAM_SLUG, env=env)
+        _skip_if_cli_camera_open_failed(calibrated)
         assert calibrated.returncode == 0, calibrated.stderr
         assert b"succeeded" in calibrated.stdout, calibrated.stdout
 
