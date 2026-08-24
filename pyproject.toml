@@ -40,7 +40,7 @@ dependencies = [
   "rich>=13.0",
   "zeroconf>=0.131",
   "pillow>=10.0",
-  "mcp>=1.0",
+  "mcp>=1.0,<2",
   "opencv-contrib-python>=4.8",
 ]
 
