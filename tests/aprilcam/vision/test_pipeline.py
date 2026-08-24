@@ -43,16 +43,33 @@ BASELINE_JPG = FIXTURE_DIR / "baseline.jpg"
 
 
 def _load_bgr_fixture() -> np.ndarray:
-    """The arducam baseline fixture, as a real BGR frame (no synthesis)."""
+    """The arducam baseline fixture, as a real BGR frame (no synthesis).
+
+    Skips cleanly (sprint 035 ticket 008's gate-invariance fix) rather
+    than failing when ``tests/images/`` is absent or renamed -- the same
+    "skipped, with a reason" degradation ``tests/image_matrix/conftest.py``
+    already documents as this project's convention for a rotted/missing
+    fixture corpus, extended here to this pre-existing (ticket 021-001)
+    module which previously asserted the fixture present.
+    """
+    if not BASELINE_JPG.is_file():
+        pytest.skip(f"fixture missing: {BASELINE_JPG} (tests/images/ absent or renamed)")
     image = cv.imread(str(BASELINE_JPG), cv.IMREAD_COLOR)
-    assert image is not None, f"fixture missing or unreadable: {BASELINE_JPG}"
+    if image is None:
+        pytest.skip(f"fixture unreadable: {BASELINE_JPG}")
     return image
 
 
 def _load_gray_fixture() -> np.ndarray:
-    """The arducam baseline fixture, decoded straight to grayscale."""
+    """The arducam baseline fixture, decoded straight to grayscale.
+
+    Skips cleanly under the same conditions as :func:`_load_bgr_fixture`.
+    """
+    if not BASELINE_JPG.is_file():
+        pytest.skip(f"fixture missing: {BASELINE_JPG} (tests/images/ absent or renamed)")
     image = cv.imread(str(BASELINE_JPG), cv.IMREAD_GRAYSCALE)
-    assert image is not None, f"fixture missing or unreadable: {BASELINE_JPG}"
+    if image is None:
+        pytest.skip(f"fixture unreadable: {BASELINE_JPG}")
     return image
 
 

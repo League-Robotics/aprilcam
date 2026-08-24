@@ -10,11 +10,20 @@ dedicated `ov9281` matrix entry, and the HD USB control-ordering fix (§4,
 because the live baseline itself had `auto-exposure-mode`/
 `auto-white-balance-temp` set to "auto"; fixed by forcing each variation's
 gated value control's gate to manual before the value, ordered gate-first).
-Remaining work tracked in `clasi/issues/image-matrix-fixture-test-suite.md`:
-the pytest suite (§6, superseded by sprint 035's `tests/image_matrix/`
-package) and the operator-assisted `fs-20260823` capture session (sprint 035
-ticket 004) that exercises this ticket's changes against real hardware.
-**Date:** 2026-07-29 (capture tool); 2026-08-23 (ticket 003 updates)
+**Updated 2026-08-23 (sprint 035 tickets 004-008):** the operator-assisted
+`fs-20260823` capture session ran (ticket 004 — 3 cameras, 55 images), and
+the §6 pytest suite is now **implemented as a package**,
+`tests/image_matrix/` (tickets 005-007), replacing this document's
+original single-module (`tests/test_image_matrix.py`) framing — see §1 and
+§6 below for the module breakdown. `scripts/test-gate.sh` (ticket 008) runs
+it, alongside every other non-`camera`/non-`integration` test, as the
+canonical gate. The one item still genuinely open:
+`tests/images/field-state.json`'s `fs-20260823` entry is stakeholder-
+`unverified`, so every fixture keyed to it is excluded and its tests skip
+cleanly by design (`tests/image_matrix/conftest.py`) until a human confirms
+what was physically on the field.
+**Date:** 2026-07-29 (capture tool); 2026-08-23 (ticket 003 updates, and
+tickets 004-008)
 **Stakeholder intent:** capture real playfield images from several cameras
 under systematically varied camera configurations, save them as regenerable
 test fixtures, and run the detection/calibration pipeline against them as
@@ -30,9 +39,13 @@ the field contents will change (new tags placed, etc.).
    applies a matrix of configuration variations, captures image(s) per
    variation, saves them with a full manifest, and **always restores the
    baseline config** afterwards (try/finally).
-2. **A pytest suite** (`tests/test_image_matrix.py`) that runs the vision
-   pipeline over the saved fixtures and asserts detection quality,
-   world-coordinate accuracy, and degradation boundaries.
+2. **A pytest suite** — `tests/image_matrix/`, a **package** (sprint 035
+   tickets 005-007), not the single `tests/test_image_matrix.py` module
+   this section originally specified — that runs the vision pipeline over
+   the saved fixtures and asserts detection quality, world-coordinate
+   accuracy, calibration-marker robustness, geometry conventions, and
+   degradation boundaries, both from the captured matrix (§6) and from
+   synthetic transforms applied on top of it (§6's closing note).
 
 ## 2. Baseline: the Arducam over the main playfield
 
@@ -195,18 +208,27 @@ Two sources, combined:
 
 ## 6. Test suite
 
-Parameterized over every manifest entry (skip cleanly if fixtures are
-absent on a machine). All detection runs use the same code path the
-daemon uses (`TagDetector` / `AprilCam.process_frame` internals — not a
-parallel reimplementation).
+**Implemented as a package**, `tests/image_matrix/` (sprint 035 tickets
+005-007), not the single module this document originally named — one
+module per assertion family below, plus `conftest.py`'s shared fixture
+discovery (`discover_fixture_entries`/`pytest_generate_tests`: walks
+`tests/images/**` for every `manifest.json`, resolves each to a
+`field-state.json` entry, and excludes anything not stakeholder-
+`confirmed`). Parameterized over every manifest entry — skip cleanly
+(never fail) if fixtures are absent, or if the field state they reference
+is not yet confirmed. All detection runs use the same daemon entry
+points, nowhere else: `vision.pipeline.run_pipeline` then
+`aprilcam.daemon.detection._default_detector_factory(slug).detect` — the
+same two calls `daemon.detection.DetectionEngine.run_burst` itself makes
+— never a parallel reimplementation.
 
-1. **Tag recall per configuration.** For each image: detected tag IDs ⊇
+1. **Tag recall per configuration** (`test_recall.py`). For each image: detected tag IDs ⊇
    expected visible IDs (from field state). Baseline and near-baseline
    configs must be 100%; for cliff-crossing configs the assertion
    inverts — the test *documents* the failure boundary (e.g. exposure
    ≥ 16 ⇒ washout, recall may drop) so a regression that silently
    *improves or worsens* the boundary is visible.
-2. **World-coordinate accuracy.** For surveyed static tags detected in
+2. **World-coordinate accuracy** (`test_world_accuracy.py`). For surveyed static tags detected in
    calibrated images: |world_detected − world_surveyed| ≤ tolerance
    (start: 1.5 cm; tighten empirically). Uses the camera's committed
    calibration snapshot (the manifest pins which calibration.json was
@@ -222,14 +244,14 @@ parallel reimplementation).
    field. When a camera has no calibration yet, the field is `null` and
    the run still proceeds (logged, not fatal) — that camera's
    world-accuracy tests skip until it is calibrated and recaptured.
-3. **Geometry conventions.** Using two tags with known east/north
+3. **Geometry conventions** (`test_geometry.py`). Using two tags with known east/north
    relationships from the survey: assert +x east / +y north / north-up
    on the deskewed image — the axis-mirror regression tests required by
    the world-coordinates-first issue.
-4. **Corner/calibration robustness.** The 4 corner ArUcos (and all
+4. **Corner/calibration robustness** (`test_calibration_robustness.py`). The 4 corner ArUcos (and all
    surveyed ArUcos) detected across the variation range; document which
    configs calibration would survive.
-5. **Preprocessing effectiveness** (informational, non-blocking):
+5. **Preprocessing effectiveness** (`test_preprocessing.py`; informational, non-blocking):
    detection with/without the highpass illumination flattening across
    the exposure sweep, so preprocessing changes show their real effect.
 
@@ -249,6 +271,17 @@ ticket 006's "Dropped criterion" note and
 `clasi/issues/colored-object-detection-does-not-exist-needs-vision-design.md`
 for the full rationale and follow-up.
 
+**Beyond the captured matrix (sprint 035 ticket 007):** `tests/image_matrix/`
+also contains `transforms.py` (seven pure, deterministic degradation
+functions — exposure, gamma, contrast, brightness, blur, noise, JPEG
+recompression) and `test_synthetic_degradation.py`, which applies them to
+each camera's confirmed baseline image and re-runs the same detection call
+pair items 1-5 use. This is not a sixth family of item 1-5's captured-matrix
+plan — it stresses the pipeline along axes the physical capture matrix
+cannot reach (arbitrary severity, not just the configs a camera control
+actually offers) and is tracked separately, against its own ticket, rather
+than renumbering this list.
+
 ## 7. Regeneration workflow (stakeholder loop)
 
 ```bash
@@ -256,7 +289,7 @@ for the full rationale and follow-up.
 python testdev/capture_matrix.py arducam          # regenerate that camera
 python testdev/capture_matrix.py --all            # every configured camera
 # update tests/images/field-state.json if tag population changed
-uv run pytest tests/test_image_matrix.py
+bash scripts/test-gate.sh                         # runs tests/image_matrix/, among everything else
 ```
 
 More cameras will be attached soon; each new camera needs only (a) a
