@@ -87,13 +87,63 @@ physical camera it actually used and whether that choice was forced.
 If none qualifies at all, every function below skips the calling test
 cleanly (never fails, never silently substitutes an unrelated camera)
 naming exactly what was checked and how to fix it.
+
+**Multi-camera enumeration (sprint 035, ticket 010).** The two functions
+above answer "the one camera" -- exactly what every hardware test module
+needed until this sprint's L1 flagship test (ticket 011) and a
+parameterized full-calibrate flow (``tests/aprilcam/calibration/``) came
+along needing to exercise **every** qualifying camera against a
+playfield, not just the best one.
+:func:`resolve_all_hardware_camera_identities` answers that question:
+same "genuinely qualifies" check (config playfield match + a persisted
+calibration), but returns every match rather than picking a winner, and
+-- unlike the single-camera resolver -- never drops a candidate for
+failing the availability probe (the "prefer one that is actually free"
+tiebreak makes no sense once every candidate is wanted). This is
+additive: :func:`resolve_hardware_camera_identity`/
+:func:`resolve_hardware_camera_slug` keep their exact existing contract
+and behavior, unchanged.
+
+**Enumeration is not availability -- do not gate a rig-availability
+decision on it.** This module's qualification check
+(:func:`_configured_playfield` + a ``calibration.json`` on disk) is pure
+filesystem/identity inspection; it does not open a device or need any
+camera permission from the calling process, so it happily reports a
+camera as "qualifies" even when this process cannot actually get a
+frame from it (macOS TCC denies camera access per-process, and a
+process with no grant -- e.g. an agent session -- still enumerates
+every device fine; only the *open* fails, silently mismeasuring "rig
+present" as "rig working" -- see
+``docs/knowledge/daemon-camera-grant-and-detection-priming.md``). This
+module's own enumeration functions are therefore deliberately a
+*qualification* answer only ("is this camera configured and calibrated
+against this playfield"), never an *availability* answer ("can a frame
+be fetched from it right now") -- a caller that needs the latter (e.g.
+the parameterized full-calibrate flow) must attempt a real open/frame
+fetch itself and skip that one case on failure, individually, rather
+than trusting this module's qualification result as proof the camera
+will actually open.
+
+**Calibration staleness is surfaced, never filtered on.**
+:func:`hardware_camera_calibration_stale` reports a qualifying camera's
+persisted ``calibration.json`` ``"stale"`` flag (a playfield definition
+was replaced after the camera was calibrated against it) -- advisory
+information a caller may want to log or assert on, never a
+qualification signal on its own (a stale calibration is still a real,
+present calibration; :func:`_configured_playfield`'s "calibrated at
+all" check is deliberately staleness-blind, matching the single-camera
+resolver's own existing contract). Confirmed on this project's own dev
+rig: every one of its three calibrated cameras (2, 3, 5) currently
+reports ``stale: true`` (their shared playfield definitions were
+replaced after calibrating), which is routine drift, not evidence any
+of them is broken.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import pytest
 
@@ -105,6 +155,8 @@ from aprilcam.config.directories import Directories
 __all__ = [
     "resolve_hardware_camera_identity",
     "resolve_hardware_camera_slug",
+    "resolve_all_hardware_camera_identities",
+    "hardware_camera_calibration_stale",
 ]
 
 #: The playfield every one of this project's current hardware test
@@ -158,6 +210,24 @@ def _configured_playfield(config_path: Path) -> Optional[str]:
         return None
     playfield = document.get("playfield")
     return playfield if isinstance(playfield, str) else None
+
+
+def _calibration_stale(calibration_path: Path) -> Optional[bool]:
+    """The ``"stale"`` field of a camera's persisted ``calibration.json``,
+    or ``None`` on anything that stops this from being a clean answer
+    (missing file, unreadable, malformed JSON, non-boolean value) --
+    mirrors :func:`_configured_playfield`'s own degrade-on-failure
+    contract exactly. Staleness is advisory (module docstring's
+    "Calibration staleness is surfaced" section), never itself a
+    qualification signal -- callers that care read it separately via
+    :func:`hardware_camera_calibration_stale` rather than having it
+    silently fold into whether a candidate qualifies at all."""
+    try:
+        document = json.loads(calibration_path.read_text())
+    except (OSError, ValueError):
+        return None
+    stale = document.get("stale")
+    return stale if isinstance(stale, bool) else None
 
 
 def _probe_available(identity: CameraIdentity, index: int, *, attempts: int = 3) -> bool:
@@ -270,3 +340,116 @@ def resolve_hardware_camera_slug(playfield: str = DEFAULT_HARDWARE_PLAYFIELD) ->
     a bare device-name string). See
     :func:`resolve_hardware_camera_identity` for the full contract."""
     return resolve_hardware_camera_identity(playfield).slug
+
+
+def resolve_all_hardware_camera_identities(
+    playfield: str = DEFAULT_HARDWARE_PLAYFIELD,
+) -> Tuple[CameraIdentity, ...]:
+    """Every currently-attached camera that is genuinely configured and
+    calibrated against *playfield* -- not just the first/best one, unlike
+    :func:`resolve_hardware_camera_identity`. See the module docstring's
+    "Multi-camera enumeration" section for why this exists and how it
+    differs from the single-camera resolver.
+
+    Uses the exact same "genuinely qualifies" check as
+    :func:`resolve_hardware_camera_identity` (``config.json``'s
+    ``"playfield"`` field plus a persisted ``calibration.json`` --
+    :func:`_configured_playfield` and the calibration-path existence
+    check, shared rather than duplicated), so the two functions can never
+    silently disagree about which cameras qualify.
+
+    **Never drops or reorders a candidate by availability.** The
+    single-camera resolver uses :func:`_probe_available` to break ties in
+    favor of a camera that is actually free right now; that tiebreak has
+    no meaning here since every qualifying candidate is wanted, not just
+    one. Every qualifying candidate is still probed and the result
+    printed (this module's existing informative-diagnostics precedent --
+    see :func:`resolve_hardware_camera_identity`'s own prints), so a
+    run's own output always says which candidates looked busy, but a
+    busy result never removes a candidate from the returned tuple -- per
+    this module's "never silently substitute/drop" philosophy, the
+    per-camera skip decision (e.g. after a real open/frame-fetch attempt
+    fails) belongs to the caller, not to this enumeration step. See the
+    module docstring's "Enumeration is not availability" section: this
+    function answers "which cameras qualify," never "which cameras can
+    actually be opened right now" -- a caller that needs the latter must
+    check it itself.
+
+    Returned in the same deterministic order
+    :func:`resolve_hardware_camera_identity` iterates candidates in
+    (sorted by ``config_dir/cameras/<slug>`` directory name), so a
+    caller that parameterizes tests over this tuple gets stable,
+    reproducible test ids across runs.
+
+    Skips the calling test cleanly (``pytest.skip``, matching
+    :func:`resolve_hardware_camera_identity`'s own clean-skip contract)
+    if zero cameras qualify -- never a hard failure. Passes
+    ``allow_module_level=True`` so this also works correctly when called
+    from a ``pytest_generate_tests`` hook (collection time, for dynamic
+    per-camera parameterization) as well as from an ordinary
+    fixture/test body; the flag is inert in the latter case.
+    """
+    identities = resolve_all()
+    if not identities:
+        pytest.skip("no camera attached to this machine", allow_module_level=True)
+
+    by_slug = {identity.slug: identity for identity in identities.values()}
+    index_by_slug = {identity.slug: index for index, identity in identities.items()}
+    directories = _real_system_directories()
+    cameras_config_dir = directories.config_dir / "cameras"
+
+    candidates = []
+    if cameras_config_dir.is_dir():
+        for camera_dir in sorted(cameras_config_dir.iterdir()):
+            identity = by_slug.get(camera_dir.name)
+            if identity is None:
+                continue  # configured at some point, but not attached right now
+            config_path = camera_dir / "config.json"
+            if _configured_playfield(config_path) != playfield:
+                continue
+            calibration_path = directories.state_dir / "cameras" / camera_dir.name / "calibration.json"
+            if not calibration_path.exists():
+                continue
+            candidates.append(identity)
+
+    if not candidates:
+        pytest.skip(
+            f"no attached camera is both configured (config_dir/cameras/<slug>/"
+            f"config.json's \"playfield\") and calibrated (state_dir/cameras/"
+            f"<slug>/calibration.json present) against {playfield!r} on this "
+            f"machine's real system state -- attached cameras right now: "
+            f"{sorted(by_slug)}. Link and calibrate at least one with "
+            f"'aprilcam camera config <file>' and 'aprilcam camera calibrate "
+            f"<camera>' before running these tests.",
+            allow_module_level=True,
+        )
+
+    for identity in candidates:
+        calibration_path = directories.state_dir / "cameras" / identity.slug / "calibration.json"
+        stale = _calibration_stale(calibration_path)
+        index = index_by_slug.get(identity.slug)
+        available = index is not None and _probe_available(identity, index)
+        print(
+            f"[hardware_camera] candidate {identity.slug!r} qualifies against "
+            f"{playfield!r} (calibration_stale={stale}, "
+            f"availability_probe={'ok' if available else 'busy/unavailable'})"
+        )
+
+    return tuple(candidates)
+
+
+def hardware_camera_calibration_stale(slug: str) -> Optional[bool]:
+    """Whether *slug*'s persisted ``calibration.json`` (this machine's
+    real, un-overridden system state -- see
+    :func:`_real_system_directories`) is marked stale, or ``None`` if it
+    has no calibration at all (or the file cannot be cleanly read).
+
+    A focused, separate lookup rather than folded into
+    :func:`resolve_all_hardware_camera_identities`'s own
+    ``CameraIdentity`` return values -- see the module docstring's
+    "Calibration staleness is surfaced" section for why staleness is
+    reported this way (advisory information a caller can act on) rather
+    than silently treated as either "fine" or "broken" by the
+    qualification check itself."""
+    calibration_path = _real_system_directories().state_dir / "cameras" / slug / "calibration.json"
+    return _calibration_stale(calibration_path)

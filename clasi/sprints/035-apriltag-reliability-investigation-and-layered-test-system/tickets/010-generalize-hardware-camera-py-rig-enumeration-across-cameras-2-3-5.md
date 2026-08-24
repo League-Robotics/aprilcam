@@ -1,7 +1,7 @@
 ---
 id: '010'
 title: Generalize hardware_camera.py rig enumeration across cameras 2, 3, 5
-status: in-progress
+status: done
 use-cases:
 - UC-22
 depends-on: []
@@ -30,28 +30,28 @@ for "the one camera" keep their exact current contract and behavior.
 
 ## Acceptance Criteria
 
-- [ ] A new function (e.g. `resolve_all_hardware_camera_identities(playfield=...)`)
+- [x] A new function (e.g. `resolve_all_hardware_camera_identities(playfield=...)`)
       returns every currently-attached, configured-and-calibrated camera
       against `playfield` — not just the first/best one — using the same
       "genuinely qualifies" check (`config.json`'s `playfield` field +
       `calibration.json` presence) as the existing single-camera
       resolver.
-- [ ] Existing single-camera callers (`resolve_hardware_camera_identity`,
+- [x] Existing single-camera callers (`resolve_hardware_camera_identity`,
       `resolve_hardware_camera_slug`) are unchanged in behavior — full
       existing hardware-test suite passes unmodified.
-- [ ] A camera that qualifies but fails the availability probe is still
+- [x] A camera that qualifies but fails the availability probe is still
       included (candidates are not silently dropped for being busy — the
       per-camera skip decision belongs to the caller, per this module's
       existing "never silently substitute" philosophy), with the same
       informative print-diagnostics precedent this module already uses.
-- [ ] If zero cameras qualify, the new function raises the same
+- [x] If zero cameras qualify, the new function raises the same
       clean-skip contract (`pytest.skip` with remediation text) as the
       existing single-camera function — never a hard failure.
-- [ ] `tests/aprilcam/calibration/` (or wherever the full-calibrate flow
+- [x] `tests/aprilcam/calibration/` (or wherever the full-calibrate flow
       lives) gains a parameterized test iterating cameras 2, 3, 5 via the
       new enumeration, each camera skipping individually rather than one
       unavailable camera skipping the whole parameterized set.
-- [ ] `--with-intrinsics` on the flat field reports
+- [x] `--with-intrinsics` on the flat field reports
       `"coplanar-constrained"` for at least one of the three cameras
       (an existing behavior, re-asserted here across the newly
       parameterized set as a regression check).
