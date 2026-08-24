@@ -406,7 +406,25 @@ def test_probe_does_not_disturb_a_live_read_loop():
         identity = identities[index]
 
     live_camera = Camera(identity.slug, OpenCVBackend(index), device_name=identity.device_name)
-    live_camera.open()
+    # Enumeration (identities/_real_identities, above) is not availability
+    # -- this process may enumerate the device fine and still be unable
+    # to open it (e.g. an agent session with no macOS camera TCC grant --
+    # docs/knowledge/daemon-camera-grant-and-detection-priming.md). Gate
+    # on the real open itself; re-raise any RuntimeError that is not this
+    # specific known camera-open failure so a genuine bug still fails
+    # loudly.
+    try:
+        live_camera.open()
+    except RuntimeError as exc:
+        if "failed to open camera" not in str(exc):
+            raise
+        pytest.skip(
+            f"{identity.slug!r} is attached but could not be opened just "
+            f"now -- {exc}. Expected when this process has no camera TCC "
+            f"grant (e.g. an agent session) or the device is genuinely busy "
+            f"elsewhere; re-run from an operator Terminal session to "
+            f"exercise this test for real."
+        )
 
     frame_counts: List[int] = [0]
     errors: List[BaseException] = []

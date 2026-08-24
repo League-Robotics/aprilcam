@@ -598,117 +598,182 @@ async def test_camera_golden_path_against_real_daemon_and_camera_3(real_director
     try:
         server = _build_server_for(directories, tmp_path)
 
+        # See _run_camera_golden_path_session's own docstring for why the
+        # session body is a separate function called inside its own
+        # try/except BaseException here, rather than inlined directly in
+        # this async-with body: a pytest.skip()/assert raised straight
+        # inside stdio_client/ClientSession's own anyio task group gets
+        # swallowed into an opaque "unhandled errors in a TaskGroup" with
+        # no message (ticket 035-011's finding, applied here).
+        outcome: Dict[str, BaseException] = {}
         async with create_connected_server_and_client_session(server) as session:
-            guide = await session.call_tool("get_guide", {})
-            assert guide.isError is False
-            assert "AprilCam" in guide.content[0].text
-
-            cameras = await session.call_tool("list_cameras", {})
-            assert cameras.isError is False
-            names = {c["name"] for c in cameras.structuredContent["result"]}
-            assert arducam_slug in names, f"arducam not enumerated by the real daemon: {names}"
-
-            # -- configure: push the playfield and camera-config link for
-            # real, over the MCP tools, even though both were also
-            # boot-loaded above -- proving set_playfield/set_camera_config
-            # genuinely work against a real daemon, and (per the diagnostic
-            # pass this ticket ran by hand) that re-pushing an identical
-            # document does not disturb the boot-loaded calibration.
-            set_pf = await session.call_tool("set_playfield", {"document": _main_playfield_document()})
-            assert set_pf.isError is False, set_pf.content
-
-            set_cc = await session.call_tool(
-                "set_camera_config",
-                {"document": {"name": arducam_slug, "playfield": "main-playfield", "settings": {}}},
-            )
-            assert set_cc.isError is False, set_cc.content
-
-            # -- calibrate: a live attempt, honestly reported either way --
-            cal = await session.call_tool("calibrate", {"camera": arducam_slug})
-            assert cal.isError is False, cal.content
-            live_result = cal.structuredContent
-            print(f"\n[026-006 hardware] live calibrate() attempt: {live_result}")
-
-            # -- ... or confirm already calibrated: this machine's own
-            # real, previously-solved calibration, boot-loaded above,
-            # must still be intact regardless of the live attempt's
-            # outcome (UC-04: "a failed attempt leaves any existing good
-            # calibration untouched").
-            confirmed = await session.call_tool("get_calibration", {"camera": arducam_slug})
-            assert confirmed.isError is False, confirmed.content
-            confirmed_calibration = confirmed.structuredContent["result"]
-            assert confirmed_calibration is not None, (
-                "camera reports uncalibrated after this test's setup -- no real prior "
-                "calibration was found on this machine for boot-loading (see "
-                f"_find_real_prior_calibration) and the live calibrate() attempt above "
-                f"also failed: {live_result}. Physically aim the arducam at an "
-                "unobstructed main-playfield (all 10 ArUco ids visible) and re-run."
-            )
-            assert confirmed_calibration["playfield"] == "main-playfield"
-            print(f"[026-006 hardware] confirmed calibration: {confirmed_calibration}")
-
-            # -- perceive: tags in world coordinates. Not asserted to be
-            # non-empty -- UC-10's own "empty field returns an empty
-            # frame, not an error" contract, and exactly what a
-            # partially-obstructed live view may honestly produce right
-            # now; the point here is the tool call itself, not a specific
-            # tag's presence (test_calibration_hardware.py's own
-            # precedent for not pinning to one specific tag).
-            tags = await session.call_tool("get_tags", {"camera": arducam_slug})
-            assert tags.isError is False, tags.content
-            world_tags = [t for t in (tags.structuredContent or {}).get("tags", []) if t.get("world")]
-            print(f"[026-006 hardware] {len(world_tags)} tag(s) with world coordinates this burst")
-
-            frame = await session.call_tool(
-                "get_frame", {"camera": arducam_slug, "deskewed": True, "format": "base64"}
-            )
-            assert frame.isError is False, frame.content
-            assert frame.content[0].type == "image"
-            image_bytes = base64.b64decode(frame.content[0].data)
-            assert len(image_bytes) > 0
-
-            draw = await session.call_tool(
-                "draw_marker",
-                {
-                    "playfield": "main-playfield",
-                    "layer": "ticket-026-006",
-                    "id": "agent-marker",
-                    "x": 0.0,
-                    "y": 0.0,
-                    "label": "ticket 026-006 acceptance",
-                },
-            )
-            assert draw.isError is False, draw.content
-
-            listed = await session.call_tool(
-                "list_annotations", {"playfield": "main-playfield", "layer": "ticket-026-006"}
-            )
-            assert listed.isError is False
-            ids = {a["id"] for a in listed.structuredContent["annotations"]}
-            assert "agent-marker" in ids, f"the marker just drawn was not read back: {ids}"
-
-            cleared = await session.call_tool(
-                "clear_layer", {"playfield": "main-playfield", "layer": "ticket-026-006"}
-            )
-            assert cleared.isError is False
-
-            after_clear = await session.call_tool(
-                "list_annotations", {"playfield": "main-playfield", "layer": "ticket-026-006"}
-            )
-            assert after_clear.structuredContent["annotations"] == []
-
-            # Printed (not asserted) so a `-s` run leaves a durable trace
-            # of the real hardware verification, per this ticket's
-            # honesty requirement.
-            print(
-                f"\n[026-006 hardware] golden path OK: cameras={sorted(names)}, "
-                f"live calibrate()={live_result}, "
-                f"confirmed calibration={confirmed_calibration}, "
-                f"tags_with_world={len(world_tags)}, "
-                f"frame_bytes={len(image_bytes)}"
-            )
+            try:
+                await _run_camera_golden_path_session(session, arducam_slug)
+            except BaseException as exc:  # noqa: BLE001 - see docstring above
+                outcome["exception"] = exc
+        if "exception" in outcome:
+            raise outcome["exception"]
     finally:
         lifecycle.stop()
+
+
+async def _run_camera_golden_path_session(session, arducam_slug: str) -> None:
+    """The full session body for :func:`test_camera_golden_path_against_
+    real_daemon_and_camera_3` -- extracted into its own function so the
+    caller can run it inside a local ``try/except BaseException``,
+    outside ``create_connected_server_and_client_session``'s own
+    ``async with`` block, before re-raising. ``create_connected_server_
+    and_client_session`` (the in-memory client/server transport) runs its
+    own background read/write pump inside an ``anyio.create_task_group()``
+    -- like ``mcp.client.stdio.stdio_client``, any exception raised
+    directly inside its ``async with`` body, including a plain ``assert``
+    failure or a ``pytest.skip()`` call (``pytest.skip`` raises
+    ``Skipped``, a ``BaseException``), gets caught by that task group's
+    own ``__aexit__`` and re-raised as a
+    ``BaseExceptionGroup("unhandled errors in a TaskGroup", ...)``,
+    discarding this function's own carefully-written skip/failure message
+    (ticket 035-011's finding against ``stdio_client``, confirmed to
+    apply identically here). The caller instead calls this function
+    inside its own local ``try/except BaseException``, stores whatever
+    was raised, lets the ``async with`` block exit normally (no exception
+    in flight -> no task-group wrapping), and re-raises the *original*
+    exception object once it is closed -- outside the task group, so
+    pytest sees the real ``Skipped``/``AssertionError`` with its real
+    message intact.
+    """
+    guide = await session.call_tool("get_guide", {})
+    assert guide.isError is False
+    assert "AprilCam" in guide.content[0].text
+
+    cameras = await session.call_tool("list_cameras", {})
+    assert cameras.isError is False
+    names = {c["name"] for c in cameras.structuredContent["result"]}
+    assert arducam_slug in names, f"arducam not enumerated by the real daemon: {names}"
+
+    # -- configure: push the playfield and camera-config link for
+    # real, over the MCP tools, even though both were also
+    # boot-loaded above -- proving set_playfield/set_camera_config
+    # genuinely work against a real daemon, and (per the diagnostic
+    # pass this ticket ran by hand) that re-pushing an identical
+    # document does not disturb the boot-loaded calibration.
+    set_pf = await session.call_tool("set_playfield", {"document": _main_playfield_document()})
+    assert set_pf.isError is False, set_pf.content
+
+    set_cc = await session.call_tool(
+        "set_camera_config",
+        {"document": {"name": arducam_slug, "playfield": "main-playfield", "settings": {}}},
+    )
+    assert set_cc.isError is False, set_cc.content
+
+    # -- calibrate: a live attempt, honestly reported either way --
+    cal = await session.call_tool("calibrate", {"camera": arducam_slug})
+    if cal.isError:
+        # A field-geometry failure (occlusion, bad focus, ...) is
+        # not an MCP tool error -- calibrate() still returns a
+        # normal CalibrationResult with succeeded=False, handled
+        # below by the "confirm already calibrated" fallback.
+        # isError=True instead means the *tool call itself*
+        # raised -- on this rig, that is the camera failing to
+        # open (enumeration/config, above, never proves this
+        # process can actually open it -- docs/knowledge/daemon-
+        # camera-grant-and-detection-priming.md). Only that
+        # specific, known signature is treated as environmental;
+        # any other tool-call error still fails the assert below
+        # for real.
+        error_text = cal.content[0].text if cal.content else repr(cal.content)
+        if "failed to open camera" in error_text:
+            pytest.skip(
+                f"{arducam_slug!r} is configured against "
+                f"main-playfield but the real daemon could not open "
+                f"it just now -- {error_text}. Expected when this "
+                f"process has no camera TCC grant (e.g. an agent "
+                f"session -- see docs/knowledge/daemon-camera-grant-"
+                f"and-detection-priming.md) or the device is "
+                f"genuinely busy elsewhere; re-run from an operator "
+                f"Terminal session to exercise this test for real."
+            )
+    assert cal.isError is False, cal.content
+    live_result = cal.structuredContent
+    print(f"\n[026-006 hardware] live calibrate() attempt: {live_result}")
+
+    # -- ... or confirm already calibrated: this machine's own
+    # real, previously-solved calibration, boot-loaded above,
+    # must still be intact regardless of the live attempt's
+    # outcome (UC-04: "a failed attempt leaves any existing good
+    # calibration untouched").
+    confirmed = await session.call_tool("get_calibration", {"camera": arducam_slug})
+    assert confirmed.isError is False, confirmed.content
+    confirmed_calibration = confirmed.structuredContent["result"]
+    assert confirmed_calibration is not None, (
+        "camera reports uncalibrated after this test's setup -- no real prior "
+        "calibration was found on this machine for boot-loading (see "
+        f"_find_real_prior_calibration) and the live calibrate() attempt above "
+        f"also failed: {live_result}. Physically aim the arducam at an "
+        "unobstructed main-playfield (all 10 ArUco ids visible) and re-run."
+    )
+    assert confirmed_calibration["playfield"] == "main-playfield"
+    print(f"[026-006 hardware] confirmed calibration: {confirmed_calibration}")
+
+    # -- perceive: tags in world coordinates. Not asserted to be
+    # non-empty -- UC-10's own "empty field returns an empty
+    # frame, not an error" contract, and exactly what a
+    # partially-obstructed live view may honestly produce right
+    # now; the point here is the tool call itself, not a specific
+    # tag's presence (test_calibration_hardware.py's own
+    # precedent for not pinning to one specific tag).
+    tags = await session.call_tool("get_tags", {"camera": arducam_slug})
+    assert tags.isError is False, tags.content
+    world_tags = [t for t in (tags.structuredContent or {}).get("tags", []) if t.get("world")]
+    print(f"[026-006 hardware] {len(world_tags)} tag(s) with world coordinates this burst")
+
+    frame = await session.call_tool(
+        "get_frame", {"camera": arducam_slug, "deskewed": True, "format": "base64"}
+    )
+    assert frame.isError is False, frame.content
+    assert frame.content[0].type == "image"
+    image_bytes = base64.b64decode(frame.content[0].data)
+    assert len(image_bytes) > 0
+
+    draw = await session.call_tool(
+        "draw_marker",
+        {
+            "playfield": "main-playfield",
+            "layer": "ticket-026-006",
+            "id": "agent-marker",
+            "x": 0.0,
+            "y": 0.0,
+            "label": "ticket 026-006 acceptance",
+        },
+    )
+    assert draw.isError is False, draw.content
+
+    listed = await session.call_tool(
+        "list_annotations", {"playfield": "main-playfield", "layer": "ticket-026-006"}
+    )
+    assert listed.isError is False
+    ids = {a["id"] for a in listed.structuredContent["annotations"]}
+    assert "agent-marker" in ids, f"the marker just drawn was not read back: {ids}"
+
+    cleared = await session.call_tool(
+        "clear_layer", {"playfield": "main-playfield", "layer": "ticket-026-006"}
+    )
+    assert cleared.isError is False
+
+    after_clear = await session.call_tool(
+        "list_annotations", {"playfield": "main-playfield", "layer": "ticket-026-006"}
+    )
+    assert after_clear.structuredContent["annotations"] == []
+
+    # Printed (not asserted) so a `-s` run leaves a durable trace
+    # of the real hardware verification, per this ticket's
+    # honesty requirement.
+    print(
+        f"\n[026-006 hardware] golden path OK: cameras={sorted(names)}, "
+        f"live calibrate()={live_result}, "
+        f"confirmed calibration={confirmed_calibration}, "
+        f"tags_with_world={len(world_tags)}, "
+        f"frame_bytes={len(image_bytes)}"
+    )
 
 
 # ---------------------------------------------------------------------------

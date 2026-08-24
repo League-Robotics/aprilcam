@@ -163,6 +163,25 @@ def _attached_camera_slugs_or_skip() -> list[str]:
     return slugs
 
 
+def _skip_if_camera_open_failed(result: subprocess.CompletedProcess, slug: str) -> None:
+    """``resolve_all()``/``camera probe``/``camera list`` (above) only
+    prove a camera is *enumerated* -- not that this process can actually
+    open it right now (e.g. an agent session has no macOS camera TCC
+    grant; docs/knowledge/daemon-camera-grant-and-detection-priming.md).
+    Only the specific, known "failed to open camera" signature is
+    treated as environmental; any other non-zero exit still fails the
+    calling assertion for real."""
+    if result.returncode != 0 and b"failed to open camera" in result.stderr:
+        pytest.skip(
+            f"{slug!r} is attached but the isolated daemon could not open "
+            f"it just now -- {result.stderr.decode(errors='replace').strip()}. "
+            f"Expected when this process has no camera TCC grant (e.g. an "
+            f"agent session) or the device is genuinely busy elsewhere; "
+            f"re-run from an operator Terminal session to exercise this "
+            f"test for real."
+        )
+
+
 @pytest.mark.camera
 def test_daemon_and_camera_round_trip_against_real_hardware(tmp_path, isolated_env):
     slugs = _attached_camera_slugs_or_skip()
@@ -236,6 +255,7 @@ def test_daemon_and_camera_round_trip_against_real_hardware(tmp_path, isolated_e
             "png",
             env=env,
         )
+        _skip_if_camera_open_failed(result, png_slug)
         assert result.returncode == 0, result.stderr
         data = png_path.read_bytes()
         assert data[:8] == b"\x89PNG\r\n\x1a\n"

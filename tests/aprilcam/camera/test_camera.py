@@ -1318,7 +1318,24 @@ def test_real_camera_open_read_close(name_substring, expected_slug):
         pytest.skip(f"no attached camera matching {name_substring!r}")
 
     cam = Camera(expected_slug, OpenCVBackend(index), device_name=name_substring)
-    cam.open()
+    # Enumeration (above) is not availability: this process may enumerate
+    # the device fine and still be unable to open it (e.g. an agent
+    # session with no macOS camera TCC grant -- docs/knowledge/daemon-
+    # camera-grant-and-detection-priming.md). Gate on the real open
+    # itself, individually, so a genuinely broken Camera.open() (a real
+    # RuntimeError with a different message) still fails loudly.
+    try:
+        cam.open()
+    except RuntimeError as exc:
+        if "failed to open camera" not in str(exc):
+            raise
+        pytest.skip(
+            f"{expected_slug!r} ({name_substring!r}) is attached but could not "
+            f"be opened just now -- {exc}. Expected when this process has no "
+            f"camera TCC grant (e.g. an agent session) or the device is "
+            f"genuinely busy elsewhere; re-run from an operator Terminal "
+            f"session to exercise this test for real."
+        )
     try:
         assert cam.state.present is True
         assert cam.state.usable is True
