@@ -40,8 +40,18 @@ BASELINE_JPG = FIXTURE_DIR / "baseline.jpg"
 
 
 def _load_gray_fixture() -> np.ndarray:
+    """The arducam baseline fixture, decoded straight to grayscale.
+
+    Skips cleanly (sprint 035 ticket 008's gate-invariance fix) when
+    ``tests/images/`` is absent or renamed, rather than failing --
+    matching ``tests/image_matrix/conftest.py``'s "skipped, with a
+    reason" convention for a rotted/missing fixture corpus.
+    """
+    if not BASELINE_JPG.is_file():
+        pytest.skip(f"fixture missing: {BASELINE_JPG} (tests/images/ absent or renamed)")
     image = cv.imread(str(BASELINE_JPG), cv.IMREAD_GRAYSCALE)
-    assert image is not None, f"fixture missing or unreadable: {BASELINE_JPG}"
+    if image is None:
+        pytest.skip(f"fixture unreadable: {BASELINE_JPG}")
     return image
 
 

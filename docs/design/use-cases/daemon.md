@@ -1283,16 +1283,16 @@ use cases and 57 scenarios (including variations).
 | UC-01 Start daemon / config model | JTBD-05 | A-04, A-03 | S-1 ✓, S-2 ✓, S-3 ✗, S-4 ✓ (+4a, 4b) | daemon, camera, config | — |
 | UC-02 Push playfield | JTBD-05, 03 | A-03, A-01, A-02 | S-1 ✓ (+1a), S-2 ✗ | daemon, playfield | — |
 | UC-03 Configure camera | JTBD-05 | A-03 | S-1 ✓, S-2 ✓, S-3 ✗, S-4 ✓, S-5 ✓ | daemon, camera, config | — |
-| UC-04 Calibrate | JTBD-06, 01 | A-03, A-02 | S-1 ✓, S-2 ✗, S-3 ✗ | daemon, calibration, vision | — |
+| UC-04 Calibrate | JTBD-06, 01 | A-03, A-02 | S-1 ✓, S-2 ✗, S-3 ✗ | daemon, calibration, vision | `tests/image_matrix/test_calibration_robustness.py::test_calibration_robustness`, `tests/image_matrix/test_world_accuracy.py::test_world_accuracy` |
 | UC-05 Confirm readiness | JTBD-06 | A-03, A-01, A-02 | S-1 ✓, S-2 ✗ | daemon | — |
-| UC-06 Single image from camera | JTBD-02 | A-02, A-03 | S-1 ✓, S-2 ✓, S-3 ✗ | daemon, calibration | — |
+| UC-06 Single image from camera | JTBD-02 | A-02, A-03 | S-1 ✓, S-2 ✓, S-3 ✗ | daemon, calibration | `tests/image_matrix/test_geometry.py::test_geometry_east_west_and_north_up` |
 | UC-07 Stream video from camera | JTBD-02 | A-03, A-01 | S-1 ✓, S-2 ✗, S-3 ✓ | daemon, client | — |
 | UC-08 Where is a feature | JTBD-03 | A-02, A-01, A-03 | S-1 ✓, S-2 ✗, S-3 ✗ | playfield, daemon | — |
-| UC-09 One tag by id | JTBD-01 | A-01, A-02 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗, S-5 ✗ | daemon, vision, calibration | — |
-| UC-10 All detected tags | JTBD-01, 04 | A-02, A-01 | S-1 ✓, S-2 ✓, S-3 ✗ | daemon, vision | — |
+| UC-09 One tag by id | JTBD-01 | A-01, A-02 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗, S-5 ✗ | daemon, vision, calibration | `tests/image_matrix/test_recall.py::test_recall` |
+| UC-10 All detected tags | JTBD-01, 04 | A-02, A-01 | S-1 ✓, S-2 ✓, S-3 ✗ | daemon, vision | `tests/image_matrix/test_recall.py::test_recall`, `tests/image_matrix/test_calibration_robustness.py::test_calibration_robustness` |
 | UC-11 Stream tags | JTBD-04, 01 | A-01 | S-1 ✓, S-2 ✓, S-3 ✗ | daemon, vision, client | — |
 | UC-12 Tag parameters | JTBD-01, 06 | A-01, A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✓, S-5 ✗ | daemon, calibration | — |
-| UC-26 Tag history | JTBD-04, 01 | A-02, A-01 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗ | daemon, vision | — |
+| UC-26 Tag history | JTBD-04, 01 | A-02, A-01 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗ | daemon, vision | `tests/image_matrix/test_recall.py::test_recall`, `tests/image_matrix/test_synthetic_degradation.py::test_severe_degradation_documented_boundary` |
 | UC-27 Packaged instructions | JTBD-01, 02, 03 | A-02, A-01 | S-1 ✓, S-2 ✓, S-3 ✗ | mcp, guides | — |
 | UC-28 Draw on the playfield | JTBD-07 | A-01, A-02, A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✓, S-5 ✗, S-6 ✓ | daemon, client, mcp | — |
 
