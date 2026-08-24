@@ -800,15 +800,20 @@ Before tickets can be created, all of the following must be true:
 | 015 | Acceptance inventory against the real daemon | 4. L2 acceptance | layered-test-system | 014 |
 | 016 | Elevated with-raised-blocks dry-run locate coverage and operator doc | 4. L2 acceptance | layered-test-system | 015 |
 | 017 | Wire test-hardware.sh and test-acceptance.sh runners | 4. L2 acceptance | layered-test-system | 011, 012, 013, 016 |
-| 018 | Full dress rehearsal and final traceability fill | 5. Dress rehearsal | layered-test-system | 008, 017 |
+| 019 | Convert hard-failing -m camera tests to skip-with-remediation | Cross-cutting: skip hygiene | layered-test-system | 010 |
+| 018 | Full dress rehearsal and final traceability fill | 5. Dress rehearsal | layered-test-system | 008, 017, 019 |
 
-Tickets execute serially in the order listed above (001→018), which is
-also dependency order: within a group, a ticket with no `Depends On`
-entry has no fixture/prior-ticket dependency and could in principle run
-earlier, but grouping is preserved for readability since the groups
-themselves are sequential (ticket-group 2's capture-session gate, 004,
-blocks everything from 005 onward; group 3 and group 4 each have
-internal parallelism the serial order doesn't exploit but doesn't
-violate either). "apriltag-1" =
-`apriltag-1-detects-unreliably-on-arducam-ov9281-usb-camera.md`;
+Tickets execute serially in the order listed above (001→017→019→018),
+which is also dependency order: within a group, a ticket with no
+`Depends On` entry has no fixture/prior-ticket dependency and could in
+principle run earlier, but grouping is preserved for readability since
+the groups themselves are sequential (ticket-group 2's capture-session
+gate, 004, blocks everything from 005 onward; group 3 and group 4 each
+have internal parallelism the serial order doesn't exploit but doesn't
+violate either). Ticket 019 was added mid-sprint (after ticket 010's
+regression check of the existing `-m camera` suite found 41 of 57 tests
+hard-failing rather than skipping) and runs after group 4, before the
+dress rehearsal (018), since 018's hardware run is meaningless while
+most of the hardware suite fails environmentally rather than skipping.
+"apriltag-1" = `apriltag-1-detects-unreliably-on-arducam-ov9281-usb-camera.md`;
 "layered-test-system" = `aprilcam-v2-layered-test-system.md`.

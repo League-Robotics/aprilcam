@@ -18,6 +18,7 @@ tickets:
 - 035-016
 - 035-017
 - 035-018
+- 035-019
 ---
 
 # AprilCam v2 layered test system: offline image-matrix, live system tests, acceptance runs
