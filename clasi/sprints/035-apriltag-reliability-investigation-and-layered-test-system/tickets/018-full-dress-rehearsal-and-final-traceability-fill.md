@@ -3,7 +3,7 @@ id: '018'
 title: Full dress rehearsal and final traceability fill
 status: open
 use-cases: [UC-10, UC-22, UC-29, UC-09]
-depends-on: ['008', '017']
+depends-on: ['008', '017', '019']
 github-issue: ''
 issue: aprilcam-v2-layered-test-system.md
 completes_issue: true
