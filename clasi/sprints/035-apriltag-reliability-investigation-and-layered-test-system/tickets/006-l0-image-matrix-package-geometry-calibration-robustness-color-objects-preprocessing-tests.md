@@ -2,7 +2,7 @@
 id: '006'
 title: 'L0 image-matrix package: geometry, calibration-robustness, color-objects,
   preprocessing tests'
-status: exception
+status: done
 use-cases:
 - UC-10
 depends-on:
@@ -43,6 +43,13 @@ exception:
     a live vision-confirmation capability that the current, explicitly-stated architecture
     forbids for this feature class.'
   surface: user-visible
+  resolved: true
+  resolution: 'Stakeholder decision (2026-08-24): drop the test_color_objects.py
+    acceptance criterion rather than build a classifier or assert a vacuous static
+    lookup. Full rationale, citations, and doc corrections recorded in this ticket''s
+    "Dropped criterion" note (under Acceptance Criteria) and "Resolution" section
+    (end of Handoff Notes). Follow-up issue filed:
+    clasi/issues/colored-object-detection-does-not-exist-needs-vision-design.md.'
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
 
@@ -50,14 +57,17 @@ exception:
 
 ## Description
 
-Adds the remaining four offline assertion families from
+Adds the remaining offline assertion families from
 `docs/test-plans/camera-image-matrix.md` §6, built on ticket 005's
 fixture-discovery conftest: geometry-convention checks, corner/
-calibration robustness across the exposure sweep, color/object
-detection, and preprocessing effectiveness (informational only). Same
-rule as ticket 005: every assertion goes through the daemon's own
-`vision.pipeline`/`vision.detector` entry points, never a parallel
-reimplementation.
+calibration robustness across the exposure sweep, and preprocessing
+effectiveness (informational only). Same rule as ticket 005: every
+assertion goes through the daemon's own `vision.pipeline`/
+`vision.detector` entry points, never a parallel reimplementation.
+
+A fourth family, color/object detection, was originally in scope here
+but was **dropped by stakeholder decision** — see "Dropped criterion"
+under Acceptance Criteria below for the full rationale.
 
 ## Acceptance Criteria
 
@@ -72,15 +82,6 @@ reimplementation.
       camera, documenting which configs a real calibration attempt would
       survive (a config where fewer than the required set is detected is
       an expected, named exception, not a silent pass).
-- [ ] `test_color_objects.py`: where the confirmed field state includes
-      surveyed rectangles/dots, each is found within position tolerance
-      across the white-balance variation axis (the stress axis for this
-      family per §6.5). **BLOCKED — exception thrown, see Handoff Notes.**
-      No live color/object classifier exists anywhere in this codebase,
-      and `design.md` Sec.6's "Feature roles" rule states rectangles/dots
-      are "queryable surveyed positions only, never vision-confirmed" —
-      building one would override that architecture decision, which is
-      outside this ticket's (test-writing) scope.
 - [x] `test_preprocessing.py`: detection with/without the highpass
       illumination-flattening stage (`vision.pipeline.PipelineConfig.use_highpass`)
       is compared across the exposure sweep and reported — informational
@@ -89,13 +90,62 @@ reimplementation.
       cleanly, same as ticket 005 (re-verified for this module
       specifically, not assumed inherited) — for the three implemented
       modules (`test_geometry.py`, `test_calibration_robustness.py`,
-      `test_preprocessing.py`); `test_color_objects.py` was not created,
-      see the blocked criterion above.
-- [x] One mutation check per family (geometry, calibration-robustness,
-      color-objects), recorded in the PR/commit — geometry and
-      calibration-robustness done (see Handoff Notes); color-objects is
-      not applicable since that file was never created (blocked
-      criterion above).
+      `test_preprocessing.py`); `test_color_objects.py` is not part of
+      this ticket — see "Dropped criterion" below.
+- [x] One mutation check per family (geometry, calibration-robustness),
+      recorded in the PR/commit — geometry and calibration-robustness
+      done (see Handoff Notes); color-objects has no mutation check
+      since the family was dropped, not implemented — see "Dropped
+      criterion" below.
+
+### Dropped criterion: `test_color_objects.py` (stakeholder decision, 2026-08-24)
+
+The original fourth criterion —
+"`test_color_objects.py`: where the confirmed field state includes
+surveyed rectangles/dots, each is found within position tolerance across
+the white-balance variation axis (the stress axis for this family per
+§6.5)" — is **dropped, not deferred**. This is a deliberate architectural
+decision made by the stakeholder after resolving the exception below, not
+an oversight or a scope cut made under time pressure. Anyone re-adding
+this criterion in the future should read this note first.
+
+**Why**: the criterion presupposes a live color/object classifier that
+does not exist and, per two independent design documents, is not
+supposed to exist:
+
+- `src/aprilcam/vision/DESIGN.md` §6 ("Open Questions / Known
+  Limitations"): "No object/color/contour detection lives in this
+  subsystem... Whatever backs the MCP `get_objects` tool is not
+  implemented anywhere in `src/aprilcam/vision/` as of this review."
+- `docs/design/design.md` §6 ("Global conventions"), the "Feature
+  roles" rule: "ArUco + AprilTags are calibration ground truth; colored
+  rectangles/dots are queryable surveyed positions only, never
+  vision-confirmed."
+
+**Alternatives considered and rejected** (same reasoning the exception
+below already recorded):
+
+1. **Build a minimal color classifier** so the test would have something
+   real to call. Rejected: that is new production vision code, not test
+   code — outside a test-writing ticket's scope — and it would reverse
+   the "never vision-confirmed" architecture rule above rather than test
+   against it.
+2. **Assert the static `playfield.query.FeatureQuery` survey lookup**
+   instead (the "where is the blue dot" answer). Rejected: that lookup
+   never touches pixel data, so it returns the identical answer for
+   every white-balance-varied fixture — a vacuous pass across the exact
+   stress axis (test plan §6.5) this family exists to exercise, the same
+   "silently under-testing" anti-pattern ticket 005's own
+   `test_world_accuracy.py` explicitly refuses to produce.
+
+`test_color_objects.py` was not created and will not be. Both
+`docs/test-plans/camera-image-matrix.md` §6 and this sprint's `sprint.md`
+(SUC-001) were corrected in the same change that recorded this decision,
+so neither document claims color-object test coverage that does not
+exist. Follow-up:
+`clasi/issues/colored-object-detection-does-not-exist-needs-vision-design.md`
+records that colored-object detection would need vision-subsystem design
+work before it could ever be a real, testable feature.
 
 ## Implementation Plan
 
@@ -108,12 +158,13 @@ live hardware, cited rather than re-derived.
 **Files to create**:
 - `tests/image_matrix/test_geometry.py`
 - `tests/image_matrix/test_calibration_robustness.py`
-- `tests/image_matrix/test_color_objects.py`
 - `tests/image_matrix/test_preprocessing.py`
+- ~~`tests/image_matrix/test_color_objects.py`~~ — dropped, see "Dropped
+  criterion" under Acceptance Criteria above.
 
 **Testing plan**:
 - Run against the `fs-20260823` fixtures from ticket 004.
-- **Verification command**: `uv run pytest tests/image_matrix/test_geometry.py tests/image_matrix/test_calibration_robustness.py tests/image_matrix/test_color_objects.py tests/image_matrix/test_preprocessing.py -v`
+- **Verification command**: `uv run pytest tests/image_matrix/test_geometry.py tests/image_matrix/test_calibration_robustness.py tests/image_matrix/test_preprocessing.py -v`
 
 **Documentation updates**:
 - None yet — ticket 008 covers doc/traceability updates for the whole
@@ -190,8 +241,8 @@ module specifically.
   naming the fixture and the exact mismatch (`documented
   calibration-robustness boundary changed -- ... now sees [2, 3, 4, 5,
   10]`); reverted, re-ran, passes.
-- **Color-objects**: not applicable — the file was never created (see
-  the blocked criterion above).
+- **Color-objects**: not applicable — the file was never created and,
+  per the resolution below, never will be.
 
 **A note on concurrency**: partway through this work, `tests/images/
 field-state.json`'s throwaway `"confirmed"` flip was found reverted to
@@ -200,3 +251,37 @@ concurrently-dispatched agent's git operation touched the working tree
 (three other tickets were active in this same checkout). The flip was
 simply re-applied for the remaining verification runs and reverted
 again at the end; no ticket-006 file was affected.
+
+## Resolution (2026-08-24, exception resolved)
+
+The stakeholder resolved the exception above by choosing to **drop**
+`test_color_objects.py` rather than build a classifier or write a
+vacuous test — see "Dropped criterion" under Acceptance Criteria for
+the full decision record and citations. Concretely:
+
+- `test_color_objects.py` was not created; the "Files to create" list
+  and verification command in the Implementation Plan above were
+  corrected to drop it.
+- `docs/test-plans/camera-image-matrix.md` §6's assertion-family list
+  was corrected to no longer list a color/object family (renumbered
+  5 → 4, with a note pointing to this ticket and the follow-up issue).
+- `clasi/sprints/035-apriltag-reliability-investigation-and-layered-test-system/sprint.md`
+  was corrected in two places that claimed color-object coverage: the
+  Architecture "What Changed" deliverables list, and SUC-001's Main
+  Flow step 3.
+- Follow-up issue filed:
+  `clasi/issues/colored-object-detection-does-not-exist-needs-vision-design.md`.
+
+**Re-verification of the three landed families** (same throwaway-flip
+technique as before, `tests/images/field-state.json` never committed):
+- Default state (`fs-20260823` = `unverified`): `uv run pytest
+  tests/image_matrix/test_geometry.py
+  tests/image_matrix/test_calibration_robustness.py
+  tests/image_matrix/test_preprocessing.py -q` → `3 skipped` (clean
+  skip by design, one per module).
+- Temporarily forced to `"confirmed"`: same command → `86 passed, 27
+  skipped` (matches the per-module breakdown recorded above: 3 geometry
+  + 55 calibration-robustness + 28 preprocessing = 86, with 27 of the
+  preprocessing cases skipped for non-exposure configs).
+- Reverted; `git diff tests/images/field-state.json` confirmed clean
+  both before and after this verification pass.

@@ -229,13 +229,25 @@ parallel reimplementation).
 4. **Corner/calibration robustness.** The 4 corner ArUcos (and all
    surveyed ArUcos) detected across the variation range; document which
    configs calibration would survive.
-5. **Color/object detection** (where the field state includes the
-   rectangles/dots): classifier finds each surveyed colored object
-   within position tolerance; white-balance variations are the stress
-   axis here.
-6. **Preprocessing effectiveness** (informational, non-blocking):
+5. **Preprocessing effectiveness** (informational, non-blocking):
    detection with/without the highpass illumination flattening across
    the exposure sweep, so preprocessing changes show their real effect.
+
+**Dropped (sprint 035 ticket 006, 2026-08-24):** a color/object
+detection family — where the field state includes the rectangles/dots,
+a classifier would find each surveyed colored object within position
+tolerance, white-balance variations being the stress axis — was
+originally planned here as item 5. It was dropped, not deferred: no
+live color/object classifier exists anywhere in `src/aprilcam/`, and
+`docs/design/design.md` §6's "Feature roles" rule states colored
+rectangles/dots are "queryable surveyed positions only, never
+vision-confirmed" — `src/aprilcam/vision/DESIGN.md` §6 independently
+confirms no such detector is implemented. Building one, or asserting the
+static `playfield.query.FeatureQuery` survey lookup instead (which would
+pass vacuously — it never touches pixel data), were both rejected. See
+ticket 006's "Dropped criterion" note and
+`clasi/issues/colored-object-detection-does-not-exist-needs-vision-design.md`
+for the full rationale and follow-up.
 
 ## 7. Regeneration workflow (stakeholder loop)
 

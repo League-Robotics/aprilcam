@@ -376,9 +376,11 @@ points, never the reverse.
   place, not replaced.
 - New `tests/image_matrix/` package: conftest fixture discovery,
   `test_recall.py`, `test_world_accuracy.py`, `test_geometry.py`,
-  `test_calibration_robustness.py`, `test_color_objects.py`,
-  `test_preprocessing.py`, `transforms.py` +
-  `test_synthetic_degradation.py`.
+  `test_calibration_robustness.py`, `test_preprocessing.py`,
+  `transforms.py` + `test_synthetic_degradation.py`. (A planned
+  `test_color_objects.py` was dropped by stakeholder decision — ticket
+  006, 2026-08-24 — since no color/object classifier exists or is
+  architecturally permitted; see the ticket's "Dropped criterion" note.)
 - New `tests/aprilcam/mcp/test_stdio_offline.py` and
   `test_stdio_hardware.py`; generalized
   `tests/aprilcam/hardware_camera.py`; new
@@ -579,8 +581,11 @@ Parent: UC-10 — Get all detected tags at once
   2. For each fixture, `run_pipeline` + `TagDetector.detect` (the same
      entry points the daemon itself calls) run against the saved JPEG.
   3. Recall, world-accuracy (≤1.5 cm), geometry-convention
-     (+x east/+y north/north-up), calibration-robustness, color-object,
-     and preprocessing-effectiveness assertions run per fixture family.
+     (+x east/+y north/north-up), calibration-robustness, and
+     preprocessing-effectiveness assertions run per fixture family. (A
+     color-object family was planned but dropped by stakeholder
+     decision — ticket 006 — since no vision-confirmed color/object
+     classifier exists or is architecturally permitted.)
   4. Synthetic degradation transforms (exposure/gamma/contrast/
      brightness/blur/noise/recompress) run against a mild and a severe
      grid, asserting full recall and the documented boundary
