@@ -124,6 +124,12 @@ import pytest
 from aprilcam.client.discovery import probe_socket_reachable
 from aprilcam.config.directories import Directories
 from aprilcam.daemon.lifecycle import SOCKET_FILENAME
+from tests.aprilcam.daemon.mount_z_math import (
+    REAL_HEIGHT_CM,
+    REAL_NADIR_X_CM,
+    REAL_NADIR_Y_CM,
+    expected_parallax_corrected_position,
+)
 from tests.aprilcam.hardware_camera import resolve_hardware_camera_slug
 
 pytestmark = pytest.mark.camera
@@ -150,9 +156,11 @@ MAIN_PLAYFIELD_JSON = (
 #: regression; the real value ``camera locate`` actually wrote to
 #: ``~/.config/aprilcam`` before the reference stands were removed --
 #: confirmed live, read-only, as part of this ticket's completion notes).
-REAL_NADIR_X_CM = 3.0570142285481654
-REAL_NADIR_Y_CM = -2.798700632324644
-REAL_HEIGHT_CM = 128.22990496814816
+#: Sprint 035 ticket 011: moved to ``tests/aprilcam/daemon/
+#: mount_z_math.py`` so this module and every other real-hardware
+#: mount_z test import the exact same values rather than each
+#: redeclaring them -- re-exported here (still ``REAL_NADIR_X_CM`` etc.
+#: in this module's own namespace) so nothing below needed to change.
 
 
 def _skip_if_arducam_not_attached() -> None:
@@ -431,9 +439,9 @@ def test_mount_z_is_a_noop_until_camera_position_is_pushed_then_engages_with_no_
         assert dumped_data["camera_position"]["nadir_x_cm"] == pytest.approx(REAL_NADIR_X_CM, abs=1e-6)
 
         configured_x, configured_y, _ = _poll_for_tag(bin_path, env, family, number)
-        ratio = 20.0 / REAL_HEIGHT_CM
-        expected_x = before_x + ratio * (REAL_NADIR_X_CM - before_x)
-        expected_y = before_y + ratio * (REAL_NADIR_Y_CM - before_y)
+        expected_x, expected_y = expected_parallax_corrected_position(
+            before_x, before_y, mount_z_cm=20.0
+        )
         # The per-axis shift depends on how far *this particular* tag sits
         # from the nadir on that axis -- for a tag that happens to sit
         # close to the nadir's x (as the field's own corner markers can),
