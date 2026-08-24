@@ -62,6 +62,61 @@ Never writes ``camera_position`` anywhere -- ``hardware_test_camera_config``
 (``tests/aprilcam/daemon/conftest.py``) pushes only ``name``/
 ``playfield``/a swept ``exposure`` setting, and nothing in this module
 constructs a ``CameraConfig`` with ``camera_position`` set at all.
+
+**Out-of-process cleanup (2026-08-23): three of the four ``camera_session``
+tests were converted to a third session, against the operator's
+already-running daemon, because they never needed a private one.** A
+private daemon started from this process cannot open a camera at all
+(``docs/knowledge/daemon-camera-grant-and-detection-priming.md`` --
+no macOS camera TCC grant), so ``camera_session`` always skips every
+case in an agent run. But the operator's own daemon is already up,
+already linked+calibrated (camera 3, ``arducam-ov9782-usb-camera``,
+against ``main-playfield``), and already serving frames/tags to any
+client on this machine -- ``get_frame``/``get_tags``/``stream_images``
+are pure reads against that state, so nothing stops them running for
+real against it instead:
+
+* :func:`running_daemon_session` -- ``Discovery().connect()`` with **no**
+  isolation env vars and **no** spawned daemon, targeting
+  :data:`_RELIABLE_CAMERA_SLUG` specifically rather than the full
+  multi-camera parameterization ``camera_session`` uses. Deliberately a
+  single fixed camera, not another ``resolve_all_hardware_camera_
+  identities`` parameterization: camera 5 (``arducam-ov9281-usb-camera``)
+  also qualifies (linked+calibrated to ``main-playfield``) but only sees
+  ArUco 1 ~7/12 of the time on this rig, and the whole point of these
+  three tests is a real, non-flaky read, not an availability sweep.
+  Pushes nothing -- no ``set_playfield``, no ``set_camera_config``, no
+  ``calibrate`` -- since the target camera is already configured and
+  calibrated on this machine's real, persisted state (confirmed on disk
+  before writing this fixture); a push here would be a live override
+  visible to the operator and to anyone else watching this daemon, which
+  is exactly what this conversion exists to avoid.
+  :func:`test_get_frame_succeeds_raw_and_deskewed` and
+  :func:`test_get_tags_get_tag_and_get_tag_history_return_well_typed_results`
+  use it unchanged from their ``camera_session`` bodies otherwise (same
+  assertions, same ``_prime_tags`` helper).
+  :func:`test_stream_images_subscription_receives_a_frame_and_unsubscribes_cleanly_on_close`
+  drops the private-daemon variant's ``lifecycle._status_source.__self__``/
+  ``_image_stream_producers`` reach-in -- that inspects the daemon
+  process's own internals, which for this session live in a separate,
+  operator-owned process this test does not control -- and instead
+  proves "unsubscribes cleanly" the black-box way: ``close()`` raises
+  nothing, and a plain ``get_frame`` right after still succeeds (the
+  daemon's stream-handling state was not left corrupted by the close).
+* :func:`test_register_tag_and_unregister_tag_round_trip` **stays on the
+  private, isolated ``camera_session`` path.** ``register_tag`` is not a
+  read -- ``types.MountParameters``' own docstring: "runtime
+  registrations... applies whatever mount_x/mount_y/mount_z/mount_yaw_rad
+  it is given" -- and this test's ``mount_x=3.0``/``mount_y=-1.5`` would
+  offset the reported world position of *any* real ARUCO tag 2 the
+  operator's daemon sees, on any camera, for as long as the registration
+  is live, exactly the same "live override the operator would see" risk
+  ruled out for camera config. A ``finally``-guarded ``unregister_tag``
+  narrows the exposure window but does not remove it (a crash between
+  register and the ``finally`` would leave a real tag's reported
+  position wrong for the rest of the daemon's uptime, and this project's
+  own rule is never to restart it to recover). Judged unsafe against a
+  shared daemon; left exactly as ticket 012 wrote it.
 """
 
 from __future__ import annotations
@@ -126,21 +181,6 @@ def _dir_listing(root: Path) -> Tuple[str, ...]:
 
 def _real_dirs_snapshot() -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
     return _dir_listing(_REAL_DIRECTORIES.config_dir), _dir_listing(_REAL_DIRECTORIES.state_dir)
-
-
-def _wait_until(predicate, *, timeout: float = 5.0, interval: float = 0.02) -> bool:
-    """Real-clock polling helper -- identical idiom to
-    ``tests/aprilcam/daemon/test_streaming_integration.py``'s own
-    ``_wait_until``, reused here (duplicated, not imported, matching
-    this suite's established "short helper duplicated per module"
-    convention) for the same reason: observing a real background
-    thread's state without a fixed ``time.sleep``."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(interval)
-    return predicate()
 
 
 def _prime_tags(daemon: Daemon, slug: str, *, attempts: int = 20, delay: float = 0.5) -> TagFrame:
@@ -401,11 +441,61 @@ def camera_session(isolated_directories: Directories, identity) -> Iterator[Tupl
     )
 
 
+#: The one camera the shared-daemon tests below target -- never the full
+#: multi-camera parameterization ``camera_session``/``identity`` use.
+#: Camera 3 is this rig's reliable one (AprilTag 1 + ArUco 1-10); camera
+#: 5 (``arducam-ov9281-usb-camera``, also linked+calibrated to
+#: ``main-playfield``) sees ArUco 1 only ~7/12 of the time and must never
+#: be required for a "a tag was detected" assertion
+#: (``docs/knowledge/daemon-camera-grant-and-detection-priming.md``'s
+#: "Visibility is per-camera" section).
+_RELIABLE_CAMERA_SLUG = "arducam-ov9782-usb-camera"
+
+
+@pytest.fixture
+def running_daemon_session() -> Iterator[Tuple[Daemon, str]]:
+    """Connects to the operator's already-running daemon -- no isolation
+    env vars, no spawned daemon, no config pushed -- and gates on a real
+    ``get_frame`` against :data:`_RELIABLE_CAMERA_SLUG`, mirroring
+    ``camera_session``'s own gate-on-open-not-enumeration contract
+    (``docs/knowledge/daemon-camera-grant-and-detection-priming.md``:
+    enumeration succeeds even when opens fail). Skips cleanly with
+    remediation text if the named camera does not currently qualify, or
+    if a real frame fetch fails."""
+    identities = resolve_all_hardware_camera_identities(playfield=_TARGET_PLAYFIELD)
+    if not any(identity.slug == _RELIABLE_CAMERA_SLUG for identity in identities):
+        pytest.skip(
+            f"{_RELIABLE_CAMERA_SLUG!r} is not currently attached and "
+            f"configured+calibrated against {_TARGET_PLAYFIELD!r} on this "
+            f"machine's real system state (qualifying cameras right now: "
+            f"{sorted(i.slug for i in identities)}) -- link and calibrate it "
+            f"with 'aprilcam camera config <file>' and 'aprilcam camera "
+            f"calibrate {_RELIABLE_CAMERA_SLUG}' before running this test."
+        )
+
+    daemon = Discovery().connect()
+    try:
+        daemon.get_frame(_RELIABLE_CAMERA_SLUG, deskewed=False, encoding="jpeg")
+    except AprilCamError as exc:
+        pytest.skip(
+            f"{_RELIABLE_CAMERA_SLUG!r} qualifies (config + calibration "
+            f"present on this machine's real system state) but could not "
+            f"be read via the running daemon just now -- {exc}. The "
+            f"operator's daemon may be down or the camera busy elsewhere "
+            f"-- re-run once it is reachable (see docs/knowledge/"
+            f"daemon-camera-grant-and-detection-priming.md)."
+        )
+    yield daemon, _RELIABLE_CAMERA_SLUG
+
+
 @pytest.mark.camera
-def test_get_frame_succeeds_raw_and_deskewed(camera_session):
-    daemon, _lifecycle, slug = camera_session
-    result = _link_and_calibrate(daemon, slug)
-    assert result.succeeded is True, calibration_diagnosis(result, slug)
+def test_get_frame_succeeds_raw_and_deskewed(running_daemon_session):
+    """Against the operator's already-running daemon (no isolation, no
+    pushed config) -- camera 3 is already linked+calibrated to
+    ``main-playfield`` on this machine's real, persisted state, so this
+    test only reads. Assertions unchanged from the isolated-daemon
+    version this replaces (ticket 012)."""
+    daemon, slug = running_daemon_session
 
     raw = daemon.get_frame(slug, deskewed=False, encoding="jpeg")
     assert isinstance(raw, ImageFrame)
@@ -425,16 +515,19 @@ def test_get_frame_succeeds_raw_and_deskewed(camera_session):
 
 
 @pytest.mark.camera
-def test_get_tags_get_tag_and_get_tag_history_return_well_typed_results(camera_session):
-    daemon, _lifecycle, slug = camera_session
-    result = _link_and_calibrate(daemon, slug)
-    assert result.succeeded is True, calibration_diagnosis(result, slug)
+def test_get_tags_get_tag_and_get_tag_history_return_well_typed_results(running_daemon_session):
+    """Against the operator's already-running daemon -- see
+    :func:`running_daemon_session`. Assertions unchanged from the
+    isolated-daemon version this replaces (ticket 012)."""
+    daemon, slug = running_daemon_session
 
     frame = _prime_tags(daemon, slug)
     assert isinstance(frame, TagFrame)
     assert len(frame.tags) > 0, (
-        f"no tags detected on {slug!r} against {_TARGET_PLAYFIELD!r} after "
-        f"priming -- {calibration_diagnosis(result, slug)}"
+        f"no tags detected on {slug!r} against {_TARGET_PLAYFIELD!r} via the "
+        f"running daemon after priming -- expected AprilTag 1 / ArUco 1-10 "
+        f"to be visible on this camera (docs/knowledge/"
+        f"daemon-camera-grant-and-detection-priming.md)"
     )
 
     # get_tag for a tag actually seen this frame -- picked from the live
@@ -466,8 +559,19 @@ def test_get_tags_get_tag_and_get_tag_history_return_well_typed_results(camera_s
 
 
 @pytest.mark.camera
-def test_stream_images_subscription_receives_a_frame_and_unsubscribes_cleanly_on_close(camera_session):
-    daemon, lifecycle, slug = camera_session
+def test_stream_images_subscription_receives_a_frame_and_unsubscribes_cleanly_on_close(running_daemon_session):
+    """Against the operator's already-running daemon -- see
+    :func:`running_daemon_session`. Cannot reach ``DaemonService.
+    _image_stream_producers`` the way the isolated-daemon version (ticket
+    012) did -- that private state lives inside a separate,
+    operator-owned process this test does not control, so there is no
+    ``lifecycle`` object here to reach in through at all. Proves
+    "unsubscribes cleanly" the only way a client-only test against a
+    shared daemon can: ``close()`` raises nothing, and a plain
+    ``get_frame`` right after still succeeds -- if ``close()`` had left
+    the daemon's stream-handling state corrupted, that follow-up read
+    would be the thing to catch it."""
+    daemon, slug = running_daemon_session
 
     stream = daemon.stream_images(slug, deskewed=False)
     it = iter(stream)
@@ -479,18 +583,12 @@ def test_stream_images_subscription_receives_a_frame_and_unsubscribes_cleanly_on
     assert isinstance(frame, ImageFrame)
     assert len(frame.data) > 0
 
-    # socket-close-is-unsubscribe, verified daemon-side -- no public API
-    # exposes a stream subscriber count, so this reaches the private
-    # DaemonService the identical way
-    # tests/aprilcam/daemon/test_streaming_integration.py's own
-    # real-socket idle-gating tests do (``# noqa: SLF001`` there too).
-    service = lifecycle._status_source.__self__  # noqa: SLF001
-    producer = service._image_stream_producers.get((slug, False))  # noqa: SLF001
-    assert producer is not None, "expected an image-stream producer to exist for this camera"
-    assert _wait_until(lambda: producer.running is False, timeout=5.0), (
-        "image-stream producer is still running after the client-side "
-        "stream was closed -- looks like a leaked subscriber"
-    )
+    # The daemon is still healthy for other clients after this
+    # subscription closed -- the black-box substitute for the isolated
+    # version's direct producer-leak check (see docstring above).
+    after_close = daemon.get_frame(slug, deskewed=False, encoding="jpeg")
+    assert isinstance(after_close, ImageFrame)
+    assert len(after_close.data) > 0
 
 
 @pytest.mark.camera
