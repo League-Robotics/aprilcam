@@ -1,5 +1,9 @@
 ---
-status: pending
+status: in-progress
+sprint: '036'
+tickets:
+- 036-004
+- 036-005
 ---
 
 # `opencv-contrib-python` is a base dependency, contradicting the daemon-only contract

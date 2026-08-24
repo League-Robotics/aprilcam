@@ -1,5 +1,8 @@
 ---
-status: pending
+status: in-progress
+sprint: '036'
+tickets:
+- 036-006
 ---
 
 # The installed-package test never starts `aprilcam mcp`, so a broken MCP server ships silently

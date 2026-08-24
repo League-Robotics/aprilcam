@@ -1,5 +1,9 @@
 ---
-status: pending
+status: in-progress
+sprint: '036'
+tickets:
+- 036-007
+- 036-008
 ---
 
 # Mount registrations (tag pose relative to robot, parallax correction) should persist across daemon restarts

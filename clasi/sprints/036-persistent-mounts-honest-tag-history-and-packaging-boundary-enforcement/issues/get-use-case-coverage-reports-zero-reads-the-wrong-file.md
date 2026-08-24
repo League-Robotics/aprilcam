@@ -1,5 +1,8 @@
 ---
-status: pending
+status: in-progress
+sprint: '036'
+tickets:
+- 036-001
 ---
 
 # `get_use_case_coverage()` always reports zero — it reads a file this project never populated
