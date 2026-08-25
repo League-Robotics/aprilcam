@@ -93,30 +93,38 @@ Two questions look similar but are answered from different sources:
   limitation, not a bug: the definition is ground truth for this
   query, never live observation.
 
-## 6. Mounts and Annotations Are Per-Session — Re-register Every Time
+## 6. Mounts Persist; Annotations Are Still Per-Session
 
-**This is the rule most likely to bite you.** Two kinds of state live
-only in the daemon's memory and vanish on **every** daemon restart:
+Two kinds of state used to both live only in the daemon's memory and
+vanish on every restart. That is no longer true for one of them — get
+this distinction right, or you'll either redo work that is no longer
+necessary or trust a stale annotation that already vanished:
 
 - **Mount registrations** (`aprilcam tags mount register`) — if you
   want a tag's reported position to be the *robot's* position
   (correcting for the tag's height and its offset from the robot's own
   reference point) rather than the raw tag's position, you register a
-  mount for that tag. That registration does **not** survive a daemon
-  restart.
+  mount for that tag. **This now survives a daemon restart**: the
+  registration is written to `state_dir/mounts/registry.json` and
+  reloaded automatically the next time the daemon starts. Register a
+  tag once and it stays registered — there is no re-registration
+  ritual at the start of every session. The only way to remove a
+  registration is `unregister_tag` (`aprilcam tags mount clear`); a
+  restart no longer clears one for you, so a tag re-mounted on a
+  different robot needs an explicit `clear` first, not just a wait for
+  the next restart.
 - **Annotations** (drawings pushed to a playfield, visible to every
-  other client) likewise do not survive a restart.
+  other client) are **unaffected by this change and remain
+  per-session** — held only in the daemon's memory, gone on every
+  restart, same as always. You must still re-draw them at the start of
+  every session that needs them.
 
-If you register a mount once and assume it persists across sessions,
-you will silently get the *raw tag's* pose back instead of the
-*robot's* pose after any daemon restart — with no error and no
-warning, just a plausible-looking number that is wrong. **Re-register
-your mount (and re-draw your annotations) at the start of every
-session that needs them, not just once ever.** `aprilcam tags mount
-list` shows what is currently registered if you need to check before
-trusting a reported position.
+`aprilcam tags mount list` still shows what is currently registered —
+unaffected by this change, and worth checking if you're unsure whether
+a registration you expect is actually in effect, whether it came from
+this session or was reloaded from a previous one.
 
-> Per-session rule: mount registrations (UC-12) and annotations (UC-28) do not survive a daemon restart -- re-register and re-draw them at the start of every session that needs them.
+> Per-session rule: mount registrations (UC-12) now persist across a daemon restart (written to state_dir/mounts/registry.json, reloaded at startup) and are removed only by an explicit unregister_tag/`aprilcam tags mount clear` -- annotations (UC-28) remain per-session and must still be re-drawn at the start of every session that needs them.
 
 **A second, independent precondition — calibrated is not the same as
 located.** A nonzero `mount_z` (the tag's height above the field,
