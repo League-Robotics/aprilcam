@@ -5,11 +5,19 @@ utility (design.md §4.10); nothing here needs a daemon, camera, or
 network. Dictionary sizes are asserted against the real installed
 OpenCV programmatically, never as hardcoded literals, so this suite
 stays correct if the installed OpenCV version changes a dictionary.
+
+Sprint 036 ticket 004 added the ``cv2``-unimportable tests below
+(``_is_missing_cv2``/``_import_cv``), mirroring
+``tests/aprilcam/cli/test_mcp_cli.py``'s identically-shaped coverage of
+``cli/mcp.py``'s ``_is_missing_mcp_sdk``/``_import_build_server`` for
+the ``mcp`` SDK -- same lazy-import-with-typed-error pattern, same test
+shape, different package.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 import warnings
 from pathlib import Path
 from typing import Iterator
@@ -18,7 +26,8 @@ from unittest.mock import MagicMock
 import cv2 as cv
 import pytest
 
-from aprilcam.errors import InvalidTagId, UnwritableOutputPath
+from aprilcam.errors import InvalidTagId, MissingOptionalDependency, UnwritableOutputPath
+from aprilcam.tags import generator as generator_module
 from aprilcam.tags.generator import TagGenerator
 from aprilcam.types import TagFamily
 
@@ -211,3 +220,143 @@ def test_generate_does_not_warn_for_a_normal_size(
         generator.generate(
             TagFamily.ARUCO, (1,), size_cm=8.0, out_dir=tmp_path, dpi=300
         )
+
+
+# ---------------------------------------------------------------------------
+# Sprint 036 ticket 004 -- cv2 is a lazy, `daemon`-extra-gated import.
+# Importing this module, or constructing a TagGenerator, must never touch
+# cv2; valid_ids()/generate() must raise a clear MissingOptionalDependency
+# (not a bare ImportError) when cv2 is unimportable.
+# ---------------------------------------------------------------------------
+
+
+def test_module_has_no_module_scope_cv2_import() -> None:
+    """AST check, not a reload/meta_path dance: no top-level statement
+    in ``generator.py`` may be an ``import cv2``/``from cv2 import
+    ...``. Deliberately only inspects the module's direct top-level
+    statements (``tree.body``, not ``ast.walk``) -- unlike
+    ``tests/test_no_cv2_in_client_modules.py``'s all-scopes scan, this
+    module is *expected* to import ``cv2`` inside its functions
+    (``_import_cv``); only a bare module-scope import would defeat the
+    laziness this ticket exists to add.
+    """
+    import ast
+    import inspect
+
+    source_path = Path(inspect.getfile(generator_module))
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+
+    offenders = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "cv2" or alias.name.startswith("cv2."):
+                    offenders.append(f"import {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "cv2" or (node.module or "").startswith("cv2."):
+                offenders.append(f"from {node.module} import ...")
+
+    assert not offenders, (
+        f"{source_path} must not import cv2 at module scope (sprint 036 "
+        f"ticket 004 -- cv2 must be a lazy, point-of-use import): "
+        f"found {offenders}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# _is_missing_cv2 -- classifies which ModuleNotFoundErrors mean "cv2 is
+# missing" vs. some unrelated import failure.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("missing_name", ["cv2", "cv2.aruco"])
+def test_is_missing_cv2_true_for_cv2_and_its_submodules(missing_name: str) -> None:
+    exc = ModuleNotFoundError(f"No module named {missing_name!r}", name=missing_name)
+    assert generator_module._is_missing_cv2(exc) is True
+
+
+@pytest.mark.parametrize("missing_name", ["numpy", "cv2_enumerate_cameras"])
+def test_is_missing_cv2_false_for_unrelated_modules(missing_name: str) -> None:
+    exc = ModuleNotFoundError(f"No module named {missing_name!r}", name=missing_name)
+    assert generator_module._is_missing_cv2(exc) is False
+
+
+def test_is_missing_cv2_false_when_exception_carries_no_name() -> None:
+    # `ModuleNotFoundError.name` can be None in principle; must not
+    # crash on the `.startswith` call.
+    exc = ModuleNotFoundError("something went wrong")
+    assert generator_module._is_missing_cv2(exc) is False
+
+
+# ---------------------------------------------------------------------------
+# _import_cv / valid_ids / generate -- the actual lazy import, end to end.
+# ---------------------------------------------------------------------------
+
+
+class _BlockCv2Imports:
+    """A ``sys.meta_path`` finder that makes ``cv2``/``cv2.*`` genuinely
+    unimportable, reproducing a base-only install's missing-daemon-extra
+    failure mode without uninstalling anything from this dev
+    environment. Mirrors ``tests/aprilcam/cli/test_mcp_cli.py``'s
+    ``_BlockMcpImports`` for the ``mcp`` SDK."""
+
+    def find_spec(self, fullname, path, target=None):  # noqa: ANN001, ANN201
+        if fullname == "cv2" or fullname.startswith("cv2."):
+            raise ModuleNotFoundError(
+                f"No module named {fullname!r} (blocked for test)", name=fullname
+            )
+        return None
+
+
+@pytest.fixture()
+def cv2_uninstalled(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Simulates an environment where ``cv2`` cannot be imported at
+    all: evicts every already-cached ``cv2``/``cv2.*`` module from
+    ``sys.modules`` (so the next import actually re-executes rather
+    than hitting the cache) and installs a blocking finder ahead of the
+    real ones. ``monkeypatch`` restores both ``sys.modules`` and
+    ``sys.meta_path`` to their prior state on teardown, so this cannot
+    leak into other tests.
+    """
+    for name in list(sys.modules):
+        if name == "cv2" or name.startswith("cv2."):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setattr(sys, "meta_path", [_BlockCv2Imports(), *sys.meta_path])
+    yield
+
+
+def test_import_cv_raises_missing_optional_dependency_when_cv2_is_absent(
+    cv2_uninstalled: None,
+) -> None:
+    with pytest.raises(MissingOptionalDependency) as excinfo:
+        generator_module._import_cv()
+
+    assert excinfo.value.package == "opencv-contrib-python"
+    assert excinfo.value.feature == "aprilcam taggen"
+    assert "aprilcam[daemon]" in str(excinfo.value)
+
+
+def test_import_cv_returns_the_real_cv2_module_when_available() -> None:
+    assert generator_module._import_cv() is cv
+
+
+def test_valid_ids_raises_missing_optional_dependency_when_cv2_is_absent(
+    cv2_uninstalled: None,
+) -> None:
+    with pytest.raises(MissingOptionalDependency) as excinfo:
+        TagGenerator().valid_ids(TagFamily.ARUCO)
+
+    assert "aprilcam[daemon]" in str(excinfo.value)
+
+
+def test_generate_raises_missing_optional_dependency_when_cv2_is_absent(
+    cv2_uninstalled: None, tmp_path: Path
+) -> None:
+    with pytest.raises(MissingOptionalDependency) as excinfo:
+        TagGenerator().generate(
+            TagFamily.ARUCO, (1,), size_cm=8.0, out_dir=tmp_path, dpi=300
+        )
+
+    assert "aprilcam[daemon]" in str(excinfo.value)
+    # Nothing must be rendered or written when cv2 itself is unavailable.
+    assert list(tmp_path.iterdir()) == []

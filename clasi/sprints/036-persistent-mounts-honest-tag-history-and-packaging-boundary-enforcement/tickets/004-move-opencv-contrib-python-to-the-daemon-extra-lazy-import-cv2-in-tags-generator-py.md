@@ -1,7 +1,7 @@
 ---
 id: '004'
 title: Move opencv-contrib-python to the daemon extra; lazy-import cv2 in tags/generator.py
-status: in-progress
+status: done
 use-cases:
 - SUC-003
 depends-on:
@@ -154,34 +154,34 @@ checking).
 
 ## Acceptance Criteria
 
-- [ ] `opencv-contrib-python` moves from `[project.dependencies]` to
+- [x] `opencv-contrib-python` moves from `[project.dependencies]` to
       `[project.optional-dependencies.daemon]` in `pyproject.toml`.
-- [ ] `src/aprilcam/tags/generator.py`'s `import cv2 as cv` at module
+- [x] `src/aprilcam/tags/generator.py`'s `import cv2 as cv` at module
       scope is removed; `cv2` is imported inside the function(s) that
       need it (`generate()`/`valid_ids()`), with `ImportError` caught
       and re-raised as a clear message naming
       `pip install 'aprilcam[daemon]'`.
-- [ ] `_DICTIONARY_BY_FAMILY` (currently a module-level dict built from
+- [x] `_DICTIONARY_BY_FAMILY` (currently a module-level dict built from
       `cv.aruco.DICT_APRILTAG_36h11`/`DICT_4X4_50` at import time)
       moves inside the same lazy-import boundary, so that simply
       `import aprilcam.tags.generator` — or constructing a
       `TagGenerator` — touches no `cv2` symbol at all.
-- [ ] `aprilcam taggen`/`tags generate` still appears in `--help` and
+- [x] `aprilcam taggen`/`tags generate` still appears in `--help` and
       the CLI dispatch tree unchanged; running it without the
       `daemon` extra installed fails with the clear message above, not
       a raw traceback.
-- [ ] `tests/packaging/test_installed_package.py::test_import_cv2_fails_in_the_fresh_base_only_venv`'s
+- [x] `tests/packaging/test_installed_package.py::test_import_cv2_fails_in_the_fresh_base_only_venv`'s
       `xfail(strict=True)` marker is removed; the test passes for
       real.
-- [ ] `tests/test_no_cv2_in_client_modules.py` still passes unchanged
+- [x] `tests/test_no_cv2_in_client_modules.py` still passes unchanged
       (it doesn't scan `tags/`, so this is a sanity check, not an
       expected code change).
-- [ ] Existing `tags/` tests (detection of a missing/invalid id,
+- [x] Existing `tags/` tests (detection of a missing/invalid id,
       output-directory-writability checks, etc.) still pass with `cv2`
       importable (i.e. run from this repo's own dev venv, which has
       the `daemon` extra) — this ticket does not change `generate()`'s
       behavior when `cv2` *is* available, only when it isn't.
-- [ ] **The dev/test environment keeps `cv2` available after this
+- [x] **The dev/test environment keeps `cv2` available after this
       move.** Confirmed during sprint re-planning: neither
       `pyproject.toml`'s `[dependency-groups].dev` nor its
       `[project.optional-dependencies].dev` currently pulls in the
@@ -206,6 +206,25 @@ checking).
       alongside the rest of the daemon extra's packages. Re-lock
       `uv.lock` after the change and confirm with a fresh `uv sync`
       (no extra flags) followed by `uv run python -c "import cv2"`.
+
+      **Resolved**: `uv` 0.11.21 supports a self-referential extra
+      requirement inside `[dependency-groups]` — `"aprilcam[daemon]"` —
+      which uv recognizes as the project's own name and merges the
+      named extra's requirements into the group instead of resolving it
+      against PyPI (confirmed in the re-locked `uv.lock`:
+      `[package.dev-dependencies].dev` now has
+      `{ name = "aprilcam", extra = ["daemon"] }`, and
+      `[package.metadata.requires-dev].dev` mirrors it). Added the same
+      `"aprilcam[daemon]"` line to `[project.optional-dependencies].dev`
+      for consistency (`pip install "aprilcam[dev]"` gets the same
+      benefit; `uv.lock`'s `requires-dist` confirms
+      `{ name = "aprilcam", extras = ["daemon"], marker = "extra ==
+      'dev'" }`). Verified live: `uv sync` (no `--extra`/`--group`
+      flags) followed by `uv run python -c "import cv2"` succeeds, and
+      all of `mss`/`websockets`/`fpdf`/`cv2_enumerate_cameras`/`msgpack`
+      import too. `README.md`'s Development section updated: the setup
+      command is now a bare `uv sync` (no `--group dev --extra daemon`
+      needed).
 
 ## Testing
 
@@ -249,3 +268,19 @@ Architecture section for the full account. This ticket's scope and
 acceptance criteria for `tags/generator.py` itself are unchanged by the
 resequencing; only the "Scope boundary with ticket 005" section, the
 expected test outcome, and the new dev-environment AC above are new.
+
+## Completion note (second attempt)
+
+Recovered the first attempt's stashed work (`pyproject.toml`,
+`tags/generator.py`, `tests/aprilcam/tags/test_generator.py`,
+`tests/packaging/test_installed_package.py`, `uv.lock`) — it applied
+cleanly on top of ticket 005 with no conflicts, exactly as this
+ticket's "Stashed prior work exists" note predicted. Also removed the
+`xfail(strict=True)` marker on
+`tests/test_cv2_import_blocker_console_script.py::test_aprilcam_cli_still_requires_cv2_via_tags_generator`
+(ticket 005's own test file, parked pending this ticket landing per
+that test's own docstring) and renamed it to
+`test_aprilcam_cli_imports_with_cv2_blocked` — now a real,
+unconditional pass. Full scoped verification, including both fresh-venv
+packaging tests and the console-script import-blocker suite, is green;
+see the closing commit for the exact command and result.

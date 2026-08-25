@@ -44,15 +44,18 @@ also lands. This module is explicit about that split:
   ``tags``) by stubbing out ``aprilcam.tags.generator`` -- the one
   piece this ticket does not touch -- rather than silently relying on
   it happening to already be fixed.
-- :func:`test_aprilcam_cli_still_requires_cv2_via_tags_generator` is
+- :func:`test_aprilcam_cli_imports_with_cv2_blocked` used to be
   ``xfail(strict=True)``, mirroring
   ``tests/packaging/test_installed_package.py``'s own idiom for a
-  known, tracked, not-yet-closed gap: it documents that the *whole*
-  ``import aprilcam.cli`` does not yet succeed with ``cv2`` blocked,
-  names the precise reason, and will flip to a hard failure (an
-  unexpected pass) the day ticket 004 lands and closes the gap -- at
-  which point this xfail marker (and, ideally, this module's docstring
-  paragraph about the split) should be removed/updated.
+  known, tracked, not-yet-closed gap: ``aprilcam.tags.generator`` had
+  its own top-level ``import cv2 as cv``, unrelated to this ticket's
+  ``calibration/geometry.py``/``distortion.py`` split, so the *whole*
+  ``import aprilcam.cli`` did not yet succeed with ``cv2`` blocked.
+  Sprint 036 ticket 004 made that import lazy (see
+  ``tags/generator.py``'s module docstring), closing the gap -- the
+  marker has been removed and this is now a real, unconditional
+  assertion that ``import aprilcam.cli`` succeeds with ``cv2`` blocked
+  and nothing stubbed.
 
 **Eviction is required, not optional.** A module already cached in
 ``sys.modules`` from an earlier import elsewhere in this test session
@@ -193,36 +196,23 @@ def test_cli_camera_and_locate_chain_imports_with_cv2_blocked(
 
 
 # ---------------------------------------------------------------------------
-# The known, separate, tracked gap -- xfail(strict=True) so it stays
-# visible without blocking this ticket, and flips to a hard failure
-# (not a silent pass) the day ticket 004 lands. Mirrors
-# tests/packaging/test_installed_package.py's own idiom for exactly
-# this situation.
+# The gap this xfail used to track (sprint 036 ticket 004:
+# aprilcam.tags.generator's own top-level `import cv2 as cv`) is now
+# closed -- tags/generator.py's cv2 import is lazy, so the whole
+# `import aprilcam.cli` chain genuinely succeeds with cv2 blocked, with
+# nothing stubbed. No xfail marker: this is a real, unconditional pass.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "known, separate packaging gap tracked for ticket 004 (sprint 036, "
-        "same sprint as this ticket): aprilcam.tags.generator has its own "
-        "top-level `import cv2 as cv`, unrelated to this ticket's "
-        "calibration/geometry.py <-> distortion.py split, so `import "
-        "aprilcam.cli` still pulls in cv2 via cli/tags.py -> "
-        "aprilcam.tags.generator even after this ticket's fix. Confirmed "
-        "NOT caused by the chain this ticket owns (cli/camera.py -> "
-        "cli/locate.py -> calibration/geometry.py): see "
-        "test_cli_camera_and_locate_chain_imports_with_cv2_blocked above, "
-        "which isolates and proves that specific chain is clean by "
-        "stubbing out aprilcam.tags.generator. Ticket 004's own stashed "
-        "WIP on this branch (parked pending this ticket's landing, per "
-        "the sprint's ticket-004/005 resequencing) already makes "
-        "tags/generator.py's cv2 import lazy; this assertion should flip "
-        "to an unexpected pass the day that fix lands, at which point "
-        "this xfail marker must be removed."
-    ),
-    strict=True,
-)
-def test_aprilcam_cli_still_requires_cv2_via_tags_generator(cv2_blocked: None) -> None:
+def test_aprilcam_cli_imports_with_cv2_blocked(cv2_blocked: None) -> None:
+    """The full ``import aprilcam.cli`` -- the same import every
+    console-script invocation performs before argparse even parses a
+    flag -- succeeds with ``cv2`` genuinely blocked and nothing
+    stubbed. This subsumes
+    :func:`test_cli_camera_and_locate_chain_imports_with_cv2_blocked`'s
+    stubbed proof now that both halves of the chain (ticket 005's
+    ``calibration/geometry.py`` split and ticket 004's lazy
+    ``tags/generator.py`` import) are in place."""
     _evict_modules(
         ["aprilcam.cli", "aprilcam.calibration", "aprilcam.client", "aprilcam.tags", "cv2"]
     )

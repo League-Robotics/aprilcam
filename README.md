@@ -118,10 +118,18 @@ aprilcam cameras    # List available cameras
 ## Development
 
 ```
-uv sync --group dev --extra daemon   # install dev tools + full server stack
-uv run pytest                        # full test suite (includes the mypy gate below)
-uv run mypy                          # type check src/aprilcam on its own
+uv sync            # install dev tools + full server stack (cv2 included)
+uv run pytest      # full test suite (includes the mypy gate below)
+uv run mypy        # type check src/aprilcam on its own
 ```
+
+A bare `uv sync` is enough: `[dependency-groups].dev` in `pyproject.toml`
+self-references `aprilcam[daemon]` (sprint 036), so the `dev` group --
+already installed by default -- pulls in the `daemon` extra
+(`opencv-contrib-python` included) without needing an explicit
+`--extra daemon` flag. `opencv-contrib-python` itself is **not** a base
+dependency (see [Requirements](#requirements) above); this is what
+keeps `cv2` available for the test suite despite that.
 
 `uv run pytest` always runs `tests/test_typing.py`, which shells out to
 `mypy` over `src/aprilcam` (scope and strictness are configured in

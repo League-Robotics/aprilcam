@@ -9,22 +9,28 @@ pipx install's daemon subprocess had no capture backend. This module
 does not reproduce that incident directly -- it instead nails down the
 adjacent, load-bearing claim the project overview and
 ``docs/design/design.md`` §9 item 1 both make: a **base** install (no
-``[daemon]`` extra) should need no ``cv2`` at all. That claim is
-currently false (see below), and asserting it honestly, rather than
-inferring it from the dependency list, is this module's whole job.
+``[daemon]`` extra) should need no ``cv2`` at all. That claim was
+false when this module was first written (see below), and asserting
+it honestly, rather than inferring it from the dependency list, is
+this module's whole job.
 
-**Expected to fail, deliberately.** ``pyproject.toml`` lists
+**Previously expected to fail; now passes for real (sprint 036,
+ticket 004).** ``pyproject.toml`` used to list
 ``opencv-contrib-python>=4.8`` as a **base** dependency (not gated
-behind ``optional-dependencies.daemon``), a known, currently-open gap
-recorded in ``docs/design/design.md`` §9 item 1. So
-:func:`test_import_cv2_fails_in_the_fresh_base_only_venv` below is
-marked ``xfail(strict=True)``: it is expected to fail *today* (a fresh
-base-only install still gets ``cv2``), and ``strict=True`` means the
-day that packaging gap closes, this same assertion flips to an
-unexpected pass -- reported as a hard failure, not a silent skip --
-which is exactly the "starkly visible until closed" behaviour the
-ticket calls for. Nothing about the assertion itself is weakened to
-make the suite green.
+behind ``optional-dependencies.daemon``), a known packaging gap
+recorded in ``docs/design/design.md`` §9 item 1.
+:func:`test_import_cv2_fails_in_the_fresh_base_only_venv` below was
+marked ``xfail(strict=True)`` for that reason: it was expected to fail
+(a fresh base-only install still got ``cv2``), and ``strict=True``
+meant the day that packaging gap closed, this same assertion would
+flip to an unexpected pass -- reported as a hard failure, not a silent
+skip -- which was exactly the "starkly visible until closed" behaviour
+the ticket called for. Sprint 036 ticket 004 closed that gap
+(``opencv-contrib-python`` moved to the ``daemon`` extra;
+``tags/generator.py``'s ``cv2`` import became lazy so ``aprilcam
+taggen`` stays base-importable), so the marker has been removed and
+this test now genuinely passes. Nothing about the assertion itself was
+ever weakened.
 
 **Two-tier build**: a module-scoped :func:`built_wheel` fixture runs
 ``uv build --wheel`` once, and a module-scoped :func:`fresh_base_venv`
@@ -297,28 +303,16 @@ def test_import_aprilcam_cli_locate_succeeds_in_the_fresh_base_only_venv(fresh_b
 
 
 # ---------------------------------------------------------------------------
-# AC3 -- `import cv2` FAILS in the fresh venv. Currently does not: see
-# the module docstring and design.md §9 item 1. xfail(strict=True) so
-# this stays visible in the sprint gate without blocking it, and flips
-# to a hard failure (not a silent pass) the day the gap closes.
+# AC3 -- `import cv2` FAILS in the fresh venv. Previously known-broken
+# (design.md §9 item 1) and guarded by an `xfail(strict=True)` marker;
+# sprint 036 ticket 004 moved `opencv-contrib-python` to the `daemon`
+# extra, so this now passes for real and the marker is gone -- see
+# `tags/generator.py`'s module docstring for the lazy-import mechanism
+# that keeps `aprilcam taggen` working despite the move.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
-@pytest.mark.xfail(
-    reason=(
-        "known packaging gap, design.md §9 item 1: opencv-contrib-python "
-        "is listed as a BASE dependency in pyproject.toml (not gated "
-        "behind optional-dependencies.daemon), so a genuinely fresh, "
-        "base-only-install venv still gets a working cv2. Confirmed by "
-        "hand while writing this test: `uv pip install` of the built "
-        "wheel with no extras pulls in opencv-contrib-python==5.0.0.93 "
-        "unprompted. This must start passing -- and this xfail marker "
-        "must be removed -- the day that dependency moves to the "
-        "`daemon` extra."
-    ),
-    strict=True,
-)
 def test_import_cv2_fails_in_the_fresh_base_only_venv(fresh_base_venv: Path):
     venv_python = fresh_base_venv / "bin" / "python"
     result = _run([str(venv_python), "-c", "import cv2"])

@@ -30,7 +30,9 @@ classifiers = [
 # Base dependencies: lightweight gRPC client stack + MCP server framework.
 # The MCP server, web hub, and view client are opencv-free thin clients that
 # ship in the base install, so the MCP SDK belongs here (not the daemon extra).
-# Heavy server/vision deps go in the optional extras below.
+# Heavy server/vision deps go in the optional extras below. opencv-contrib-python
+# is NOT here (sprint 036, reversing sprint 028's decision) -- see the daemon
+# extra below and tags/generator.py's module docstring for why.
 dependencies = [
   "grpcio>=1.60",
   "protobuf>=4.25",
@@ -41,7 +43,6 @@ dependencies = [
   "zeroconf>=0.131",
   "pillow>=10.0",
   "mcp>=1.0,<2",
-  "opencv-contrib-python>=4.8",
 ]
 
 [project.urls]
@@ -52,6 +53,11 @@ aprilcam = "aprilcam.cli:main"
 
 [project.optional-dependencies]
 imaging = []
+# opencv-contrib-python lives here, not in [project.dependencies] (sprint
+# 036): the daemon is the sole vision authority (design.md §9), and
+# tags/generator.py's own cv2 import is now lazy, at the point of use, so
+# `aprilcam taggen` stays importable/discoverable in the base CLI but needs
+# this extra installed to actually run (see generator.py's module docstring).
 daemon = [
   "mss>=9.0",
   "websockets>=12.0",
@@ -59,8 +65,17 @@ daemon = [
   "cv2-enumerate-cameras>=1.3",
   "msgpack>=1.0",
   "grpcio-reflection>=1.60",
+  "opencv-contrib-python>=4.8",
 ]
+# Self-referential (`aprilcam[daemon]`) so `pip install "aprilcam[dev]"`
+# also gets cv2 and the rest of the daemon extra (sprint 036 ticket
+# 004): before opencv-contrib-python moved out of [project.dependencies],
+# this extra got it for free as a base dependency; without this line a
+# bare "aprilcam[dev]" install would silently lose cv2 the same way a
+# bare `uv sync` would without [dependency-groups].dev's matching fix
+# below.
 dev = [
+  "aprilcam[daemon]",
   "ipykernel>=7.2.0",
   "ipython>=8.39.0",
   "jupyter>=1.1.1",
@@ -93,7 +108,18 @@ markers = [
 ]
 
 [dependency-groups]
+# "aprilcam[daemon]" (sprint 036 ticket 004): self-referential extra,
+# not a duplicated package list -- uv recognizes the project's own name
+# here and merges the `daemon` extra's requirements (opencv-contrib-python
+# included) into this group instead of resolving it against PyPI. Needed
+# because `uv sync`/`uv run pytest` install this `dev` group by default
+# with no `--extra` flag; without this, moving opencv-contrib-python out
+# of [project.dependencies] would silently leave `cv2` missing from every
+# contributor's/CI's default environment, not just this ticket's own
+# scope. Verify after any change here with a bare `uv sync` (no --extra
+# flags) followed by `uv run python -c "import cv2"`.
 dev = [
+    "aprilcam[daemon]",
     "anthropic>=0.104.0",
     "ipykernel>=7.2.0",
     "jupyter>=1.1.1",
