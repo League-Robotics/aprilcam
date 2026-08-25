@@ -3,7 +3,7 @@ id: '006'
 title: Exercise the real aprilcam mcp entry point in the installed-package test
 status: open
 use-cases: [SUC-004]
-depends-on: ["005"]
+depends-on: ["004"]
 github-issue: ''
 issue: installed-package-test-does-not-exercise-aprilcam-mcp.md
 completes_issue: true
@@ -40,11 +40,15 @@ Migrating to the mcp 2.x API is explicitly out of scope (tracked
 separately per the issue's "Longer-term" section) — this ticket is
 about the missing test, not the pin.
 
-**Depends on ticket 005**: both this ticket and ticket 005 edit
-`tests/packaging/test_installed_package.py`. Implement this ticket
-against the file state ticket 005 leaves behind (the new
-`client.renderer` import assertion) rather than an earlier version, to
-avoid rebasing a hand-written diff.
+**Depends on ticket 004 (resequenced 2026-08-24 — see sprint.md's
+Architecture section)**: tickets 004, 005, and this ticket all edit
+`tests/packaging/test_installed_package.py`; 005 now lands first (adds
+the `client.renderer` import assertion plus an import-blocker test),
+then 004 (removes the strict xfail on
+`test_import_cv2_fails_in_the_fresh_base_only_venv`), then this ticket
+last. Implement this ticket against the file state ticket 004 leaves
+behind — which itself builds on ticket 005's additions — rather than
+an earlier version, to avoid rebasing a hand-written diff.
 
 ## Acceptance Criteria
 

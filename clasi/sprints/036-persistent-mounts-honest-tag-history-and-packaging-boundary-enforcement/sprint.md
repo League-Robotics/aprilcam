@@ -219,6 +219,90 @@ between them — the one genuinely new thing this sprint composes (the
 mount-persistence read/write path) is small enough that the module list
 and one paragraph of prose say everything a 5-node diagram would.
 
+### Revision (2026-08-24): ticket 004/005 resequencing
+
+Ticket 004's programmer threw an internal (structural) exception after
+implementation and its own specified verification command showed the
+plan's premise was false. Ticket 004's original "Scope boundary with
+ticket 005" text asserted that moving `opencv-contrib-python` out of
+`[project.dependencies]` alone would leave only `tags/generator.py`
+(and, transitively, `client/renderer.py`/`cli/locate.py`) broken in a
+base-only install until ticket 005 landed — and that no existing test
+would notice in the meantime. Actually running
+`tests/packaging/test_installed_package.py` after implementing 004
+showed otherwise: `import aprilcam.cli` — which every invocation of the
+`aprilcam` console script performs, before argparse parses a single
+flag — unconditionally imports `cli/camera.py`, which unconditionally
+imports `cli/locate.py`, which imports `calibration/geometry.py`,
+whose module-scope `import cv2 as cv` then fails. So landing ticket
+004's dependency move alone doesn't narrowly break `tags/` or the
+client-rendering path — it makes the **entire console script**
+non-functional (`-V`, `--help`, every subcommand) until ticket 005's
+`geometry.py` split lands. There is no ordering under the original
+`004 → 005` sequencing in which ticket 004 lands alone without this
+regression window, since 005 depended on 004.
+
+Resolution: the two tickets are resequenced. **Ticket 005 (the
+`calibration/geometry.py` → `calibration/distortion.py` split) now
+lands first**, standalone (`depends-on: []`) — it is a pure module
+split with no dependency-metadata change and no behavior change for
+any caller that still has `cv2` available, so it is safe regardless of
+what `pyproject.toml` currently declares as a base dependency. **Ticket
+004 now depends on ticket 005** (`depends-on: ["005"]`): by the time
+004 moves `opencv-contrib-python` to the `daemon` extra, the transitive
+`cv2` dependency through `cli/locate.py`/`client/renderer.py` has
+already been removed, so the move is safe by construction and 004's
+own scoped packaging-test run (including
+`test_console_script_exists_and_reports_the_built_wheel_version`) is
+expected to be fully green rather than partially green with an
+accepted known failure. **Ticket 006 now depends on ticket 004**
+(previously depended on 005): 005, 004, and 006 all edit
+`tests/packaging/test_installed_package.py` in sequence, and since 004
+is now the last of the pair to touch that file, 006 must build on 004's
+version of it, not 005's.
+
+Because ticket 005 now lands while `opencv-contrib-python` is still a
+base dependency, its own new packaging-test assertion
+(`import aprilcam.client.renderer` succeeds in a fresh base-only venv)
+would pass trivially at that point regardless of whether the split
+actually happened — the venv still has `cv2` from the base dependency
+either way. Ticket 005's real proof is therefore an import-blocker test
+(`sys.meta_path`-based, mirroring `test_mcp_cli.py`'s
+`_BlockMcpImports`) covering the whole console-script import graph
+(`aprilcam.cli` and everything it pulls transitively) plus
+`aprilcam.client.renderer`, independent of what `pyproject.toml`
+happens to declare at the moment it runs. See ticket 005's own Revision
+note for the full detail.
+
+This is a pure reordering of already-planned work, not a change to any
+architectural decision: the module split itself (Design Rationale in
+`design/calibration-DESIGN.diff.md`) is unaffected, no new module or
+dependency is introduced, and `design/calibration-DESIGN.md` and
+`design/cli-DESIGN.md` were checked and found to make no ordering claim
+that resequencing would falsify (both describe only the *end state*
+after both tickets land, e.g. "as of sprint 036, `geometry.py` is
+`cv2`-free" — true regardless of which of 004/005 landed first — so
+neither needed a correction). Ticket numbering is unchanged (tickets
+are not renumbered when reordered); execution order is 001, 002, 003,
+005, 004, 006, 007, 008, per the updated `## Tickets` table below.
+
+Separately, this exception surfaced a related gap this sprint's tickets
+did not originally cover: `[dependency-groups].dev` in `pyproject.toml`
+(and `uv.lock`'s corresponding `[package.dev-dependencies].dev`) does
+not pull in the `daemon` extra or any of its packages. Before ticket
+004, this didn't matter — `opencv-contrib-python` was a base
+dependency, so any `uv sync`/`uv run pytest` had `cv2` regardless of
+group. After ticket 004, a bare `uv sync`/`uv run pytest` with no
+`--extra daemon` flag would silently lose `cv2` for the dev/test
+environment, breaking every test elsewhere in the suite that needs it
+— a real risk to `close_sprint`'s own full-suite run and to
+contributors who don't remember `README.md`'s documented `--extra
+daemon` flag. Ticket 004 gained a new acceptance criterion to make the
+dev/test environment self-sufficient (extend `[dependency-groups].dev`
+or an equivalent `[tool.uv]` setting so a bare `uv sync` keeps `cv2`
+available) rather than relying on every invocation remembering an
+explicit flag.
+
 ## Use Cases
 
 ### SUC-001: Mount registrations survive a daemon restart
@@ -390,21 +474,28 @@ Before tickets can be created, all of the following must be true:
 | 001 | Generate clasi/usecases.md index from docs/design/use-cases/ | — | get-use-case-coverage-reports-zero-reads-the-wrong-file.md |
 | 002 | Fix get_tag_history docstring and document detection cadence in AGENT_GUIDE.md | — | tag-history-gaps-and-jitter-speed-mislead-mcp-consumers.md |
 | 003 | Suppress compute_motion speed below the noise floor | 002 | tag-history-gaps-and-jitter-speed-mislead-mcp-consumers.md |
-| 004 | Move opencv-contrib-python to the daemon extra; lazy-import cv2 in tags/generator.py | — | opencv-is-a-base-dependency-contradicting-the-daemon-only-contract.md |
-| 005 | Split calibration/geometry.py's lens-distortion functions into calibration/distortion.py | 004 | opencv-is-a-base-dependency-contradicting-the-daemon-only-contract.md |
-| 006 | Exercise the real aprilcam mcp entry point in the installed-package test | 005 | installed-package-test-does-not-exercise-aprilcam-mcp.md |
+| 005 | Split calibration/geometry.py's lens-distortion functions into calibration/distortion.py | — | opencv-is-a-base-dependency-contradicting-the-daemon-only-contract.md |
+| 004 | Move opencv-contrib-python to the daemon extra; lazy-import cv2 in tags/generator.py | 005 | opencv-is-a-base-dependency-contradicting-the-daemon-only-contract.md |
+| 006 | Exercise the real aprilcam mcp entry point in the installed-package test | 004 | installed-package-test-does-not-exercise-aprilcam-mcp.md |
 | 007 | Persist mobile-tag mount registrations across daemon restarts | — | mount-registrations-should-persist-across-daemon-restarts.md |
 | 008 | Update AGENT_GUIDE.md and ROBOT_API_GUIDE.md for persistent mount registrations | 007 | mount-registrations-should-persist-across-daemon-restarts.md |
 
-Tickets execute serially in the order listed. Ordering rationale: the
-cheap, independent, high-signal tickets (001, 002) run first; 003
-follows 002 since it appends to the AGENT_GUIDE.md section 002 creates.
-004→005→006 are sequenced because 005 depends on 004's dependency move
-to make its new packaging-test assertion meaningful, and 006 depends on
-005 because both edit `tests/packaging/test_installed_package.py` and
-006 must build on 005's version of that file. Mount persistence (007,
-the sprint's largest item) and its doc follow-up (008) run last so they
-don't block the smaller, independent tickets ahead of them.
+Tickets execute serially in the order listed (**note**: ticket numbers
+are not renumbered when reordered — see Revision note below; ticket 005
+now executes before ticket 004 despite the numbering). Ordering
+rationale: the cheap, independent, high-signal tickets (001, 002) run
+first; 003 follows 002 since it appends to the AGENT_GUIDE.md section
+002 creates. 005→004→006 are sequenced because 005's
+`calibration/geometry.py` split must land *before* 004 moves
+`opencv-contrib-python` out of base dependencies — landing 004 first
+would leave the entire `aprilcam` console script transitively
+`cv2`-dependent-but-broken in a base-only install for as long as 005
+hadn't yet landed (see Revision note below). 006 depends on 004 because
+005, 004, and 006 all edit `tests/packaging/test_installed_package.py`
+in sequence, and 006 must build on the file state 004 (the last of the
+three) leaves behind. Mount persistence (007, the sprint's largest
+item) and its doc follow-up (008) run last so they don't block the
+smaller, independent tickets ahead of them.
 
 ## Revision (2026-08-24)
 

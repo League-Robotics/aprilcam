@@ -3,7 +3,7 @@ id: '005'
 title: Split calibration/geometry.py's lens-distortion functions into calibration/distortion.py
 status: open
 use-cases: [SUC-003]
-depends-on: ["004"]
+depends-on: []
 github-issue: ''
 issue: opencv-is-a-base-dependency-contradicting-the-daemon-only-contract.md
 completes_issue: true
@@ -14,7 +14,6 @@ completes_issue: true
 
 ## Description
 
-Ticket 004 moved `opencv-contrib-python` to the `daemon` extra, but
 `src/aprilcam/calibration/geometry.py` has its own top-level
 `import cv2 as cv` — needed **only** by two functions,
 `undistort_point`/`distort_point` (the lens-distortion round trip,
@@ -29,12 +28,23 @@ confirmed by reading the module during sprint planning.
 (`solve_camera_geometry`) both import directly from `geometry.py` for
 functions that never call `cv2` — but because the whole module has a
 top-level `cv2` import, importing either of those files transitively
-requires `cv2`. Before ticket 004, this was invisible because `cv2`
-was a base dependency anyway. After ticket 004, this is a **real
-regression**: `client/renderer.py` backs `aprilcam view` and MCP
-annotation rendering, both meant to work in a base-only install per
-the project overview — `import aprilcam.client.renderer` would now
-raise `ModuleNotFoundError` in a fresh base-only venv.
+requires `cv2`. Today, while `opencv-contrib-python` is still a base
+dependency, this transitive requirement is invisible — everything has
+`cv2` anyway. It stops being invisible the moment ticket 004 moves
+`opencv-contrib-python` to the `daemon` extra: at that point,
+`import aprilcam.cli` (which every `aprilcam` console-script invocation
+performs, via `cli/__init__.py` → `cli/camera.py` → `cli/locate.py`)
+and `import aprilcam.client.renderer` would both raise
+`ModuleNotFoundError` in a fresh base-only venv — not just
+`client/renderer.py` in isolation, but the **entire CLI console
+script** (confirmed by tracing the actual import graph during sprint
+re-planning: `cli/__init__.py` imports `camera`, which imports both
+`calibrate` and `locate` at module scope; `locate.py` is the only one
+of those that reaches `calibration.geometry`; no other module in that
+graph has a direct `cv2` import). This ticket removes that transitive
+dependency **before** ticket 004 lands, so ticket 004's dependency move
+is safe by construction rather than needing to be verified after the
+fact.
 
 The fix: move `undistort_point`/`distort_point` (and their two tuning
 constants, `_DISTORT_POINT_MAX_ITERATIONS`/`_DISTORT_POINT_TOLERANCE_PX`)
@@ -51,11 +61,28 @@ full Design Rationale (Decision/Context/Alternatives/Consequences) —
 read it before starting; it explains why a module split was chosen
 over a lazy `cv2` import inside `geometry.py` itself.
 
-**Depends on ticket 004**: the new packaging-test coverage below only
-proves something meaningful once `opencv-contrib-python` is actually
-out of `[project.dependencies]` (ticket 004's change) — verifying this
-ticket's fix against a venv that still has `cv2` in base would pass
-trivially either way.
+**Lands first, standalone — ticket 004 now depends on this one** (see
+Revision note below). This is a pure module split with no dependency
+metadata change and no behavior change for any caller with `cv2`
+installed, so it is safe to land before `opencv-contrib-python` moves
+out of `[project.dependencies]`. Consequence: while `opencv-contrib-python`
+is still a base dependency (i.e., until ticket 004 lands afterward), a
+*fresh base-only venv* still has `cv2` present regardless of this
+split, so a packaging test that only checks
+"`import aprilcam.client.renderer` succeeds in a fresh base-only venv"
+would pass trivially at this point in the sequence — it would pass
+even without the split, because `cv2` is still installed anyway. That
+assertion is still worth adding (it becomes the load-bearing packaging
+proof once ticket 004 lands and actually removes `cv2` from base
+deps), but it cannot be this ticket's only verification that the split
+actually accomplished anything. This ticket's real proof must be an
+**import-blocker** check — one that makes `cv2` genuinely unimportable
+in-process (a `sys.meta_path` finder that raises on `import cv2`, the
+same technique `tests/test_no_cv2_in_client_modules.py` and
+`test_mcp_cli.py`'s `_BlockMcpImports` already use) and then imports
+the target modules against that block, independent of whatever
+`pyproject.toml` currently declares as a base dependency. See the
+widened AC below.
 
 ## Acceptance Criteria
 
@@ -86,6 +113,39 @@ trivially either way.
         expected to be none (they likely use unrelated `geometry`
         functions), but confirm rather than assume; update their
         imports only if they do.
+- [ ] **Import-blocker proof (load-bearing — see Description above for
+      why the fresh-venv packaging test alone cannot prove this at
+      this point in the sequence)**: a new test that blocks `cv2` from
+      being importable in-process (a `sys.meta_path` finder that raises
+      on `import cv2`/`import cv2.*`, the same technique
+      `test_mcp_cli.py`'s `_BlockMcpImports` uses, or reuse ticket 004's
+      own `_import_cv`-blocking pattern from
+      `tests/aprilcam/tags/test_generator.py` if it lands first) and
+      then, with that block active, successfully imports **every**
+      module the `aprilcam` console script pulls in at startup —
+      concretely: `aprilcam.cli` (which transitively imports `camera`,
+      `config`, `daemon`, `guide`, `mcp`, `playfield`, `tags`, and via
+      `camera`, `calibrate` and `locate`) — plus `aprilcam.client.renderer`.
+      Do not hand-enumerate this list as the assertion itself and trust
+      it; the assertion is "these imports succeed with `cv2` blocked,"
+      which mechanically covers the whole transitive closure including
+      any chain not listed here. Place this in
+      `tests/packaging/test_installed_package.py` alongside the other
+      import checks, or in a new focused test module if that reads
+      better — either is fine as long as it runs in the normal dev venv
+      (it needs no fresh venv/wheel build, since it blocks `cv2` at the
+      `sys.meta_path` level rather than relying on it being absent from
+      the environment).
+- [ ] Optionally, widen `tests/test_no_cv2_in_client_modules.py`'s
+      `_CV2_FREE_PACKAGES` to add a check that `cli/` has no *direct*
+      `import cv2` in any of its own files (cheap, catches a future
+      regression fast) — but note this AST scan only checks each file's
+      own literal imports, not transitive ones, so it is a
+      complement to the import-blocker test above, not a substitute
+      for it. Do not add the whole `calibration/` package to
+      `_CV2_FREE_PACKAGES` — `calibration.py`/`distortion.py`
+      legitimately import `cv2`; the existing grep-based AC above
+      already covers `geometry.py` specifically.
 - [ ] New packaging-test coverage in
       `tests/packaging/test_installed_package.py`: assert
       `import aprilcam.client.renderer` succeeds (subprocess `-c`
@@ -93,7 +153,12 @@ trivially either way.
       `import cv2` checks) in the fresh **base-only** venv. Optionally
       also assert `import aprilcam.cli.locate` succeeds there (a bonus
       fix, per `cli/DESIGN.md`'s resolved §3/§6 — not required, but
-      cheap given the fixture already exists).
+      cheap given the fixture already exists). Note (see Description):
+      at the point this ticket lands, `opencv-contrib-python` is still
+      a base dependency, so this specific assertion passes trivially
+      either way — it is still worth adding now because it becomes the
+      real proof once ticket 004 lands afterward and the fixture no
+      longer has `cv2` for any reason.
 - [ ] `docs/design/design.md` §9's item 6 and `cli/DESIGN.md` §3/§6
       already describe this fix in this sprint's `design/` overlay —
       no further doc edits needed beyond what ticket 007/008 (mount
@@ -108,6 +173,31 @@ trivially either way.
 - **New tests to write**: `tests/aprilcam/calibration/test_distortion.py`
   (moved from `test_geometry.py`, imports updated); the new
   `import aprilcam.client.renderer` (and optionally `cli.locate`)
-  assertion in `test_installed_package.py`.
+  assertion in `test_installed_package.py`; the import-blocker test
+  proving the whole console-script import graph and `client.renderer`
+  are `cv2`-free with `cv2` blocked at `sys.meta_path`.
 - **Verification command**:
   `uv run pytest tests/aprilcam/calibration/ tests/packaging/test_installed_package.py tests/test_no_cv2_in_client_modules.py -q`
+
+## Revision (2026-08-24)
+
+Ticket 004's programmer threw an exception after discovering that
+moving `opencv-contrib-python` out of `[project.dependencies]` (ticket
+004's AC1) breaks the **entire** `aprilcam` console script in a
+base-only install — not just `client/renderer.py` in isolation, as
+ticket 004's original "Scope boundary with ticket 005" section assumed
+— because `import aprilcam.cli` itself pulls in `cli/camera.py` →
+`cli/locate.py` → `calibration/geometry.py` → `cv2` before argparse
+sees a single flag. The sprint's ticket ordering is resequenced in
+response: this ticket now lands **first**, standalone, with
+`depends-on: []`; ticket 004 now depends on this one
+(`depends-on: ["005"]`). Ticket 006 (which edits the same packaging
+test file) now depends on ticket 004, since 004 is the last of the
+pair to touch `tests/packaging/test_installed_package.py`. See
+sprint.md's Architecture section for the fuller resequencing note. No
+architectural decision changes as a result — the module split itself
+(Decision documented in `design/calibration-DESIGN.diff.md`) is
+unaffected; only the *order* in which the two tickets land changes,
+plus the verification strategy above (import-blocker as the
+load-bearing proof, since the fresh-venv packaging assertion alone
+cannot prove anything meaningful before ticket 004 lands).
