@@ -1,8 +1,9 @@
 ---
 id: '007'
 title: Persist mobile-tag mount registrations across daemon restarts
-status: open
-use-cases: [SUC-001]
+status: in-progress
+use-cases:
+- SUC-001
 depends-on: []
 github-issue: ''
 issue: mount-registrations-should-persist-across-daemon-restarts.md
