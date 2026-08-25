@@ -1,7 +1,7 @@
 ---
 id: '006'
 title: Exercise the real aprilcam mcp entry point in the installed-package test
-status: in-progress
+status: done
 use-cases:
 - SUC-004
 depends-on:
@@ -54,7 +54,7 @@ an earlier version, to avoid rebasing a hand-written diff.
 
 ## Acceptance Criteria
 
-- [ ] `tests/packaging/test_installed_package.py` gains a new test
+- [x] `tests/packaging/test_installed_package.py` gains a new test
       (module-scoped fixture reuse where sensible — the existing
       `fresh_base_venv`/`built_wheel` fixtures are **base-only**, so
       this new test needs its **own** fresh venv fixture with the
@@ -65,27 +65,47 @@ an earlier version, to avoid rebasing a hand-written diff.
       assuming `[daemon]` alone suffices, and adjust to `[daemon]`
       plus whatever else is missing if `aprilcam mcp` fails to start
       with `[daemon]` alone).
-- [ ] The new test starts `aprilcam mcp` as a real subprocess against
+      Verified by hand (built the wheel, installed into two throwaway
+      venvs): `aprilcam mcp` actually starts and completes a full
+      handshake with the **base-only** install too — the whole import
+      chain (`mcp/server.py` -> `mcp/connection.py` ->
+      `client/discovery.py`/`client/guides.py`/`daemon/interfaces.py`
+      -> `calibration/interfaces.py`/`config/interfaces.py` ->
+      `types.py`) touches no `cv2` and no other daemon-extra
+      dependency. Added the new `fresh_daemon_venv` fixture with the
+      `daemon` extra anyway, per this AC's explicit instruction and
+      because it models the realistic deployment shape and
+      stress-tests the resolved `mcp` version against a heavier
+      dependency set. Finding recorded in the module docstring and the
+      fixture's own docstring rather than silently assumed.
+- [x] The new test starts `aprilcam mcp` as a real subprocess against
       the fresh, extra-installed venv's own console script, isolated
       the same way `test_stdio_offline.py` isolates it
       (`APRILCAM_CONFIG_DIR`/`APRILCAM_STATE_DIR`/`XDG_RUNTIME_DIR`
       pointed at private tmp roots so it never reaches a real daemon
       or the stakeholder's real config).
-- [ ] Completes a real `initialize` handshake over stdio using
+- [x] Completes a real `initialize` handshake over stdio using
       `mcp.client.stdio.stdio_client`/`mcp.ClientSession` (the same
       client-side machinery `test_stdio_offline.py` already uses),
       then shuts the subprocess down cleanly.
-- [ ] Asserts the pinned tool inventory — reuse or mirror
+- [x] Asserts the pinned tool inventory — reuse or mirror
       `test_stdio_offline.py`'s `_EXPECTED_TOOLS` frozenset (27 tools
       as of that ticket; confirm the current count/set hasn't changed
       since) as a superset assertion against the live server's
-      `tools/list`.
-- [ ] Asserts the resolved `mcp` package version (in the fresh venv)
+      `tools/list`. Imported directly (`from
+      tests.aprilcam.mcp.test_stdio_offline import _EXPECTED_TOOLS`),
+      not hand-copied; still 27 tools, confirmed live against the
+      installed server.
+- [x] Asserts the resolved `mcp` package version (in the fresh venv)
       satisfies the declared `>=1.0,<2` constraint from
       `pyproject.toml` — read the constraint from the built wheel's
       metadata or `pyproject.toml` directly, don't hardcode `<2`
-      twice in two places that could drift.
-- [ ] The new test is marked `@pytest.mark.integration` (matching
+      twice in two places that could drift. Reads
+      `Requires-Dist: mcp<2,>=1.0` straight out of the built wheel's
+      own `METADATA` via `_mcp_requirement_from_wheel` and checks the
+      fresh venv's resolved version against it with
+      `packaging.requirements.Requirement`.
+- [x] The new test is marked `@pytest.mark.integration` (matching
       every other test in this module) and reuses the module's
       existing `built_wheel` fixture for the wheel artifact, adding
       only the extra-installed-venv fixture as new.
