@@ -1,9 +1,11 @@
 ---
 id: 008
 title: Update AGENT_GUIDE.md and ROBOT_API_GUIDE.md for persistent mount registrations
-status: open
-use-cases: [SUC-001]
-depends-on: ["007"]
+status: in-progress
+use-cases:
+- SUC-001
+depends-on:
+- '007'
 github-issue: ''
 issue: mount-registrations-should-persist-across-daemon-restarts.md
 completes_issue: true
