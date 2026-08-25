@@ -46,9 +46,10 @@ canonical upper-left-origin ID tables -- superseded entirely by
 matching detected ids directly against
 ``PlayfieldDefinition.aruco_position``.
 
-**Lens distortion (sprint 030 ticket 001).** ``Calibration`` gains
-optional ``camera_matrix``/``dist_coeffs``; ``to_world``/``to_pixel``
-undistort/redistort via ``geometry.undistort_point``/``distort_point``
+**Lens distortion (sprint 030 ticket 001; moved to ``distortion.py`` in
+sprint 036 ticket 005).** ``Calibration`` gains optional
+``camera_matrix``/``dist_coeffs``; ``to_world``/``to_pixel``
+undistort/redistort via ``distortion.undistort_point``/``distort_point``
 when they are set. ``Calibrator.calibrate`` carries forward whatever
 lens model this camera's prior successful calibration already held
 (Design Rationale Decision 3 -- intrinsics survive a field move without
@@ -133,7 +134,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import cv2 as cv
 import numpy as np
 
-from aprilcam.calibration import geometry
+from aprilcam.calibration import distortion, geometry
 from aprilcam.calibration.interfaces import Calibration as _CalibrationBase
 from aprilcam.calibration.interfaces import CalibrationResult
 from aprilcam.calibration.interfaces import Calibrator as _CalibratorBase
@@ -384,7 +385,7 @@ class Calibration(_CalibrationBase):
 
     def to_world(self, pixel: PixelPoint) -> WorldPoint:
         if self._has_intrinsics():
-            pixel = geometry.undistort_point(
+            pixel = distortion.undistort_point(
                 pixel, self._camera_matrix_array(), self._dist_coeffs_array()
             )
         return geometry.pixel_to_world(self._matrix(), pixel)
@@ -392,7 +393,7 @@ class Calibration(_CalibrationBase):
     def to_pixel(self, world: WorldPoint) -> PixelPoint:
         pixel = geometry.world_to_pixel(self._matrix(), world)
         if self._has_intrinsics():
-            pixel = geometry.distort_point(
+            pixel = distortion.distort_point(
                 pixel, self._camera_matrix_array(), self._dist_coeffs_array()
             )
         return pixel
@@ -1325,7 +1326,7 @@ class Calibrator(_CalibratorBase):
             camera_matrix_array = np.array(camera_matrix, dtype=np.float64)
             dist_coeffs_array = np.array(dist_coeffs, dtype=np.float64)
             undistorted = {
-                tag_id: geometry.undistort_point(
+                tag_id: distortion.undistort_point(
                     aruco_detected[tag_id], camera_matrix_array, dist_coeffs_array
                 )
                 for tag_id in homography_ids

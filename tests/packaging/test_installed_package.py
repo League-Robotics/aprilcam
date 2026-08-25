@@ -253,6 +253,49 @@ def test_import_aprilcam_client_succeeds_in_the_fresh_base_only_venv(fresh_base_
     )
 
 
+@pytest.mark.integration
+def test_import_aprilcam_client_renderer_succeeds_in_the_fresh_base_only_venv(
+    fresh_base_venv: Path,
+):
+    """Sprint 036 ticket 005: ``client/renderer.py`` imports
+    ``calibration/geometry.py`` for ``world_to_deskewed_pixel``, and
+    ``geometry.py`` used to have its own top-level ``import cv2 as cv``
+    (needed only by the two functions ticket 005 moved to
+    ``calibration/distortion.py``). At the point this ticket lands,
+    ``opencv-contrib-python`` is still a base dependency (ticket 004
+    hasn't moved it to the ``daemon`` extra yet), so this assertion
+    passes trivially either way today -- ``cv2`` is present in this
+    fresh venv regardless of whether the split happened. It is still
+    worth adding now: it becomes the real, load-bearing proof once
+    ticket 004 lands and this venv genuinely has no ``cv2`` for any
+    reason. The actual proof *right now* that the split accomplished
+    anything is the ``sys.meta_path`` import-blocker test in
+    ``tests/test_cv2_import_blocker_console_script.py``, which works
+    independently of what this fresh venv happens to have installed."""
+    venv_python = fresh_base_venv / "bin" / "python"
+    result = _run([str(venv_python), "-c", "import aprilcam.client.renderer"])
+    assert result.returncode == 0, (
+        f"import aprilcam.client.renderer failed in a fresh base-only-install "
+        f"venv (exit {result.returncode}):\nstdout={result.stdout}\nstderr={result.stderr}"
+    )
+
+
+@pytest.mark.integration
+def test_import_aprilcam_cli_locate_succeeds_in_the_fresh_base_only_venv(fresh_base_venv: Path):
+    """Bonus fix (sprint 036 ticket 005, not required by this ticket's
+    own acceptance criteria): ``cli/locate.py`` imports
+    ``calibration.geometry`` too (``solve_camera_geometry``), for the
+    same reason ``client/renderer.py`` does -- see that test's own
+    docstring above for why this passes trivially today and becomes
+    load-bearing once ticket 004 lands."""
+    venv_python = fresh_base_venv / "bin" / "python"
+    result = _run([str(venv_python), "-c", "import aprilcam.cli.locate"])
+    assert result.returncode == 0, (
+        f"import aprilcam.cli.locate failed in a fresh base-only-install venv "
+        f"(exit {result.returncode}):\nstdout={result.stdout}\nstderr={result.stderr}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # AC3 -- `import cv2` FAILS in the fresh venv. Currently does not: see
 # the module docstring and design.md §9 item 1. xfail(strict=True) so

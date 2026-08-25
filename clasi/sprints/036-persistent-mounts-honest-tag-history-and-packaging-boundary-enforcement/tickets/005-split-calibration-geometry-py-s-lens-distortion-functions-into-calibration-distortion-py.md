@@ -1,8 +1,9 @@
 ---
 id: '005'
 title: Split calibration/geometry.py's lens-distortion functions into calibration/distortion.py
-status: open
-use-cases: [SUC-003]
+status: done
+use-cases:
+- SUC-003
 depends-on: []
 github-issue: ''
 issue: opencv-is-a-base-dependency-contradicting-the-daemon-only-contract.md
@@ -86,19 +87,26 @@ widened AC below.
 
 ## Acceptance Criteria
 
-- [ ] New file `src/aprilcam/calibration/distortion.py` holds
+- [x] New file `src/aprilcam/calibration/distortion.py` holds
       `undistort_point`, `distort_point`, and their two tuning
       constants, with the `import cv2 as cv` that used to live in
       `geometry.py`.
-- [ ] `src/aprilcam/calibration/geometry.py` no longer imports `cv2`
+- [x] `src/aprilcam/calibration/geometry.py` no longer imports `cv2`
       anywhere — verify with `grep -n cv2
       src/aprilcam/calibration/geometry.py` returning nothing.
-- [ ] `src/aprilcam/calibration/calibration.py` imports the new
+      (Confirmed via `grep -n "^import cv2\|^from cv2\|import cv2 as
+      cv"` returning nothing; the bare-word `grep -n cv2` also matches
+      pre-existing prose in the module docstring/comments — e.g. "no
+      cv2 detector objects", "this module still talks to no camera, no
+      daemon, no cv2" — that predates this ticket and was never itself
+      an import. The load-bearing check, no actual `import cv2`
+      statement, is clean.)
+- [x] `src/aprilcam/calibration/calibration.py` imports the new
       `distortion` module alongside `geometry` and calls
       `distortion.undistort_point`/`distortion.distort_point` at its
       three existing call sites; behavior is otherwise unchanged
       (this is a pure move, not a rewrite of the distortion math).
-- [ ] `tests/aprilcam/calibration/test_geometry.py`'s
+- [x] `tests/aprilcam/calibration/test_geometry.py`'s
       `undistort_point`/`distort_point` tests (the "undistort_point /
       distort_point (sprint 030 ticket 001)" section) move to a new
       `tests/aprilcam/calibration/test_distortion.py`, importing from
@@ -106,14 +114,25 @@ widened AC below.
       remaining tests in `test_geometry.py` (homography, deskew
       geometry, mount correction, camera-geometry solver) are
       unaffected and stay where they are.
-  - [ ] Check `tests/aprilcam/config/test_loader.py` and
+  - [x] Check `tests/aprilcam/config/test_loader.py` and
         `tests/image_matrix/test_geometry.py` (both import
         `calibration.geometry` per a repo-wide grep during sprint
         planning) for any use of `undistort_point`/`distort_point` —
         expected to be none (they likely use unrelated `geometry`
         functions), but confirm rather than assume; update their
         imports only if they do.
-- [ ] **Import-blocker proof (load-bearing — see Description above for
+        (Confirmed via grep: neither file references
+        `undistort_point`/`distort_point`; no changes needed there.
+        **Found one additional call site the ticket's own grep during
+        sprint planning missed**:
+        `tests/aprilcam/calibration/test_calibration.py` calls
+        `geometry.undistort_point`/`geometry.distort_point` directly
+        in two of its own tests — updated to
+        `distortion.undistort_point`/`distortion.distort_point` with
+        the new import added; full calibration suite reruns green,
+        126 passed / 2 skipped, hardware-dependent skips unrelated to
+        this change.)
+- [x] **Import-blocker proof (load-bearing — see Description above for
       why the fresh-venv packaging test alone cannot prove this at
       this point in the sequence)**: a new test that blocks `cv2` from
       being importable in-process (a `sys.meta_path` finder that raises
@@ -136,7 +155,29 @@ widened AC below.
       (it needs no fresh venv/wheel build, since it blocks `cv2` at the
       `sys.meta_path` level rather than relying on it being absent from
       the environment).
-- [ ] Optionally, widen `tests/test_no_cv2_in_client_modules.py`'s
+      (Done, as a new focused module,
+      `tests/test_cv2_import_blocker_console_script.py`. **Real finding
+      while writing this, worth flagging to ticket 004's programmer**:
+      the mechanical "does not hand-enumerate and trust it" test found
+      a *second*, independent top-level `cv2` import in the same
+      `aprilcam.cli` graph that this ticket's own Description did not
+      anticipate — `aprilcam.tags.generator` (reached via
+      `cli/__init__.py` -> `cli/tags.py`), out of this ticket's scope
+      and explicitly not to be touched here. So `import aprilcam.cli`
+      as a *whole* does not yet succeed with `cv2` blocked — this is
+      captured honestly as an `xfail(strict=True)` test naming the
+      exact cause, mirroring `test_installed_package.py`'s own idiom
+      for a known tracked gap. The chain this ticket *is* responsible
+      for (`cli/camera.py` -> `cli/locate.py` ->
+      `calibration/geometry.py`, plus `config`/`daemon`/`guide`/`mcp`/
+      `playfield`) is proven clean independently by stubbing out
+      `aprilcam.tags.generator`, and `aprilcam.client.renderer` and
+      `aprilcam.calibration.geometry` are proven clean directly and
+      unconditionally. Ticket 004's own stashed WIP already appears to
+      fix `tags/generator.py`'s import (per its stash message); once
+      that lands, the xfail above should flip to an unexpected pass and
+      be removed.)
+- [x] Optionally, widen `tests/test_no_cv2_in_client_modules.py`'s
       `_CV2_FREE_PACKAGES` to add a check that `cli/` has no *direct*
       `import cv2` in any of its own files (cheap, catches a future
       regression fast) — but note this AST scan only checks each file's
@@ -146,7 +187,9 @@ widened AC below.
       `_CV2_FREE_PACKAGES` — `calibration.py`/`distortion.py`
       legitimately import `cv2`; the existing grep-based AC above
       already covers `geometry.py` specifically.
-- [ ] New packaging-test coverage in
+      (Done — `cli` added to `_CV2_FREE_PACKAGES`; passes today since
+      no `cli/*.py` file has ever had its own literal `import cv2`.)
+- [x] New packaging-test coverage in
       `tests/packaging/test_installed_package.py`: assert
       `import aprilcam.client.renderer` succeeds (subprocess `-c`
       check, same pattern as the existing `import aprilcam.client`/
@@ -159,7 +202,10 @@ widened AC below.
       either way — it is still worth adding now because it becomes the
       real proof once ticket 004 lands afterward and the fixture no
       longer has `cv2` for any reason.
-- [ ] `docs/design/design.md` §9's item 6 and `cli/DESIGN.md` §3/§6
+      (Both added; full `tests/packaging/test_installed_package.py`
+      run: 6 passed, 1 xfailed — the pre-existing AC3 `xfail(strict=
+      True)` for `import cv2` succeeding, unaffected by this ticket.)
+- [x] `docs/design/design.md` §9's item 6 and `cli/DESIGN.md` §3/§6
       already describe this fix in this sprint's `design/` overlay —
       no further doc edits needed beyond what ticket 007/008 (mount
       persistence docs) or this ticket's own code comments require.

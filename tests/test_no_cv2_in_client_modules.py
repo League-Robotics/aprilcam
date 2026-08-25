@@ -27,6 +27,19 @@ every one of them lands already covered). ``camera/``, ``vision/``, and
 ``daemon/`` are the vision authority and legitimately import ``cv2`` --
 scanning them would make this test fail by design, not catch a real
 regression.
+
+``cli/`` (sprint 036 ticket 005) is added to :data:`_CV2_FREE_PACKAGES`
+too, but for a narrower reason than the other three: no file under
+``cli/`` has ever had a *direct* ``import cv2`` of its own -- the risk
+this AST scan actually catches for ``cli/`` is a future regression
+introducing one, cheaply. This is a **complement** to, not a substitute
+for, ``tests/test_cv2_import_blocker_console_script.py``'s
+``sys.meta_path`` import-blocker proof: this scan cannot see (and does
+not try to see) ``cli/``'s existing *transitive* ``cv2`` dependencies
+reached through another module's own import (e.g. ``cli/tags.py`` ->
+``aprilcam.tags.generator``'s own top-level ``import cv2``, a real,
+separate, still-open gap this AST scan is structurally blind to -- see
+the import-blocker module's docstring for the full story).
 """
 
 from __future__ import annotations
@@ -41,8 +54,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = REPO_ROOT / "src" / "aprilcam"
 
 #: Packages this test asserts are cv2-free. See the module docstring
-#: for why exactly these three and not the whole tree.
-_CV2_FREE_PACKAGES = ("client", "view", "mcp")
+#: for why exactly these four and not the whole tree -- ``cli`` is a
+#: narrower, direct-import-only check (no ``cli/*.py`` file has ever had
+#: its own ``import cv2``), not a claim that ``cli/`` has no transitive
+#: cv2 dependency at all (it currently still does, via
+#: ``aprilcam.tags.generator`` -- see the module docstring).
+_CV2_FREE_PACKAGES = ("client", "view", "mcp", "cli")
 
 
 def _python_files(package: str) -> Iterator[Path]:
