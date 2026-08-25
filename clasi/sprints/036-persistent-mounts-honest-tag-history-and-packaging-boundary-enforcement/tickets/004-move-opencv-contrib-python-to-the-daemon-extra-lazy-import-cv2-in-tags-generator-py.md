@@ -1,8 +1,9 @@
 ---
 id: '004'
 title: Move opencv-contrib-python to the daemon extra; lazy-import cv2 in tags/generator.py
-status: open
-use-cases: [SUC-003]
+status: in-progress
+use-cases:
+- SUC-003
 depends-on: []
 github-issue: ''
 issue: opencv-is-a-base-dependency-contradicting-the-daemon-only-contract.md
