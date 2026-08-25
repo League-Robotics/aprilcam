@@ -1,9 +1,9 @@
 ---
-status: in-progress
+status: done
 sprint: '036'
 tickets:
-- 036-002
-- 036-003
+- '002'
+- '003'
 ---
 
 # Tag history can span hours, but the MCP surface promises "~10 seconds" — and stationary tags report ~1 cm/s speed

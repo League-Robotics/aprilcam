@@ -1,9 +1,9 @@
 ---
-status: in-progress
+status: done
 sprint: '036'
 tickets:
-- 036-004
-- 036-005
+- '004'
+- '005'
 ---
 
 # `opencv-contrib-python` is a base dependency, contradicting the daemon-only contract

@@ -1,9 +1,9 @@
 ---
-status: in-progress
+status: done
 sprint: '036'
 tickets:
-- 036-007
-- 036-008
+- '007'
+- 008
 ---
 
 # Mount registrations (tag pose relative to robot, parallax correction) should persist across daemon restarts
