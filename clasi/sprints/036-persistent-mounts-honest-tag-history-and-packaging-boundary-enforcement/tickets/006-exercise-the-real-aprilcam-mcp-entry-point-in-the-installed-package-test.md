@@ -1,9 +1,11 @@
 ---
 id: '006'
 title: Exercise the real aprilcam mcp entry point in the installed-package test
-status: open
-use-cases: [SUC-004]
-depends-on: ["004"]
+status: in-progress
+use-cases:
+- SUC-004
+depends-on:
+- '004'
 github-issue: ''
 issue: installed-package-test-does-not-exercise-aprilcam-mcp.md
 completes_issue: true
