@@ -1,7 +1,7 @@
 ---
 id: '002'
 title: Fix get_tag_history docstring and document detection cadence in AGENT_GUIDE.md
-status: in-progress
+status: done
 use-cases:
 - SUC-002
 depends-on: []
@@ -46,13 +46,13 @@ implements the actual behavior change.
 
 ## Acceptance Criteria
 
-- [ ] `get_tag_history`'s docstring in
+- [x] `get_tag_history`'s docstring in
       `src/aprilcam/mcp/tools/perception.py` no longer claims
       "roughly the last 10 seconds" unconditionally — it states the
       buffer holds the last 300 *bursts*, which map to ~10 wall-clock
       seconds only while a tag stream is active, and points at each
       frame's own `timestamp` as the authority otherwise.
-- [ ] A new section in `src/aprilcam/AGENT_GUIDE.md` (suggested:
+- [x] A new section in `src/aprilcam/AGENT_GUIDE.md` (suggested:
       insert as a new numbered section after current §6 "Mounts and
       Annotations...", renumbering the current §7 "Command /
       Capability Overview" to §8) covers: demand-driven detection
@@ -61,15 +61,15 @@ implements the actual behavior change.
       `frame_index` as authoritative — mirroring
       `ROBOT_API_GUIDE.md`'s existing, already-correct framing rather
       than inventing new prose from scratch.
-  - [ ] Leave a clear insertion point (e.g. a short "Motion field
+  - [x] Leave a clear insertion point (e.g. a short "Motion field
         semantics" placeholder heading, or simply end the new section
         where cadence coverage ends) for ticket 003 to append the
         speed/heading/`None` interpretation guidance once that
         behavior lands — do not write speed-semantics prose here that
         ticket 003 would have to contradict.
-- [ ] `ROBOT_API_GUIDE.md` is read and confirmed already accurate on
+- [x] `ROBOT_API_GUIDE.md` is read and confirmed already accurate on
       cadence (no edit needed there for this ticket).
-- [ ] No behavior change — this ticket touches documentation and one
+- [x] No behavior change — this ticket touches documentation and one
       docstring only.
 
 ## Testing

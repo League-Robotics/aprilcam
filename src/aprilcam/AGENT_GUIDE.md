@@ -148,7 +148,33 @@ not guaranteed to succeed on the first try: a camera mounted very
 close to straight-down (near-nadir) can make the solve numerically
 ill-conditioned, so do not assume it always just works.
 
-## 7. Command / Capability Overview
+## 7. Detection Cadence and Tag History
+
+Detection is **demand-driven, not continuous, by default.** An idle
+camera runs zero detections — `get_tags`/`get_tag` each trigger exactly
+one detection burst on that call, synchronously, and nothing else in
+the daemon ever runs one on its own. That has a direct consequence for
+`get_tag_history` (UC-26): its 300-frame ring buffer holds the last 300
+*detection bursts*, not the last 300 seconds. Those two are the same
+thing — roughly 10 wall-clock seconds of continuous history — only
+while at least one `stream_tags` subscriber is active on that camera,
+which drives bursts at a steady cadence for as long as the subscriber
+lasts. With nobody streaming, the buffer still fills, but only as fast
+as something polls it: consecutive frames in the returned history can
+be seconds, minutes, or hours apart.
+
+This is intentional architecture, not a bug or a stall — but it means
+**never assume evenly-spaced history frames.** Each `TagFrame` in the
+history carries its own `timestamp` and `frame_index`; those, not the
+frame's position in the returned sequence, are the only authority on
+how far apart two frames actually were. Before computing velocity,
+heading, or any other rate from consecutive history frames, check their
+timestamps — or start a `stream_tags` subscription first, which is the
+only way to guarantee continuous, evenly-paced history.
+
+> Cadence summary: detection is demand-driven (idle = zero detections); `get_tag_history`'s 300-frame buffer means ~10 wall-clock seconds only while a stream subscriber is active, otherwise gaps can be minutes or hours — trust each frame's own `timestamp`/`frame_index`, never assumed spacing.
+
+## 8. Command / Capability Overview
 
 Every capability below is reachable identically from the CLI, from the
 Python client library (`aprilcam.client.discovery.Discovery().connect()`
