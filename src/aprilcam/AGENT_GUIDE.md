@@ -174,6 +174,22 @@ only way to guarantee continuous, evenly-paced history.
 
 > Cadence summary: detection is demand-driven (idle = zero detections); `get_tag_history`'s 300-frame buffer means ~10 wall-clock seconds only while a stream subscriber is active, otherwise gaps can be minutes or hours — trust each frame's own `timestamp`/`frame_index`, never assumed spacing.
 
+**Motion-field interpretation.** Once a tag has two or more world
+samples on file, each new `TagRecord` attempts to fill in
+`heading_rad`, `world_velocity`, and `speed` from the two most recent
+of them. When those two samples are too close together to tell real
+motion from ordinary detector jitter, **all three come back `None`
+together** — not just the direction fields. `speed is None` here means
+the same thing `heading_rad is None` has always meant: "the
+displacement between these two samples is below the reliable noise
+floor" (the same small, sub-centimeter threshold `heading_rad` uses),
+not "the daemon failed to compute a speed." This matters most at tight
+query cadence: two samples close together in time turn a small,
+constant amount of jitter into a proportionally larger `jitter / dt`,
+so a fast poll is exactly the case where a stationary tag would
+otherwise look like it is creeping — trust the `None`, don't treat it
+as a dropped measurement.
+
 ## 8. Command / Capability Overview
 
 Every capability below is reachable identically from the CLI, from the

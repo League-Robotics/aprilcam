@@ -30,38 +30,64 @@ tag's boundary corners) -- a robot driving backwards has the two 180
 degrees apart, which is signal, not a bug (``types.TagRecord``'s own
 docstring).
 
-**Below-noise-floor motion reports a defined ``speed`` but an undefined
-``heading`` (ticket 022-007 fix).** Activating this module against real
-hardware (sprint 022's acceptance gate) surfaced a defect sprint 021's
-purely-synthetic testing could not: a physically stationary tag's two
-most recent samples are never bit-for-bit identical -- sub-pixel
-detector jitter between bursts moves the reported position by a small,
-essentially random amount every time, even though nothing moved. Before
-this fix, :func:`compute_motion` reported ``atan2`` of that jitter as a
-fully-formed ``heading_rad`` -- a *confident-looking, wrong* answer
-(exactly the failure mode the world-first contract in ``types.py``
-exists to prevent): real hardware output looked like ``heading=-1.633
-speed=0.00`` for a tag that had not moved. A direction of travel is not
-a small perturbation of a real answer at this magnitude -- it is pure
-noise dressed as data, and a robot consuming ``heading_rad`` would
-steer on it.
+**Below-noise-floor motion originally split speed from heading; sprint
+036 reunited them (ticket 022-007's fix, then its sprint-036
+correction).** Activating this module against real hardware (sprint
+022's acceptance gate) surfaced a defect sprint 021's purely-synthetic
+testing could not: a physically stationary tag's two most recent
+samples are never bit-for-bit identical -- sub-pixel detector jitter
+between bursts moves the reported position by a small, essentially
+random amount every time, even though nothing moved. Before ticket
+022-007's fix, :func:`compute_motion` reported ``atan2`` of that jitter
+as a fully-formed ``heading_rad`` -- a *confident-looking, wrong*
+answer (exactly the failure mode the world-first contract in
+``types.py`` exists to prevent): real hardware output looked like
+``heading=-1.633 speed=0.00`` for a tag that had not moved. A direction
+of travel is not a small perturbation of a real answer at this
+magnitude -- it is pure noise dressed as data, and a robot consuming
+``heading_rad`` would steer on it.
 
-The fix distinguishes **magnitude** from **direction**: ``speed`` (a
-non-negative scalar, bounded near zero for jitter) stays a real,
-un-suppressed reading of ``hypot(vx, vy)`` even when that reading is
-tiny -- "roughly stationary" is exactly what a small speed value
-honestly means, jitter or not. ``heading_rad`` (a direction, which is
-*disproportionately* sensitive to noise as displacement shrinks --
-``atan2`` of a jitter vector points anywhere on the circle with equal
-likelihood) is instead reported ``None`` -- "undefined", not "zero" --
-whenever the two-sample displacement falls below
-:data:`MIN_RELIABLE_DISPLACEMENT_CM`. ``world_velocity`` is suppressed
-alongside ``heading_rad`` (not alongside ``speed``): the *vector*
-carries direction just as much as ``heading_rad`` does (a caller could
-trivially recover the same noise-driven angle via
-``atan2(velocity.y, velocity.x)``), so hiding one while exposing the
-other would not actually protect a caller from the failure this fix
-targets.
+Ticket 022-007's fix distinguished **magnitude** from **direction**:
+``heading_rad`` (a direction, which is *disproportionately* sensitive
+to noise as displacement shrinks -- ``atan2`` of a jitter vector points
+anywhere on the circle with equal likelihood) was reported ``None`` --
+"undefined", not "zero" -- whenever the two-sample displacement fell
+below :data:`MIN_RELIABLE_DISPLACEMENT_CM`, while ``speed`` (a
+non-negative scalar, bounded near zero *in magnitude* for jitter)
+stayed a real, un-suppressed reading of ``hypot(vx, vy)`` even when
+tiny -- the reasoning being that "a small speed value honestly means
+roughly stationary."
+
+**That reasoning silently assumed ``dt`` on the order of a second or
+more (sprint 036 finding).** ``speed`` is bounded near zero *in
+magnitude* for a fixed amount of jitter, but it is ``jitter / dt`` --
+and that quotient grows without bound as ``dt`` shrinks, independent of
+how small the jitter itself is. At streaming cadence or rapid
+interactive polling (confirmed live: ~0.25s between two consecutive
+MCP calls), the same ~0.25 cm of detector jitter the displacement
+threshold exists to catch produces ``speed = jitter / dt ~= 1`` cm/s --
+small in absolute terms, but confidently non-zero: exactly the
+"looks like signal, is noise" failure mode ``heading_rad``'s
+suppression already existed to prevent, just manifesting in the other
+field because the original fix never applied the same test to it.
+Sprint 036 closes that gap: ``speed`` is now suppressed to ``None``
+alongside ``heading_rad``/``world_velocity`` whenever the two-sample
+displacement falls below :data:`MIN_RELIABLE_DISPLACEMENT_CM`,
+**regardless of ``dt``** -- the threshold is a pure distance test, so
+no new constant was needed, only applying the existing one to a third
+field. The accepted, honest consequence: real motion slower than
+roughly ``MIN_RELIABLE_DISPLACEMENT_CM / dt`` now reads as ``None``
+instead of a small positive number (e.g. ~2 cm/s at a 0.25s query
+cadence) -- "no signal" over "confident wrong signal," the same trade
+the original fix made for direction, now applied uniformly to
+magnitude too.
+
+``world_velocity`` is suppressed alongside ``heading_rad`` and (as of
+sprint 036) ``speed``: the *vector* carries direction just as much as
+``heading_rad`` does (a caller could trivially recover the same
+noise-driven angle via ``atan2(velocity.y, velocity.x)``), so hiding it
+while exposing either scalar would not actually protect a caller from
+the failure this fix targets.
 
 **Where the threshold comes from.** Ticket 022-003's real hardware
 verification against ``main-playfield`` measured this daemon's actual
@@ -97,15 +123,16 @@ from aprilcam.types import WorldPoint
 
 __all__ = ["compute_motion", "MIN_RELIABLE_DISPLACEMENT_CM"]
 
-#: Two-sample displacement (cm) below which a direction of travel is
-#: noise, not signal -- see the module docstring's "Where the threshold
-#: comes from" section for the full derivation from ticket 022-003's
-#: real ~0.18-0.19 cm reprojection error. Below this, :func:`compute_motion`
-#: reports ``heading_rad`` and ``velocity`` as ``None`` (undefined, never
-#: a fabricated confident angle) while still reporting ``speed`` honestly
-#: -- a small, real, non-negative number is not a misleading answer to
-#: "how fast", the way an ``atan2`` of jitter is a misleading answer to
-#: "which way".
+#: Two-sample displacement (cm) below which motion is noise, not signal
+#: -- see the module docstring's "Where the threshold comes from"
+#: section for the full derivation from ticket 022-003's real
+#: ~0.18-0.19 cm reprojection error. Below this, :func:`compute_motion`
+#: reports ``velocity``, ``speed``, and ``heading_rad`` **all** as
+#: ``None`` (undefined, never a fabricated confident number) -- sprint
+#: 036 extended suppression to ``speed`` too, since ``jitter / dt`` at
+#: short ``dt`` is just as misleading a magnitude as ``atan2`` of jitter
+#: is a misleading direction (module docstring's "Below-noise-floor
+#: motion" section).
 MIN_RELIABLE_DISPLACEMENT_CM = 0.5
 
 
@@ -129,15 +156,16 @@ def compute_motion(
     ``Daemon.get_tag`` already apply.
 
     Below :data:`MIN_RELIABLE_DISPLACEMENT_CM` of straight-line
-    displacement between the two points, ``velocity`` and
-    ``heading_rad`` are **also** ``None`` -- direction is undefined, not
-    zero, when the two samples are indistinguishable from detector
-    jitter (module docstring's "Below-noise-floor motion" section).
-    ``speed`` is the one exception: it is always returned as a real,
-    non-negative ``float`` whenever *history* has 2+ points with
-    distinct timestamps, including this near-zero-displacement case --
-    a small honest speed reading, jitter or not, is a truthful answer
-    to "how fast", unlike the direction fields.
+    displacement between the two points, ``velocity``, ``speed``, and
+    ``heading_rad`` are **all** ``None`` -- the two samples are
+    indistinguishable from detector jitter (module docstring's
+    "Below-noise-floor motion" section), and at short ``dt`` that
+    jitter divided by ``dt`` is just as misleading a "how fast" answer
+    as ``atan2`` of it is a misleading "which way" answer (sprint 036;
+    ticket 022-007's original fix suppressed only the direction fields,
+    on the assumption ``dt`` would be on the order of a second or
+    more -- an assumption that does not hold at streaming/polling
+    cadence).
 
     Args:
         history: Oldest-to-newest ``(timestamp, WorldPoint)`` pairs, in
@@ -145,14 +173,13 @@ def compute_motion(
             +x east, +y north convention).
 
     Returns:
-        A ``(velocity, speed, heading_rad)`` triple. ``velocity`` is a
-        :class:`~aprilcam.types.WorldPoint` of cm/s components, or
-        ``None`` below the reliable-displacement threshold. ``speed`` is
-        always a real ``float`` once two distinct-timestamp points
-        exist. ``heading_rad`` is ``atan2(velocity.y, velocity.x)`` --
-        ``0`` = east, CCW positive -- above the threshold; ``None``
-        (undefined) at or below it, rather than the noise-driven angle
-        ``atan2`` of a near-zero vector would otherwise produce.
+        A ``(velocity, speed, heading_rad)`` triple. All three are
+        ``None`` below the reliable-displacement threshold (as well as
+        with fewer than two distinct-timestamp points) -- never a
+        fabricated zero. Above the threshold: ``velocity`` is a
+        :class:`~aprilcam.types.WorldPoint` of cm/s components, ``speed``
+        is ``hypot(velocity.x, velocity.y)``, and ``heading_rad`` is
+        ``atan2(velocity.y, velocity.x)`` -- ``0`` = east, CCW positive.
     """
     if len(history) < 2:
         return None, None, None
@@ -168,10 +195,11 @@ def compute_motion(
 
     displacement_cm = math.hypot(p1.x - p0.x, p1.y - p0.y)
     if displacement_cm < MIN_RELIABLE_DISPLACEMENT_CM:
-        # Direction is undefined at this magnitude (module docstring) --
-        # velocity and heading stay None; speed alone is still honestly
-        # reported above.
-        return None, speed, None
+        # Below the noise floor: direction is undefined, and (sprint
+        # 036) so is magnitude at short dt -- jitter / dt is just as
+        # misleading a speed as atan2(jitter) is a heading (module
+        # docstring's "Below-noise-floor motion" section).
+        return None, None, None
 
     velocity = WorldPoint(x=vx, y=vy)
     heading_rad = math.atan2(vy, vx)

@@ -58,14 +58,17 @@ this exact tag, plus this burst's own new sample -- to
 ``vision.motion.compute_motion`` (sprint 021, inert until now) to fill in
 ``heading_rad``/``world_velocity``/``speed``, which stay ``None`` until a
 second calibrated sample exists for that tag -- and (ticket 022-007,
-real-hardware finding) ``heading_rad``/``world_velocity`` stay ``None``
-even with a second sample if the two are within
+real-hardware finding, revised by sprint 036) all three of
+``heading_rad``/``world_velocity``/``speed`` stay ``None`` even with a
+second sample if the two are within
 ``vision.motion.MIN_RELIABLE_DISPLACEMENT_CM`` of each other: a
 physically stationary tag jitters by a small, real amount between
 bursts, and that module's docstring works through why a direction
-derived from jitter is worse than no direction at all, while ``speed``
-alone is still safe to report honestly at that magnitude. **An
-uncalibrated camera's path is completely untouched**: ``calibration_lookup``
+derived from jitter is worse than no direction at all -- and (sprint
+036 finding) why a speed computed as that same jitter divided by a
+short ``dt`` is just as misleading, so it is no longer the exception
+that stays reported at this magnitude. **An uncalibrated camera's path
+is completely untouched**: ``calibration_lookup``
 returning ``None``
 (the default, and every case before ticket 003's calibration engine
 existed) reproduces sprint 021's output byte-for-byte -- ``world``,
