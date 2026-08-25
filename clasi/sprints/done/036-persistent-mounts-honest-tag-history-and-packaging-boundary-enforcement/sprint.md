@@ -1,7 +1,7 @@
 ---
 id: '036'
 title: Persistent mounts, honest tag history, and packaging boundary enforcement
-status: executing
+status: done
 branch: sprint/036-persistent-mounts-honest-tag-history-and-packaging-boundary-enforcement
 use-cases: []
 issues:
