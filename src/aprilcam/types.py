@@ -324,13 +324,17 @@ class MountParameters:
     ``mount_y`` offset from the robot's reference point in the robot's
     own frame; ``mount_yaw`` rotates so reported heading is the robot's.
 
-    These are **runtime registrations, not calibration data** —
-    calibration stays robot-agnostic (spec §2.4). They are in-memory
-    only and do not survive a daemon restart — v1's persisted
-    ``tags.json`` is dropped (2026-07-31). A client that expects its
-    tag to have a height or mount orientation **registers it when it
-    connects, every session**, like re-drawing annotations
-    (UC-28.S-4).
+    These are **registrations, not calibration data** — calibration
+    stays robot-agnostic (spec §2.4). A registration is written through
+    to ``<state_dir>/mounts/registry.json`` by ``daemon/service.py``'s
+    ``register_tag`` and reloaded at daemon startup (ticket 036-007),
+    the same file-backed treatment ``calibration.json`` already gets —
+    v1's persisted ``tags.json`` (dropped 2026-07-31) is effectively
+    revived, in a new on-disk shape. A client registers a tag's mount
+    once; it stays registered — and survives a daemon restart — until
+    explicitly unregistered (``unregister_tag``). This differs from
+    annotations (UC-28.S-4), which remain in-memory-only, per-session
+    state.
 
     **Reference point: client-defined, not daemon-mandated** (resolved
     2026-08-03, sprint 025). The daemon has no way to inspect a robot's

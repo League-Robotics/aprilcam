@@ -1,7 +1,7 @@
 ---
 id: '007'
 title: Persist mobile-tag mount registrations across daemon restarts
-status: in-progress
+status: done
 use-cases:
 - SUC-001
 depends-on: []
@@ -69,15 +69,15 @@ location/format decision — read it before implementing:
 
 ## Acceptance Criteria
 
-- [ ] New `_mounts_path()` returns `state_dir / "mounts" /
+- [x] New `_mounts_path()` returns `state_dir / "mounts" /
       "registry.json"`, mirroring `_calibration_path`'s shape.
-- [ ] New `_persist_mounts()` atomically writes the **entire** current
+- [x] New `_persist_mounts()` atomically writes the **entire** current
       `self._mount_params` dict (tmp+fsync+`os.replace`, creating
       `state_dir/mounts/` on demand) — called from `register_tag`'s
       success path (after the existing precondition checks, alongside
       the existing `self._mount_params[tag] = params` line) and from
       `unregister_tag` (after `self._mount_params.pop(tag, None)`).
-- [ ] New `_load_mounts()` reads `state_dir/mounts/registry.json` if
+- [x] New `_load_mounts()` reads `state_dir/mounts/registry.json` if
       present, tolerantly (missing file, corrupt JSON, or a
       malformed entry are each logged as a warning and skipped/ignored
       — never raised, never crashes daemon construction), and
@@ -85,28 +85,28 @@ location/format decision — read it before implementing:
       `DaemonService.__init__` (alongside the existing
       `self._load_calibrations()` call) — before any RPC can be
       served.
-- [ ] `unregister_tag` on a tag with no persisted entry remains a
+- [x] `unregister_tag` on a tag with no persisted entry remains a
       no-op (existing behavior preserved) — `_persist_mounts()` after
       a no-op pop still succeeds (harmless rewrite of an unchanged
       file, or simply skip the write if nothing changed — implementer's
       choice, either is correct).
-- [ ] `list_tag_parameters`'s `mount_z_applied` flag is unaffected by
+- [x] `list_tag_parameters`'s `mount_z_applied` flag is unaffected by
       this change (it is already computed fresh from current
       calibration state at query time, not from anything this ticket
       stores) — confirm with a test rather than assuming.
-- [ ] New tests (new file `tests/aprilcam/daemon/test_mount_persistence.py`
+- [x] New tests (new file `tests/aprilcam/daemon/test_mount_persistence.py`
       or an addition to `tests/aprilcam/daemon/test_service.py`,
       implementer's choice) cover:
-  - [ ] Register a mount, construct a **second** `DaemonService`
+  - [x] Register a mount, construct a **second** `DaemonService`
         against the same `state_dir` (simulating a restart), query —
         reports the corrected pose, not the raw tag pose.
-  - [ ] Unregister, "restart," query — reports the raw tag pose (entry
+  - [x] Unregister, "restart," query — reports the raw tag pose (entry
         was actually removed from disk, not just from memory).
-  - [ ] A missing `mounts/registry.json` (first run) loads cleanly
+  - [x] A missing `mounts/registry.json` (first run) loads cleanly
         with an empty `_mount_params`, no warning-as-error.
-  - [ ] A corrupt `mounts/registry.json` loads cleanly (warning
+  - [x] A corrupt `mounts/registry.json` loads cleanly (warning
         logged, entry skipped, daemon construction succeeds).
-  - [ ] A persisted nonzero-`mount_z` registration reloaded into a
+  - [x] A persisted nonzero-`mount_z` registration reloaded into a
         `DaemonService` with **no** calibrations loaded at all does
         not raise `NotCalibrated` and is not dropped — it is present
         in `list_tag_parameters()`'s output with `mount_z_applied`

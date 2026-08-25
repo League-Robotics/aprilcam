@@ -24,6 +24,7 @@ detection instead).
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import shutil
@@ -3438,6 +3439,289 @@ def test_register_tag_for_a_tag_not_currently_visible_is_accepted(service):
     service.register_tag(tag, MountParameters(mount_x=1.0))
 
     assert tag in service.list_tag_parameters()
+
+
+# ---------------------------------------------------------------------------
+# Mount registry persistence (ticket 036-007): register_tag/unregister_tag
+# write through to <state_dir>/mounts/registry.json and DaemonService.
+# __init__ reloads it -- the identical tmp+fsync+os.replace write and
+# tolerant-of-corruption load stance _persist_calibration/_load_calibrations
+# already establish, applied here to a whole-registry file. "Simulated
+# restart" below always means constructing a second, independent
+# DaemonService against the SAME directories/registry -- exactly the
+# pattern test_fresh_daemon_service_reloads_calibration_json_after_a_
+# simulated_restart above already uses for calibration.
+# ---------------------------------------------------------------------------
+
+
+def test_register_tag_persists_the_expected_on_disk_shape(service, directories):
+    """One concrete on-disk record: a flat JSON object keyed by
+    ``"<family>:<number>"``, mapping to ``MountParameters``' fields --
+    ``size_cm`` present only when set, mirroring
+    ``Calibration.to_dict``'s "omit an optional field entirely rather
+    than write JSON null" convention."""
+    tag = TagId(family=TagFamily.APRILTAG, number=7)
+    service.register_tag(
+        tag, MountParameters(mount_x=8.0, mount_y=3.0, mount_yaw_rad=0.5, size_cm=10.0)
+    )
+
+    path = service._mounts_path()  # noqa: SLF001 - internal; asserting the write itself
+    assert path == directories.state_dir / "mounts" / "registry.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data == {
+        "apriltag:7": {
+            "mount_x": 8.0,
+            "mount_y": 3.0,
+            "mount_z": 0.0,
+            "mount_yaw_rad": 0.5,
+            "size_cm": 10.0,
+        }
+    }
+
+
+def test_mount_registration_survives_a_simulated_daemon_restart(directories, registry):
+    """Definition of Done: register a mount, construct a second,
+    independent ``DaemonService`` against the same ``state_dir`` (no
+    ``register_tag`` call on it), and confirm it reports the *corrected*
+    robot pose -- not the raw tag pose -- with no re-registration.
+    ``mount_z`` stays at its ``0.0`` default (the offset/yaw half is
+    what's end-to-end checkable here; see
+    ``test_register_tag_corrects_get_tags_get_tag_and_history_then_
+    unregister_reverts`` above for why)."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(
+        registry, [frame] * (CALIBRATION_FRAME_COUNT + CONFIRMATION_STREAK + 3)
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True
+
+    tag = TagId(family=TagFamily.ARUCO, number=1)
+    for _ in range(CONFIRMATION_STREAK - 1):
+        service.get_tags(slug)
+    raw_frame = service.get_tags(slug)
+    raw_record = next(r for r in raw_frame.tags if r.tag == tag)
+    assert raw_record.world is not None
+    assert raw_record.yaw_rad is not None
+
+    mount = MountParameters(mount_x=8.0, mount_y=3.0, mount_yaw_rad=math.radians(30.0))
+    service.register_tag(tag, mount)
+    expected_position, expected_yaw = apply_mount_offset(raw_record.world, raw_record.yaw_rad, mount)
+
+    # "Restart": a second DaemonService, freshly constructed against the
+    # same directories/registry, with its own freshly-opened camera
+    # (rendering the identical frame) -- register_tag is never called on
+    # this instance.
+    identity2, slug2, cam2, _backend2 = _open_camera_with_frames(
+        registry, [frame] * (CONFIRMATION_STREAK + 3)
+    )
+    assert slug2 == slug  # same real identity resolves to the same registry slug
+    restarted = _service_with_camera(directories, registry, identity2, slug2, cam2)
+
+    for _ in range(CONFIRMATION_STREAK - 1):
+        restarted.get_tags(slug)
+    tag_frame = restarted.get_tags(slug)
+    record = next(r for r in tag_frame.tags if r.tag == tag)
+    assert record.world is not None
+    assert record.world.x == pytest.approx(expected_position.x, abs=1e-6)
+    assert record.world.y == pytest.approx(expected_position.y, abs=1e-6)
+    assert record.yaw_rad == pytest.approx(expected_yaw, abs=1e-6)
+
+
+def test_unregistered_mount_does_not_reappear_after_a_simulated_restart(directories, registry):
+    """Register, then unregister -- the entry must be gone from *disk*,
+    not merely from this process's memory: a second, independent
+    ``DaemonService`` against the same ``state_dir`` reports the raw tag
+    pose, and the tag is absent from its own ``list_tag_parameters``."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(
+        registry, [frame] * (CALIBRATION_FRAME_COUNT + CONFIRMATION_STREAK + 3)
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True
+
+    tag = TagId(family=TagFamily.ARUCO, number=1)
+    for _ in range(CONFIRMATION_STREAK - 1):
+        service.get_tags(slug)
+    raw_frame = service.get_tags(slug)
+    raw_record = next(r for r in raw_frame.tags if r.tag == tag)
+    assert raw_record.world is not None
+
+    service.register_tag(tag, MountParameters(mount_x=8.0, mount_y=3.0))
+    service.unregister_tag(tag)
+
+    identity2, slug2, cam2, _backend2 = _open_camera_with_frames(
+        registry, [frame] * (CONFIRMATION_STREAK + 3)
+    )
+    restarted = _service_with_camera(directories, registry, identity2, slug2, cam2)
+
+    for _ in range(CONFIRMATION_STREAK - 1):
+        restarted.get_tags(slug)
+    tag_frame = restarted.get_tags(slug)
+    record = next(r for r in tag_frame.tags if r.tag == tag)
+    assert record.world is not None
+    assert record.world.x == pytest.approx(raw_record.world.x, abs=1e-6)
+    assert record.world.y == pytest.approx(raw_record.world.y, abs=1e-6)
+    assert tag not in restarted.list_tag_parameters()
+
+
+def test_missing_mounts_registry_loads_cleanly_as_empty(directories, registry):
+    """First run: no ``mounts/registry.json`` on disk at all -- daemon
+    construction succeeds with an empty registry, no warning-as-error."""
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(),
+        identity_source=lambda: {},
+        backend_factory=lambda index: FakeBackend(),
+    )
+
+    service = DaemonService(registry=registry, discovery=discovery, directories=directories)
+
+    assert service.list_tag_parameters() == {}
+    assert not (directories.state_dir / "mounts" / "registry.json").exists()
+
+
+def test_corrupt_mounts_registry_loads_cleanly_with_a_warning(directories, registry, caplog):
+    """A corrupt (non-JSON) ``mounts/registry.json`` is tolerated --
+    logged as a warning, never raised, daemon construction succeeds with
+    an empty registry -- mirrors ``camera.registry.CameraRegistry``'s /
+    ``_load_calibrations``'s "a corrupt file must never crash the
+    daemon" stance."""
+    path = directories.state_dir / "mounts" / "registry.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{not valid json", encoding="utf-8")
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(),
+        identity_source=lambda: {},
+        backend_factory=lambda index: FakeBackend(),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        service = DaemonService(registry=registry, discovery=discovery, directories=directories)
+
+    assert service.list_tag_parameters() == {}
+    assert any("corrupt mount registry" in record.message for record in caplog.records)
+
+
+def test_mounts_registry_with_malformed_entries_skips_them_and_keeps_the_rest(
+    directories, registry, caplog
+):
+    """A well-formed JSON object whose individual entries are malformed
+    (bad key, non-object value) has each bad entry logged as a warning
+    and skipped -- the good entry alongside them still loads, and
+    daemon construction succeeds."""
+    path = directories.state_dir / "mounts" / "registry.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "apriltag:7": {"mount_x": 1.0},
+                "not-a-valid-key": {"mount_x": 2.0},
+                "aruco:1": "not an object",
+            }
+        ),
+        encoding="utf-8",
+    )
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(),
+        identity_source=lambda: {},
+        backend_factory=lambda index: FakeBackend(),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        service = DaemonService(registry=registry, discovery=discovery, directories=directories)
+
+    params = service.list_tag_parameters()
+    good_tag = TagId(family=TagFamily.APRILTAG, number=7)
+    assert set(params) == {good_tag}
+    assert params[good_tag].params.mount_x == 1.0
+    malformed_warnings = [
+        r for r in caplog.records if "malformed mount registry entry" in r.message
+    ]
+    assert len(malformed_warnings) == 2
+
+
+def test_persisted_nonzero_mount_z_reloads_without_calibration_and_reports_inert(
+    directories, registry
+):
+    """The trickiest acceptance criterion: a persisted nonzero-``mount_z``
+    registration reloaded into a ``DaemonService`` with **no**
+    calibration at all must not raise ``NotCalibrated`` and must not be
+    dropped -- it behaves exactly like a fresh registration into that
+    same daemon state today (registration stands, height correction
+    inert, ``mount_z_applied`` reports the truth). ``_load_mounts``
+    populates ``self._mount_params`` directly, never via
+    ``register_tag``, specifically so this scenario -- which
+    ``register_tag`` itself would reject with ``NotCalibrated`` -- can
+    exist on reload at all."""
+    tag = TagId(family=TagFamily.APRILTAG, number=7)
+    path = directories.state_dir / "mounts" / "registry.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"apriltag:7": {"mount_x": 1.0, "mount_z": 15.0}}), encoding="utf-8"
+    )
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(),
+        identity_source=lambda: {},
+        backend_factory=lambda index: FakeBackend(),
+    )
+
+    # Must not raise NotCalibrated -- this daemon holds no calibration
+    # for any camera at all, the exact condition register_tag() itself
+    # would reject a fresh nonzero-mount_z registration for.
+    service = DaemonService(registry=registry, discovery=discovery, directories=directories)
+
+    params = service.list_tag_parameters()
+    assert tag in params
+    assert params[tag].params.mount_x == 1.0
+    assert params[tag].params.mount_z == 15.0
+    assert params[tag].mount_z_applied is False  # inert: no calibration, no located camera
+
+
+def test_mount_z_applied_after_restart_reflects_the_new_processs_current_state(
+    directories, registry
+):
+    """AC: ``mount_z_applied`` is unaffected by this ticket -- it is
+    computed fresh from current calibration/location state at query
+    time, never from anything persisted on the registration itself.
+    Confirmed here rather than assumed: a registration that reported
+    ``mount_z_applied=False`` (calibrated but unlocated) in the process
+    that made it reports ``True`` after a "restart" whose fresh process
+    happens to have its camera located before the first query -- proving
+    the flag is recomputed per process/per query, not carried over from
+    persistence."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(
+        registry, [frame] * (CALIBRATION_FRAME_COUNT + 3)
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True
+
+    tag = TagId(family=TagFamily.APRILTAG, number=7)
+    warning = service.register_tag(tag, MountParameters(mount_z=15.0))
+    assert warning is not None  # calibrated but not yet located
+    assert service.list_tag_parameters()[tag].mount_z_applied is False
+
+    identity2, slug2, cam2, _backend2 = _open_camera_with_frames(registry, [frame])
+    restarted = _service_with_camera(directories, registry, identity2, slug2, cam2)
+    restarted.set_camera_config(
+        CameraConfig(
+            name=slug2,
+            playfield="main-playfield",
+            settings={},
+            camera_position=CameraPosition(nadir=WorldPoint(x=0.0, y=0.0), height_cm=128.25),
+        )
+    )
+
+    assert restarted.list_tag_parameters()[tag].mount_z_applied is True
 
 
 # ---------------------------------------------------------------------------
