@@ -26,7 +26,7 @@ import numpy as np
 import pytest
 
 from aprilcam.calibration import calibration as calibration_module
-from aprilcam.calibration import geometry
+from aprilcam.calibration import distortion, geometry
 from aprilcam.calibration.calibration import (
     DRIFT_CHECK_INTERVAL_S,
     DRIFT_TOLERANCE_CM,
@@ -844,7 +844,7 @@ def _forward_distort_pixel(px: float, py: float) -> Tuple[float, float]:
     (``docs.opencv.org``'s own camera-calibration model), applied
     directly against :data:`_SYNTHETIC_CAMERA_MATRIX`/
     :data:`_SYNTHETIC_DIST_COEFFS` -- deliberately **independent** of
-    ``geometry.distort_point``'s own fixed-point-iteration
+    ``distortion.distort_point``'s own fixed-point-iteration
     implementation, so the tests below check against an
     independently-computed ground truth rather than merely round-
     tripping through the same code under test. Generates the *known,
@@ -1016,7 +1016,7 @@ def test_to_world_and_to_pixel_are_unaffected_when_intrinsics_are_none():
 def test_to_world_undistorts_before_applying_the_homography_when_intrinsics_are_set():
     """Isolates the undistort step from the homography math: with an
     **identity** homography, ``to_world(pixel)`` reports exactly
-    ``geometry.undistort_point(pixel, ...)``'s own output (interpreted
+    ``distortion.undistort_point(pixel, ...)``'s own output (interpreted
     as a world point), proving the undistort happens *before* the
     homography is applied, not skipped."""
     identity_homography = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
@@ -1032,7 +1032,7 @@ def test_to_world_undistorts_before_applying_the_homography_when_intrinsics_are_
     camera_matrix_array = np.array(_SYNTHETIC_CAMERA_MATRIX, dtype=np.float64)
     dist_coeffs_array = np.array(_SYNTHETIC_DIST_COEFFS, dtype=np.float64)
     distorted_pixel = PixelPoint(x=500.0, y=380.0)
-    expected = geometry.undistort_point(distorted_pixel, camera_matrix_array, dist_coeffs_array)
+    expected = distortion.undistort_point(distorted_pixel, camera_matrix_array, dist_coeffs_array)
 
     world = calibration.to_world(distorted_pixel)
 
@@ -1043,7 +1043,7 @@ def test_to_world_undistorts_before_applying_the_homography_when_intrinsics_are_
 def test_to_pixel_redistorts_after_applying_the_inverse_homography_when_intrinsics_are_set():
     """The ``to_pixel`` half of the isolation above: with an identity
     homography, ``to_pixel(world)`` reports exactly
-    ``geometry.distort_point``'s own output for that same point,
+    ``distortion.distort_point``'s own output for that same point,
     proving the redistort happens *after* the inverse homography."""
     identity_homography = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
     calibration = Calibration(
@@ -1058,7 +1058,7 @@ def test_to_pixel_redistorts_after_applying_the_inverse_homography_when_intrinsi
     camera_matrix_array = np.array(_SYNTHETIC_CAMERA_MATRIX, dtype=np.float64)
     dist_coeffs_array = np.array(_SYNTHETIC_DIST_COEFFS, dtype=np.float64)
     world = WorldPoint(x=500.0, y=380.0)
-    expected = geometry.distort_point(
+    expected = distortion.distort_point(
         PixelPoint(x=world.x, y=world.y), camera_matrix_array, dist_coeffs_array
     )
 

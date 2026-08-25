@@ -1,9 +1,11 @@
 ---
 id: '003'
 title: Suppress compute_motion speed below the noise floor
-status: open
-use-cases: [SUC-002]
-depends-on: ["002"]
+status: done
+use-cases:
+- SUC-002
+depends-on:
+- '002'
 github-issue: ''
 issue: tag-history-gaps-and-jitter-speed-mislead-mcp-consumers.md
 completes_issue: true
@@ -44,42 +46,44 @@ reads as `None` instead of a small positive number (e.g. ~2 cm/s at a
 
 ## Acceptance Criteria
 
-- [ ] `compute_motion` returns `(None, None, None)` for
+- [x] `compute_motion` returns `(None, None, None)` for
       `(velocity, speed, heading_rad)` when two-sample displacement is
       below `MIN_RELIABLE_DISPLACEMENT_CM` — `speed` is no longer the
       exception that stays a real float at this magnitude.
-- [ ] The "fewer than two points / zero-`dt`" early-return path is
+- [x] The "fewer than two points / zero-`dt`" early-return path is
       unaffected (still `(None, None, None)`, unrelated to this
       change).
-- [ ] Unit tests in `tests/aprilcam/vision/test_motion.py` cover the
+- [x] Unit tests in `tests/aprilcam/vision/test_motion.py` cover the
       displacement-threshold boundary at both **small `dt`** (e.g.
       ~0.25s, the case that motivated this fix) and **large `dt`**
       (e.g. several seconds), confirming `speed` is `None` below the
       threshold and a real float above it, at both time scales.
-- [ ] `vision/motion.py`'s module docstring is revised: remove the
+- [x] `vision/motion.py`'s module docstring is revised: remove the
       now-false claim that speed is "bounded near zero for jitter" as
       a *safe* reading (it is bounded in magnitude, but at short `dt`
       that magnitude was still misleadingly non-zero) — state instead
       that `speed` is suppressed below the same displacement threshold
       as `heading_rad`/`velocity`, and why (the dt-dependence
       argument above).
-- [ ] `src/aprilcam/types.py`'s `TagRecord` docstring is checked for
+- [x] `src/aprilcam/types.py`'s `TagRecord` docstring is checked for
       any claim about `speed` semantics; update only if one exists
       (as of sprint planning, `TagRecord`'s docstring does not
       describe `speed` specifically, so likely no change is needed —
-      confirm rather than assume).
-- [ ] Append a short "motion field interpretation" note to the section
+      confirm rather than assume). **Confirmed: no `speed`-specific
+      claim exists in `TagRecord`'s docstring; no change made.**
+- [x] Append a short "motion field interpretation" note to the section
       ticket 002 added to `AGENT_GUIDE.md`: `speed` being `None`
       alongside `heading_rad`/`world_velocity` means "below the
       reliable-displacement threshold," not "not computed" — point at
       `MIN_RELIABLE_DISPLACEMENT_CM`'s value (0.5 cm) informally
       (do not hardcode it if it might change; describe it as "the
       same noise floor `heading_rad` uses").
-- [ ] Check `src/aprilcam/ROBOT_API_GUIDE.md` for any claim that
+- [x] Check `src/aprilcam/ROBOT_API_GUIDE.md` for any claim that
       `speed` stays populated when `heading`/`velocity` go `None` —
       none is expected to exist (confirmed during sprint planning),
       but confirm rather than assume; add a one-line clarification
-      only if needed.
+      only if needed. **Confirmed: `ROBOT_API_GUIDE.md` never mentions
+      `speed` at all; no change made.**
 
 ## Testing
 

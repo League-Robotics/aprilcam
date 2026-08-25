@@ -381,14 +381,21 @@ class Daemon:
         """Describe how a tag is mounted on its robot (UC-12).
 
         Applied per frame so queries and streams report **the robot's**
-        pose rather than the tag's. Runtime registrations, in memory
-        only — calibration itself stays robot-agnostic.
+        pose rather than the tag's. Calibration itself stays
+        robot-agnostic — a mount registration is a separate, per-tag
+        overlay applied on top of it.
 
-        Registrations do **not** survive a daemon restart (v1's
-        ``tags.json`` is dropped). A client that expects its tag to
-        have a height or mount orientation calls this **at session
-        start, every session** — the same reconnect ritual as
-        re-drawing annotations (UC-28.S-4).
+        **Registrations persist across a daemon restart** (ticket
+        036-007; v1's ``tags.json`` is the precedent this revives, in a
+        new on-disk shape — see ``daemon/service.py``'s
+        ``_persist_mounts``/``_load_mounts``). A mount registration
+        describes physical reality — where a tag is bolted to a robot —
+        not a per-session experiment, so a client registers a tag once
+        and it stays registered until explicitly
+        :meth:`unregister_tag`\\ d, with no re-registration ritual at
+        the start of every session. (Annotations, the other per-session
+        state UC-28.S-4 describes, are unaffected by this ticket and
+        remain in-memory only.)
 
         **Returns an optional warning string** (ticket 030-004,
         SUC-004; formerly always ``None``) — non-``None`` exactly when
@@ -415,9 +422,12 @@ class Daemon:
     def unregister_tag(self, tag: TagId) -> None:
         """Forget a mount registration; the tag reports as itself again.
 
-        Absent key is a no-op. Without this, a session's registry only
-        grows — a tag moved to a different robot mid-session would keep
-        the old robot's mount until a daemon restart.
+        Absent key is a no-op. Without this, the registry only grows —
+        a tag moved to a different robot would keep the old robot's
+        mount indefinitely: registrations persist across a daemon
+        restart (ticket 036-007), so a restart no longer clears a stale
+        one either. This is the only way to remove a mount registration
+        short of hand-editing ``mounts/registry.json``.
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.unregister_tag")
 

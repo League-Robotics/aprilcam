@@ -56,9 +56,10 @@ limit; an empty field returns an empty list, not an error.
 
 `record.world` is the **tag's** position by default. If the tag is
 mounted on a robot — elevated above the field plane, offset from the
-robot's own reference point — register its mount parameters once per
-session and every subsequent report for that tag becomes the
-**robot's** position and heading instead of the raw tag's:
+robot's own reference point — register its mount parameters once and
+every subsequent report for that tag becomes the **robot's** position
+and heading instead of the raw tag's — the registration persists (see
+below), so this is a one-time setup step, not a per-session one:
 
 ```python
 from aprilcam.types import MountParameters
@@ -103,17 +104,23 @@ tags at surveyed positions (UC-29). A camera nobody has `locate`d
 accepts a nonzero `mount_z` registration without error but reports the
 tag's raw, uncorrected position, exactly as if `mount_z` were zero.
 
-### This registration does not survive a daemon restart
+### This registration survives a daemon restart
 
-Mount parameters are **runtime-only**: held in memory, gone the moment
-the daemon restarts — same as annotations, below. **Register at the
-start of every session**, not once ever. A robot program that connects,
-skips this call because "I already registered it last week," and then
-reads `record.world` after a daemon restart silently gets the *raw
-tag's* position back instead of its own — no error, just a
-plausible-looking wrong number that will not announce itself. If your
-control loop depends on `register_tag` having been called, call it
-every time you connect, before you trust a reported position.
+Mount parameters are **persisted**, not runtime-only: `register_tag`
+writes the registration to `state_dir/mounts/registry.json`, and the
+daemon reloads it automatically the next time it starts — unlike
+annotations, below, which stay in-memory only. Register a tag's mount
+once and it stays registered; there is no need to call `register_tag`
+again on every connect solely to guard against a prior restart. The
+only way to remove a registration is an explicit `unregister_tag`
+(`aprilcam tags mount clear`) — a restart will not do it for you, so a
+tag moved to a different robot needs an explicit `clear` first.
+
+It is still harmless to call `register_tag` on every connect if that is
+simpler for your control loop to reason about — a registration
+upserts, replacing the previous one outright — but it is no longer
+*required*, and skipping it after the first successful registration
+will not leave you reading the raw tag's position by surprise.
 
 ## Reading Tags: Polling vs Streaming
 
@@ -145,11 +152,12 @@ timestamp rather than assuming a fixed frame interval.
 Annotations (`daemon.put_annotation`) are world-coordinate drawings —
 markers, paths, polygons, circles, text — visible to every other
 client watching the same playfield: a viewer, another robot, an agent.
-Like mount registrations, **annotations are runtime-only and do not
-survive a daemon restart** — re-draw them at the start of every session
-that wants them visible, not just once. (`aprilcam playfield
-annotations <name>` lists or clears the current set from a shell;
-authoring one is currently a Python-client call, not yet a CLI verb.)
+Unlike mount registrations (above), **annotations are still
+runtime-only and do not survive a daemon restart** — re-draw them at
+the start of every session that wants them visible, not just once.
+(`aprilcam playfield annotations <name>` lists or clears the current
+set from a shell; authoring one is currently a Python-client call, not
+yet a CLI verb.)
 
 ## Configuration
 

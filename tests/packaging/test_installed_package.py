@@ -9,22 +9,28 @@ pipx install's daemon subprocess had no capture backend. This module
 does not reproduce that incident directly -- it instead nails down the
 adjacent, load-bearing claim the project overview and
 ``docs/design/design.md`` §9 item 1 both make: a **base** install (no
-``[daemon]`` extra) should need no ``cv2`` at all. That claim is
-currently false (see below), and asserting it honestly, rather than
-inferring it from the dependency list, is this module's whole job.
+``[daemon]`` extra) should need no ``cv2`` at all. That claim was
+false when this module was first written (see below), and asserting
+it honestly, rather than inferring it from the dependency list, is
+this module's whole job.
 
-**Expected to fail, deliberately.** ``pyproject.toml`` lists
+**Previously expected to fail; now passes for real (sprint 036,
+ticket 004).** ``pyproject.toml`` used to list
 ``opencv-contrib-python>=4.8`` as a **base** dependency (not gated
-behind ``optional-dependencies.daemon``), a known, currently-open gap
-recorded in ``docs/design/design.md`` §9 item 1. So
-:func:`test_import_cv2_fails_in_the_fresh_base_only_venv` below is
-marked ``xfail(strict=True)``: it is expected to fail *today* (a fresh
-base-only install still gets ``cv2``), and ``strict=True`` means the
-day that packaging gap closes, this same assertion flips to an
-unexpected pass -- reported as a hard failure, not a silent skip --
-which is exactly the "starkly visible until closed" behaviour the
-ticket calls for. Nothing about the assertion itself is weakened to
-make the suite green.
+behind ``optional-dependencies.daemon``), a known packaging gap
+recorded in ``docs/design/design.md`` §9 item 1.
+:func:`test_import_cv2_fails_in_the_fresh_base_only_venv` below was
+marked ``xfail(strict=True)`` for that reason: it was expected to fail
+(a fresh base-only install still got ``cv2``), and ``strict=True``
+meant the day that packaging gap closed, this same assertion would
+flip to an unexpected pass -- reported as a hard failure, not a silent
+skip -- which was exactly the "starkly visible until closed" behaviour
+the ticket called for. Sprint 036 ticket 004 closed that gap
+(``opencv-contrib-python`` moved to the ``daemon`` extra;
+``tags/generator.py``'s ``cv2`` import became lazy so ``aprilcam
+taggen`` stays base-importable), so the marker has been removed and
+this test now genuinely passes. Nothing about the assertion itself was
+ever weakened.
 
 **Two-tier build**: a module-scoped :func:`built_wheel` fixture runs
 ``uv build --wheel`` once, and a module-scoped :func:`fresh_base_venv`
@@ -70,22 +76,70 @@ both sides (unix-socket ~103-char path limit), mirroring
 Real ``~/.config/aprilcam``/``~/.local/share/aprilcam`` are never
 touched -- nothing here constructs a ``Directories()`` with no
 overrides, and no fixture below writes a ``camera_position``.
+
+**Sprint 036 ticket 006: the ``aprilcam mcp`` entry point itself.**
+Every test above proves things about the base-install *client* surface
+-- it never starts ``aprilcam mcp``, the one console-script invocation
+where a fresh dependency resolution meets the real MCP entry point.
+That gap let a 2026-08-23 incident ship silently: ``pyproject.toml``
+declared ``mcp>=1.0`` with no upper bound, a fresh pipx install
+resolved mcp 2.0.0 (which moved ``mcp.server.fastmcp`` to
+``mcp.server.mcpserver``), and ``aprilcam mcp`` crashed on import while
+every existing test stayed green against the repo's own ``uv.lock``-
+pinned mcp 1.26.0. See
+``installed-package-test-does-not-exercise-aprilcam-mcp.md`` for the
+full incident writeup. The tests at the bottom of this module close
+that gap: a new module-scoped :func:`fresh_daemon_venv` fixture builds
+a **second** fresh venv (this time with the ``daemon`` extra
+installed, per this ticket's Acceptance Criteria), and real-subprocess
+tests spawn *that* venv's own ``bin/aprilcam mcp``, complete a genuine
+stdio ``initialize`` handshake using the same ``mcp.client.stdio``
+machinery ``tests/aprilcam/mcp/test_stdio_offline.py`` (sprint 035
+ticket 009) already uses against the dev venv, and assert both the
+pinned tool inventory and the resolved ``mcp`` version against the
+declared constraint. Confirmed by hand while writing this ticket: the
+full ``aprilcam mcp`` import chain (``mcp/server.py`` ->
+``mcp/connection.py`` -> ``client/discovery.py`` / ``client/
+guides.py`` / ``daemon/interfaces.py`` -> ``calibration/interfaces.py``
+/ ``config/interfaces.py`` -> ``types.py``) touches no ``cv2`` and no
+other daemon-extra dependency, so ``aprilcam mcp`` actually starts
+fine even in a **base-only** venv -- the ``daemon`` extra is not
+strictly required for this handshake to succeed. :func:`fresh_daemon_venv`
+still installs it anyway, per this ticket's Acceptance Criteria: it
+models the realistic deployment shape (a host running ``aprilcam mcp``
+for an agent very likely also runs ``aprilcam daemon`` on the same
+box) and stress-tests the resolved ``mcp`` version against a heavier,
+more conflict-prone dependency set than the base-only install alone
+would.
 """
 
 from __future__ import annotations
 
+import email
 import os
 import shutil
 import subprocess
 import tempfile
 import textwrap
+import zipfile
+from datetime import timedelta
 from pathlib import Path
 from typing import Dict, Iterator, Optional
 
+import anyio
 import pytest
+from mcp import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
+from packaging.requirements import Requirement
 
 from aprilcam.config.directories import Directories
 from aprilcam.daemon import __main__ as daemon_main
+from aprilcam.daemon.lifecycle import SOCKET_FILENAME
+
+# Sprint 036 ticket 006: reused, not hand-copied, from the module that
+# already pins it (sprint 035 ticket 009) -- see this module's
+# docstring's "Sprint 036 ticket 006" paragraph.
+from tests.aprilcam.mcp.test_stdio_offline import _EXPECTED_TOOLS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -224,6 +278,39 @@ def fresh_base_venv(built_wheel: Path) -> Iterator[Path]:
         shutil.rmtree(venv_dir, ignore_errors=True)
 
 
+@pytest.fixture(scope="module")
+def fresh_daemon_venv(built_wheel: Path) -> Iterator[Path]:
+    """Sprint 036 ticket 006: a **second**, separate fresh venv (own
+    fixture, own ``uv venv``/``uv pip install`` -- not a variant of
+    :func:`fresh_base_venv`, which stays base-only for AC2/AC3 above)
+    with :func:`built_wheel` installed **with the ``daemon`` extra**.
+    Used only by the ``aprilcam mcp`` real-subprocess tests at the
+    bottom of this module -- see this module's docstring's "Sprint 036
+    ticket 006" paragraph for why the ``daemon`` extra is installed
+    here even though it was confirmed, by hand, not to be strictly
+    required for ``aprilcam mcp`` to start. Yields the venv's root
+    directory, matching :func:`fresh_base_venv`'s shape."""
+    venv_dir = _short_tmp_dir("ac-006-venv-")
+    try:
+        venv_result = _run(["uv", "venv", str(venv_dir)], cwd=str(REPO_ROOT))
+        assert venv_result.returncode == 0, (
+            f"uv venv failed (exit {venv_result.returncode}):\n"
+            f"stdout={venv_result.stdout}\nstderr={venv_result.stderr}"
+        )
+        venv_python = venv_dir / "bin" / "python"
+        install_result = _run(
+            ["uv", "pip", "install", "--python", str(venv_python), f"{built_wheel}[daemon]"],
+            cwd=str(REPO_ROOT),
+        )
+        assert install_result.returncode == 0, (
+            f"uv pip install (daemon extra) failed (exit {install_result.returncode}):\n"
+            f"stdout={install_result.stdout}\nstderr={install_result.stderr}"
+        )
+        yield venv_dir
+    finally:
+        shutil.rmtree(venv_dir, ignore_errors=True)
+
+
 # ---------------------------------------------------------------------------
 # AC1 -- build + fresh venv + base-only install actually happened.
 # ---------------------------------------------------------------------------
@@ -253,29 +340,60 @@ def test_import_aprilcam_client_succeeds_in_the_fresh_base_only_venv(fresh_base_
     )
 
 
+@pytest.mark.integration
+def test_import_aprilcam_client_renderer_succeeds_in_the_fresh_base_only_venv(
+    fresh_base_venv: Path,
+):
+    """Sprint 036 ticket 005: ``client/renderer.py`` imports
+    ``calibration/geometry.py`` for ``world_to_deskewed_pixel``, and
+    ``geometry.py`` used to have its own top-level ``import cv2 as cv``
+    (needed only by the two functions ticket 005 moved to
+    ``calibration/distortion.py``). At the point this ticket lands,
+    ``opencv-contrib-python`` is still a base dependency (ticket 004
+    hasn't moved it to the ``daemon`` extra yet), so this assertion
+    passes trivially either way today -- ``cv2`` is present in this
+    fresh venv regardless of whether the split happened. It is still
+    worth adding now: it becomes the real, load-bearing proof once
+    ticket 004 lands and this venv genuinely has no ``cv2`` for any
+    reason. The actual proof *right now* that the split accomplished
+    anything is the ``sys.meta_path`` import-blocker test in
+    ``tests/test_cv2_import_blocker_console_script.py``, which works
+    independently of what this fresh venv happens to have installed."""
+    venv_python = fresh_base_venv / "bin" / "python"
+    result = _run([str(venv_python), "-c", "import aprilcam.client.renderer"])
+    assert result.returncode == 0, (
+        f"import aprilcam.client.renderer failed in a fresh base-only-install "
+        f"venv (exit {result.returncode}):\nstdout={result.stdout}\nstderr={result.stderr}"
+    )
+
+
+@pytest.mark.integration
+def test_import_aprilcam_cli_locate_succeeds_in_the_fresh_base_only_venv(fresh_base_venv: Path):
+    """Bonus fix (sprint 036 ticket 005, not required by this ticket's
+    own acceptance criteria): ``cli/locate.py`` imports
+    ``calibration.geometry`` too (``solve_camera_geometry``), for the
+    same reason ``client/renderer.py`` does -- see that test's own
+    docstring above for why this passes trivially today and becomes
+    load-bearing once ticket 004 lands."""
+    venv_python = fresh_base_venv / "bin" / "python"
+    result = _run([str(venv_python), "-c", "import aprilcam.cli.locate"])
+    assert result.returncode == 0, (
+        f"import aprilcam.cli.locate failed in a fresh base-only-install venv "
+        f"(exit {result.returncode}):\nstdout={result.stdout}\nstderr={result.stderr}"
+    )
+
+
 # ---------------------------------------------------------------------------
-# AC3 -- `import cv2` FAILS in the fresh venv. Currently does not: see
-# the module docstring and design.md §9 item 1. xfail(strict=True) so
-# this stays visible in the sprint gate without blocking it, and flips
-# to a hard failure (not a silent pass) the day the gap closes.
+# AC3 -- `import cv2` FAILS in the fresh venv. Previously known-broken
+# (design.md §9 item 1) and guarded by an `xfail(strict=True)` marker;
+# sprint 036 ticket 004 moved `opencv-contrib-python` to the `daemon`
+# extra, so this now passes for real and the marker is gone -- see
+# `tags/generator.py`'s module docstring for the lazy-import mechanism
+# that keeps `aprilcam taggen` working despite the move.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
-@pytest.mark.xfail(
-    reason=(
-        "known packaging gap, design.md §9 item 1: opencv-contrib-python "
-        "is listed as a BASE dependency in pyproject.toml (not gated "
-        "behind optional-dependencies.daemon), so a genuinely fresh, "
-        "base-only-install venv still gets a working cv2. Confirmed by "
-        "hand while writing this test: `uv pip install` of the built "
-        "wheel with no extras pulls in opencv-contrib-python==5.0.0.93 "
-        "unprompted. This must start passing -- and this xfail marker "
-        "must be removed -- the day that dependency moves to the "
-        "`daemon` extra."
-    ),
-    strict=True,
-)
 def test_import_cv2_fails_in_the_fresh_base_only_venv(fresh_base_venv: Path):
     venv_python = fresh_base_venv / "bin" / "python"
     result = _run([str(venv_python), "-c", "import cv2"])
@@ -391,3 +509,148 @@ def test_consumer_script_in_fresh_venv_round_trips_camera_free_data_against_isol
         f"stdout={result.stdout}\nstderr={result.stderr}"
     )
     assert "CONSUMER_ROUND_TRIP_OK" in result.stdout, result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Sprint 036 ticket 006 -- the real `aprilcam mcp` entry point, started as
+# a subprocess of the FRESH, daemon-extra-installed venv's own console
+# script (never the dev venv's). Closes
+# `installed-package-test-does-not-exercise-aprilcam-mcp.md` -- see this
+# module's docstring's "Sprint 036 ticket 006" paragraph for the incident
+# this replays and the fixture design decisions.
+# ---------------------------------------------------------------------------
+
+
+def _mcp_requirement_from_wheel(wheel_path: Path) -> Requirement:
+    """Reads the declared ``mcp`` version constraint straight out of
+    *wheel_path*'s own ``METADATA`` -- not a second ``<2`` hand-copied
+    from ``pyproject.toml``, which could silently drift out of sync
+    with the real pin (this ticket's Acceptance Criteria)."""
+    with zipfile.ZipFile(wheel_path) as archive:
+        metadata_names = [
+            name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
+        ]
+        assert len(metadata_names) == 1, (
+            f"expected exactly one *.dist-info/METADATA in {wheel_path}, "
+            f"found {metadata_names}"
+        )
+        metadata_text = archive.read(metadata_names[0]).decode("utf-8")
+
+    message = email.message_from_string(metadata_text)
+    all_requirements = [Requirement(value) for value in message.get_all("Requires-Dist") or []]
+    mcp_requirements = [req for req in all_requirements if req.name == "mcp"]
+    assert len(mcp_requirements) == 1, (
+        f"expected exactly one 'mcp' entry in {wheel_path}'s Requires-Dist, "
+        f"found {mcp_requirements}"
+    )
+    return mcp_requirements[0]
+
+
+@pytest.mark.integration
+def test_resolved_mcp_version_satisfies_the_declared_pyproject_constraint(
+    fresh_daemon_venv: Path, built_wheel: Path
+):
+    """The 2026-08-23 incident happened because ``pyproject.toml``
+    declared ``mcp>=1.0`` with no upper bound, and a fresh dependency
+    resolution picked up mcp 2.0.0 -- which moved
+    ``mcp.server.fastmcp`` to ``mcp.server.mcpserver``, breaking
+    ``aprilcam mcp`` at import time. The repo's own ``.venv`` had mcp
+    1.26.0 pinned by ``uv.lock``, so every existing test stayed green
+    while the shipped artifact was broken. This asserts the ``mcp``
+    version actually resolved into a FRESH, installed venv satisfies
+    the constraint declared in the built wheel's own METADATA (read via
+    :func:`_mcp_requirement_from_wheel`, not hardcoded here) -- turning
+    a future unpinned upper bound into a caught dependency fact rather
+    than a downstream ``ModuleNotFoundError``."""
+    venv_python = fresh_daemon_venv / "bin" / "python"
+    result = _run(
+        [str(venv_python), "-c", "import importlib.metadata as md; print(md.version('mcp'))"]
+    )
+    assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+    resolved_version = result.stdout.strip()
+
+    requirement = _mcp_requirement_from_wheel(built_wheel)
+    assert requirement.specifier.contains(resolved_version, prereleases=True), (
+        f"resolved mcp=={resolved_version} in the fresh installed venv does "
+        f"not satisfy the declared constraint 'mcp{requirement.specifier}' "
+        f"from the built wheel's own METADATA -- this is exactly the class "
+        f"of drift that shipped a broken 'aprilcam mcp' on 2026-08-23"
+    )
+
+
+@pytest.mark.integration
+async def test_aprilcam_mcp_completes_a_real_stdio_handshake_in_the_installed_venv(
+    fresh_daemon_venv: Path,
+    isolated_directories: Directories,
+    short_runtime_dir: Path,
+) -> None:
+    """Spawns the FRESH, daemon-extra-installed venv's own
+    ``bin/aprilcam mcp`` console script as a real subprocess -- not the
+    dev venv's -- and completes a genuine MCP ``initialize`` handshake
+    plus ``tools/list`` over real stdio, using the same client-side
+    machinery (``mcp.client.stdio.stdio_client`` / ``mcp.ClientSession``)
+    ``tests/aprilcam/mcp/test_stdio_offline.py`` (sprint 035 ticket 009)
+    already uses against the *dev* venv's console script. This is the
+    one check that would have caught the 2026-08-23 incident: a fresh
+    dependency resolution that picked mcp 2.0.0 broke
+    ``mcp/server.py``'s ``from mcp.server.fastmcp import FastMCP`` at
+    import time, and no existing test in this module started this
+    entry point anywhere a fresh resolution could actually happen.
+
+    Isolation reuses this module's own ``isolated_directories``/
+    ``short_runtime_dir`` fixtures (already exercised by AC5's daemon
+    round-trip test above), which isolate the exact same three knobs
+    ``test_stdio_offline.py``'s own ``isolated_mcp_env`` fixture does --
+    private ``APRILCAM_CONFIG_DIR``/``APRILCAM_STATE_DIR``/
+    ``XDG_RUNTIME_DIR`` roots -- so this subprocess can never reach the
+    stakeholder's real ``~/.config/aprilcam`` or a real,
+    currently-running daemon's control socket. ``isolated_directories``
+    also skips this test outright (rather than silently talking to a
+    real daemon) if this sandbox's ``/run/aprilcam`` is itself
+    available and writable.
+    """
+    aprilcam_bin = fresh_daemon_venv / "bin" / "aprilcam"
+    assert aprilcam_bin.exists(), f"expected a console script at {aprilcam_bin}"
+
+    socket_path = isolated_directories.socket_dir / SOCKET_FILENAME
+    assert not socket_path.exists(), (
+        "sanity check on the isolation fixtures themselves: a freshly "
+        "created socket_dir must start with no control-plane socket -- if "
+        "this fails, the isolation is broken, not the server under test"
+    )
+
+    env = dict(os.environ)
+    env["APRILCAM_CONFIG_DIR"] = str(isolated_directories.config_dir)
+    env["APRILCAM_STATE_DIR"] = str(isolated_directories.state_dir)
+    env["XDG_RUNTIME_DIR"] = str(short_runtime_dir)
+
+    params = StdioServerParameters(command=str(aprilcam_bin), args=["mcp"], env=env)
+
+    async with stdio_client(params) as (read_stream, write_stream):
+        async with ClientSession(
+            read_stream, write_stream, read_timeout_seconds=timedelta(seconds=20)
+        ) as session:
+            with anyio.fail_after(20):
+                init_result = await session.initialize()
+            assert init_result.serverInfo.name == "aprilcam", init_result.serverInfo
+
+            with anyio.fail_after(20):
+                tools_result = await session.list_tools()
+            tool_names = {tool.name for tool in tools_result.tools}
+
+    # `async with stdio_client(...)` has now run its full MCP-spec
+    # shutdown sequence (close stdin -> wait -> SIGTERM -> SIGKILL) --
+    # see mcp.client.stdio's own docstring/source, and
+    # `test_stdio_offline.py`'s identical comment. No orphaned
+    # `aprilcam mcp` process survives this test, pass, fail, or error
+    # alike, because that teardown lives in the context manager's
+    # `finally` and always runs when the `async with` block is exited.
+
+    missing = _EXPECTED_TOOLS - tool_names
+    assert not missing, (
+        f"pinned tool inventory regressed in the INSTALLED package -- "
+        f"missing: {sorted(missing)}"
+    )
+    # Deliberately no assertion that `tool_names == _EXPECTED_TOOLS`: this
+    # is a superset assertion by design (mirroring test_stdio_offline.py),
+    # so a server that grows a new tool must not fail this test.

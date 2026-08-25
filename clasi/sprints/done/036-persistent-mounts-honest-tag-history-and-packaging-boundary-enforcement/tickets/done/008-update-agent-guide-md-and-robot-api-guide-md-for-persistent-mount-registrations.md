@@ -1,9 +1,11 @@
 ---
 id: 008
 title: Update AGENT_GUIDE.md and ROBOT_API_GUIDE.md for persistent mount registrations
-status: open
-use-cases: [SUC-001]
-depends-on: ["007"]
+status: done
+use-cases:
+- SUC-001
+depends-on:
+- '007'
 github-issue: ''
 issue: mount-registrations-should-persist-across-daemon-restarts.md
 completes_issue: true
@@ -47,7 +49,7 @@ change).
 
 ## Acceptance Criteria
 
-- [ ] `AGENT_GUIDE.md` §6's heading and opening paragraph no longer
+- [x] `AGENT_GUIDE.md` §6's heading and opening paragraph no longer
       claim mounts are per-session; it explains that mount
       registrations now persist across restarts (written to
       `state_dir/mounts/registry.json`, per ticket 007), while
@@ -57,19 +59,19 @@ change).
       into clearly separated sub-points — implementer's judgment on
       exact wording, but the persistence-vs-not distinction must be
       unambiguous to a first-time reader.
-  - [ ] The one-line summary near the end of §6 ("Per-session rule:
+  - [x] The one-line summary near the end of §6 ("Per-session rule:
         mount registrations (UC-12) and annotations (UC-28) do not
         survive a daemon restart...") is corrected to state mounts
         now persist.
-  - [ ] `aprilcam tags mount list` is still correctly described as the
+  - [x] `aprilcam tags mount list` is still correctly described as the
         way to check what's currently registered (unaffected by this
         change — still true whether the registration came from this
         session or a reload).
-  - [ ] The `mount_z`-precondition sub-section (calibrated vs. located)
+  - [x] The `mount_z`-precondition sub-section (calibrated vs. located)
         is left unchanged in substance — only reworded if it directly
         cross-references the now-corrected per-session framing above
         it.
-- [ ] `ROBOT_API_GUIDE.md`'s "### This registration does not survive a
+- [x] `ROBOT_API_GUIDE.md`'s "### This registration does not survive a
       daemon restart" section (and its heading) is corrected: mount
       registrations now persist; a robot program does **not** need to
       call `register_tag` on every connect solely to guard against a
@@ -78,10 +80,10 @@ change).
       guide should not present it as *required*). State plainly that
       annotations (mentioned nearby, if at all) are unaffected and
       still per-session, if the surrounding text implies otherwise.
-- [ ] Neither guide is changed anywhere outside the mount-persistence
+- [x] Neither guide is changed anywhere outside the mount-persistence
       framing (no scope creep into cadence/motion-semantics wording,
       which tickets 002/003 already own).
-- [ ] Both guides remain internally consistent after the edit — read
+- [x] Both guides remain internally consistent after the edit — read
       each in full after editing, not just the changed section, to
       confirm no other passage still assumes mounts are ephemeral
       (e.g. a stray earlier mention in `AGENT_GUIDE.md`'s bring-up

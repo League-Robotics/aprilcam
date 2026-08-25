@@ -168,19 +168,23 @@ def test_available_returns_exactly_agent_and_robot() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Content: register-per-session rule, bring-up order
+# Content: mount persistence vs. per-session annotations, bring-up order
 # ---------------------------------------------------------------------------
 
 
-def test_agent_guide_states_the_per_session_reregistration_rule() -> None:
-    """Mount registrations (UC-12) and annotations (UC-28) are runtime
-    state that vanishes on every daemon restart -- the guide must say
-    so explicitly, not leave it implied."""
+def test_agent_guide_states_mounts_persist_annotations_are_per_session() -> None:
+    """Mount registrations (UC-12) persist across a daemon restart
+    (ticket 036-007); annotations (UC-28) remain runtime state that
+    vanishes on every daemon restart. The guide must say both
+    explicitly, not leave either implied -- and must not still claim
+    mounts are per-session (ticket 036-008)."""
     text = Guides().get("agent")
 
-    assert "do not survive a daemon restart" in text
     assert "UC-12" in text
     assert "UC-28" in text
+    assert "mount registrations (UC-12) now persist across a daemon restart" in text
+    assert "annotations (UC-28) remain per-session" in text
+    assert "registry.json" in text
 
 
 def test_agent_guide_states_the_bring_up_order() -> None:

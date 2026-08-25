@@ -23,6 +23,18 @@ reloading every camera's ``calibration.json`` at construction time --
 "loaded at daemon startup", the same file-backed rule the module
 docstring above already describes for ``config.json``/registry.json.
 
+**Mount-registry persistence** (ticket 036-007, UC-12). The mobile-tag
+registry (``register_tag``/``unregister_tag``/``list_tag_parameters``
+above) is file-backed the same way: a successful ``register_tag``/
+``unregister_tag`` writes the whole registry to ``<state_dir>/mounts/
+registry.json`` (:meth:`DaemonService._persist_mounts`, the identical
+tmp+fsync+``os.replace`` pattern ``_persist_calibration`` uses), and
+:meth:`DaemonService._load_mounts` reloads it at construction time,
+tolerating a missing or corrupt file exactly like ``_load_calibrations``
+does. A mount registration describes physical reality -- where a tag is
+bolted to a robot -- so, like a calibration, it no longer needs
+re-registering every session.
+
 Delegates everything camera-shaped to ``camera/registry.py`` (ticket
 002) and ``Camera``/``CameraDiscovery`` (ticket 003) -- no identity
 derivation, no registry persistence, no probe/backend logic is
@@ -127,6 +139,7 @@ from aprilcam.types import (
     PathShape,
     Polygon,
     ProbeReport,
+    TagFamily,
     TagFrame,
     TagId,
     TagRecord,
@@ -138,6 +151,13 @@ __all__ = ["DaemonService"]
 #: Name every camera's calibration file gets under
 #: ``<state_dir>/cameras/<camera>/`` -- design.md §7's storage layout.
 CALIBRATION_FILENAME = "calibration.json"
+
+#: Name of the one shared mount-registry file under ``<state_dir>/mounts/``
+#: (ticket 036-007) -- ``camera/registry.py``'s ``<state_dir>/cameras/
+#: registry.json`` sibling layout, one flat file for the whole registry
+#: rather than one file per tag, matching ``register_tag``'s existing
+#: upsert-by-tag, read/write-as-a-unit semantics.
+MOUNTS_FILENAME = "registry.json"
 
 #: How many frames :meth:`DaemonService._capture_calibration_frames`
 #: reads for one :meth:`DaemonService.calibrate` call -- see
@@ -235,6 +255,69 @@ def _check_point_bound(shape: AnnotationShape) -> None:
     this check."""
     if isinstance(shape, (PathShape, Polygon)) and len(shape.points) > _MAX_POINTS_PER_SHAPE:
         raise AnnotationLimitExceeded("points", _MAX_POINTS_PER_SHAPE, len(shape.points))
+
+
+# -- mount registry (de)serialization (ticket 036-007) -----------------------
+#
+# Neither ``TagId`` nor ``MountParameters`` (``types.py``) has a
+# ``to_dict``/``from_dict`` of its own to reuse -- unlike ``Calibration``,
+# which already had one before this ticket. These four module-level
+# functions are ``mounts/registry.json``'s inline (de)serialization,
+# deliberately mirroring ``Calibration.to_dict``/``from_dict``'s shape
+# (raise on malformed input; omit an optional field entirely rather than
+# writing JSON ``null``) rather than inventing a different convention.
+
+
+def _mount_registry_key(tag: TagId) -> str:
+    """``TagId`` -> its string key in ``mounts/registry.json``, e.g.
+    ``"apriltag:7"`` -- the encoding the sprint's storage-location
+    decision calls for."""
+    return f"{tag.family.value}:{tag.number}"
+
+
+def _mount_registry_key_to_tag(key: str) -> TagId:
+    """The inverse of :func:`_mount_registry_key`. Raises ``ValueError``
+    on anything that does not parse as ``"<family>:<number>"`` with a
+    known family and an integer number -- :meth:`DaemonService._load_mounts`
+    catches this and treats it as one malformed entry to skip, exactly
+    like a malformed ``calibration.json`` field."""
+    family_str, sep, number_str = key.partition(":")
+    if not sep:
+        raise ValueError(f"malformed mount registry key {key!r}: missing ':'")
+    return TagId(family=TagFamily(family_str), number=int(number_str))
+
+
+def _mount_params_to_dict(params: MountParameters) -> Dict[str, object]:
+    """Serialize one ``MountParameters`` for ``mounts/registry.json`` --
+    ``size_cm`` is omitted entirely when ``None``, never written as a
+    JSON ``null`` placeholder, mirroring ``Calibration.to_dict``'s
+    identical treatment of its own optional fields."""
+    data: Dict[str, object] = {
+        "mount_x": params.mount_x,
+        "mount_y": params.mount_y,
+        "mount_z": params.mount_z,
+        "mount_yaw_rad": params.mount_yaw_rad,
+    }
+    if params.size_cm is not None:
+        data["size_cm"] = params.size_cm
+    return data
+
+
+def _mount_params_from_dict(data: object) -> MountParameters:
+    """The inverse of :func:`_mount_params_to_dict`. Raises
+    ``TypeError``/``KeyError``/``ValueError`` on a malformed record --
+    :meth:`DaemonService._load_mounts` treats that as one malformed
+    entry to skip, never a reason to fail daemon construction (mirrors
+    ``Calibration.from_dict``'s contract exactly)."""
+    if not isinstance(data, dict):
+        raise TypeError(f"mount registry entry is not a JSON object: {data!r}")
+    return MountParameters(
+        mount_x=float(data.get("mount_x", 0.0)),
+        mount_y=float(data.get("mount_y", 0.0)),
+        mount_z=float(data.get("mount_z", 0.0)),
+        mount_yaw_rad=float(data.get("mount_yaw_rad", 0.0)),
+        size_cm=float(data["size_cm"]) if data.get("size_cm") is not None else None,
+    )
 
 
 class DaemonService(Daemon):
@@ -393,11 +476,13 @@ class DaemonService(Daemon):
         # TagId -> MountParameters (ticket 025-004, UC-12): a fifth
         # in-memory store, guarded by the same ``self._lock`` -- "one
         # more dict under the existing lock", exactly the pattern ticket
-        # 024-001 used for ``_annotations`` above. Runtime state, never
-        # written to disk, wiped on restart (UC-12's "re-register every
-        # session" contract) -- there is simply no write-to-disk path
-        # here, the same structural guarantee every other store in this
-        # class already has.
+        # 024-001 used for ``_annotations`` above. **Disk-backed as of
+        # ticket 036-007**: a mount registration describes physical
+        # reality (where a tag is bolted to a robot), not a per-session
+        # experiment, so it now survives a restart the same way
+        # ``_calibrations`` already does -- see :meth:`_persist_mounts`/
+        # :meth:`_load_mounts`, called from :meth:`register_tag`/
+        # :meth:`unregister_tag` and from this constructor respectively.
         self._mount_params: Dict[TagId, MountParameters] = {}
         # slug -> its live TagStreamProducer (ticket 027-003, UC-11).
         # Populated lazily by :meth:`stream_tags` on that camera's first
@@ -443,6 +528,7 @@ class DaemonService(Daemon):
         )
         self._calibrations: Dict[str, Calibration] = {}
         self._load_calibrations()
+        self._load_mounts()
 
     # -- beyond the interface: CameraDiscovery's active_slugs wiring -----
 
@@ -1210,10 +1296,12 @@ class DaemonService(Daemon):
     # ``self._annotation_revisions`` (playfield -> monotonic counter),
     # both declared alongside ``_playfields``/``_camera_configs`` in
     # ``__init__`` and guarded the same way, by ``self._lock``. Runtime
-    # state exactly like the mobile-tag registry: in-memory,
-    # record-level, gone on restart, never written to disk -- there is
-    # simply no write-to-disk path here, the same structural guarantee
-    # ``_playfields``/``_camera_configs`` already have.
+    # state, record-level, gone on restart, never written to disk --
+    # there is simply no write-to-disk path here, the same structural
+    # guarantee ``_playfields``/``_camera_configs`` already have.
+    # (The mobile-tag registry below used to be this same shape too,
+    # but is disk-backed as of ticket 036-007 -- see that section's own
+    # header comment.)
     #
     # Unknown playfield is rejected on all five methods below
     # (``UnknownPlayfield``, naming every playfield currently held) --
@@ -1396,13 +1484,22 @@ class DaemonService(Daemon):
     # -- mobile-tag registry (ticket 025-004, UC-12) -------------------------
     #
     # ``self._mount_params`` (``TagId -> MountParameters``), guarded by the
-    # same ``self._lock`` as every other in-memory store this class holds
-    # -- runtime state exactly like the annotation store above: in-memory,
-    # gone on restart, re-registered by clients on reconnect. The actual
-    # correction math lives in ``calibration.geometry``/``daemon.detection``
-    # (this class only holds the registrations and hands two lookups to
-    # ``DetectionEngine`` -- :meth:`_mount_lookup`/:meth:`_camera_geometry_for`
-    # below -- so it never duplicates that math itself).
+    # same ``self._lock`` as every other store this class holds --
+    # **disk-backed as of ticket 036-007**, unlike the annotation store
+    # above. A mount registration describes physical reality (where a
+    # tag is bolted to a robot), not a per-session experiment, so it now
+    # survives a daemon restart the same way ``_calibrations`` already
+    # does: :meth:`register_tag`/:meth:`unregister_tag` write through to
+    # ``<state_dir>/mounts/registry.json`` (:meth:`_persist_mounts`) and
+    # :meth:`_load_mounts` reloads it at construction time -- the
+    # identical tmp+fsync+``os.replace`` write and tolerant-of-corruption
+    # load stance as :meth:`_persist_calibration`/:meth:`_load_calibrations`
+    # below, reused deliberately rather than inventing a new pattern. The
+    # actual correction math lives in ``calibration.geometry``/
+    # ``daemon.detection`` (this class only holds the registrations and
+    # hands two lookups to ``DetectionEngine`` --
+    # :meth:`_mount_lookup`/:meth:`_camera_geometry_for` below -- so it
+    # never duplicates that math itself).
 
     def register_tag(self, tag: TagId, params: MountParameters) -> Optional[str]:
         """See ``daemon.interfaces.Daemon.register_tag``.
@@ -1449,6 +1546,18 @@ class DaemonService(Daemon):
         purely informational, never raised, never blocking. ``None``
         means either ``mount_z`` was zero or at least one camera is
         already located.
+
+        **Ticket 036-007**: a successful registration is now persisted
+        to ``<state_dir>/mounts/registry.json`` (:meth:`_persist_mounts`)
+        before this method returns, so it survives a daemon restart --
+        no separate save step, no ``--session-only`` opt-out. The write
+        happens while :attr:`_lock` is still held (unlike
+        :meth:`calibrate`'s persist-after-release ordering), because
+        :meth:`_persist_mounts` re-reads the *entire* current
+        ``self._mount_params`` dict rather than a single already-captured
+        value -- serializing it under the same lock that guards every
+        mutation of that dict is what keeps two concurrent registrations
+        from a lost-update race against this one shared file.
         """
         with self._lock:
             if params.mount_z != 0.0 and not self._calibrations:
@@ -1458,6 +1567,7 @@ class DaemonService(Daemon):
                     "would be meaningless -- calibrate a camera first"
                 )
             self._mount_params[tag] = params
+            self._persist_mounts()
 
         if params.mount_z > 0.0 and not self._any_camera_located():
             return (
@@ -1477,10 +1587,15 @@ class DaemonService(Daemon):
         An absent *tag* is a no-op, matching :meth:`clear_annotations`'s
         established no-op-on-absent convention (sprint 024) -- there is
         nothing to undo for a tag that was never registered, or already
-        unregistered.
+        unregistered. :meth:`_persist_mounts` still runs on that no-op
+        path (ticket 036-007) -- a harmless rewrite of an unchanged
+        registry file rather than special-cased away, exactly like
+        removing an entry that *was* present rewrites the file to drop
+        it from disk, not just from memory.
         """
         with self._lock:
             self._mount_params.pop(tag, None)
+            self._persist_mounts()
 
     def list_tag_parameters(self) -> Dict[TagId, MountRegistration]:
         """See ``daemon.interfaces.Daemon.list_tag_parameters``.
@@ -1592,6 +1707,113 @@ class DaemonService(Daemon):
         if mount_z <= 0.0:
             return True
         return self._any_camera_located()
+
+    def _mounts_path(self) -> Path:
+        """``<state_dir>/mounts/registry.json`` (ticket 036-007) --
+        mirrors :meth:`_calibration_path`'s shape and ``camera/
+        registry.py``'s ``<state_dir>/cameras/registry.json`` sibling
+        layout. ``state_dir``, not ``config_dir``: mount registrations
+        are written by the daemon itself in response to an RPC, exactly
+        like calibration, never hand-edited by an operator."""
+        return self._directories.state_dir / "mounts" / MOUNTS_FILENAME
+
+    def _persist_mounts(self) -> None:
+        """Atomically write the **entire** current ``self._mount_params``
+        to ``mounts/registry.json``: tmp file, ``fsync``, ``os.replace``
+        -- the identical tmp+fsync+``os.replace`` pattern
+        :meth:`_persist_calibration` uses (ticket 036-007's decision to
+        reuse that pattern exactly rather than inventing a new one).
+
+        Always called with :attr:`_lock` already held, by
+        :meth:`register_tag`/:meth:`unregister_tag`. This differs from
+        :meth:`_persist_calibration`, which persists one
+        already-captured value into a per-camera file and can safely
+        run *after* the lock is released (a slow disk write should not
+        hold up an unrelated concurrent caller) -- :meth:`_persist_mounts`
+        instead re-reads the entire current ``self._mount_params`` dict
+        itself, because the mount registry is one shared file, not one
+        per tag. Running it under the same lock that guards every
+        mutation of that dict is what keeps two concurrent
+        registrations from a lost-update race against that one file.
+        """
+        path = self._mounts_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise OSError(f"cannot create mounts directory {path.parent}: {exc}") from exc
+
+        payload = {
+            _mount_registry_key(tag): _mount_params_to_dict(params)
+            for tag, params in self._mount_params.items()
+        }
+        text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except OSError as exc:
+            raise OSError(f"cannot write mounts file {path}: {exc}") from exc
+        finally:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:  # pragma: no cover - best-effort cleanup
+                pass
+
+    def _load_mounts(self) -> None:
+        """Reload ``mounts/registry.json`` at construction time (ticket
+        036-007) -- mirrors :meth:`_load_calibrations`'s stance exactly:
+        a missing file (first run) or a corrupt/malformed record is
+        tolerated by skipping it (logged as a warning), never by
+        failing daemon construction.
+
+        Populates ``self._mount_params`` **directly**, never by calling
+        :meth:`register_tag` -- a reload must bypass that method's
+        ``NotCalibrated`` precondition the same way :meth:`_load_calibrations`
+        bypasses ``Calibrator.calibrate``'s own validation on load. A
+        persisted nonzero-``mount_z`` registration reloaded into a
+        daemon with no calibration at all must not crash startup and
+        must not silently vanish -- it behaves exactly like a fresh
+        registration made into that same daemon state today: the
+        registration stands, height correction stays inert until a
+        camera is calibrated *and* located, and ``mount_z_applied``
+        (:meth:`_mount_z_applied`) keeps reporting the truth dynamically
+        at query time, since that computation already reads current
+        calibration/location state, never anything stored on the
+        registration itself.
+        """
+        path = self._mounts_path()
+        if not path.exists():
+            return
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            logger.warning("corrupt mount registry at %s: %s -- ignoring", path, exc)
+            return
+        if not isinstance(raw, dict):
+            logger.warning(
+                "corrupt mount registry at %s: expected a JSON object, got %s "
+                "-- ignoring",
+                path,
+                type(raw).__name__,
+            )
+            return
+        for key, value in raw.items():
+            try:
+                tag = _mount_registry_key_to_tag(key)
+                params = _mount_params_from_dict(value)
+            except (KeyError, ValueError, TypeError) as exc:
+                logger.warning(
+                    "malformed mount registry entry %r at %s: %s -- skipping",
+                    key,
+                    path,
+                    exc,
+                )
+                continue
+            self._mount_params[tag] = params
 
     # -- calibration (ticket 022-003) --------------------------------------
 

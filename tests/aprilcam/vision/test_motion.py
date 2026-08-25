@@ -1,5 +1,6 @@
 """Tests for ``aprilcam.vision.motion`` (ticket 021-004; the
-below-noise-floor heading fix, ticket 022-007).
+below-noise-floor heading fix, ticket 022-007; its sprint-036 revision
+to also suppress ``speed``, ticket 036-003).
 
 Pure-function tests against synthetic ``(timestamp, WorldPoint)``
 sequences -- exercising this module in isolation, the way sprint 021
@@ -15,9 +16,17 @@ Every displacement below uses values well clear of either side of
 :data:`MIN_RELIABLE_DISPLACEMENT_CM` -- current tests for genuine motion
 (``test_due_east_motion_has_heading_zero`` etc.) already move 10-20 cm,
 comfortably above the 0.5 cm threshold, so they needed no change; only
-the exact-zero-motion case (below) had to change, since that is exactly
-the case the fix reclassifies from "defined heading 0.0" to "undefined
-heading" -- see ``vision/motion.py``'s module docstring for why.
+the below-threshold cases (below) test the noise-floor branch, since
+that is exactly the case the fixes reclassify from "defined" to
+"undefined" -- see ``vision/motion.py``'s module docstring for why.
+
+Ticket 036-003's change is dt-independent (the threshold is a pure
+distance test), so its boundary tests are parametrized over both a
+short ``dt`` (~0.25s, the streaming/polling cadence that motivated the
+fix -- jitter/dt is large at this scale) and a long ``dt`` (several
+seconds, ticket 022-007's original assumption -- jitter/dt is small at
+this scale) to confirm ``speed`` suppression does not depend on which
+regime produced the small displacement.
 """
 
 from __future__ import annotations
@@ -94,18 +103,23 @@ def test_due_west_motion_has_heading_pi():
     assert math.isclose(heading, math.pi)
 
 
-def test_zero_motion_case_reports_zero_speed_and_undefined_heading():
-    """Regression, ticket 022-007: exactly-zero displacement is the
-    n=0 limit of the below-noise-floor case a physically stationary
-    real tag hits every burst (sub-pixel detector jitter almost never
-    lands on *exactly* zero, but it lands well inside
-    ``MIN_RELIABLE_DISPLACEMENT_CM`` -- see
+def test_zero_motion_case_reports_all_none():
+    """Regression, ticket 022-007, revised by ticket 036-003: exactly-zero
+    displacement is the n=0 limit of the below-noise-floor case a
+    physically stationary real tag hits every burst (sub-pixel detector
+    jitter almost never lands on *exactly* zero, but it lands well
+    inside ``MIN_RELIABLE_DISPLACEMENT_CM`` -- see
     ``test_displacement_just_below_the_threshold_...`` below for that
-    more realistic case). Before this fix, ``heading`` was defined as
-    ``0.0`` here (``atan2(0, 0)``) -- a direction of travel for a tag
-    that never moved. ``speed`` stays a real, honestly-reported ``0.0``:
-    unlike heading, "zero speed" is not a misleading answer for a
-    stationary tag."""
+    more realistic case). Before ticket 022-007, ``heading`` was defined
+    as ``0.0`` here (``atan2(0, 0)``) -- a direction of travel for a tag
+    that never moved. Ticket 022-007 fixed that but left ``speed`` a
+    real, honestly-reported ``0.0``; ticket 036-003 found that reasoning
+    only held at ``dt`` on the order of a second or more, and this
+    exact-zero-displacement case has ``speed == 0.0`` at *any* ``dt`` --
+    it was never actually the counterexample. It is included here
+    anyway, unchanged, as the simplest possible below-threshold case:
+    ``speed`` is ``None`` alongside ``velocity``/``heading`` now, same
+    as every other below-threshold case."""
     history = [
         (0.0, WorldPoint(x=3.0, y=4.0)),
         (1.0, WorldPoint(x=3.0, y=4.0)),
@@ -113,25 +127,66 @@ def test_zero_motion_case_reports_zero_speed_and_undefined_heading():
     velocity, speed, heading = compute_motion(history)
 
     assert velocity is None
-    assert speed == 0.0
+    assert speed is None
     assert heading is None
 
 
-def test_displacement_just_below_the_threshold_reports_speed_but_undefined_heading():
-    """The realistic case the fix targets: a small, non-zero
-    displacement -- exactly what sub-pixel detector jitter on a
-    physically stationary real tag produces -- must not manufacture a
-    confident-looking ``heading_rad``."""
+@pytest.mark.parametrize(
+    "dt, dt_label",
+    [
+        pytest.param(0.25, "short-dt-streaming-cadence", id="short-dt"),
+        pytest.param(4.0, "long-dt-several-seconds", id="long-dt"),
+    ],
+)
+def test_displacement_just_below_the_threshold_reports_all_none(dt, dt_label):
+    """The realistic case ticket 022-007 targeted, and the one ticket
+    036-003 revisits: a small, non-zero displacement -- exactly what
+    sub-pixel detector jitter on a physically stationary real tag
+    produces -- must not manufacture a confident-looking ``heading_rad``
+    *or*, as of 036-003, a confident-looking ``speed``.
+
+    Parametrized over both a short ``dt`` (~0.25s, the streaming/polling
+    cadence that motivated 036-003 -- here ``speed`` would have been
+    ``jitter / 0.25 ~= 4x`` the jitter magnitude, clearly non-negligible)
+    and a long ``dt`` (several seconds, ticket 022-007's original
+    assumption -- here ``speed`` would have been small even before this
+    fix) to prove the suppression is a pure distance test, unaffected by
+    which regime produced the small displacement."""
     jitter = MIN_RELIABLE_DISPLACEMENT_CM * 0.5
     history = [
         (0.0, WorldPoint(x=-67.1, y=0.0)),
-        (1.0, WorldPoint(x=-67.1 + jitter, y=0.0)),
+        (dt, WorldPoint(x=-67.1 + jitter, y=0.0)),
     ]
     velocity, speed, heading = compute_motion(history)
 
-    assert velocity is None
-    assert heading is None
-    assert speed is not None and speed == pytest.approx(jitter, abs=1e-9)
+    assert velocity is None, dt_label
+    assert heading is None, dt_label
+    assert speed is None, dt_label
+
+
+@pytest.mark.parametrize(
+    "dt, dt_label",
+    [
+        pytest.param(0.25, "short-dt-streaming-cadence", id="short-dt"),
+        pytest.param(4.0, "long-dt-several-seconds", id="long-dt"),
+    ],
+)
+def test_displacement_just_above_the_threshold_reports_a_real_speed(dt, dt_label):
+    """The other side of the same boundary, at both time scales: a
+    displacement that clears the threshold gets a real, non-``None``
+    ``speed`` (and ``velocity``/``heading``) regardless of how large or
+    small ``dt`` is -- the threshold ticket 036-003 applies to ``speed``
+    is purely about displacement, never about ``dt``."""
+    motion = MIN_RELIABLE_DISPLACEMENT_CM * 1.5
+    history = [
+        (0.0, WorldPoint(x=0.0, y=0.0)),
+        (dt, WorldPoint(x=motion, y=0.0)),
+    ]
+    velocity, speed, heading = compute_motion(history)
+
+    assert velocity is not None, dt_label
+    assert heading is not None, dt_label
+    assert speed is not None and speed == pytest.approx(motion / dt), dt_label
 
 
 def test_displacement_just_above_the_threshold_reports_a_real_heading():

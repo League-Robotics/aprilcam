@@ -93,30 +93,38 @@ Two questions look similar but are answered from different sources:
   limitation, not a bug: the definition is ground truth for this
   query, never live observation.
 
-## 6. Mounts and Annotations Are Per-Session — Re-register Every Time
+## 6. Mounts Persist; Annotations Are Still Per-Session
 
-**This is the rule most likely to bite you.** Two kinds of state live
-only in the daemon's memory and vanish on **every** daemon restart:
+Two kinds of state used to both live only in the daemon's memory and
+vanish on every restart. That is no longer true for one of them — get
+this distinction right, or you'll either redo work that is no longer
+necessary or trust a stale annotation that already vanished:
 
 - **Mount registrations** (`aprilcam tags mount register`) — if you
   want a tag's reported position to be the *robot's* position
   (correcting for the tag's height and its offset from the robot's own
   reference point) rather than the raw tag's position, you register a
-  mount for that tag. That registration does **not** survive a daemon
-  restart.
+  mount for that tag. **This now survives a daemon restart**: the
+  registration is written to `state_dir/mounts/registry.json` and
+  reloaded automatically the next time the daemon starts. Register a
+  tag once and it stays registered — there is no re-registration
+  ritual at the start of every session. The only way to remove a
+  registration is `unregister_tag` (`aprilcam tags mount clear`); a
+  restart no longer clears one for you, so a tag re-mounted on a
+  different robot needs an explicit `clear` first, not just a wait for
+  the next restart.
 - **Annotations** (drawings pushed to a playfield, visible to every
-  other client) likewise do not survive a restart.
+  other client) are **unaffected by this change and remain
+  per-session** — held only in the daemon's memory, gone on every
+  restart, same as always. You must still re-draw them at the start of
+  every session that needs them.
 
-If you register a mount once and assume it persists across sessions,
-you will silently get the *raw tag's* pose back instead of the
-*robot's* pose after any daemon restart — with no error and no
-warning, just a plausible-looking number that is wrong. **Re-register
-your mount (and re-draw your annotations) at the start of every
-session that needs them, not just once ever.** `aprilcam tags mount
-list` shows what is currently registered if you need to check before
-trusting a reported position.
+`aprilcam tags mount list` still shows what is currently registered —
+unaffected by this change, and worth checking if you're unsure whether
+a registration you expect is actually in effect, whether it came from
+this session or was reloaded from a previous one.
 
-> Per-session rule: mount registrations (UC-12) and annotations (UC-28) do not survive a daemon restart -- re-register and re-draw them at the start of every session that needs them.
+> Per-session rule: mount registrations (UC-12) now persist across a daemon restart (written to state_dir/mounts/registry.json, reloaded at startup) and are removed only by an explicit unregister_tag/`aprilcam tags mount clear` -- annotations (UC-28) remain per-session and must still be re-drawn at the start of every session that needs them.
 
 **A second, independent precondition — calibrated is not the same as
 located.** A nonzero `mount_z` (the tag's height above the field,
@@ -148,7 +156,49 @@ not guaranteed to succeed on the first try: a camera mounted very
 close to straight-down (near-nadir) can make the solve numerically
 ill-conditioned, so do not assume it always just works.
 
-## 7. Command / Capability Overview
+## 7. Detection Cadence and Tag History
+
+Detection is **demand-driven, not continuous, by default.** An idle
+camera runs zero detections — `get_tags`/`get_tag` each trigger exactly
+one detection burst on that call, synchronously, and nothing else in
+the daemon ever runs one on its own. That has a direct consequence for
+`get_tag_history` (UC-26): its 300-frame ring buffer holds the last 300
+*detection bursts*, not the last 300 seconds. Those two are the same
+thing — roughly 10 wall-clock seconds of continuous history — only
+while at least one `stream_tags` subscriber is active on that camera,
+which drives bursts at a steady cadence for as long as the subscriber
+lasts. With nobody streaming, the buffer still fills, but only as fast
+as something polls it: consecutive frames in the returned history can
+be seconds, minutes, or hours apart.
+
+This is intentional architecture, not a bug or a stall — but it means
+**never assume evenly-spaced history frames.** Each `TagFrame` in the
+history carries its own `timestamp` and `frame_index`; those, not the
+frame's position in the returned sequence, are the only authority on
+how far apart two frames actually were. Before computing velocity,
+heading, or any other rate from consecutive history frames, check their
+timestamps — or start a `stream_tags` subscription first, which is the
+only way to guarantee continuous, evenly-paced history.
+
+> Cadence summary: detection is demand-driven (idle = zero detections); `get_tag_history`'s 300-frame buffer means ~10 wall-clock seconds only while a stream subscriber is active, otherwise gaps can be minutes or hours — trust each frame's own `timestamp`/`frame_index`, never assumed spacing.
+
+**Motion-field interpretation.** Once a tag has two or more world
+samples on file, each new `TagRecord` attempts to fill in
+`heading_rad`, `world_velocity`, and `speed` from the two most recent
+of them. When those two samples are too close together to tell real
+motion from ordinary detector jitter, **all three come back `None`
+together** — not just the direction fields. `speed is None` here means
+the same thing `heading_rad is None` has always meant: "the
+displacement between these two samples is below the reliable noise
+floor" (the same small, sub-centimeter threshold `heading_rad` uses),
+not "the daemon failed to compute a speed." This matters most at tight
+query cadence: two samples close together in time turn a small,
+constant amount of jitter into a proportionally larger `jitter / dt`,
+so a fast poll is exactly the case where a stationary tag would
+otherwise look like it is creeping — trust the `None`, don't treat it
+as a dropped measurement.
+
+## 8. Command / Capability Overview
 
 Every capability below is reachable identically from the CLI, from the
 Python client library (`aprilcam.client.discovery.Discovery().connect()`

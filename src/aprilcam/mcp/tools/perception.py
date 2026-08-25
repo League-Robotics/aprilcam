@@ -177,10 +177,19 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         daemon: Optional[str] = None,
     ) -> tuple[TagFrame, ...]:
         """Recent per-frame tag history from the daemon's ring buffer
-        (UC-26, roughly the last 10 seconds) -- enough for a caller to
-        compute or verify velocities and trajectories itself. Omitting
-        *family*/*number* returns every tag's history; giving both
-        filters to one tag's history only (see ``Daemon.
+        (UC-26) -- enough for a caller to compute or verify velocities
+        and trajectories itself. The buffer holds the last 300
+        *detection bursts*, not 300 seconds: that maps to roughly the
+        last 10 wall-clock seconds only while a ``stream_tags``
+        subscriber is active on this camera, driving bursts at a
+        steady cadence. Detection is otherwise demand-driven -- an
+        idle camera runs a burst only when something polls it -- so
+        with no active stream, consecutive frames in this history can
+        be seconds, minutes, or hours apart. Never assume even
+        spacing; each returned frame's own ``timestamp``/``frame_index``
+        is the only authority on how far apart frames actually are.
+        Omitting *family*/*number* returns every tag's history; giving
+        both filters to one tag's history only (see ``Daemon.
         get_tag_history``'s own ``tag`` parameter). Gaps where a tag
         was absent stay explicit in the returned frames -- nothing here
         interpolates across one.
