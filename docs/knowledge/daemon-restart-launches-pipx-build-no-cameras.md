@@ -53,3 +53,66 @@ still return nothing — the daemon process's AVFoundation capture
 session for that device is wedged and only a **daemon restart** (per
 the recipe above) recovers it. Views subscribed to the wedged camera
 hang waiting for a first frame; kill and reopen them after the restart.
+
+## Recurrence 2026-08-26 — and the durable fix: install the pipx build *with* the extra
+
+Same symptom again (all six cameras `absent`/`unusable`, `camera view 3`
+hanging instead of erroring). But the cause was **narrower than "no
+OpenCV", and the diagnosis above would have missed it**:
+
+`cv2` *was* installed in the pipx venv (opencv-contrib-python 5.0.0.93).
+The module actually missing was **`cv2-enumerate-cameras`**. It is a
+`[daemon]`-extra dependency, and `pipx_metadata.json` showed the install
+had been done as:
+
+```
+pipx install /Volumes/Proj/proj/RobotProjects/aprilcam --force-reinstall
+```
+
+— local path, **no `[daemon]` extra**, no injected packages. Every other
+daemon-extra dep (`mss`, `websockets`, `fpdf2`, `msgpack`,
+`grpcio-reflection`) was missing too. `cv2` was present only because the
+installed version (0.20260823.6) predated sprint 036 moving
+opencv-contrib-python out of `[project.dependencies]`.
+
+The failure is silent because `camera/identity.py`'s `_enumerate_cv2()`
+catches the `ImportError` with a bare `pass` and returns `{}`;
+`resolve_all()` iterates that empty table and returns `{}`; discovery
+then finds zero hardware keys and marks *every* registry camera absent.
+
+**The tell is that ALL cameras read `absent`, not one.** A genuinely
+unplugged camera cannot produce that. Two agents lost time on this
+assuming a cable problem.
+
+`camera view <n>` then *hangs* rather than erroring: the CLI connects
+fine, opens the window, and subscribes to `stream_images` for a camera
+the daemon believes is absent, so no first frame ever arrives.
+
+### Fix (preferred over the `uv run` workaround above)
+
+Install the pipx build with the extra, so `daemon restart` spawning the
+PATH `aprilcam` is no longer a trap:
+
+```sh
+pipx install --force '/Volumes/Proj/proj/RobotProjects/aprilcam[daemon]'
+aprilcam daemon stop && aprilcam daemon start
+```
+
+Verify all seven land — a missing one is the bug recurring:
+
+```sh
+SP=~/.local/pipx/venvs/aprilcam/lib/python3.14/site-packages
+for p in mss websockets fpdf msgpack grpc_reflection cv2 cv2_enumerate_cameras; do
+  [ -e "$SP/$p" ] && echo "PRESENT $p" || echo "MISSING $p"
+done
+```
+
+Then `aprilcam daemon status` should show the physical cameras
+`present`/`usable`. Note `get_tags` returns empty on the first call
+after a restart (`frame_index: 1`, detection loop still cold) — query
+again before concluding detection is broken.
+
+Do **not** `pipx install cv2-enumerate-cameras` on its own: that creates
+an isolated app venv (it was present on this host, exposing `lscam`)
+which `aprilcam` can never import from. Use the extra, or
+`pipx inject aprilcam <pkg>`.
