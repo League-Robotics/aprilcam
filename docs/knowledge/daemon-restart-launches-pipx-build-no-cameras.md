@@ -54,6 +54,42 @@ session for that device is wedged and only a **daemon restart** (per
 the recipe above) recovers it. Views subscribed to the wedged camera
 hang waiting for a first frame; kill and reopen them after the restart.
 
+### Recurrence 2026-08-26 on camera 2 (`hd-usb-camera`) — three refinements
+
+Same wedge, different camera, ~8 hours after a clean daemon start.
+`camera image 2` and a `camera view 2` both failed with
+**"no frame available from camera '2'"** while cameras 1, 3 and 5
+captured normally and `system_profiler` still listed the device.
+
+1. **`present`/`usable` does NOT mean "delivers frames."** Camera 2 read
+   `present`/`usable` throughout — not `unusable` as the original note
+   above reports. `discovery._probe_openable()` does `open()` then
+   `close()` and never reads a frame, so a device whose capture session
+   is wedged still probes `usable`. Do not use `usable` to rule the
+   wedge out; only an actual capture does that.
+2. **Killing the subscriber does not clear it.** A hung
+   `aprilcam camera view 2` held both stream sockets
+   (`stream-images-{raw,deskewed}-2.sock`). Killing that process left
+   the wedge fully intact — the very next `camera image 2` failed
+   identically. Only the daemon restart recovered it. So the hung view
+   is a *symptom*, not the cause; don't stop after killing it.
+3. **`camera probe` is not a diagnostic here.** With any stream live it
+   reports every camera as `in use by a live subscriber` and skips
+   them, and its skipped rows print `playfield=-`/`uncalibrated`, which
+   looks alarmingly like config loss but is just probe's transient view.
+
+Recovery was the standard one, and it worked:
+
+```sh
+aprilcam daemon stop && aprilcam daemon start
+```
+
+Afterwards camera 2 returned a real frame and detected exactly ArUco
+1-4 (its documented expected set for the secondary playfield). As with
+camera 3, `get_tags` was empty at `frame_index` 0 and 1 and populated
+at 2 — poll until the index advances before concluding anything.
+
+
 ## Recurrence 2026-08-26 — and the durable fix: install the pipx build *with* the extra
 
 Same symptom again (all six cameras `absent`/`unusable`, `camera view 3`
