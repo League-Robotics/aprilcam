@@ -236,6 +236,32 @@ class NoPlayfieldLinked(AprilCamError):
         )
 
 
+class NoFieldMask(AprilCamError):
+    """Flat-field capture was requested for a camera with no derivable
+    field-interior mask (sprint 037).
+
+    A **precondition failure**, distinct from a failed
+    ``calibration.interfaces.FlatFieldResult`` -- raised before any
+    capture burst is taken, mirroring :class:`NoPlayfieldLinked`'s
+    "raised before any frame is captured" discipline exactly.
+    ``daemon.service.DaemonService.capture_flat_field`` (ticket 002)
+    derives the mask two ways -- from an existing ``Calibration``, or
+    by detecting the linked playfield's required ArUco corners directly
+    -- and raises this only when *neither* path produces one: no stored
+    calibration **and** the corners are not currently detectable (dark
+    field, camera unplugged, wrong exposure).
+    """
+
+    def __init__(self, camera: str) -> None:
+        self.camera = camera
+        super().__init__(
+            f"camera {camera!r} has no calibration and no detectable playfield "
+            "corners; cannot derive a field-interior mask for flat-field capture "
+            "-- calibrate the camera first, or ensure its playfield's ArUco "
+            "corners are visible"
+        )
+
+
 class MissingOptionalDependency(AprilCamError):
     """A subcommand needs a package this environment does not actually
     have -- e.g. ``aprilcam mcp`` needs the ``mcp`` SDK's

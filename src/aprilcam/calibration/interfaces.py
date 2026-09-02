@@ -18,12 +18,23 @@ fields, so they stay methods -- not properties -- with
 classes. No concrete implementation of any of these four exists yet
 (calibration is a later sprint); converting now means that sprint
 derives from a real class instead of duck-typing against a shape.
+
+**Flat-field gain-map capture (sprint 037).** ``FlatFieldCapturer`` is
+the same "behavioral -> plain base class" treatment as ``Calibrator``;
+``FlatFieldResult`` and ``FlatFieldInfo`` are the same "value-shaped ->
+frozen dataclass declaring fields" treatment as ``CalibrationResult``/
+``Calibration``. ``FlatFieldResult`` carries a numpy ``gain`` array
+directly (unlike ``Calibration.homography``'s plain-tuple workaround)
+because it is never compared for equality the way a stored, reloaded
+``Calibration`` is -- there is no ``flatfield.json``-round-trip
+equality check anywhere in this codebase, only ``.gain is not None``
+truthiness and per-field spread/reason assertions in tests.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -193,3 +204,103 @@ class Deskewer:
 
     def deskew(self, frame: np.ndarray) -> np.ndarray:
         raise NotImplementedError(f"{type(self).__name__} does not implement Deskewer.deskew")
+
+
+@dataclass(frozen=True, kw_only=True)
+class FlatFieldResult:
+    """The outcome of one flat-field gain-map build attempt (sprint 037).
+
+    Mirrors ``CalibrationResult``'s "explicit failure is data" contract:
+    a failing quality-gate check never raises, it reports
+    ``succeeded=False`` with :attr:`reason` naming the check, and the
+    *measured* spread is still carried on both a passing and a refused
+    attempt -- the same "report the number even on a threshold
+    rejection" pattern ``CalibrationResult.reprojection_error_cm`` uses.
+    """
+
+    succeeded: bool
+    spread_before: Tuple[float, ...]
+    """Per-channel p98/p2 luminance ratio inside the mask, measured on
+    the batch-averaged, *uncorrected* image -- one value per channel of
+    the input frames (length 1 for a mono burst, 3 for colour)."""
+    spread_after: Tuple[float, ...]
+    """The same per-channel p98/p2 ratio, measured on the image the
+    built gain map would produce (``avg * gain``) -- computed and
+    reported even when the attempt is refused, so a caller can see how
+    much the (unreturned) map would have helped."""
+    reason: Optional[str] = None
+    """Which quality-gate check(s) failed, and why -- ``None`` when
+    every check passed. Non-``None`` on a forced pass too, naming what
+    ``force=True`` overrode."""
+    forced_checks: Tuple[str, ...] = ()
+    """Which gate(s) ``force=True`` overrode to produce a
+    ``succeeded=True`` result despite a failing check -- empty whenever
+    no check failed, regardless of whether *force* was passed."""
+    gain: Optional[np.ndarray] = None
+    """The built per-pixel, per-channel gain map -- present only when
+    :attr:`succeeded` is ``True`` (a clean pass, or a forced pass over
+    :attr:`forced_checks`). ``None`` on an unforced refusal: nothing is
+    returned for a caller to persist."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class FlatFieldInfo:
+    """The ``flatfield.json`` metadata-sidecar shape (sprint 037).
+
+    ``cv2``-free by design, like ``Calibration``/``CalibrationResult`` --
+    read by ``client``/``mcp`` code (e.g. a ``get_flatfield`` query) that
+    must never need OpenCV to report whether a camera has a flat-field
+    correction in place. Persistence itself (writing/reading the JSON
+    file next to ``flatfield.npy``) is ``daemon/service.py``'s job, the
+    same division ``Calibration.to_dict``/``from_dict`` already
+    establishes for ``calibration.json``.
+    """
+
+    present: bool
+    """Whether this camera currently has a gain map applied."""
+    captured_at: Optional[float] = None
+    """When the map was built, if known. ``None`` for a pre-sprint-037
+    map with no sidecar (a one-time migration gap, never a fabricated
+    timestamp -- see ``calibration/DESIGN.md``'s Open Questions)."""
+    shape: Optional[Tuple[int, ...]] = None
+    """The stored array's shape, e.g. ``(H, W, 3)`` or ``(H, W)``."""
+    gain_min: Optional[float] = None
+    gain_max: Optional[float] = None
+    stale: bool = False
+    """Whether the camera's mounting or lighting may have changed since
+    this map was captured. Never inferred here -- set by whatever wrote
+    the sidecar."""
+
+
+class FlatFieldCapturer:
+    """Builds a per-camera flat-field gain map from a frame burst
+    (sprint 037).
+
+    A plain base class, not ``Protocol`` -- see ``daemon.interfaces``'s
+    module docstring for the design rule.
+
+    Mirrors ``Calibrator``'s "camera frame access is handed in, never
+    owned" invariant exactly: :meth:`build` takes an already-captured
+    frame burst and a precomputed boolean field-interior mask as plain
+    arguments -- it never opens a camera, never touches a filesystem,
+    and never reaches into any daemon state. Pushing/restoring a
+    temporary exposure override, capturing the burst, and deriving the
+    mask (from a ``Calibration`` or ArUco detection) are all the
+    caller's job (``daemon/service.py``), exactly like frame capture and
+    playfield resolution are for ``Calibrator.calibrate``.
+    """
+
+    def build(self, frames: Sequence[np.ndarray], mask: np.ndarray, *, force: bool = False) -> FlatFieldResult:
+        """Build and quality-gate a gain map from *frames* and *mask*.
+
+        *frames* is a burst of already-captured raw frames (BGR or
+        mono), all the same shape. *mask* is a boolean field-interior
+        array the same height/width as each frame.
+
+        Never raises for a failed quality-gate check -- reported via
+        ``FlatFieldResult.succeeded=False``/``reason``, mirroring
+        ``Calibrator.calibrate``'s own "explicit failure is data"
+        contract. *force* overrides a failing check and still reports
+        which one it overrode, via ``FlatFieldResult.forced_checks``.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement FlatFieldCapturer.build")

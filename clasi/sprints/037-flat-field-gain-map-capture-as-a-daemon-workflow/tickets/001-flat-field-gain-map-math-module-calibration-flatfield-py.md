@@ -1,10 +1,12 @@
 ---
-id: "001"
-title: "Flat-field gain-map math module (calibration/flatfield.py)"
-status: open
-use-cases: [SUC-001, SUC-002]
+id: '001'
+title: Flat-field gain-map math module (calibration/flatfield.py)
+status: done
+use-cases:
+- SUC-001
+- SUC-002
 depends-on: []
-github-issue: ""
+github-issue: ''
 issue: flat-field-gain-map-capture-as-a-daemon-workflow.md
 completes_issue: false
 ---
@@ -46,30 +48,30 @@ following the existing typed-exception shape, e.g. `NoPlayfieldLinked`).
 
 ## Acceptance Criteria
 
-- [ ] `calibration/interfaces.py` gains `FlatFieldCapturer` (plain base
+- [x] `calibration/interfaces.py` gains `FlatFieldCapturer` (plain base
       class, `NotImplementedError` bodies), `FlatFieldResult`, and
       `FlatFieldInfo` (both frozen `@dataclass(kw_only=True)`, declaring
       fields, never properties).
-- [ ] `calibration/flatfield.py`'s concrete `FlatFieldCapturer.build(frames,
+- [x] `calibration/flatfield.py`'s concrete `FlatFieldCapturer.build(frames,
       mask, *, force=False) -> FlatFieldResult` implements the 8-step
       algorithm in `design/calibration-DESIGN.md` §4.
-- [ ] A known synthetic gradient flattens to within a stated tolerance
+- [x] A known synthetic gradient flattens to within a stated tolerance
       after correction.
-- [ ] Synthetic wrinkle/speckle noise in the input does not leak into
+- [x] Synthetic wrinkle/speckle noise in the input does not leak into
       the built gain map (median blur suppresses it).
-- [ ] A synthetic frame with in-field clipping is refused
+- [x] A synthetic frame with in-field clipping is refused
       (`succeeded=False`) without `force=True`, and proceeds with
       `force=True`, with the returned result naming the overridden check.
-- [ ] A synthetic frame set with >10x measured spread is refused the
+- [x] A synthetic frame set with >10x measured spread is refused the
       same way; a synthetic frame set whose frames disagree beyond the
       flicker-normalisation tolerance (a simulated "sheet moved" case)
       is refused the same way.
-- [ ] `FlatFieldResult` always carries per-channel `spread_before`/
+- [x] `FlatFieldResult` always carries per-channel `spread_before`/
       `spread_after` (p98/p2), on both a passing and a refused gate.
-- [ ] `FlatFieldCapturer.build` never touches a filesystem, a camera, or
+- [x] `FlatFieldCapturer.build` never touches a filesystem, a camera, or
       any daemon state — verified by a test asserting no such call is
       made (e.g. no `open`/`cv2.VideoCapture` symbols touched).
-- [ ] `errors.NoFieldMask` added, following the existing typed-exception
+- [x] `errors.NoFieldMask` added, following the existing typed-exception
       shape.
 
 ## Testing
