@@ -1,10 +1,14 @@
 ---
-id: "003"
-title: "Proto messages, CaptureFlatField/GetFlatField/ClearFlatField RPCs"
-status: open
-use-cases: [SUC-001, SUC-002, SUC-003]
-depends-on: ["002"]
-github-issue: ""
+id: '003'
+title: Proto messages, CaptureFlatField/GetFlatField/ClearFlatField RPCs
+status: done
+use-cases:
+- SUC-001
+- SUC-002
+- SUC-003
+depends-on:
+- '002'
+github-issue: ''
 issue: flat-field-gain-map-capture-as-a-daemon-workflow.md
 completes_issue: false
 ---
@@ -48,27 +52,27 @@ exception type.
 
 ## Acceptance Criteria
 
-- [ ] `proto/aprilcam_v2.proto` gains the three RPCs and their
+- [x] `proto/aprilcam_v2.proto` gains the three RPCs and their
       request/response messages, plus `CameraState.flatfield_present`/
       `flatfield_stale`, following this file's existing
       optional-scalar/submessage presence conventions.
-- [ ] `scripts/compile_proto.py` regenerates `aprilcam_v2_pb2.py`/
+- [x] `scripts/compile_proto.py` regenerates `aprilcam_v2_pb2.py`/
       `aprilcam_v2_pb2_grpc.py` cleanly with no manual edits to either
       generated file.
-- [ ] `daemon/rpc.py`'s `_Servicer` implements all three new RPC
+- [x] `daemon/rpc.py`'s `_Servicer` implements all three new RPC
       methods, each delegating to the matching `DaemonService` method
       inside the same try/except-mapped-through-`_abort` shape every
       existing RPC method uses.
-- [ ] `NoFieldMask` is added to `_STATUS_CODES` (`FAILED_PRECONDITION`)
+- [x] `NoFieldMask` is added to `_STATUS_CODES` (`FAILED_PRECONDITION`)
       and `_abort`'s metadata table, with its docstring entry alongside
       the other typed exceptions.
-- [ ] Fake-backend RPC round-trip tests exercise `CaptureFlatField`/
+- [x] Fake-backend RPC round-trip tests exercise `CaptureFlatField`/
       `GetFlatField`/`ClearFlatField` end-to-end through a real
       in-process gRPC server/servicer pair, covering success, a
       quality-gate refusal, `force=True`, `dry_run=True`, and
       `NoFieldMask` (client reconstructs the typed exception from
       trailing metadata).
-- [ ] `tests/test_no_cv2_in_client_modules.py` continues to pass (the
+- [x] `tests/test_no_cv2_in_client_modules.py` continues to pass (the
       generated proto module itself carries no `cv2` import; this
       ticket touches only `proto/`/`daemon/rpc.py`, both daemon-side).
 

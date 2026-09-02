@@ -173,6 +173,21 @@ class AprilCamV2Stub(object):
                 request_serializer=aprilcam__v2__pb2.GetTagStreamRequest.SerializeToString,
                 response_deserializer=aprilcam__v2__pb2.GetTagStreamResponse.FromString,
                 _registered_method=True)
+        self.CaptureFlatField = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/CaptureFlatField',
+                request_serializer=aprilcam__v2__pb2.CaptureFlatFieldRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.CaptureFlatFieldResponse.FromString,
+                _registered_method=True)
+        self.GetFlatField = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/GetFlatField',
+                request_serializer=aprilcam__v2__pb2.GetFlatFieldRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.GetFlatFieldResponse.FromString,
+                _registered_method=True)
+        self.ClearFlatField = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/ClearFlatField',
+                request_serializer=aprilcam__v2__pb2.ClearFlatFieldRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.ClearFlatFieldResponse.FromString,
+                _registered_method=True)
 
 
 class AprilCamV2Servicer(object):
@@ -461,6 +476,41 @@ class AprilCamV2Servicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def CaptureFlatField(self, request, context):
+        """Build (and, unless refused or `dry_run`, persist) a per-camera
+        flat-field gain map from a fresh capture burst (SUC-001, sprint
+        037 ticket 003). All vision happens in the daemon -- the client
+        sends a camera name and a few scalar knobs, never pixels, exactly
+        like `Calibrate`. `NoFieldMask` (neither a stored calibration nor
+        a live-detectable playfield corner set) maps to
+        `FAILED_PRECONDITION`, raised before any capture burst is taken.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetFlatField(self, request, context):
+        """Fetch a camera's currently-held flat-field gain-map metadata, if
+        any (SUC-002). Absent `GetFlatFieldResponse.flatfield`
+        (`HasField("flatfield") == false`) means this camera has never had
+        one built, or it was cleared -- never a fabricated/default
+        `FlatFieldInfo`, mirroring `GetCalibrationResponse.calibration`'s
+        presence discipline.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ClearFlatField(self, request, context):
+        """Delete a camera's stored gain map and metadata sidecar, and drop
+        the live-applied map on a held-open camera -- no daemon restart
+        (SUC-003). Clearing an already-clear camera is a no-op, never an
+        error.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_AprilCamV2Servicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -598,6 +648,21 @@ def add_AprilCamV2Servicer_to_server(servicer, server):
                     servicer.GetTagStream,
                     request_deserializer=aprilcam__v2__pb2.GetTagStreamRequest.FromString,
                     response_serializer=aprilcam__v2__pb2.GetTagStreamResponse.SerializeToString,
+            ),
+            'CaptureFlatField': grpc.unary_unary_rpc_method_handler(
+                    servicer.CaptureFlatField,
+                    request_deserializer=aprilcam__v2__pb2.CaptureFlatFieldRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.CaptureFlatFieldResponse.SerializeToString,
+            ),
+            'GetFlatField': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetFlatField,
+                    request_deserializer=aprilcam__v2__pb2.GetFlatFieldRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.GetFlatFieldResponse.SerializeToString,
+            ),
+            'ClearFlatField': grpc.unary_unary_rpc_method_handler(
+                    servicer.ClearFlatField,
+                    request_deserializer=aprilcam__v2__pb2.ClearFlatFieldRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.ClearFlatFieldResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1333,6 +1398,87 @@ class AprilCamV2(object):
             '/aprilcam.v2.AprilCamV2/GetTagStream',
             aprilcam__v2__pb2.GetTagStreamRequest.SerializeToString,
             aprilcam__v2__pb2.GetTagStreamResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CaptureFlatField(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/CaptureFlatField',
+            aprilcam__v2__pb2.CaptureFlatFieldRequest.SerializeToString,
+            aprilcam__v2__pb2.CaptureFlatFieldResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetFlatField(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/GetFlatField',
+            aprilcam__v2__pb2.GetFlatFieldRequest.SerializeToString,
+            aprilcam__v2__pb2.GetFlatFieldResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ClearFlatField(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/ClearFlatField',
+            aprilcam__v2__pb2.ClearFlatFieldRequest.SerializeToString,
+            aprilcam__v2__pb2.ClearFlatFieldResponse.FromString,
             options,
             channel_credentials,
             insecure,

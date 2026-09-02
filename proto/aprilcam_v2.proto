@@ -201,6 +201,35 @@
 // post-031 daemon ignores it per protobuf's normal forward-compatibility
 // rules.
 //
+// Sprint 037 ticket 003 is the thirteenth: `CaptureFlatField` /
+// `GetFlatField` / `ClearFlatField` (SUC-001..003) -- flat-field
+// gain-map capture, put on the wire exactly like `Calibrate`/
+// `GetCalibration` above: the client sends a camera name and a few
+// scalar knobs, never pixels, and all the vision/math happens inside
+// the daemon (`aprilcam.calibration.interfaces.FlatFieldCapturer`,
+// ticket 002). `CaptureFlatFieldRequest` carries `camera` plus
+// optional `exposure`/`frames` and plain `force`/`dry_run` (`false`
+// already means "not requested", same as `Calibrate.
+// estimate_intrinsics`). `FlatFieldResult` mirrors
+// `aprilcam.calibration.interfaces.FlatFieldResult` field for field,
+// **except** `gain` -- the built per-pixel gain map never crosses this
+// wire, mirroring `Calibration`'s own "report what happened, never the
+// matrix" precedent (`homography`/`camera_matrix` are reported because
+// a client needs them to do its own pixel math; a gain map is applied
+// daemon-side only and has no client-side use). `GetFlatFieldResponse`
+// wraps an optional `FlatFieldInfo` submessage, `HasField`-guarded
+// absent exactly when a camera has never had one built (or it was
+// cleared) -- mirrors `GetCalibrationResponse.calibration`'s presence
+// discipline. `CameraState` gains `flatfield_present`/
+// `flatfield_stale` (plain bool, not `HasField`-guarded -- same as
+// `calibrated`/`calibration_stale`), overlaid the same way those two
+// already are (`daemon/service.py`'s `list_cameras`/`probe_cameras`).
+// `NoFieldMask` (a capture requested for a camera with neither a
+// stored calibration nor a live-detectable playfield corner set) maps
+// to `FAILED_PRECONDITION`, the same code family as
+// `NoPlayfieldLinked` -- both are "cannot succeed given current
+// state," raised before any capture burst is taken.
+//
 // Wire conventions this file follows (docs/design/design.md §6):
 //   - World-cm coordinates cross this boundary only inside `TagRecord`
 //     (`world`, `world_velocity`, `world_corners`), and every camera
@@ -407,6 +436,29 @@ service AprilCamV2 {
   // (UC-11, sprint 027 tickets 001/005). Same "endpoint allocation
   // only, reused per key" scope as `GetImageStream` above.
   rpc GetTagStream (GetTagStreamRequest) returns (GetTagStreamResponse);
+
+  // Build (and, unless refused or `dry_run`, persist) a per-camera
+  // flat-field gain map from a fresh capture burst (SUC-001, sprint
+  // 037 ticket 003). All vision happens in the daemon -- the client
+  // sends a camera name and a few scalar knobs, never pixels, exactly
+  // like `Calibrate`. `NoFieldMask` (neither a stored calibration nor
+  // a live-detectable playfield corner set) maps to
+  // `FAILED_PRECONDITION`, raised before any capture burst is taken.
+  rpc CaptureFlatField (CaptureFlatFieldRequest) returns (CaptureFlatFieldResponse);
+
+  // Fetch a camera's currently-held flat-field gain-map metadata, if
+  // any (SUC-002). Absent `GetFlatFieldResponse.flatfield`
+  // (`HasField("flatfield") == false`) means this camera has never had
+  // one built, or it was cleared -- never a fabricated/default
+  // `FlatFieldInfo`, mirroring `GetCalibrationResponse.calibration`'s
+  // presence discipline.
+  rpc GetFlatField (GetFlatFieldRequest) returns (GetFlatFieldResponse);
+
+  // Delete a camera's stored gain map and metadata sidecar, and drop
+  // the live-applied map on a held-open camera -- no daemon restart
+  // (SUC-003). Clearing an already-clear camera is a no-op, never an
+  // error.
+  rpc ClearFlatField (ClearFlatFieldRequest) returns (ClearFlatFieldResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +481,13 @@ message CameraState {
   // (`HasField("number") == false`) only for a camera not yet
   // registered -- mirrors `CameraState.number`'s `Optional[int]`.
   optional int32 number = 8;
+  // Sprint 037 ticket 003: whether this camera currently has a
+  // flat-field gain-map correction applied, and whether that map may
+  // be stale -- plain bool, not `HasField`-guarded, same as
+  // `calibrated`/`calibration_stale` above. Mirrors
+  // `types.CameraState.flatfield_present`/`.flatfield_stale`.
+  bool flatfield_present = 9;
+  bool flatfield_stale = 10;
 }
 
 // One backend a probe could not interrogate, and why (UC-25.S-7).
@@ -1157,3 +1216,83 @@ message GetTagStreamRequest {
 message GetTagStreamResponse {
   StreamEndpoint endpoint = 1;
 }
+
+// ---------------------------------------------------------------------------
+// Flat-field gain-map capture (sprint 037 ticket 003, SUC-001..003).
+// Mirrors aprilcam.calibration.interfaces.FlatFieldResult/FlatFieldInfo
+// field-for-field -- see this file's header comment for the RPC-level
+// design notes.
+// ---------------------------------------------------------------------------
+
+// The outcome of one flat-field gain-map build attempt. Mirrors
+// aprilcam.calibration.interfaces.FlatFieldResult field-for-field,
+// except the built gain map itself never crosses this wire -- see this
+// file's header comment.
+message FlatFieldResult {
+  bool succeeded = 1;
+  // Per-channel p98/p2 luminance ratio inside the mask, measured on
+  // the uncorrected batch-averaged image -- one value per channel
+  // (length 1 for mono, 3 for colour).
+  repeated double spread_before = 2;
+  // The same ratio, measured on the image the built gain map would
+  // produce -- computed and reported even on a refused attempt.
+  repeated double spread_after = 3;
+  // Which quality-gate check(s) failed, and why -- absent when every
+  // check passed. Present on a forced pass too, naming what
+  // `force=true` overrode.
+  optional string reason = 4;
+  // Which gate(s) `force=true` overrode to produce a `succeeded=true`
+  // result despite a failing check -- empty whenever no check failed.
+  repeated string forced_checks = 5;
+}
+
+// The `flatfield.json` metadata-sidecar shape. Mirrors
+// aprilcam.calibration.interfaces.FlatFieldInfo field-for-field.
+message FlatFieldInfo {
+  bool present = 1;
+  // Absent (`HasField("captured_at") == false`) for a pre-sprint-037
+  // map with no sidecar -- never a fabricated timestamp.
+  optional double captured_at = 2;
+  // The stored gain array's shape, e.g. (H, W, 3) or (H, W).
+  repeated int32 shape = 3;
+  optional double gain_min = 4;
+  optional double gain_max = 5;
+  bool stale = 6;
+}
+
+message CaptureFlatFieldRequest {
+  string camera = 1;
+  // Absent means "use whatever this camera is currently configured
+  // for" -- mirrors Daemon.capture_flat_field(exposure: Optional[float]
+  // = None).
+  optional double exposure = 2;
+  // Absent means the daemon's own default burst size -- mirrors
+  // Daemon.capture_flat_field(frames: Optional[int] = None).
+  optional int32 frames = 3;
+  // `false` already means "not requested" -- no presence check needed,
+  // matching `Calibrate.estimate_intrinsics`'s plain-bool convention.
+  bool force = 4;
+  bool dry_run = 5;
+}
+
+message CaptureFlatFieldResponse {
+  FlatFieldResult result = 1;
+}
+
+message GetFlatFieldRequest {
+  string camera = 1;
+}
+
+message GetFlatFieldResponse {
+  // Absent (`HasField("flatfield") == false`) means this camera has
+  // never had a gain map built, or it was cleared -- never a
+  // fabricated/default FlatFieldInfo, mirroring
+  // GetCalibrationResponse.calibration's presence discipline.
+  FlatFieldInfo flatfield = 1;
+}
+
+message ClearFlatFieldRequest {
+  string camera = 1;
+}
+
+message ClearFlatFieldResponse {}

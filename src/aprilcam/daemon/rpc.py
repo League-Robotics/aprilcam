@@ -7,7 +7,9 @@ are ticket 022-003; ``ResetCameraConfig`` is ticket 023-004;
 ``ClearAnnotations``/``GetAnnotations`` and the ``GetFrame`` annotation
 embed are ticket 024-001; ``FindFeature`` is ticket 025-002;
 ``RegisterTag``/``UnregisterTag``/``ListTagParameters`` are ticket
-025-004; ``GetGuide`` is ticket 025-007, this sprint's last).
+025-004; ``GetGuide`` is ticket 025-007; ``CaptureFlatField``/
+``GetFlatField``/``ClearFlatField`` are ticket 037-003, this sprint's
+latest).
 
 Translates between ``proto/aprilcam_v2.proto``'s service (sprint 020's
 four RPCs -- ``ListCameras``, ``ProbeCameras``, ``GetFrame``,
@@ -16,7 +18,8 @@ four RPCs -- ``ListCameras``, ``ProbeCameras``, ``GetFrame``,
 playfield/camera-config RPCs and ``Calibrate``/``GetCalibration``, plus
 sprint 023's ``ResetCameraConfig``, plus sprint 024's annotation-store
 RPCs and the ``GetFrame`` annotation embed above, plus sprint 025's
-``FindFeature``) and
+``FindFeature``, plus sprint 037's ``CaptureFlatField``/``GetFlatField``/
+``ClearFlatField`` and the ``CameraState`` flat-field flags) and
 ``daemon.service.DaemonService`` method calls. Everything here is
 (de)serialization and error-code mapping; no business logic, no camera
 access, no registry/discovery/vision calls -- see the sprint
@@ -80,7 +83,7 @@ from typing import Iterable, Optional
 import grpc
 
 from aprilcam.calibration.calibration import Calibration
-from aprilcam.calibration.interfaces import CalibrationResult
+from aprilcam.calibration.interfaces import CalibrationResult, FlatFieldInfo, FlatFieldResult
 from aprilcam.config.interfaces import CameraConfig, CameraPosition, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
@@ -91,6 +94,7 @@ from aprilcam.errors import (
     AnnotationLimitExceeded,
     AprilCamError,
     CameraNotPresent,
+    NoFieldMask,
     NoPlayfieldLinked,
     NotCalibrated,
     UnknownCamera,
@@ -165,6 +169,12 @@ _STATUS_CODES = {
     # given current state," distinct from the explicit-but-failed
     # CalibrationResult path, which is not an error at all.
     NoPlayfieldLinked: grpc.StatusCode.FAILED_PRECONDITION,
+    # A capture_flat_field request for a camera with neither a stored
+    # calibration nor a live-detectable playfield corner set (sprint
+    # 037 ticket 003) -- same "cannot succeed given current state"
+    # family as NoPlayfieldLinked, raised before any capture burst is
+    # taken.
+    NoFieldMask: grpc.StatusCode.FAILED_PRECONDITION,
     # A put_annotation/replace_layer request exceeding the fixed
     # per-layer count or per-shape point bound (ticket 031-010) --
     # RESOURCE_EXHAUSTED matches gRPC's own "quota exceeded" status
@@ -195,6 +205,10 @@ def _camera_state_to_proto(state: CameraState) -> aprilcam_v2_pb2.CameraState:
         calibrated=state.calibrated,
         calibration_stale=state.calibration_stale,
         frame_dark=state.frame_dark,
+        # Sprint 037 ticket 003: plain bool, not HasField-guarded --
+        # same as calibrated/calibration_stale above.
+        flatfield_present=state.flatfield_present,
+        flatfield_stale=state.flatfield_stale,
     )
     # optional fields: only set when not None, so HasField() on the wire
     # matches Optional[...] being None on this side (design.md §6).
@@ -617,6 +631,41 @@ def _calibration_to_proto(calibration: Calibration) -> aprilcam_v2_pb2.Calibrati
     return msg
 
 
+def _flatfield_result_to_proto(result: FlatFieldResult) -> aprilcam_v2_pb2.FlatFieldResult:
+    """Python -> proto, for a ``CaptureFlatField`` response. ``gain`` is
+    deliberately never sent -- see ``calibration/interfaces.py``'s
+    ``FlatFieldResult`` docstring and ``aprilcam_v2.proto``'s header
+    comment: mirrors ``Calibration``'s "report what happened, never the
+    matrix" precedent."""
+    msg = aprilcam_v2_pb2.FlatFieldResult(
+        succeeded=result.succeeded,
+        spread_before=list(result.spread_before),
+        spread_after=list(result.spread_after),
+        forced_checks=list(result.forced_checks),
+    )
+    if result.reason is not None:
+        msg.reason = result.reason
+    return msg
+
+
+def _flatfield_info_to_proto(info: FlatFieldInfo) -> aprilcam_v2_pb2.FlatFieldInfo:
+    """Python -> proto, for a ``GetFlatField`` response. ``stale`` is
+    plain (not ``HasField``-guarded), mirroring ``Calibration.stale``;
+    ``captured_at``/``shape``/``gain_min``/``gain_max`` are ``None``-
+    guarded the same way ``Calibration.reprojection_error_cm`` is --
+    absent means "not known," never a fabricated zero."""
+    msg = aprilcam_v2_pb2.FlatFieldInfo(present=info.present, stale=info.stale)
+    if info.captured_at is not None:
+        msg.captured_at = info.captured_at
+    if info.shape is not None:
+        msg.shape.extend(info.shape)
+    if info.gain_min is not None:
+        msg.gain_min = info.gain_min
+    if info.gain_max is not None:
+        msg.gain_max = info.gain_max
+    return msg
+
+
 #: Annotations (ticket 024-001, UC-28, specification.md section 9
 #: decision 8). Every converter below mirrors the exact
 #: ``types.py``/``aprilcam_v2.proto`` field-for-field shape -- see this
@@ -775,6 +824,9 @@ def _abort(context: grpc.ServicerContext, exc: Exception) -> None:
       also an ``UnknownTarget`` subtype (UC-27.S-3, ticket 025-007).
     * :class:`CameraNotPresent`: + ``aprilcam-slug``.
     * :class:`~aprilcam.errors.NoPlayfieldLinked`: + ``aprilcam-camera``.
+    * :class:`~aprilcam.errors.NoFieldMask` (sprint 037 ticket 003): +
+      ``aprilcam-camera`` -- same single field, same key, as
+      :class:`~aprilcam.errors.NoPlayfieldLinked` above.
     * :class:`~aprilcam.errors.AnnotationLimitExceeded` (ticket
       031-010): + ``aprilcam-kind``, ``aprilcam-bound``,
       ``aprilcam-actual``.
@@ -801,6 +853,8 @@ def _abort(context: grpc.ServicerContext, exc: Exception) -> None:
         elif isinstance(exc, CameraNotPresent):
             metadata.append(("aprilcam-slug", exc.slug))
         elif isinstance(exc, NoPlayfieldLinked):
+            metadata.append(("aprilcam-camera", exc.camera))
+        elif isinstance(exc, NoFieldMask):
             metadata.append(("aprilcam-camera", exc.camera))
         elif isinstance(exc, AnnotationLimitExceeded):
             metadata.append(("aprilcam-kind", exc.kind))
@@ -1128,6 +1182,44 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
             return aprilcam_v2_pb2.GetTagStreamResponse()
         endpoint = self._transport.get_or_create_tag_endpoint(request.camera)
         return aprilcam_v2_pb2.GetTagStreamResponse(endpoint=_stream_endpoint_to_proto(endpoint))
+
+    def CaptureFlatField(self, request, context):  # noqa: N802
+        exposure = request.exposure if request.HasField("exposure") else None
+        frames = request.frames if request.HasField("frames") else None
+        try:
+            result = self._service.capture_flat_field(
+                request.camera,
+                exposure=exposure,
+                frames=frames,
+                force=request.force,
+                dry_run=request.dry_run,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.CaptureFlatFieldResponse()
+        return aprilcam_v2_pb2.CaptureFlatFieldResponse(result=_flatfield_result_to_proto(result))
+
+    def GetFlatField(self, request, context):  # noqa: N802
+        try:
+            info = self._service.get_flatfield(request.camera)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.GetFlatFieldResponse()
+        response = aprilcam_v2_pb2.GetFlatFieldResponse()
+        # Absent (never a fabricated/default FlatFieldInfo) means never
+        # built, or cleared -- same presence discipline as
+        # GetCalibrationResponse.calibration.
+        if info is not None:
+            response.flatfield.CopyFrom(_flatfield_info_to_proto(info))
+        return response
+
+    def ClearFlatField(self, request, context):  # noqa: N802
+        try:
+            self._service.clear_flat_field(request.camera)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.ClearFlatFieldResponse()
+        return aprilcam_v2_pb2.ClearFlatFieldResponse()
 
 
 class _GrpcListener(ControlPlaneListener):
