@@ -1,7 +1,7 @@
 ---
 id: '037'
 title: Flat-field gain map capture as a daemon workflow
-status: executing
+status: done
 branch: sprint/037-flat-field-gain-map-capture-as-a-daemon-workflow
 use-cases: []
 issues:
