@@ -5845,3 +5845,15 @@ def test_dump_camera_config_round_trips_through_install_and_restart_live(
         real_daemon_service.set_camera_config(
             CameraConfig(name=slug, playfield=None, settings=_CAMERA_3_BASELINE_SETTINGS)
         )
+
+
+def test_flatfield_path_for_is_state_dir_cameras_slug_flatfield_npy(service, directories):
+    """Out-of-process change, 2026-09-02: the per-camera flat-field gain
+    map lives next to ``calibration.json`` under ``state_dir``, and is
+    what every ``Camera`` built by ``_camera_for`` is wired to."""
+    from aprilcam.camera.camera import FLATFIELD_FILENAME
+
+    assert FLATFIELD_FILENAME == "flatfield.npy"
+    assert service._flatfield_path_for("cam-x") == (
+        directories.state_dir / "cameras" / "cam-x" / "flatfield.npy"
+    )

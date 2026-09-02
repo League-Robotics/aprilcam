@@ -1451,3 +1451,133 @@ def test_real_camera_effective_config_reports_full_settable_key_set_with_control
         assert cfg.settings[key] is None, f"{key} should be blank in the template"
 
     assert cfg.settings["device_name"] == device_name
+
+
+# ---------------------------------------------------------------------------
+# Flat-field gain map (FLATFIELD_FILENAME) -- out-of-process change, 2026-09-02
+# ---------------------------------------------------------------------------
+
+
+def _flat_frame(value: int, size=(4, 6), channels: Optional[int] = 3) -> np.ndarray:
+    shape = (size[0], size[1]) if channels is None else (size[0], size[1], channels)
+    return np.full(shape, value, dtype=np.uint8)
+
+
+def _write_gain(path, gain: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(path, gain)
+
+
+def test_read_applies_flatfield_gain_map_and_saturates(tmp_path):
+    from aprilcam.camera.camera import FLATFIELD_FILENAME
+
+    path = tmp_path / FLATFIELD_FILENAME
+    gain = np.full((4, 6, 3), 2.0, dtype=np.float32)
+    gain[:, :, 1] = 3.0  # green channel: 100 * 3 = 300 -> must clip to 255
+    gain[0, 0, :] = 0.5  # one pixel dimmed
+    _write_gain(path, gain)
+    cam = Camera("cam-a", FakeBackend(read_queue=[_flat_frame(100)]), flatfield_path=path)
+    cam.open()
+    out = cam.read()
+    assert out is not None and out.dtype == np.uint8 and out.shape == (4, 6, 3)
+    assert out[1, 1].tolist() == [200, 255, 200]
+    assert out[0, 0].tolist() == [50, 50, 50]
+
+
+def test_read_without_flatfield_file_passes_frames_through(tmp_path):
+    from aprilcam.camera.camera import FLATFIELD_FILENAME
+
+    frame = _flat_frame(100)
+    cam = Camera("cam-a", FakeBackend(read_queue=[frame]), flatfield_path=tmp_path / FLATFIELD_FILENAME)
+    cam.open()
+    out = cam.read()
+    assert out is not None and np.array_equal(out, frame)
+
+
+def test_read_with_no_flatfield_path_is_unchanged():
+    frame = _flat_frame(100)
+    cam = Camera("cam-a", FakeBackend(read_queue=[frame]))
+    cam.open()
+    out = cam.read()
+    assert out is not None and np.array_equal(out, frame)
+
+
+def test_flatfield_shape_mismatch_is_skipped_with_one_warning(tmp_path, caplog):
+    import logging
+
+    from aprilcam.camera.camera import FLATFIELD_FILENAME
+
+    path = tmp_path / FLATFIELD_FILENAME
+    _write_gain(path, np.full((8, 8, 3), 2.0, dtype=np.float32))
+    frame = _flat_frame(100)
+    cam = Camera("cam-a", FakeBackend(read_queue=[frame, frame]), flatfield_path=path)
+    cam.open()
+    with caplog.at_level(logging.WARNING, logger="aprilcam.camera.camera"):
+        assert np.array_equal(cam.read(), frame)
+        assert np.array_equal(cam.read(), frame)
+    assert sum("does not match frame shape" in r.message for r in caplog.records) == 1
+
+
+def test_flatfield_three_channel_map_applies_to_mono_frame(tmp_path):
+    from aprilcam.camera.camera import FLATFIELD_FILENAME
+
+    path = tmp_path / FLATFIELD_FILENAME
+    gain = np.full((4, 6, 3), 1.0, dtype=np.float32)
+    gain[:, :, 0] = 2.0  # first channel is what a mono frame uses
+    _write_gain(path, gain)
+    cam = Camera("cam-a", FakeBackend(read_queue=[_flat_frame(60, channels=None)]), flatfield_path=path)
+    cam.open()
+    out = cam.read()
+    assert out is not None and out.shape == (4, 6) and int(out[2, 2]) == 120
+
+
+def test_flatfield_two_d_map_broadcasts_over_colour_frame(tmp_path):
+    from aprilcam.camera.camera import FLATFIELD_FILENAME
+
+    path = tmp_path / FLATFIELD_FILENAME
+    _write_gain(path, np.full((4, 6), 1.5, dtype=np.float32))
+    cam = Camera("cam-a", FakeBackend(read_queue=[_flat_frame(100)]), flatfield_path=path)
+    cam.open()
+    out = cam.read()
+    assert out is not None and out[3, 5].tolist() == [150, 150, 150]
+
+
+def test_malformed_flatfield_file_is_ignored_not_fatal(tmp_path, caplog):
+    import logging
+
+    from aprilcam.camera.camera import FLATFIELD_FILENAME
+
+    path = tmp_path / FLATFIELD_FILENAME
+    _write_gain(path, np.full((4, 6, 3), 2, dtype=np.uint8))  # integer, not float -> rejected
+    frame = _flat_frame(100)
+    cam = Camera("cam-a", FakeBackend(read_queue=[frame]), flatfield_path=path)
+    with caplog.at_level(logging.WARNING, logger="aprilcam.camera.camera"):
+        cam.open()
+    assert any("malformed flat-field gain map" in r.message for r in caplog.records)
+    assert np.array_equal(cam.read(), frame)
+
+    path.write_bytes(b"not a numpy file")
+    cam2 = Camera("cam-b", FakeBackend(read_queue=[frame]), flatfield_path=path)
+    cam2.open()  # must not raise
+    assert np.array_equal(cam2.read(), frame)
+
+
+def test_reset_reloads_flatfield_from_disk(tmp_path):
+    """Deleting the file + reset() clears the correction; adding it +
+    reset() enables it -- the live install/clear path with no restart."""
+    from aprilcam.camera.camera import FLATFIELD_FILENAME
+
+    path = tmp_path / FLATFIELD_FILENAME
+    _write_gain(path, np.full((4, 6, 3), 2.0, dtype=np.float32))
+    frame = _flat_frame(100)
+    cam = Camera("cam-a", FakeBackend(read_queue=[frame] * 3), flatfield_path=path)
+    cam.open()
+    assert int(cam.read()[0, 0, 0]) == 200
+
+    path.unlink()
+    cam.reset()
+    assert int(cam.read()[0, 0, 0]) == 100
+
+    _write_gain(path, np.full((4, 6, 3), 0.5, dtype=np.float32))
+    cam.reset()
+    assert int(cam.read()[0, 0, 0]) == 50

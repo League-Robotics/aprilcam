@@ -156,6 +156,22 @@ from aprilcam.config.interfaces import ConfigLoader as ConfigLoaderIface
 from aprilcam.errors import UnsupportedSetting
 from aprilcam.types import CameraState
 
+#: Per-camera flat-field gain map, looked for at
+#: ``<state_dir>/cameras/<slug>/flatfield.npy`` (``daemon.service.
+#: DaemonService._flatfield_path_for``) -- a float ``(H, W, C)`` or
+#: ``(H, W)`` NumPy array of per-pixel multipliers built from a white-sheet
+#: reference capture (see ``docs/knowledge/flat-field-gain-map.md``).
+#: When the file is present every frame :meth:`Camera.read` hands out is
+#: multiplied by it and saturated back to the frame's own dtype, so
+#: detection, ``get_frame``, streaming, and calibration capture all see
+#: the illumination-flattened, colour-cast-corrected image without any
+#: consumer needing to know the map exists. Absent file: frames pass
+#: through untouched, exactly as before this file existed. Reloaded on
+#: every :meth:`Camera.open` and :meth:`Camera.reset`, so replacing or
+#: deleting the file takes effect live via ``ResetCameraConfig`` -- no
+#: daemon restart, no new RPC.
+FLATFIELD_FILENAME = "flatfield.npy"
+
 __all__ = ["Camera"]
 
 logger = logging.getLogger(__name__)
@@ -272,6 +288,12 @@ class Camera(_CameraBase):
         calibration stale. ``None`` (the default) means nobody is
         listening -- every pre-existing test and any ``Camera`` built
         without this parameter behaves exactly as before.
+    flatfield_path:
+        Optional path to this camera's :data:`FLATFIELD_FILENAME` gain
+        map. Loaded (if the file exists) on every :meth:`open` and
+        :meth:`reset` and applied to every frame :meth:`read` returns
+        (:meth:`_apply_flatfield`). ``None`` (the default) disables the
+        feature entirely for this instance.
     """
 
     def __init__(
@@ -286,6 +308,7 @@ class Camera(_CameraBase):
         config_loader: Optional[ConfigLoaderIface] = None,
         config_path: Optional[Path] = None,
         on_reopen: Optional[Callable[[], None]] = None,
+        flatfield_path: Optional[Path] = None,
     ) -> None:
         self._slug = slug
         self._backend = backend
@@ -296,6 +319,17 @@ class Camera(_CameraBase):
         self._config_loader = config_loader
         self._config_path = config_path
         self._on_reopen = on_reopen
+        #: Where :meth:`_load_flatfield` looks for :data:`FLATFIELD_FILENAME`
+        #: -- ``None`` (every pre-existing test, any hand-built ``Camera``)
+        #: means "no flat-field correction, ever", identical to the file
+        #: simply not existing.
+        self._flatfield_path = flatfield_path
+        #: The loaded gain map (float32) or ``None``; see :meth:`_apply_flatfield`.
+        self._flatfield: Optional[np.ndarray] = None
+        #: Once-only guard for the shape-mismatch warning in
+        #: :meth:`_apply_flatfield`, so a wrong-sized map does not log on
+        #: every frame at 30 fps.
+        self._flatfield_warned = False
         self._present = False
         self._consecutive_failures = 0
         self._reopens = 0
@@ -368,6 +402,7 @@ class Camera(_CameraBase):
         self._reopens = 0
         self._exhausted = False
         self._pending_open_settle = True
+        self._load_flatfield()
 
     def close(self) -> None:
         self._backend.close()
@@ -410,12 +445,106 @@ class Camera(_CameraBase):
                 self._consecutive_failures = 0
                 self._reopens = 0
                 self._exhausted = False
-                return frame
+                return self._apply_flatfield(frame)
             self._consecutive_failures += 1
             if self._consecutive_failures >= FAILURE_THRESHOLD:
                 self._consecutive_failures = 0
                 self._attempt_self_heal()
             return None
+
+    # -- flat-field gain map (FLATFIELD_FILENAME) ---------------------------
+
+    def _load_flatfield(self) -> None:
+        """(Re)load the gain map at :attr:`_flatfield_path`, or clear it.
+
+        Never raises: an unreadable or malformed file is logged and
+        ignored (frames then pass through uncorrected), because a
+        camera must never become unopenable over an optional
+        correction artefact. Accepts a float ``(H, W)`` or ``(H, W, C)``
+        array of finite, non-negative multipliers; anything else is
+        rejected by name so the operator can see why.
+        """
+        self._flatfield = None
+        self._flatfield_warned = False
+        path = self._flatfield_path
+        if path is None or not path.exists():
+            return
+        try:
+            gain = np.load(path)
+        except Exception as exc:  # malformed/unreadable file -- never fatal
+            logger.warning("%s: ignoring unreadable flat-field gain map %s: %s", self._slug, path, exc)
+            return
+        if (
+            not isinstance(gain, np.ndarray)
+            or gain.ndim not in (2, 3)
+            or gain.size == 0
+            or not np.issubdtype(gain.dtype, np.floating)
+            or not np.isfinite(gain).all()
+            or bool((gain < 0).any())
+        ):
+            logger.warning(
+                "%s: ignoring malformed flat-field gain map %s -- expected a non-empty "
+                "float (H, W) or (H, W, C) array of finite, non-negative gains, got %s %s",
+                self._slug,
+                path,
+                getattr(gain, "dtype", type(gain)),
+                getattr(gain, "shape", ""),
+            )
+            return
+        self._flatfield = gain.astype(np.float32, copy=False)
+        logger.info(
+            "%s: flat-field gain map loaded from %s (shape %s, gain %.2f-%.2f)",
+            self._slug,
+            path,
+            self._flatfield.shape,
+            float(self._flatfield.min()),
+            float(self._flatfield.max()),
+        )
+
+    def _apply_flatfield(self, frame: np.ndarray) -> np.ndarray:
+        """Multiply *frame* by the loaded gain map and saturate back to
+        the frame's own dtype. Pass-through when no map is loaded. A
+        map whose height/width do not match the frame (a resolution
+        change since capture) is skipped with a single warning rather
+        than silently mis-corrected or crashing the read loop. A
+        3-channel map is applied to a 2-D (mono) frame via its first
+        channel; a 2-D map broadcasts across a colour frame's channels.
+        """
+        gain = self._flatfield
+        if gain is None:
+            return frame
+        if gain.shape[:2] != frame.shape[:2]:
+            if not self._flatfield_warned:
+                self._flatfield_warned = True
+                logger.warning(
+                    "%s: flat-field gain map shape %s does not match frame shape %s -- "
+                    "not applied (recapture the map at this resolution)",
+                    self._slug,
+                    gain.shape,
+                    frame.shape,
+                )
+            return frame
+        if frame.ndim == 2 and gain.ndim == 3:
+            g: np.ndarray = gain[:, :, 0]
+        elif frame.ndim == 3 and gain.ndim == 2:
+            g = gain[:, :, None]
+        elif frame.ndim == 3 and gain.ndim == 3 and gain.shape[2] not in (1, frame.shape[2]):
+            if not self._flatfield_warned:
+                self._flatfield_warned = True
+                logger.warning(
+                    "%s: flat-field gain map has %d channels but frames have %d -- not applied",
+                    self._slug,
+                    gain.shape[2],
+                    frame.shape[2],
+                )
+            return frame
+        else:
+            g = gain
+        out = frame.astype(np.float32) * g
+        if np.issubdtype(frame.dtype, np.integer):
+            info = np.iinfo(frame.dtype)
+            np.clip(out, info.min, info.max, out=out)
+        return out.astype(frame.dtype)
 
     def _safe_read(self) -> Optional[np.ndarray]:
         try:
@@ -744,6 +873,10 @@ class Camera(_CameraBase):
         if config is None:
             config = CameraConfig(name=self._slug, playfield=self._playfield, settings={})
         self.apply_config(config)
+        # Same "re-read exactly what is installed on disk" contract for the
+        # flat-field gain map: a replaced file is picked up, a deleted file
+        # clears the correction -- live, no restart (FLATFIELD_FILENAME).
+        self._load_flatfield()
 
     def stored_config(self) -> CameraConfig:
         """The document that describes what is now in force after

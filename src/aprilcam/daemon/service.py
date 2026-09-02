@@ -102,7 +102,7 @@ from aprilcam.camera.backends import CaptureBackend, ControlBackend, resolve_cap
 from aprilcam.camera.backends.libcamera import LibcameraDevice
 from aprilcam.camera.backends.opencv_backend import OpenCVBackend
 from aprilcam.camera.backends.uvc_util import UvcUtilBackend
-from aprilcam.camera.camera import Camera
+from aprilcam.camera.camera import FLATFIELD_FILENAME, Camera
 from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import CameraIdentity, resolve_all
 from aprilcam.camera.registry import CameraRecord, CameraRegistry
@@ -2186,6 +2186,7 @@ class DaemonService(Daemon):
             config_loader=self._config_loader,
             config_path=self._config_path_for(record.slug),
             on_reopen=lambda: self._mark_stale(record.slug),
+            flatfield_path=self._flatfield_path_for(record.slug),
         )
         cam.open()
         with self._lock:
@@ -2208,6 +2209,18 @@ class DaemonService(Daemon):
         (ticket 023-004), whether or not anything is actually installed
         there yet."""
         return self._directories.config_dir / "cameras" / slug / "config.json"
+
+    def _flatfield_path_for(self, slug: str) -> Path:
+        """``state_dir/cameras/<slug>/flatfield.npy`` -- the optional
+        per-camera flat-field gain map ``camera.camera.Camera`` applies
+        to every frame it reads (``FLATFIELD_FILENAME``). ``state_dir``,
+        not ``config_dir``, and next to ``calibration.json``: like a
+        calibration it is a measured, machine-generated artefact tied
+        to this camera's current mounting and lighting, not an
+        operator-authored setting. Wired into every ``Camera``
+        :meth:`_camera_for` builds; the file is optional and its
+        absence means no correction."""
+        return self._directories.state_dir / "cameras" / slug / FLATFIELD_FILENAME
 
     def _record_for(self, token: str) -> Optional[CameraRecord]:
         """Resolve *token* against the registry: an all-digits token by
