@@ -24,10 +24,10 @@ from typing import Any, Dict, Optional, Tuple
 
 from mcp import types
 
-from aprilcam.calibration.interfaces import Calibration, CalibrationResult
+from aprilcam.calibration.interfaces import Calibration, CalibrationResult, FlatFieldInfo, FlatFieldResult
 from aprilcam.config.interfaces import CameraConfig
 from aprilcam.config.loader import ConfigLoader
-from aprilcam.errors import MalformedDocument, NoPlayfieldLinked, UnknownCamera
+from aprilcam.errors import MalformedDocument, NoFieldMask, NoPlayfieldLinked, UnknownCamera
 from aprilcam.mcp.connection import ConnectionManager
 from aprilcam.mcp.server import build_server
 from aprilcam.playfield.playfield import Playfield
@@ -51,12 +51,19 @@ class _FakeDaemon:
     calibrate_raises: Optional[Exception] = None
     calibration: Optional[Calibration] = None
     get_calibration_raises: Optional[Exception] = None
+    flatfield_result: Optional[FlatFieldResult] = None
+    capture_flat_field_raises: Optional[Exception] = None
+    flatfield_info: Optional[FlatFieldInfo] = None
+    get_flatfield_raises: Optional[Exception] = None
+    clear_flat_field_raises: Optional[Exception] = None
 
     requested_camera: Optional[str] = None
     pushed_camera_config: Optional[CameraConfig] = None
     requested_playfield_name: Optional[str] = None
     pushed_playfield: Optional[Any] = None
     requested_estimate_intrinsics: Optional[bool] = None
+    requested_flatfield_kwargs: Optional[Dict[str, Any]] = None
+    cleared_flatfield_camera: Optional[str] = None
 
     def get_camera_config(self, camera: str) -> CameraConfig:
         self.requested_camera = camera
@@ -109,6 +116,38 @@ class _FakeDaemon:
             "calibrate's NoPlayfieldLinked precondition must fail before any frame "
             "is requested (UC-15.S-2) -- get_frame must never be called for that case"
         )
+
+    def capture_flat_field(
+        self,
+        camera: str,
+        *,
+        exposure: Optional[float] = None,
+        frames: Optional[int] = None,
+        force: bool = False,
+        dry_run: bool = False,
+    ) -> FlatFieldResult:
+        self.requested_camera = camera
+        self.requested_flatfield_kwargs = {
+            "exposure": exposure,
+            "frames": frames,
+            "force": force,
+            "dry_run": dry_run,
+        }
+        if self.capture_flat_field_raises is not None:
+            raise self.capture_flat_field_raises
+        assert self.flatfield_result is not None, "test forgot to set _FakeDaemon.flatfield_result"
+        return self.flatfield_result
+
+    def get_flatfield(self, camera: str) -> Optional[FlatFieldInfo]:
+        self.requested_camera = camera
+        if self.get_flatfield_raises is not None:
+            raise self.get_flatfield_raises
+        return self.flatfield_info
+
+    def clear_flat_field(self, camera: str) -> None:
+        self.cleared_flatfield_camera = camera
+        if self.clear_flat_field_raises is not None:
+            raise self.clear_flat_field_raises
 
 
 @dataclass
@@ -489,3 +528,212 @@ async def test_daemon_parameter_targets_a_specific_host_for_one_call(tmp_path):
 
     assert result.root.isError is False
     assert discovery.connect_calls == ["pi-field.local"]
+
+
+# ---------------------------------------------------------------------------
+# capture_flatfield / get_flatfield / clear_flatfield -- sprint 037 ticket 005
+# ---------------------------------------------------------------------------
+
+
+async def test_capture_flatfield_returns_the_result_on_success(tmp_path):
+    outcome = FlatFieldResult(
+        succeeded=True,
+        spread_before=(2.65,),
+        spread_after=(1.11,),
+        reason=None,
+    )
+    daemon = _FakeDaemon(flatfield_result=outcome)
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(server, "capture_flatfield", {"camera": "arducam-ov9782-usb-camera"})
+
+    assert result.root.isError is False
+    structured = result.root.structuredContent
+    assert structured["succeeded"] is True
+    assert structured["spread_before"] == [2.65]
+    assert structured["spread_after"] == [1.11]
+    assert daemon.requested_camera == "arducam-ov9782-usb-camera"
+    # gain is never exposed client-side (client/daemon_client.py always sets it
+    # None; the MCP tool must not fabricate or leak anything either) -- absent
+    # from the structured content entirely.
+    assert "gain" not in structured or structured["gain"] is None
+
+
+async def test_capture_flatfield_forwards_optional_parameters(tmp_path):
+    outcome = FlatFieldResult(succeeded=True, spread_before=(1.3,), spread_after=(1.05,))
+    daemon = _FakeDaemon(flatfield_result=outcome)
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(
+        server,
+        "capture_flatfield",
+        {
+            "camera": "arducam-ov9782-usb-camera",
+            "exposure": 1.0,
+            "frames": 6,
+            "force": True,
+            "dry_run": True,
+        },
+    )
+
+    assert result.root.isError is False
+    assert daemon.requested_flatfield_kwargs == {
+        "exposure": 1.0,
+        "frames": 6,
+        "force": True,
+        "dry_run": True,
+    }
+
+
+async def test_capture_flatfield_defaults_are_all_off(tmp_path):
+    outcome = FlatFieldResult(succeeded=True, spread_before=(1.0,), spread_after=(1.0,))
+    daemon = _FakeDaemon(flatfield_result=outcome)
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(server, "capture_flatfield", {"camera": "arducam-ov9782-usb-camera"})
+
+    assert result.root.isError is False
+    assert daemon.requested_flatfield_kwargs == {
+        "exposure": None,
+        "frames": None,
+        "force": False,
+        "dry_run": False,
+    }
+
+
+async def test_capture_flatfield_refusal_is_reported_as_data_not_an_error(tmp_path):
+    """A failing quality-gate check is ``succeeded=False`` with a
+    ``reason`` -- explicit failure as data, mirroring ``calibrate``'s
+    ``CalibrationResult`` contract, never a tool error."""
+    outcome = FlatFieldResult(
+        succeeded=False,
+        spread_before=(2.65,),
+        spread_after=(1.9,),
+        reason="spread_after exceeds threshold",
+    )
+    daemon = _FakeDaemon(flatfield_result=outcome)
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(server, "capture_flatfield", {"camera": "arducam-ov9782-usb-camera"})
+
+    assert result.root.isError is False
+    structured = result.root.structuredContent
+    assert structured["succeeded"] is False
+    assert structured["reason"] == "spread_after exceeds threshold"
+
+
+async def test_capture_flatfield_no_field_mask_surfaces_the_typed_error(tmp_path):
+    daemon = _FakeDaemon(capture_flat_field_raises=NoFieldMask("arducam-ov9782-usb-camera"))
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(server, "capture_flatfield", {"camera": "arducam-ov9782-usb-camera"})
+
+    assert result.root.isError is True
+    assert "arducam-ov9782-usb-camera" in result.root.content[0].text
+
+
+async def test_get_flatfield_returns_none_when_never_captured(tmp_path):
+    daemon = _FakeDaemon(flatfield_info=None)
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(server, "get_flatfield", {"camera": "arducam-ov9782-usb-camera"})
+
+    assert result.root.isError is False
+    assert result.root.structuredContent["result"] is None
+    assert result.root.content == []
+
+
+async def test_get_flatfield_returns_the_info(tmp_path):
+    info = FlatFieldInfo(present=True, captured_at=1_700_000_000.0, stale=False)
+    daemon = _FakeDaemon(flatfield_info=info)
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(server, "get_flatfield", {"camera": "arducam-ov9782-usb-camera"})
+
+    assert result.root.isError is False
+    structured = result.root.structuredContent["result"]
+    assert structured["present"] is True
+    assert structured["stale"] is False
+    assert daemon.requested_camera == "arducam-ov9782-usb-camera"
+
+
+async def test_get_flatfield_unknown_camera_surfaces_the_typed_error(tmp_path):
+    daemon = _FakeDaemon(get_flatfield_raises=UnknownCamera("no-such-cam", ()))
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(server, "get_flatfield", {"camera": "no-such-cam"})
+
+    assert result.root.isError is True
+    assert "no-such-cam" in result.root.content[0].text
+
+
+async def test_clear_flatfield_calls_the_daemon(tmp_path):
+    daemon = _FakeDaemon()
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(server, "clear_flatfield", {"camera": "arducam-ov9782-usb-camera"})
+
+    assert result.root.isError is False
+    assert daemon.cleared_flatfield_camera == "arducam-ov9782-usb-camera"
+
+
+async def test_clear_flatfield_error_is_surfaced(tmp_path):
+    daemon = _FakeDaemon(clear_flat_field_raises=UnknownCamera("no-such-cam", ()))
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(server, "clear_flatfield", {"camera": "no-such-cam"})
+
+    assert result.root.isError is True
+    assert "no-such-cam" in result.root.content[0].text
+
+
+async def test_capture_flatfield_daemon_parameter_targets_a_specific_host(tmp_path):
+    outcome = FlatFieldResult(succeeded=True, spread_before=(1.0,), spread_after=(1.0,))
+    daemon = _FakeDaemon(flatfield_result=outcome)
+    server, discovery = _build(daemon, tmp_path)
+
+    result = await _call(
+        server,
+        "capture_flatfield",
+        {"camera": "c", "daemon": "pi-field.local"},
+    )
+
+    assert result.root.isError is False
+    assert discovery.connect_calls == ["pi-field.local"]
+
+
+# ---------------------------------------------------------------------------
+# list_cameras -- AC: MCP output includes the new CameraState fields
+# (sprint 037 ticket 005) -- registered by mcp/tools/perception.py, exercised
+# here since that's where every other CameraState-surfacing shape is covered
+# ---------------------------------------------------------------------------
+
+
+async def test_list_cameras_includes_flatfield_state(tmp_path):
+    from aprilcam.types import CameraState
+
+    state = CameraState(
+        name="arducam-ov9782-usb-camera",
+        present=True,
+        usable=True,
+        playfield="main-playfield",
+        calibrated=True,
+        flatfield_present=True,
+        flatfield_stale=True,
+        number=3,
+    )
+
+    @dataclass
+    class _PerceptionDaemon(_FakeDaemon):
+        def list_cameras(self):
+            return (state,)
+
+    daemon = _PerceptionDaemon()
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(server, "list_cameras")
+
+    assert result.root.isError is False
+    structured = result.root.structuredContent["result"]
+    assert structured[0]["flatfield_present"] is True
+    assert structured[0]["flatfield_stale"] is True

@@ -89,11 +89,16 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
     def list_cameras(daemon: Optional[str] = None) -> tuple[CameraState, ...]:
         """Every camera the daemon's registry knows about (UC-14,
         UC-25) -- name, presence, usability, playfield link,
-        calibration state, and its stable persistent number. An absent
-        camera (unplugged, but still configured) is listed and flagged
-        rather than omitted, and a present-but-broken camera is listed
-        distinctly from an absent one -- both straight from
-        ``Daemon.list_cameras`` with no filtering here.
+        calibration state, flat-field gain-map presence/staleness
+        (sprint 037's ``flatfield_present``/``flatfield_stale``), and
+        its stable persistent number. An absent camera (unplugged, but
+        still configured) is listed and flagged rather than omitted,
+        and a present-but-broken camera is listed distinctly from an
+        absent one -- both straight from ``Daemon.list_cameras`` with no
+        filtering here. ``CameraState`` is returned verbatim (no
+        ``.to_dict()`` shim needed, unlike ``get_playfield``/
+        ``get_camera_config``), so every field it declares -- including
+        the flat-field ones -- reaches the caller automatically.
         """
         return connection.call(lambda d: d.list_cameras(), host=daemon)
 

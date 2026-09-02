@@ -77,6 +77,44 @@ fields the ``Daemon`` interface promises (``stale``, ``calibrated_at``,
 whether a calibration is trustworthy, not the internal homography
 matrix.
 
+**``capture_flatfield``/``get_flatfield``/``clear_flatfield`` (sprint 037
+ticket 005) follow the identical rule, with one further wrinkle for
+``capture_flatfield``.** ``calibration.interfaces.FlatFieldResult``/
+``FlatFieldInfo`` (imported here) are what ``daemon.interfaces.
+Daemon.capture_flat_field``/``get_flatfield`` declare and are
+themselves ``cv2``-free -- never ``calibration.flatfield.
+FlatFieldCapturer``'s own module, which imports ``cv2`` at module scope
+for the identical reason ``calibration.calibration`` is avoided above.
+``get_flatfield`` returns ``FlatFieldInfo`` verbatim (no ``gain``-shaped
+field, so FastMCP's own pydantic ``TypeAdapter`` introspects it
+cleanly, same as ``Calibration`` above). ``capture_flatfield`` cannot:
+``FlatFieldResult.gain`` is typed ``Optional[numpy.ndarray]`` --
+*always* ``None`` on this client-library path (``client/daemon_client.
+py``'s ``GrpcDaemon.capture_flat_field`` never serializes a gain array
+across the wire, matching this ticket's "never expose gain" contract),
+but pydantic's schema generation runs over the *type annotation*, not
+the runtime value, and raises ``PydanticSchemaGenerationError`` for a
+bare ``numpy.ndarray`` field with no ``arbitrary_types_allowed``
+opt-in -- confirmed directly: returning ``FlatFieldResult`` verbatim
+here fails ``build_server()`` itself, for every tool, not just this
+one, since FastMCP introspects every registered tool's return
+annotation up front. So ``capture_flatfield`` uses this module's other
+established convention instead -- the explicit-dict shape
+``get_camera_config``/``get_playfield`` already use for a type whose
+wire shape has diverged -- via :func:`_flatfield_result_to_dict`,
+which copies every field except ``gain``.
+
+``capture_flatfield``'s ``exposure``/``frames``/``force``/``dry_run``
+parameters mirror ``calibrate``'s ``estimate_intrinsics`` shape:
+optional overrides forwarded straight to ``Daemon.capture_flat_field``
+with no client-side interpretation -- a failing quality-gate check is
+``FlatFieldResult(succeeded=False, reason=...)``, explicit failure as
+data, not a tool error (mirrors ``CalibrationResult``'s identical
+contract); only a precondition failure (``NoFieldMask`` -- no
+derivable field-interior mask) or a transport/addressing problem comes
+back as a tool error, via the same generic ``handle_tool_errors``
+mapping every other tool here uses.
+
 Every tool takes an optional ``daemon`` parameter, matching tickets
 001/002's per-call target-host override.
 """
@@ -88,10 +126,28 @@ from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from aprilcam.calibration.interfaces import Calibration, CalibrationResult
+from aprilcam.calibration.interfaces import Calibration, CalibrationResult, FlatFieldInfo, FlatFieldResult
 from aprilcam.config.loader import ConfigLoader
 from aprilcam.mcp.connection import ConnectionManager
 from aprilcam.mcp.errors import handle_tool_errors
+
+
+def _flatfield_result_to_dict(result: FlatFieldResult) -> dict[str, Any]:
+    """``FlatFieldResult`` minus ``gain`` -- the explicit-dict shape
+    ``capture_flatfield`` returns instead of the dataclass itself. See
+    this module's docstring for why: ``gain`` is typed
+    ``Optional[numpy.ndarray]``, and FastMCP's pydantic-based return-type
+    introspection cannot build a schema for a bare ``numpy.ndarray``
+    field, even though this client-library path always leaves it
+    ``None`` at runtime. Every other field copies straight across.
+    """
+    return {
+        "succeeded": result.succeeded,
+        "spread_before": result.spread_before,
+        "spread_after": result.spread_after,
+        "reason": result.reason,
+        "forced_checks": result.forced_checks,
+    }
 
 __all__ = ["register"]
 
@@ -244,3 +300,92 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         (UC-11.S-3).
         """
         return connection.call(lambda d: d.get_calibration(camera), host=daemon)
+
+    # -- flat-field gain map (sprint 037 ticket 005) ----------------------
+
+    @mcp.tool()
+    @handle_tool_errors
+    def capture_flatfield(
+        camera: str,
+        exposure: Optional[float] = None,
+        frames: Optional[int] = None,
+        force: bool = False,
+        dry_run: bool = False,
+        daemon: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Build (and, unless refused or *dry_run*, persist) a per-camera
+        flat-field gain-map correction from a fresh capture burst (sprint
+        037) -- all vision happens in the daemon, on this camera's
+        current view of its field; this sends a command and reports the
+        result, exactly like :func:`calibrate`. Lay a plain white/light
+        sheet over the whole field first -- the gain map is built from
+        how unevenly *that* reads back, so a scene with no full-field
+        reference produces a poor map even on success.
+
+        There is no partial success: either every quality-gate check
+        passed and a map was built and persisted
+        (``succeeded=True``), or the attempt was refused
+        (``reason`` naming which check failed) and any prior-good map is
+        left untouched -- the same "explicit failure is data, never an
+        exception" contract :func:`calibrate` already uses for
+        ``CalibrationResult``. A camera with no derivable field-interior
+        mask (no calibration, and no linked-playfield ArUco corners
+        detectable live) fails with ``NoFieldMask`` *before any capture
+        burst is taken* -- a precondition error, not a refused attempt;
+        this tool does nothing beyond forwarding to ``Daemon.
+        capture_flat_field``, so that ordering is the daemon's own
+        guarantee.
+
+        *exposure*, when given, is a temporary override for the capture
+        burst only -- the daemon restores this camera's prior
+        stored/live configuration afterward, on success, a refusal, or
+        an exception alike; a low exposure is normally needed here since
+        a white sheet saturates most cameras at their working exposure.
+        *frames* is how many frames to average for the burst (daemon
+        default when omitted). *force* persists the built map even if a
+        quality-gate check failed, naming what was overridden via
+        ``FlatFieldResult.forced_checks``. *dry_run* evaluates and
+        reports without writing anything to disk or changing the
+        live-applied map. The measured per-channel spread
+        (``spread_before``/``spread_after``) is always reported, whether
+        the attempt succeeded, was refused, or was only evaluated.
+
+        Returned as a plain dict (``succeeded``, ``spread_before``,
+        ``spread_after``, ``reason``, ``forced_checks``) rather than
+        ``FlatFieldResult`` itself -- see the module docstring:
+        ``FlatFieldResult.gain`` is a ``numpy.ndarray``-typed field
+        FastMCP's schema introspection cannot handle, and it is never
+        exposed here regardless (always ``None`` on this client-library
+        path).
+        """
+        result = connection.call(
+            lambda d: d.capture_flat_field(
+                camera, exposure=exposure, frames=frames, force=force, dry_run=dry_run
+            ),
+            host=daemon,
+        )
+        return _flatfield_result_to_dict(result)
+
+    @mcp.tool()
+    @handle_tool_errors
+    def get_flatfield(camera: str, daemon: Optional[str] = None) -> Optional[FlatFieldInfo]:
+        """*camera*'s current flat-field gain-map metadata, or ``None``
+        if it has never had one built (or it was cleared) -- never a
+        fabricated default, mirroring :func:`get_calibration`'s "``None``
+        means never, not a zero-valued record" discipline. ``stale``
+        flags whether the camera's mounting or lighting may have changed
+        since the map was captured; a stale map is still returned and
+        still applied, not hidden, so a caller can decide what to do
+        with it (mirrors ``Calibration.stale``'s own contract).
+        """
+        return connection.call(lambda d: d.get_flatfield(camera), host=daemon)
+
+    @mcp.tool()
+    @handle_tool_errors
+    def clear_flatfield(camera: str, daemon: Optional[str] = None) -> None:
+        """Delete *camera*'s stored gain map and metadata sidecar, and
+        drop the live-applied map immediately -- no daemon restart
+        needed, mirroring how a freshly captured map takes effect live.
+        Clearing an already-absent map is a no-op, enforced daemon-side.
+        """
+        connection.call(lambda d: d.clear_flat_field(camera), host=daemon)

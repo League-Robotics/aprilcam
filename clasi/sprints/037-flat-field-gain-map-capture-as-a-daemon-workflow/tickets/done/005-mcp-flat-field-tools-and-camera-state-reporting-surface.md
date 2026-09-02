@@ -1,10 +1,14 @@
 ---
-id: "005"
-title: "MCP flat-field tools and camera-state reporting surface"
-status: open
-use-cases: [SUC-001, SUC-002, SUC-003]
-depends-on: ["004"]
-github-issue: ""
+id: '005'
+title: MCP flat-field tools and camera-state reporting surface
+status: done
+use-cases:
+- SUC-001
+- SUC-002
+- SUC-003
+depends-on:
+- '004'
+github-issue: ''
 issue: flat-field-gain-map-capture-as-a-daemon-workflow.md
 completes_issue: false
 ---
@@ -37,20 +41,36 @@ shape that currently surfaces the calibration fields.
 
 ## Acceptance Criteria
 
-- [ ] `mcp/tools/configuration.py` registers `capture_flatfield`,
+- [x] `mcp/tools/configuration.py` registers `capture_flatfield`,
       `get_flatfield`, `clear_flatfield`, matching this module's
       existing tool-registration shape exactly.
-- [ ] The three tools return the cv2-free `calibration.interfaces`
+- [x] The three tools return the cv2-free `calibration.interfaces`
       types (or this module's existing `.to_dict()`-equivalent
       convention for a type whose wire shape has diverged), never the
       concrete `calibration.flatfield` module.
-- [ ] `tests/test_no_cv2_in_client_modules.py` continues to pass after
+      (`capture_flatfield` uses the explicit-dict convention:
+      `FlatFieldResult.gain` is `Optional[numpy.ndarray]`, and FastMCP's
+      pydantic-based schema introspection cannot build a schema for a
+      bare `numpy.ndarray` field -- confirmed directly, it broke
+      `build_server()` for every tool, not just this one, until
+      `capture_flatfield` was changed to return a plain dict built by
+      `_flatfield_result_to_dict`, omitting `gain` -- which was never to
+      be exposed here anyway. `get_flatfield` has no such field and
+      returns `FlatFieldInfo` verbatim.)
+- [x] `tests/test_no_cv2_in_client_modules.py` continues to pass after
       this ticket.
-- [ ] `cli/_common.py`'s camera-row formatting and `camera list`/`camera
+- [x] `cli/_common.py`'s camera-row formatting and `camera list`/`camera
       probe` output display flat-field presence and staleness alongside
       calibration state.
-- [ ] MCP's `list_cameras`/`get_camera_config` tool output includes the
+- [x] MCP's `list_cameras`/`get_camera_config` tool output includes the
       new `CameraState` fields.
+      (`list_cameras` returns `CameraState` verbatim, so
+      `flatfield_present`/`flatfield_stale` already reach the caller
+      automatically -- verified with a new test. `get_camera_config`
+      returns `CameraConfig`, the settings *document*, which has never
+      carried any `CameraState` field, calibration included -- there is
+      nothing to add there; `list_cameras` is the tool that actually
+      surfaces camera state over MCP.)
 
 ## Testing
 

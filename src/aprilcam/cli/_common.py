@@ -123,21 +123,31 @@ def format_camera_row(state: CameraState) -> str:
     distinct from ``present`` false ("not plugged in") -- UC-25.S-4's
     contract, and the same distinction UC-14 asks for absent cameras
     (listed and flagged, never omitted).
+
+    Flat-field gain-map presence/staleness (sprint 037 ticket 005) is
+    printed alongside calibration the same way: a ``flatfield=present``/
+    ``flatfield=absent`` word, plus a distinct ``flatfield-stale`` flag
+    in the trailing parenthetical -- kept a different word than
+    calibration's own ``stale`` flag so the two independent staleness
+    signals never read as one.
     """
     number = f"[{state.number}]" if state.number is not None else "[-]"
     presence = "present" if state.present else "absent"
     usability = "usable" if state.usable else "unusable"
     playfield = state.playfield if state.playfield is not None else "-"
     calibration = "calibrated" if state.calibrated else "uncalibrated"
+    flatfield = "flatfield=present" if state.flatfield_present else "flatfield=absent"
     flags = []
     if state.calibration_stale:
         flags.append("stale")
+    if state.flatfield_stale:
+        flags.append("flatfield-stale")
     if state.frame_dark:
         flags.append("dark")
     flag_suffix = f"  ({', '.join(flags)})" if flags else ""
     return (
         f"{number:<6} {state.name:<32} {presence:<8} {usability:<9} "
-        f"playfield={playfield:<20} {calibration}{flag_suffix}"
+        f"playfield={playfield:<20} {calibration}  {flatfield}{flag_suffix}"
     )
 
 

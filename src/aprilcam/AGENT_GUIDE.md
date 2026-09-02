@@ -215,6 +215,7 @@ world-frame and staleness rules as everywhere else in this guide —
 | | `aprilcam camera image <camera>` | capture one raw frame |
 | | `aprilcam camera tags <camera>` | current tag detections |
 | | `aprilcam camera calibrate <camera>` | calibrate against the linked playfield (§3) |
+| | `aprilcam camera flatfield <camera>` | build (or `--clear`) a flat-field gain-map lighting correction (§9) |
 | | `aprilcam camera locate <camera> --reference TAG:SLUG:HEIGHT_CM ...` | solve real ground position + height from staged elevated references — **CLI-only, no MCP tool** (§6) |
 | | `aprilcam camera config <file>` | push a camera config document |
 | | `aprilcam camera config <camera> --dump\|--reset` | read the live config, or discard the pushed override |
@@ -228,6 +229,61 @@ world-frame and staleness rules as everywhere else in this guide —
 | | `aprilcam playfield where <name> <query>` | surveyed-feature lookup (§5) |
 | Tags | `aprilcam tags mount register\|clear\|list` | mobile-tag mount registry (§6) |
 | Guide | `aprilcam guide [agent\|robot]` | this text |
+
+## 9. Flat-Field Gain-Map Capture (Optional, but fixes bad colour/threshold reads)
+
+Room lighting over a playfield is rarely uniform — one corner can read
+at half the brightness of the centre, and colour channels can drift
+unevenly (a magenta or green cast that is worse in some areas than
+others). Eyes adapt to this automatically; a colour or brightness
+threshold does not. A **flat-field gain map** is a per-pixel,
+per-channel correction, captured once per camera, that flattens this
+out before every frame that camera reports — detection, `get_frame`,
+streaming, and calibration capture all see the corrected image.
+
+**When to run it** — any time after a camera is linked to a playfield
+(§3 step 3); calibrating first (step 4) gives a more precise
+field-interior mask to build the correction against, but is not
+required — an uncalibrated-but-linked camera's playfield ArUco corners
+are detected live instead. Re-run it whenever the camera is remounted
+or the lighting changes materially — an existing map is only valid for
+the mounting/lighting state it was captured under (`get_flatfield`'s
+`stale` flag is advisory, never automatic; nothing currently detects
+staleness for you).
+
+**How** — lay a plain white or light-coloured sheet over the whole
+field first; the map is built from how unevenly *that* reads back, so
+capturing over an empty or non-reference scene produces a poor
+correction even on success. Then call `capture_flatfield(camera)` (CLI:
+`aprilcam camera flatfield <camera>`). A white sheet saturates most
+cameras at their normal working exposure, so the daemon needs a low
+exposure for the capture burst — pass one via the optional `exposure`
+parameter if the default does not work; whatever you pass is a
+*temporary* override for the burst only, and the camera's prior
+configuration is restored afterward regardless of outcome. `frames`
+controls how many frames are averaged (daemon default if omitted).
+
+Like `calibrate`, there is no partial success: either every
+quality-gate check on the measured lighting spread passed and the map
+was built and persisted, or the attempt was refused
+(`FlatFieldResult.reason` names which check) and any prior-good map is
+left untouched. `force=True` persists anyway, naming what it
+overrode. `dry_run=True` evaluates and reports without writing
+anything. A camera with no derivable field mask at all (no calibration
+*and* no linked playfield) fails with a precondition error before any
+capture is attempted, the same way `calibrate` fails fast on
+`NoPlayfieldLinked`.
+
+**Checking state** — `get_flatfield(camera)` returns the current map's
+metadata (`present`, `stale`, when it was captured), or `None` if this
+camera has never had one built. `list_cameras` also carries
+`flatfield_present`/`flatfield_stale` on every `CameraState`, the same
+way `calibrated`/`calibration_stale` already report calibration —
+check there first if you just want a quick yes/no across every camera.
+`clear_flatfield(camera)` deletes the map and drops the live-applied
+correction immediately, no daemon restart needed.
+
+> Flat-field summary: optional per-camera lighting correction, captured with a white sheet over the field and (usually) a temporary low-exposure override; `capture_flatfield`/`get_flatfield`/`clear_flatfield` mirror `calibrate`/`get_calibration`'s explicit-failure-is-data and staleness-is-advisory contracts exactly.
 
 If you are writing a robot control program rather than working
 interactively, read the companion **`robot`** guide next
