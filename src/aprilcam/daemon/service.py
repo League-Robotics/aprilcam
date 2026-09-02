@@ -2377,8 +2377,8 @@ class DaemonService(Daemon):
             [[p.x, p.y] for p in (calibration.to_pixel(w) for w in corners_world)],
             dtype=np.float64,
         )
-        filled = np.zeros((height, width), dtype=np.uint8)
-        cv.fillPoly(filled, [np.round(pixel_corners).astype(np.int32)], 1)
+        filled: np.ndarray = np.zeros((height, width), dtype=np.uint8)
+        cv.fillPoly(filled, [np.round(pixel_corners).astype(np.int32)], (1,))
         return filled.astype(bool)
 
     def _mask_from_aruco(
@@ -2405,8 +2405,8 @@ class DaemonService(Daemon):
         if len(all_points) < 3:
             return None
         hull = cv.convexHull(all_points)
-        filled = np.zeros(frame.shape[:2], dtype=np.uint8)
-        cv.fillConvexPoly(filled, np.round(hull).astype(np.int32), 1)
+        filled: np.ndarray = np.zeros(frame.shape[:2], dtype=np.uint8)
+        cv.fillConvexPoly(filled, np.round(hull).astype(np.int32), (1,))
         return filled.astype(bool)
 
     def _capture_flatfield_frames(self, cam: Camera, count: int) -> Tuple[np.ndarray, ...]:
