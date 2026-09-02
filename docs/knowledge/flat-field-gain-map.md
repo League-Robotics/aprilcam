@@ -146,3 +146,26 @@ flatfield` above replaced it end to end.
   exposure.** Always pass a low `--exposure` override (see step 2 above)
   -- capturing at the working exposure trips the quality gate's
   clipping check almost every time.
+
+## Gotcha found the first time the map went live (2026-09-02): the sheet is not neutral
+
+With the tarp-derived map applied, camera 3's magenta cast was replaced by
+a **green** cast. The map forces every channel of the sheet to the same
+grey, but the tarp as this camera sees it (B152 G110 R152 at exposure 1)
+is far more green-deficient than white printer paper at the working
+exposure (roughly B220 G200 R225), so green was over-boosted ~20%.
+
+Fix applied by hand: sample the white borders of all detected tags in a
+raw working-exposure frame, push them through the map, and scale the map's
+channels so the median mapped white is neutral. Camera 3 scalars were
+B 1.106 / G 0.870 / R 1.055; after that, whites agree to +/-4% in G/R across
+the field and wood reads a natural brown. The installed
+`flatfield.npy` is the rebalanced one; the tarp-neutral original is beside
+it as `flatfield.npy.tarp-neutral.bak`. Rerunning `camera flatfield`
+overwrites both with an unbalanced map until the issue
+`clasi/issues/flat-field-capture-should-white-balance-against-a-known-neutral-reference.md`
+is implemented -- rebalance again afterwards.
+
+Also: white paper already clips at camera 3's working exposure before any
+map, and the map's >1 gains clip more of the field. For colour
+measurements drop the exposure; tags do not care.
