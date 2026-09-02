@@ -160,6 +160,25 @@ confirmation gate. Persist the winner to the on-disk config and
 `camera config --reset`. Full detail in
 [docs/knowledge/dark-camera-image-uvc-drift-reset.md](https://github.com/League-Robotics/aprilcam/blob/master/docs/knowledge/dark-camera-image-uvc-drift-reset.md).
 
+## Per-camera flat-field correction (software side, sprint 037)
+
+Everything above corrects uneven illumination *per frame, at detection
+time*. A complementary, camera-level fix corrects it *once, at the
+source*: `aprilcam camera flatfield <camera> [--exposure N]` captures a
+K-frame burst, derives a per-pixel, per-channel gain map from it (from
+the camera's calibration homography or its linked playfield's ArUco
+corners — no manual polygon), and persists it so every subsequent frame
+`Camera.read()` returns — for detection, `get_frame`, streaming, and
+calibration capture alike — is already corrected before the pipeline
+above ever sees it. A quality gate refuses an implausible capture
+(clipping, an implausible spread, the sheet moving mid-burst) unless
+`--force` is passed, reporting the measured spread either way; `camera
+list`/`camera probe` show `flatfield=present|absent` and
+`flatfield-stale` next to calibration state. Full recipe, measured
+numbers, and gotchas (a map is only valid for one mounting and one
+lighting state) in
+[docs/knowledge/flat-field-gain-map.md](https://github.com/League-Robotics/aprilcam/blob/master/docs/knowledge/flat-field-gain-map.md).
+
 ## Lighting the field (physical fixes beat software)
 
 Unchanged truths from v1's testing, still the highest-leverage moves:

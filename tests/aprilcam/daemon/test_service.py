@@ -105,6 +105,7 @@ from tests.aprilcam.calibration.test_calibration import (
     render_projective_frame,
 )
 from tests.aprilcam.camera.test_camera import FakeBackend
+from tests.aprilcam.daemon.conftest import hardware_test_camera_config
 
 
 def _playfield_definition(
@@ -6240,6 +6241,128 @@ def test_clear_flat_field_on_an_absent_flatfield_is_a_no_op(service, held_camera
     service.clear_flat_field(slug)  # must not raise
 
     assert service.get_flatfield(slug) is None
+
+
+#: Sprint 037's own measured no-clip exposure for camera 3
+#: (``docs/knowledge/flat-field-gain-map.md``, measured 2026-09-02): both
+#: real cameras saturate a large fraction of the field at their normal
+#: working/swept exposure (camera 3: 86% of the field at 255 at
+#: exposure=6), so this test -- the one place a real capture burst is
+#: actually built -- must push the same kind of low override
+#: ``aprilcam camera flatfield --exposure`` documents, or the quality
+#: gate's in-field-clipping check would legitimately refuse the attempt
+#: regardless of camera aim or field content.
+_FLATFIELD_TEST_EXPOSURE = 1.0
+
+
+@pytest.mark.camera
+def test_capture_flat_field_installs_and_applies_a_real_gain_map(real_daemon_service, directories):
+    """Ticket 037-006's own real-hardware AC: one real ``CaptureFlatField``
+    (through ``DaemonService`` directly, mirroring every other test in
+    this module's real-hardware section) against camera 3, verifying the
+    built map installs and is actually applied on a subsequent real frame
+    read -- then ``ClearFlatField`` removes it again.
+
+    Unlike the manual-recipe measurements in
+    ``docs/knowledge/flat-field-gain-map.md`` (captured against a plain
+    white sheet laid over the field), this test runs unattended against
+    whatever the real field currently shows -- there is no actuator here
+    to lay a sheet down. So it does not assert the sheet-only numbers
+    from that doc verbatim; instead it asserts what genuinely holds for
+    *any* real capture at a deliberately low, non-clipping exposure:
+
+    * the chosen exposure is not itself refused for in-field clipping
+      (the specific problem a low override exists to avoid -- both real
+      cameras clip most of the field at their normal working exposure);
+    * the correction generally reduces, not worsens, the field's overall
+      percentile brightness spread (flattening low-frequency lighting
+      unevenness pulls extremes toward the mean even when local
+      high-contrast content, like tag ink, is untouched by a
+      low-frequency gain map);
+    * the map is genuinely installed (``get_flatfield`` reports
+      ``present``, with the persisted shape matching the built gain
+      array) and live-applied on the held-open ``Camera`` with no daemon
+      restart (mirrors ``test_capture_flat_field_..._reloads_the_live_map``'s
+      own ``cam._flatfield is not None`` check, plus one real subsequent
+      frame read to prove the shape-compatible correction path actually
+      runs against real pixels, not just a loaded array);
+    * ``clear_flat_field`` removes both the live map and the persisted
+      files.
+
+    This fixture's ``directories``/``registry`` (see ``real_daemon_service``)
+    live entirely under ``tmp_path``, never the real operator's
+    ``~/.local/share/aprilcam`` -- so there is no on-disk flat-field state
+    from any other process for this test to preserve or restore; the only
+    real, cross-process state it touches is the physical camera's UVC
+    exposure/gain, restored in ``finally`` exactly like every other real
+    hardware test in this section.
+
+    Skips cleanly -- never fails -- when no camera matching 'Arducam
+    OV9782' (camera 3, the currently-calibrated main-playfield camera) is
+    attached, or when it is attached but this process cannot open it
+    right now (:func:`_open_or_skip`)."""
+    identity = _real_identity("Arducam OV9782")
+    if identity is None:
+        pytest.skip("no attached camera matching 'Arducam OV9782'")
+    slug = identity.slug
+
+    try:
+        _open_or_skip(real_daemon_service, slug)  # open + hold -- capture_flat_field needs this
+        cam = real_daemon_service._cameras[slug]  # noqa: SLF001 - peek at the held-open Camera
+
+        real_daemon_service.set_playfield(main_playfield_definition())
+        # A real, freshly-swept detection-friendly exposure -- this
+        # becomes capture_flat_field's "prior config", restored
+        # automatically after the burst's own low-exposure override
+        # (see the RPC's own docstring). Also links the playfield so
+        # _field_mask_for's live-ArUco fallback (no stored Calibration
+        # here) can resolve it.
+        real_daemon_service.set_camera_config(
+            hardware_test_camera_config(slug, playfield="main-playfield", camera=cam)
+        )
+        assert cam._flatfield is None  # noqa: SLF001 - clean start, fresh tmp_path state
+
+        result = real_daemon_service.capture_flat_field(
+            slug, exposure=_FLATFIELD_TEST_EXPOSURE, force=True
+        )
+
+        assert result.gain is not None
+        assert result.succeeded is True  # force=True always persists
+        # The specific problem a low override exists to avoid -- assert
+        # the *clipping* check by name never fired, whatever else this
+        # unattended field's real content did or did not trip.
+        assert "clipping" not in result.forced_checks
+        assert max(result.spread_after) < max(result.spread_before)
+
+        info = real_daemon_service.get_flatfield(slug)
+        assert info is not None
+        assert info.present is True
+        assert info.shape == tuple(result.gain.shape)
+
+        # Live-applied with no daemon restart -- the same "reload
+        # actually took effect" check the offline tests above make.
+        assert cam._flatfield is not None  # noqa: SLF001
+
+        # A real subsequent frame read must succeed cleanly through the
+        # now-corrected path (proves the persisted map's shape matches
+        # this camera's real frame shape -- a mismatch is skipped with a
+        # warning, not an exception, so this is the strongest "applied"
+        # check available without a second, uncorrected camera handle).
+        applied_frame = real_daemon_service.get_frame(slug)
+        assert applied_frame is not None
+        assert len(applied_frame.data) > 0
+
+        real_daemon_service.clear_flat_field(slug)
+
+        assert real_daemon_service.get_flatfield(slug) is None
+        assert cam._flatfield is None  # noqa: SLF001
+        npy_path, json_path = _flatfield_paths(directories, slug)
+        assert not npy_path.exists()
+        assert not json_path.exists()
+    finally:
+        real_daemon_service.set_camera_config(
+            CameraConfig(name=slug, playfield=None, settings=_CAMERA_3_BASELINE_SETTINGS)
+        )
 
 
 # ---------------------------------------------------------------------------

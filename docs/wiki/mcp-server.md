@@ -110,7 +110,7 @@ brevity.
 
 | Tool | Purpose |
 |------|---------|
-| `list_cameras()` | Every camera the daemon knows: `name`, `present`, `usable`, `playfield` link, `calibrated`, `calibration_stale`, stable persistent `number`. Absent-but-configured cameras are listed and flagged, not omitted. |
+| `list_cameras()` | Every camera the daemon knows: `name`, `present`, `usable`, `playfield` link, `calibrated`, `calibration_stale`, `flatfield_present`, `flatfield_stale`, stable persistent `number`. Absent-but-configured cameras are listed and flagged, not omitted. |
 | `probe_cameras()` | Force a deep re-interrogation of every camera backend; the report names any backend it had to skip, with a reason. |
 | `get_frame(camera, deskewed?, encoding?, format?)` | One frame — raw, or the deskewed top-down view when `deskewed` is true (requires calibration; no silent raw fallback). `encoding` is `"jpeg"` (default) or `"png"`; `format` below. |
 | `get_tags(camera)` | Every tag currently detected: `world` position (when calibrated), `pixel`, `yaw_rad`, `heading_rad`, `world_velocity`, `speed`, corner quads. An empty field is an empty frame, not an error. |
@@ -130,6 +130,9 @@ brevity.
 | `list_playfields()` | Every playfield definition the daemon holds. |
 | `calibrate(camera, estimate_intrinsics?)` | Calibrate against the camera's linked playfield. No partial success: either every required ArUco id matched and a homography solved, or the result names `missing_ids` (or a degenerate-geometry `reason`) and any prior-good calibration is untouched. `estimate_intrinsics` also fits the lens model. |
 | `get_calibration(camera)` | The current calibration (`stale`, `calibrated_at`, `playfield`), or `null` if never calibrated. A stale calibration is returned, not hidden. |
+| `capture_flatfield(camera, exposure?, frames?, force?, dry_run?)` | Build (and, unless refused or `dry_run`, persist) a per-camera flat-field gain-map lighting correction from a fresh capture burst. Lay a plain white/light sheet over the whole field first, and drop `exposure` until nothing clips (real cameras saturate at their normal working exposure). No partial success: either every quality-gate check passed and the map was built and persisted, or the attempt was refused (`reason` naming which check failed, measured spread reported either way) and any prior-good map is untouched. `force` persists anyway; `dry_run` evaluates and reports without writing anything. |
+| `get_flatfield(camera)` | The current flat-field gain-map metadata (`present`, `stale`, `captured_at`, `shape`), or `null` if never captured (or cleared). A stale map is still returned and still applied, not hidden. |
+| `clear_flatfield(camera)` | Delete the stored gain map and metadata, and drop the live-applied map immediately — no daemon restart. Clearing an already-absent map is a no-op. |
 
 ### Mobile tags (robot mounts)
 

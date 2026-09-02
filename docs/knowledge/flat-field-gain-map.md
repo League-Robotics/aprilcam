@@ -26,7 +26,7 @@ so the correction is a per-pixel gain, **not** a gamma or tone curve.
 Computing one gain per channel also removes the colour cast, because
 the white reference is forced to the same grey in every channel.
 
-## How it is applied (the out-of-process change, 2026-09-02)
+## How it is applied
 
 `camera.camera.Camera` looks for
 `<state_dir>/cameras/<slug>/flatfield.npy` (constant
@@ -37,46 +37,103 @@ frame `Camera.read()` returns is multiplied by it and saturated back to
 uint8, so detection, `get_frame`, streaming and calibration capture all
 see the corrected image. Absent file: untouched frames.
 
-- **Install / replace:** copy the `.npy` into place, then
-  `aprilcam camera config --reset <n>` (or the MCP `reset_camera_config`).
-  `reset()` re-reads the file. No daemon restart.
-- **Clear:** delete the file, then the same reset.
 - **Wrong resolution:** a map whose H/W do not match the frame is skipped
   with one warning in the daemon log; recapture at the new resolution.
 - Cost: one float multiply + clip per frame, ~5-10 ms at 1280x800x3.
 
-## Capturing a map (manual recipe until the daemon grows a command)
+## Capturing a map: `aprilcam camera flatfield` (sprint 037)
 
-1. Lay a plain white sheet over the whole field. A glossy tarp works;
-   wrinkles and specular highlights are suppressed below.
-2. **Drop exposure until nothing clips.** Both cameras saturate on a
-   white sheet at their working exposure (camera 3: 86% of the field at
-   255 at `exposure=6`; camera 5 >80% at `exposure=20`). Push a live
-   override via `set_camera_config` / `aprilcam camera config` -- used:
-   camera 3 `exposure=1`, camera 5 `exposure=4`. The map's *shape* is
-   exposure-independent (sensor is linear); only its normalisation is
-   arbitrary and it is normalised to mean 1 anyway.
-3. Capture 4-8 frames per camera (`get_frame`/`aprilcam camera image`).
-   At short exposures the lights' flicker shows as a ~25% frame-to-frame
-   swing on camera 3 -- normalise each frame to the batch mean before
-   averaging.
-4. Build with [`assets/build_flatfield_2026-09-02.py`](assets/build_flatfield_2026-09-02.py)
-   (paths and the field polygon are hard-coded; edit them): average,
-   median-blur 31 px (kills wrinkles), fill outside the field with the
-   field mean (no border bleed), Gaussian sigma 40 px (keeps only the
-   low-frequency light field), `gain = mean / L` per channel, clipped to
-   `[0.3, 4]`, saved as float32 `(H, W, 3)`.
-5. `reset_camera_config` both cameras to restore the working exposure,
-   copy the maps into place, reset again.
+The manual recipe below (build the map by hand from a captured burst,
+copy the `.npy` into place, reset to reload) is **superseded**. As of
+sprint 037 the daemon owns the whole workflow -- one command, no manual
+script, no hard-coded polygon:
 
-Result on the sheet itself: camera 3 spread 2.65x -> 1.48x (residual is
-the steep east edge), camera 5 1.32x -> 1.11x.
+```
+aprilcam camera flatfield <camera> [--exposure N] [--frames K] [--force] [--dry-run] [--clear]
+```
+
+Everything below happens inside the daemon
+(`daemon.service.DaemonService.capture_flat_field` orchestrating
+`calibration.flatfield.FlatFieldCapturer`'s pure math), triggered by this
+one CLI command or the equivalent MCP tools (`capture_flatfield`,
+`get_flatfield`, `clear_flatfield`):
+
+1. **Field-interior mask.** Derived automatically -- from the camera's
+   stored calibration homography if it has one, else from the linked
+   playfield's ArUco corners detected live in one probe frame. No sheet
+   polygon to hard-code; capture refuses with `NoFieldMask` if neither
+   source is available (link a playfield or calibrate first).
+2. **Temporary exposure override.** Pass `--exposure N` to drop exposure
+   for the capture burst only -- both real cameras saturate on a plain
+   white sheet at their normal working exposure (camera 3: 86% of the
+   field at 255 at `exposure=6`; camera 5 >80% at `exposure=20`); the
+   values that worked here were camera 3 `exposure=1`, camera 5
+   `exposure=4`. The camera's prior stored/live configuration is
+   restored automatically afterward -- on success, a refusal, or an
+   exception alike. The map's *shape* is exposure-independent (sensor is
+   linear); only its normalisation is arbitrary and it is normalised to
+   mean 1 anyway.
+3. **K-frame burst.** `--frames K` (default 6, matching the manual
+   recipe's "4-8 frames"). Each frame is normalised to the batch mean
+   before averaging -- corrects the ~25% frame-to-frame light flicker
+   measured at short exposures on camera 3 without needing a flicker
+   model.
+4. **Build.** Average, median-blur 31 px (kills sheet wrinkles and
+   specular highlights), fill outside the mask with the mask's own
+   interior mean (no border bleed), Gaussian sigma 40 px (keeps only the
+   low-frequency light field), `gain = target / L` per channel, clipped
+   to `[0.3, 4]`.
+5. **Quality gate.** Refuses (measured spread still reported either way)
+   on in-field clipping, implausible p98/p2 spread (>10x), or
+   frame-to-frame disagreement beyond the flicker tolerance already
+   normalised out in step 3 -- this is what catches the sheet (or
+   anything else in the mask) *moving* mid-burst. Pass `--force` to
+   persist anyway; the CLI/MCP report names exactly which check(s) were
+   overridden. `--dry-run` evaluates and reports without writing
+   anything or touching the live-applied map.
+6. **Persist and reload.** On success (or a forced capture),
+   `flatfield.npy` + a `flatfield.json` metadata sidecar are written
+   atomically under `<state_dir>/cameras/<slug>/`, and the live map on
+   the already-open camera is reloaded in place -- no daemon restart.
+7. **`--clear`** deletes both files and drops the live-applied map the
+   same way, immediately, no restart. Mutually exclusive with every
+   capture-only flag (refused client-side before any RPC).
+
+Presence and staleness surface next to calibration state in
+`aprilcam camera list` / `camera probe` (`flatfield=present|absent`,
+`flatfield-stale` on the same triggers that already stale a calibration:
+camera reopen, a resolution-changing config push) -- there is no
+separate "is my map still good" command to remember.
+
+Result on a white sheet: camera 3 spread 2.65x -> 1.48x (residual is the
+steep east edge), camera 5 1.32x -> 1.11x -- unchanged from the original
+manual measurement below, since the math is the same; only how it is
+triggered changed.
+
+### The old manual recipe (superseded, kept for history)
+
+Before sprint 037, building a map meant: lay a plain white sheet over the
+field, drop exposure by hand via `set_camera_config` and capture frames
+via `get_frame`, run
+[`assets/build_flatfield_2026-09-02.py`](assets/build_flatfield_2026-09-02.py)
+against hard-coded paths and a hard-coded field polygon to do the
+averaging/blur/gain math offline, then copy the resulting `.npy` into
+place and `reset_camera_config` to reload it. The script is kept only as
+a historical reference for the math it validated (see
+`calibration/flatfield.py`'s own module docstring, which names it as the
+scratch implementation sprint 037's real quality-gated version was
+tuned against) -- do not use it as the capture path; `aprilcam camera
+flatfield` above replaced it end to end.
 
 ## Gotchas
 
 - **A map is only valid for one mounting and one lighting state.** Move a
   camera or change the lights and it silently mis-corrects; nothing
-  detects that yet. Recapture is a two-minute job with the tarp.
+  detects this automatically yet (out of scope for sprint 037). Recapture
+  is a one-command job: `aprilcam camera flatfield <camera> --exposure N`.
+  A camera reopen or a resolution-changing config push does mark the
+  stored map `stale` in `camera list`/`probe` -- a prompt to recapture,
+  not a correctness check on the lighting itself.
 - Gain of ~2.7x in camera 3's dark corner amplifies sensor noise by the
   same factor. Tags still detect (the detector already flattens
   illumination internally for its own purposes); colour measurements
@@ -85,3 +142,7 @@ the steep east edge), camera 5 1.32x -> 1.11x.
 - The daemon-side `frame_dark` advisory and detector preprocessing see
   the *corrected* frame. If a map is badly wrong the symptom is a
   washed-out or blotchy `camera view`, not a detection error.
+- **Real cameras clip on a white sheet at their normal working
+  exposure.** Always pass a low `--exposure` override (see step 2 above)
+  -- capturing at the working exposure trips the quality gate's
+  clipping check almost every time.
