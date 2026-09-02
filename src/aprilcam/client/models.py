@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 from typing import Dict, Optional, Tuple
 
-from aprilcam.calibration.interfaces import Calibration, CalibrationResult
+from aprilcam.calibration.interfaces import Calibration, CalibrationResult, FlatFieldInfo, FlatFieldResult
 from aprilcam.config.interfaces import CameraConfig, CameraPosition, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import DaemonStatus, MountRegistration
@@ -77,6 +77,8 @@ __all__ = [
     "daemon_status_from_proto",
     "feature_from_proto",
     "features_from_proto",
+    "flatfield_info_from_proto",
+    "flatfield_result_from_proto",
     "image_frame_from_proto",
     "mount_parameters_from_proto",
     "playfield_definition_from_proto",
@@ -103,6 +105,11 @@ def camera_state_from_proto(msg: aprilcam_v2_pb2.CameraState) -> CameraState:
         calibrated=msg.calibrated,
         calibration_stale=msg.calibration_stale,
         frame_dark=msg.frame_dark,
+        # Sprint 037 ticket 004: plain bool, not HasField-guarded --
+        # mirrors daemon/rpc.py's _camera_state_to_proto exactly (same
+        # as calibrated/calibration_stale above).
+        flatfield_present=msg.flatfield_present,
+        flatfield_stale=msg.flatfield_stale,
         number=msg.number if msg.HasField("number") else None,
     )
 
@@ -462,6 +469,48 @@ def calibration_from_proto(msg: aprilcam_v2_pb2.Calibration) -> Calibration:
     for the mechanical check this fixes.
     """
     return Calibration(stale=msg.stale, calibrated_at=msg.calibrated_at, playfield=msg.playfield)
+
+
+def flatfield_result_from_proto(msg: aprilcam_v2_pb2.FlatFieldResult) -> FlatFieldResult:
+    """The client-side mirror of ``daemon/rpc.py``'s
+    ``_flatfield_result_to_proto`` (sprint 037 ticket 004) -- field for
+    field, in reverse, with the same uniform ``HasField()`` discipline
+    as every other converter in this module. ``gain`` is deliberately
+    never reconstructed here: the built gain map itself never crosses
+    this wire (see ``aprilcam_v2.proto``'s Flat-field header comment and
+    ``calibration.interfaces.FlatFieldResult``'s own docstring), so this
+    always returns ``gain=None`` -- the dataclass's own default, made
+    explicit here rather than left implicit."""
+    return FlatFieldResult(
+        succeeded=msg.succeeded,
+        spread_before=tuple(msg.spread_before),
+        spread_after=tuple(msg.spread_after),
+        reason=msg.reason if msg.HasField("reason") else None,
+        forced_checks=tuple(msg.forced_checks),
+        gain=None,
+    )
+
+
+def flatfield_info_from_proto(msg: aprilcam_v2_pb2.FlatFieldInfo) -> FlatFieldInfo:
+    """The client-side mirror of ``daemon/rpc.py``'s
+    ``_flatfield_info_to_proto`` (sprint 037 ticket 004) -- field for
+    field, in reverse. ``present``/``stale`` are plain (not
+    ``HasField``-guarded), mirroring ``Calibration.stale``;
+    ``captured_at``/``gain_min``/``gain_max`` round-trip through
+    ``HasField()`` -- absent means "not known," never a fabricated
+    zero. ``shape`` is ``repeated`` rather than ``optional`` (proto3
+    disallows ``optional repeated``, same as ``TagRecord.world_corners``
+    -- see this module's docstring): an empty ``repeated`` is the
+    unambiguous "absent" encoding, since a real stored array's shape is
+    never length 0."""
+    return FlatFieldInfo(
+        present=msg.present,
+        captured_at=msg.captured_at if msg.HasField("captured_at") else None,
+        shape=tuple(msg.shape) if msg.shape else None,
+        gain_min=msg.gain_min if msg.HasField("gain_min") else None,
+        gain_max=msg.gain_max if msg.HasField("gain_max") else None,
+        stale=msg.stale,
+    )
 
 
 #: Annotations (ticket 024-002, UC-28, specification.md section 9

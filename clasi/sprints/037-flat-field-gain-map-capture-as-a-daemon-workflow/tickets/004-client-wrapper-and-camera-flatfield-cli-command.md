@@ -1,10 +1,14 @@
 ---
-id: "004"
-title: "Client wrapper and camera flatfield CLI command"
-status: open
-use-cases: [SUC-001, SUC-002, SUC-003]
-depends-on: ["003"]
-github-issue: ""
+id: '004'
+title: Client wrapper and camera flatfield CLI command
+status: done
+use-cases:
+- SUC-001
+- SUC-002
+- SUC-003
+depends-on:
+- '003'
+github-issue: ''
 issue: flat-field-gain-map-capture-as-a-daemon-workflow.md
 completes_issue: false
 ---
@@ -48,23 +52,23 @@ same spread numbers (never omitted just because the gate failed);
 
 ## Acceptance Criteria
 
-- [ ] `GrpcDaemon.capture_flat_field`/`get_flatfield`/`clear_flat_field`
+- [x] `GrpcDaemon.capture_flat_field`/`get_flatfield`/`clear_flat_field`
       added, each request-build-then-converter-decode, matching
       `calibrate`/`get_calibration`'s existing shape.
-- [ ] `client/models.py`'s `flatfield_result_from_proto`/
+- [x] `client/models.py`'s `flatfield_result_from_proto`/
       `flatfield_info_from_proto` follow uniform `HasField()` discipline.
-- [ ] `camera_state_from_proto` reads the new `flatfield_present`/
+- [x] `camera_state_from_proto` reads the new `flatfield_present`/
       `flatfield_stale` fields.
-- [ ] `_reconstruct_error` maps `NoFieldMask`'s trailing metadata to the
+- [x] `_reconstruct_error` maps `NoFieldMask`'s trailing metadata to the
       typed exception client-side.
-- [ ] `cli/flatfield.py`'s `aprilcam camera flatfield <cam>` supports
+- [x] `cli/flatfield.py`'s `aprilcam camera flatfield <cam>` supports
       `--exposure`/`--frames`/`--clear`/`--dry-run`/`--force`/`-d`,
       refuses `--all` up front (mirroring `calibrate.py`'s refusal
       message), and refuses `--clear` combined with any capture-only
       flag before any RPC.
-- [ ] `camera flatfield` is wired into `cli/camera.py`'s subparser tree
+- [x] `camera flatfield` is wired into `cli/camera.py`'s subparser tree
       and appears in `aprilcam camera --help`.
-- [ ] Successful, refused, and `--dry-run` output all report per-channel
+- [x] Successful, refused, and `--dry-run` output all report per-channel
       spread before/after; `--dry-run` output is clearly labelled as not
       persisted.
 

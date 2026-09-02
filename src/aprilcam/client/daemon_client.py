@@ -9,8 +9,9 @@
 ticket 025-002; ``register_tag``/``unregister_tag``/
 ``list_tag_parameters`` added by ticket 025-004; ``get_guide`` added by
 ticket 025-007; ``stream_images``/``stream_tags`` added by ticket
-027-006, completing the interface): a typed
-wrapper over the generated gRPC stub for
+027-006, completing the interface; ``capture_flat_field``/
+``get_flatfield``/``clear_flat_field`` added by sprint 037 ticket 004):
+a typed wrapper over the generated gRPC stub for
 ``list_cameras``, ``probe_cameras``, ``get_frame``, ``status``,
 ``get_tags``, ``get_tag``, ``get_tag_history``, ``set_playfield``,
 ``get_playfield``, ``list_playfields``, ``set_camera_config``,
@@ -19,14 +20,15 @@ wrapper over the generated gRPC stub for
 ``replace_layer``, ``clear_annotations``, ``get_annotations``,
 ``find_feature``, ``register_tag``, ``unregister_tag``,
 ``list_tag_parameters``, ``get_guide``, ``stream_images``,
-``stream_tags``.
+``stream_tags``, ``capture_flat_field``, ``get_flatfield``,
+``clear_flat_field``.
 
-**All twenty-seven methods are implemented** -- ``daemon.interfaces.
-Daemon`` in full, as of this ticket. Nothing is inherited as-is from the
-base class any more; every method above overrides its
-``NotImplementedError`` stub. ``isinstance(client, Daemon)`` was always
-``True``; the difference this ticket makes is that it is now true of a
-*complete* implementation, not an honestly-partial one.
+**Every method of ``daemon.interfaces.Daemon`` is implemented**, as of
+this ticket. Nothing is inherited as-is from the base class any more;
+every method above overrides its ``NotImplementedError`` stub.
+``isinstance(client, Daemon)`` was always ``True``; the difference each
+of these tickets makes is that it stays true of a *complete*
+implementation, never an honestly-partial one.
 
 **Request marshalling lives here; response marshalling does not.** This
 module builds ``aprilcam_v2_pb2`` request messages directly (nothing
@@ -71,7 +73,7 @@ from typing import Dict, Optional, Tuple
 
 import grpc
 
-from aprilcam.calibration.interfaces import Calibration, CalibrationResult
+from aprilcam.calibration.interfaces import Calibration, CalibrationResult, FlatFieldInfo, FlatFieldResult
 from aprilcam.client.models import (
     annotation_set_from_proto,
     calibration_from_proto,
@@ -80,6 +82,8 @@ from aprilcam.client.models import (
     camera_states_from_proto,
     daemon_status_from_proto,
     features_from_proto,
+    flatfield_info_from_proto,
+    flatfield_result_from_proto,
     image_frame_from_proto,
     playfield_from_proto,
     playfields_from_proto,
@@ -99,6 +103,7 @@ from aprilcam.errors import (
     CameraNotPresent,
     ConnectionFailed,
     DaemonVersionMismatch,
+    NoFieldMask,
     NoPlayfieldLinked,
     NotCalibrated,
     UnknownCamera,
@@ -344,6 +349,8 @@ def _reconstruct_error(exc: grpc.RpcError, target: str) -> Exception:
         )
     if error_type == "NoPlayfieldLinked":
         return NoPlayfieldLinked(metadata.get("aprilcam-camera", "unknown"))
+    if error_type == "NoFieldMask":
+        return NoFieldMask(metadata.get("aprilcam-camera", "unknown"))
     if error_type == "UnknownGuide":
         return UnknownGuide(
             metadata.get("aprilcam-requested", ""),
@@ -564,6 +571,52 @@ class GrpcDaemon(Daemon):
         if not response.HasField("calibration"):
             return None
         return calibration_from_proto(response.calibration)
+
+    # -- flat-field gain map (sprint 037 ticket 004) ----------------------
+
+    def capture_flat_field(
+        self,
+        camera: str,
+        *,
+        exposure: Optional[float] = None,
+        frames: Optional[int] = None,
+        force: bool = False,
+        dry_run: bool = False,
+    ) -> FlatFieldResult:
+        """See ``daemon.interfaces.Daemon.capture_flat_field``. Request-
+        build-then-converter-decode, matching :meth:`calibrate`'s exact
+        shape -- ``exposure``/``frames`` are optional-scalar request
+        fields, only set when not ``None``, mirroring
+        ``get_tag_history``'s ``frames`` handling above; ``force``/
+        ``dry_run`` are plain bools, always set (``false`` already means
+        "not requested," no presence check needed, matching
+        ``Calibrate.estimate_intrinsics``'s convention)."""
+        request = aprilcam_v2_pb2.CaptureFlatFieldRequest(camera=camera, force=force, dry_run=dry_run)
+        if exposure is not None:
+            request.exposure = exposure
+        if frames is not None:
+            request.frames = frames
+        response = self._call(self._stub.CaptureFlatField, request)
+        return flatfield_result_from_proto(response.result)
+
+    def get_flatfield(self, camera: str) -> Optional[FlatFieldInfo]:
+        """See ``daemon.interfaces.Daemon.get_flatfield``. Absent (never
+        a fabricated/default ``FlatFieldInfo``) means this camera has
+        never had a gain map built, or it was cleared -- same presence
+        discipline as :meth:`get_calibration`."""
+        request = aprilcam_v2_pb2.GetFlatFieldRequest(camera=camera)
+        response = self._call(self._stub.GetFlatField, request)
+        if not response.HasField("flatfield"):
+            return None
+        return flatfield_info_from_proto(response.flatfield)
+
+    def clear_flat_field(self, camera: str) -> None:
+        """See ``daemon.interfaces.Daemon.clear_flat_field``. Request
+        carries only the camera token, mirroring
+        :meth:`reset_camera_config`'s shape -- there is nothing else for
+        a caller to supply."""
+        request = aprilcam_v2_pb2.ClearFlatFieldRequest(camera=camera)
+        self._call(self._stub.ClearFlatField, request)
 
     def put_annotation(self, playfield: str, annotation: Annotation) -> None:
         """Upsert one annotation on *playfield* (UC-28) -- the RPC face
