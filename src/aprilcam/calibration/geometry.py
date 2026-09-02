@@ -80,6 +80,7 @@ __all__ = [
     "pixel_to_world",
     "world_to_pixel",
     "deskewed_output_size",
+    "world_corners",
     "world_to_deskewed_pixel",
     "project_tag_to_field_plane",
     "apply_mount_offset",
@@ -190,6 +191,32 @@ def deskewed_output_size(
     out_w = max(1, round(width_cm * scale))
     out_h = max(1, round(height_cm * scale))
     return out_w, out_h
+
+
+def world_corners(
+    width_cm: float, height_cm: float
+) -> Tuple[WorldPoint, WorldPoint, WorldPoint, WorldPoint]:
+    """The field rectangle's four corners, A1-centred, in NW, NE, SE, SW
+    order -- matching the anchor invariant's own starting corner
+    (:func:`world_to_deskewed_pixel`'s docstring: image ``(0, 0)`` is the
+    field's north-west corner).
+
+    Shared helper (sprint 037 ticket 002), promoted out of
+    ``calibration/deskew.py``'s own module-private ``_world_corners`` --
+    that module still defines its own thin wrapper delegating here (no
+    behaviour change, same NW/NE/SE/SW order every existing caller
+    already relies on); ``daemon/service.py``'s flat-field field-interior
+    mask derivation is the second caller this promotion exists for, so
+    the corner math is defined exactly once rather than duplicated.
+    """
+    half_w = width_cm / 2.0
+    half_h = height_cm / 2.0
+    return (
+        WorldPoint(x=-half_w, y=half_h),  # NW
+        WorldPoint(x=half_w, y=half_h),  # NE
+        WorldPoint(x=half_w, y=-half_h),  # SE
+        WorldPoint(x=-half_w, y=-half_h),  # SW
+    )
 
 
 def world_to_deskewed_pixel(

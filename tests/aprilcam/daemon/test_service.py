@@ -41,8 +41,9 @@ import grpc
 import numpy as np
 import pytest
 
-from aprilcam.calibration.calibration import Calibration
+from aprilcam.calibration.calibration import Calibration, Calibrator
 from aprilcam.calibration.geometry import apply_mount_offset
+from aprilcam.calibration.interfaces import FlatFieldInfo, FlatFieldResult
 from aprilcam.camera import identity as identity_module
 from aprilcam.camera.camera import FAILURE_THRESHOLD, Camera
 from aprilcam.camera.discovery import CameraDiscovery
@@ -59,6 +60,7 @@ from aprilcam.daemon.lifecycle import DaemonLifecycle
 from aprilcam.daemon.rpc import build_server
 from aprilcam.daemon.service import (
     CALIBRATION_FRAME_COUNT,
+    FLATFIELD_FRAME_COUNT,
     VALID_ENCODINGS,
     _MAX_ANNOTATIONS_PER_LAYER,
     _MAX_POINTS_PER_SHAPE,
@@ -68,6 +70,7 @@ from aprilcam.errors import (
     AnnotationLimitExceeded,
     CameraNotPresent,
     MalformedDocument,
+    NoFieldMask,
     NoPlayfieldLinked,
     NotCalibrated,
     UnknownCamera,
@@ -5857,3 +5860,521 @@ def test_flatfield_path_for_is_state_dir_cameras_slug_flatfield_npy(service, dir
     assert service._flatfield_path_for("cam-x") == (
         directories.state_dir / "cameras" / "cam-x" / "flatfield.npy"
     )
+
+
+# ---------------------------------------------------------------------------
+# capture_flat_field / get_flatfield / clear_flat_field (sprint 037,
+# ticket 002) -- DaemonService orchestration around ticket 001's
+# FlatFieldCapturer: mask derivation, exposure push/restore, persistence,
+# staleness. The gain-map math itself (quality gates, spread) is
+# calibration/flatfield.py's own test scope (test_flatfield.py); these
+# tests mostly pass force=True so a deterministic quality-gate pass/fail
+# never depends on this ticket's own frame content, except where a test's
+# whole point is the refusal path.
+# ---------------------------------------------------------------------------
+
+
+def _calibration_for_main_playfield(slug: str = "test-camera") -> Calibration:
+    """A real ``Calibration`` solved against ``main_playfield_definition()``
+    via ``Calibrator`` directly -- avoids plumbing a second, unrelated
+    frame queue through a full ``DaemonService.calibrate()`` RPC just to
+    get a stored calibration for a flat-field mask-derivation test."""
+    definition = main_playfield_definition()
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    calibrator = Calibrator(
+        get_camera_config=lambda name: CameraConfig(
+            name=name, playfield="main-playfield", settings={}
+        ),
+        get_playfield=lambda name: definition if name == "main-playfield" else None,
+        capture_frames=lambda name: [frame],
+    )
+    result = calibrator.calibrate(slug)
+    assert result.succeeded is True
+    calibration = calibrator.get_calibration(slug)
+    assert calibration is not None
+    return calibration
+
+
+def _uniform_frame(value: int = 128) -> np.ndarray:
+    """A flat, constant-colour frame the same canvas size
+    ``render_playfield_frame``'s default produces -- content-neutral for
+    every test below that only cares about mask *derivation*, not the
+    gain-map math itself."""
+    h, w = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS).shape[:2]
+    return np.full((h, w, 3), value, dtype=np.uint8)
+
+
+def _flatfield_paths(directories: Directories, slug: str) -> tuple:
+    cam_dir = directories.state_dir / "cameras" / slug
+    return cam_dir / "flatfield.npy", cam_dir / "flatfield.json"
+
+
+def _open_camera_with_frames_and_flatfield_path(
+    registry: CameraRegistry,
+    directories: Directories,
+    frames: List[np.ndarray],
+    *,
+    hardware_key: str = "hw:ff-live",
+    device_name: str = "FlatField Live Camera",
+):
+    """Like ``_open_camera_with_frames``, but wires ``flatfield_path`` the
+    way :meth:`DaemonService._camera_for` always does in production --
+    needed only by the handful of tests below that peek at ``Camera.
+    _flatfield`` directly to prove a reload actually took effect live.
+    Every other flat-field test above uses the plain
+    ``_open_camera_with_frames``/``_service_with_camera`` pair, since
+    those never read this attribute back."""
+    identity = _identity(hardware_key, device_name)
+    slug = registry.resolve(identity)
+    number = registry.get(slug).number
+    backend = FakeBackend(read_queue=list(frames))
+    npy_path, _json_path = _flatfield_paths(directories, slug)
+    cam = Camera(slug, backend, number=number, flatfield_path=npy_path)
+    cam.open()
+    return identity, slug, cam, backend
+
+
+def test_capture_flat_field_uses_stored_calibration_for_the_mask_and_persists(
+    directories, registry
+):
+    identity, slug, cam, backend = _open_camera_with_frames(
+        registry, [_uniform_frame() for _ in range(FLATFIELD_FRAME_COUNT + 2)]
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    with service._lock:  # noqa: SLF001 - test-only direct calibration injection
+        service._calibrations[slug] = _calibration_for_main_playfield(slug)
+
+    result = service.capture_flat_field(slug, force=True)
+
+    assert result.succeeded is True
+    assert result.gain is not None
+
+    npy_path, json_path = _flatfield_paths(directories, slug)
+    assert npy_path.exists()
+    assert json_path.exists()
+
+    info = service.get_flatfield(slug)
+    assert info is not None
+    assert info.present is True
+    assert info.captured_at is not None
+    assert info.stale is False
+    assert info.shape == tuple(result.gain.shape)
+
+
+def test_capture_flat_field_falls_back_to_detected_aruco_corners_when_uncalibrated(
+    directories, registry
+):
+    marker_frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    burst_frames = [_uniform_frame() for _ in range(FLATFIELD_FRAME_COUNT + 2)]
+    identity, slug, cam, backend = _open_camera_with_frames(
+        registry, [marker_frame] + burst_frames
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    # Deliberately no stored calibration -- forces the ArUco-corner
+    # detection fallback to actually run.
+    assert service.get_calibration(slug) is None
+
+    result = service.capture_flat_field(slug, force=True)
+
+    assert result.succeeded is True
+    assert service.get_flatfield(slug) is not None
+
+
+def test_capture_flat_field_raises_no_field_mask_with_neither_calibration_nor_playfield(
+    service, held_camera
+):
+    _, slug, _ = held_camera
+
+    with pytest.raises(NoFieldMask):
+        service.capture_flat_field(slug)
+
+    assert service.get_flatfield(slug) is None
+
+
+def test_capture_flat_field_raises_no_field_mask_when_playfield_linked_but_no_corners_detected(
+    directories, registry
+):
+    identity, slug, cam, backend = _open_camera_with_frames(registry, [_frame()])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+
+    with pytest.raises(NoFieldMask):
+        service.capture_flat_field(slug)
+
+
+def test_capture_flat_field_pushes_and_restores_exposure_on_a_forced_success(
+    directories, registry
+):
+    identity, slug, cam, backend = _open_camera_with_frames(
+        registry, [_uniform_frame() for _ in range(FLATFIELD_FRAME_COUNT + 2)]
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(
+        CameraConfig(name=slug, playfield="main-playfield", settings={"exposure": 50.0})
+    )
+    with service._lock:  # noqa: SLF001
+        service._calibrations[slug] = _calibration_for_main_playfield(slug)
+
+    pushed = []
+    original_set = backend.set_property
+
+    def _spy_set(name, value):
+        pushed.append((name, value))
+        return original_set(name, value)
+
+    backend.set_property = _spy_set  # type: ignore[method-assign]
+
+    result = service.capture_flat_field(slug, exposure=5.0, force=True)
+
+    assert result.succeeded is True
+    assert backend.get_property("exposure") == 50.0  # restored
+    exposures_pushed = [value for name, value in pushed if name == "exposure"]
+    assert exposures_pushed == [5.0, 50.0]
+
+
+def test_capture_flat_field_refusal_still_restores_exposure_and_writes_nothing(
+    directories, registry
+):
+    """A frame saturated at the sensor ceiling inside the mask trips the
+    in-field-clipping quality gate deterministically (``calibration.
+    flatfield.SATURATION_VALUE``) -- exercised here unforced, so the real
+    refusal path (not ``force=True``) restores the exposure override and
+    leaves no filesystem write."""
+    saturated = np.full(_uniform_frame().shape, 255, dtype=np.uint8)
+    identity, slug, cam, backend = _open_camera_with_frames(
+        registry, [saturated for _ in range(FLATFIELD_FRAME_COUNT + 2)]
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(
+        CameraConfig(name=slug, playfield="main-playfield", settings={"exposure": 50.0})
+    )
+    with service._lock:  # noqa: SLF001
+        service._calibrations[slug] = _calibration_for_main_playfield(slug)
+
+    result = service.capture_flat_field(slug, exposure=5.0)
+
+    assert result.succeeded is False
+    assert backend.get_property("exposure") == 50.0
+
+    npy_path, json_path = _flatfield_paths(directories, slug)
+    assert not npy_path.exists()
+    assert not json_path.exists()
+    assert service.get_flatfield(slug) is None
+
+
+def test_capture_flat_field_restores_exposure_even_when_the_capturer_raises(
+    directories, registry
+):
+    identity, slug, cam, backend = _open_camera_with_frames(
+        registry, [_uniform_frame() for _ in range(FLATFIELD_FRAME_COUNT + 2)]
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(
+        CameraConfig(name=slug, playfield="main-playfield", settings={"exposure": 50.0})
+    )
+    with service._lock:  # noqa: SLF001
+        service._calibrations[slug] = _calibration_for_main_playfield(slug)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated flat-field build failure")
+
+    service._flatfield_capturer.build = _boom  # type: ignore[method-assign]  # noqa: SLF001
+
+    with pytest.raises(RuntimeError, match="simulated flat-field build failure"):
+        service.capture_flat_field(slug, exposure=5.0)
+
+    assert backend.get_property("exposure") == 50.0
+
+
+def test_capture_flat_field_dry_run_writes_nothing_and_does_not_change_the_live_map(
+    directories, registry
+):
+    identity, slug, cam, backend = _open_camera_with_frames(
+        registry, [_uniform_frame() for _ in range(FLATFIELD_FRAME_COUNT + 2)]
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    with service._lock:  # noqa: SLF001
+        service._calibrations[slug] = _calibration_for_main_playfield(slug)
+
+    result = service.capture_flat_field(slug, force=True, dry_run=True)
+
+    assert result.succeeded is True
+    assert result.gain is not None
+
+    npy_path, json_path = _flatfield_paths(directories, slug)
+    assert not npy_path.exists()
+    assert not json_path.exists()
+    assert service.get_flatfield(slug) is None
+    assert cam._flatfield is None  # noqa: SLF001 - never reloaded
+
+
+def _gradient_frame() -> np.ndarray:
+    """A left-to-right brightness ramp, same canvas size as
+    ``render_playfield_frame``'s default -- unlike :func:`_uniform_frame`,
+    this produces a genuinely spatially-varying (non-1.0-everywhere) gain
+    map, needed by the one test below that proves a subsequent raw read
+    actually comes back pixel-corrected, not merely multiplied by a
+    uniform no-op gain of 1.0."""
+    h, w = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS).shape[:2]
+    ramp = np.linspace(60.0, 200.0, w, dtype=np.float32)
+    frame = np.repeat(np.tile(ramp, (h, 1))[:, :, None], 3, axis=2)
+    return frame.astype(np.uint8)
+
+
+def test_capture_flat_field_persists_and_a_freshly_constructed_service_reloads_it(
+    directories, registry
+):
+    identity, slug, cam, backend = _open_camera_with_frames_and_flatfield_path(
+        registry, directories, [_gradient_frame() for _ in range(FLATFIELD_FRAME_COUNT + 2)]
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    with service._lock:  # noqa: SLF001
+        service._calibrations[slug] = _calibration_for_main_playfield(slug)
+    assert cam._flatfield is None  # noqa: SLF001 - nothing loaded yet
+
+    result = service.capture_flat_field(slug, force=True)
+    assert result.succeeded is True
+    info = service.get_flatfield(slug)
+    assert info is not None
+
+    # Proves the reload actually took effect live, with no daemon
+    # restart and no explicit second call -- capture_flat_field's own
+    # persistence step already reloaded it.
+    assert cam._flatfield is not None  # noqa: SLF001
+
+    # AC: "verified via a subsequent get_frame/read on the same
+    # held-open camera" -- a fresh, differently-valued raw frame read
+    # right after capture comes back gain-corrected (not bit-identical
+    # to what the backend actually handed out), proving the reload is
+    # live, not merely an in-memory flag.
+    raw_next = np.full_like(_uniform_frame(), 200)
+    backend._queue = [raw_next]  # noqa: SLF001 - append one more frame to read
+    corrected = cam.read()
+    assert corrected is not None
+    assert not np.array_equal(corrected, raw_next)
+
+    discovery2 = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(),
+        identity_source=lambda: {},
+        backend_factory=lambda index: FakeBackend(),
+    )
+    service2 = DaemonService(
+        registry=registry, discovery=discovery2, directories=directories, identity_source=lambda: {}
+    )
+    reloaded = service2.get_flatfield(slug)
+    assert reloaded == info
+
+
+def test_load_flatfields_reports_present_true_captured_at_none_for_an_npy_with_no_sidecar(
+    directories, registry
+):
+    """The manual-recipe migration case (``docs/knowledge/flat-field-gain-map.md``):
+    a ``flatfield.npy`` installed by hand, with no ``flatfield.json``
+    sidecar, must never report a fabricated ``captured_at``."""
+    identity = _identity("hw:manual-ff", "Manual FlatField Camera")
+    slug = registry.resolve(identity)
+    npy_path = directories.state_dir / "cameras" / slug / "flatfield.npy"
+    npy_path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(npy_path, np.ones((4, 4), dtype=np.float32))
+
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(),
+        identity_source=lambda: {},
+        backend_factory=lambda index: FakeBackend(),
+    )
+    service = DaemonService(
+        registry=registry, discovery=discovery, directories=directories, identity_source=lambda: {}
+    )
+
+    info = service.get_flatfield(slug)
+
+    assert info is not None
+    assert info.present is True
+    assert info.captured_at is None
+
+
+def test_get_flatfield_returns_none_for_a_camera_never_captured(service, held_camera):
+    _, slug, _ = held_camera
+
+    assert service.get_flatfield(slug) is None
+
+
+def test_clear_flat_field_deletes_files_and_drops_the_live_map(directories, registry):
+    identity, slug, cam, backend = _open_camera_with_frames_and_flatfield_path(
+        registry, directories, [_uniform_frame() for _ in range(FLATFIELD_FRAME_COUNT + 2)]
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    with service._lock:  # noqa: SLF001
+        service._calibrations[slug] = _calibration_for_main_playfield(slug)
+    assert service.capture_flat_field(slug, force=True).succeeded is True
+    assert cam._flatfield is not None  # noqa: SLF001
+
+    service.clear_flat_field(slug)
+
+    npy_path, json_path = _flatfield_paths(directories, slug)
+    assert not npy_path.exists()
+    assert not json_path.exists()
+    assert service.get_flatfield(slug) is None
+    assert cam._flatfield is None  # noqa: SLF001 - live map dropped, no restart
+
+
+def test_clear_flat_field_on_an_absent_flatfield_is_a_no_op(service, held_camera):
+    _, slug, _ = held_camera
+
+    service.clear_flat_field(slug)  # must not raise
+
+    assert service.get_flatfield(slug) is None
+
+
+# ---------------------------------------------------------------------------
+# Flat-field staleness (sprint 037): the same two triggers ticket 023-007
+# already established for calibration -- a successful self-heal/explicit
+# reopen, and a resolution-changing set_camera_config push.
+# ---------------------------------------------------------------------------
+
+
+def test_camera_reopen_via_self_heal_marks_the_flatfield_stale_through_real_wiring(
+    directories, registry
+):
+    """Mirrors ``test_camera_reopen_via_self_heal_marks_the_calibration_stale_through_real_wiring``
+    exactly, through the same real ``_camera_for``-constructed ``Camera``
+    wiring -- a directly-injected ``Camera`` (``_open_camera_with_frames``)
+    would bypass the ``on_reopen`` hook entirely."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity = _identity("hw:ff-reopen", "FlatField Reopen Camera")
+    slug = registry.resolve(identity)
+    backend = FakeBackend(read_queue=[frame] * CALIBRATION_FRAME_COUNT)
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(),
+        identity_source=lambda: {0: identity},
+        backend_factory=lambda index: backend,
+    )
+    service = DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        identity_source=lambda: {0: identity},
+        backend_factory=lambda index: backend,
+    )
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True
+
+    # Seed a not-yet-stale flat-field entry directly -- capture_flat_field's
+    # own orchestration is covered by its own tests above; this test only
+    # needs an entry for the reopen trigger to flip.
+    with service._lock:  # noqa: SLF001
+        service._flatfields[slug] = FlatFieldInfo(present=True, captured_at=time.time())
+
+    cam = service._camera_for(slug)  # noqa: SLF001 - same Camera calibrate() opened
+    opens_before = backend.open_calls
+    for _ in range(FAILURE_THRESHOLD):
+        cam.read()  # queue is now empty -- every read fails; the 5th triggers self-heal
+
+    assert backend.open_calls == opens_before + 1  # the reopen genuinely happened
+    info = service.get_flatfield(slug)
+    assert info is not None
+    assert info.stale is True
+
+
+def test_a_resolution_changing_set_camera_config_push_marks_the_flatfield_stale(
+    directories, registry
+):
+    identity, slug, cam, backend = _open_camera_with_frames(registry, [_frame()])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_camera_config(
+        CameraConfig(
+            name=slug, playfield=None, settings={"frame_width": 640.0, "frame_height": 480.0}
+        )
+    )
+    with service._lock:  # noqa: SLF001
+        service._flatfields[slug] = FlatFieldInfo(present=True, captured_at=time.time())
+
+    service.set_camera_config(
+        CameraConfig(
+            name=slug, playfield=None, settings={"frame_width": 1280.0, "frame_height": 480.0}
+        )
+    )
+
+    info = service.get_flatfield(slug)
+    assert info is not None
+    assert info.stale is True
+
+
+def test_a_non_resolution_set_camera_config_push_does_not_mark_the_flatfield_stale(
+    directories, registry
+):
+    identity, slug, cam, backend = _open_camera_with_frames(registry, [_frame()])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_camera_config(
+        CameraConfig(
+            name=slug, playfield=None, settings={"frame_width": 640.0, "frame_height": 480.0}
+        )
+    )
+    with service._lock:  # noqa: SLF001
+        service._flatfields[slug] = FlatFieldInfo(present=True, captured_at=time.time())
+
+    service.set_camera_config(
+        CameraConfig(name=slug, playfield=None, settings={"exposure": 12.0})
+    )
+
+    info = service.get_flatfield(slug)
+    assert info is not None
+    assert info.stale is False
+
+
+def test_list_cameras_overlays_flatfield_present_and_stale_for_a_held_camera(
+    directories, registry
+):
+    identity, slug, cam, backend = _open_camera_with_frames(
+        registry, [_uniform_frame() for _ in range(FLATFIELD_FRAME_COUNT + 2)]
+    )
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    with service._lock:  # noqa: SLF001
+        service._calibrations[slug] = _calibration_for_main_playfield(slug)
+    assert service.capture_flat_field(slug, force=True).succeeded is True
+
+    states = {s.name: s for s in service.list_cameras()}
+
+    assert states[slug].flatfield_present is True
+    assert states[slug].flatfield_stale is False
+
+
+def test_list_cameras_reports_flatfield_absent_for_a_not_held_registered_camera(
+    directories, registry
+):
+    identity = _identity("hw:ff-absent", "FlatField Absent Camera")
+    slug = registry.resolve(identity)
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(),
+        identity_source=lambda: {},
+        backend_factory=lambda index: FakeBackend(),
+    )
+    service = DaemonService(
+        registry=registry, discovery=discovery, directories=directories, identity_source=lambda: {}
+    )
+
+    states = {s.name: s for s in service.list_cameras()}
+
+    assert states[slug].flatfield_present is False
+    assert states[slug].flatfield_stale is False

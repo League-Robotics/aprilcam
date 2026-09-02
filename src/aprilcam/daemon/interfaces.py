@@ -93,7 +93,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterator, Optional
 
-from aprilcam.calibration.interfaces import Calibration, CalibrationResult
+from aprilcam.calibration.interfaces import Calibration, CalibrationResult, FlatFieldInfo, FlatFieldResult
 from aprilcam.config.interfaces import CameraConfig, Feature, PlayfieldDefinition
 from aprilcam.playfield.interfaces import Playfield
 from aprilcam.types import (
@@ -283,6 +283,77 @@ class Daemon:
 
     def get_calibration(self, camera: str) -> Optional[Calibration]:
         raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.get_calibration")
+
+    # -- flat-field gain map (sprint 037) ---------------------------------
+
+    def capture_flat_field(
+        self,
+        camera: str,
+        *,
+        exposure: Optional[float] = None,
+        frames: Optional[int] = None,
+        force: bool = False,
+        dry_run: bool = False,
+    ) -> FlatFieldResult:
+        """Build and (unless refused or *dry_run*) persist a per-camera
+        flat-field gain map from a fresh capture burst.
+
+        All vision/math happens here in the daemon, on this camera's
+        current view of its field -- the caller sends a command, not
+        pixels, exactly like :meth:`calibrate`. The field-interior mask
+        the gain map is built against is derived from whatever this
+        daemon already knows about *camera*: its stored
+        :class:`~aprilcam.calibration.interfaces.Calibration` when one
+        exists, else its linked playfield's required ArUco corners
+        detected live. Neither is available:
+        :class:`~aprilcam.errors.NoFieldMask` is raised **before any
+        capture burst is taken**, mirroring :meth:`calibrate`'s
+        ``NoPlayfieldLinked`` precondition discipline exactly.
+
+        *exposure*, when given, is pushed as a temporary override before
+        the burst and the camera's prior stored/live configuration is
+        restored afterward -- on success, a refusal, or an exception
+        alike -- so a capture attempt never leaves a camera parked at the
+        low exposure it needed only for the reference frames.
+
+        A failing quality-gate check is **explicit failure, not an
+        error**: this returns ``FlatFieldResult(succeeded=False,
+        reason=...)``, the same "explicit failure is data" contract
+        :class:`~aprilcam.calibration.interfaces.CalibrationResult`
+        already uses, never raises for that reason. *force* overrides a
+        failing check and still persists the result, naming what it
+        overrode via ``FlatFieldResult.forced_checks``. *dry_run*
+        evaluates and reports without writing anything to disk or
+        changing the live-applied map.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement Daemon.capture_flat_field"
+        )
+
+    def get_flatfield(self, camera: str) -> Optional[FlatFieldInfo]:
+        """This camera's current flat-field gain-map metadata, or
+        ``None`` when it has never had one built (or it was
+        :meth:`clear_flat_field`\\ d) -- never a fabricated/default
+        record, mirroring :meth:`get_calibration`'s own "``None`` means
+        never, not a zero-valued record" discipline.
+
+        Answered from an in-memory cache reloaded at daemon construction
+        (UC-01: file-backed state survives a restart, like calibration).
+        A pre-existing ``flatfield.npy`` from the manual capture recipe,
+        with no ``flatfield.json`` sidecar, reports ``present=True,
+        captured_at=None`` -- never a fabricated timestamp.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.get_flatfield")
+
+    def clear_flat_field(self, camera: str) -> None:
+        """Delete *camera*'s stored gain map and metadata sidecar, and
+        drop the live-applied map on a held-open camera -- no daemon
+        restart, mirroring how a fresh ``flatfield.npy`` takes effect
+        live via :meth:`capture_flat_field`. Absent files are a no-op,
+        matching :meth:`unregister_tag`'s established
+        no-op-on-already-clear convention.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.clear_flat_field")
 
     # -- perception ------------------------------------------------------
 

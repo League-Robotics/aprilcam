@@ -95,9 +95,11 @@ import cv2 as cv
 import numpy as np
 
 from aprilcam import guides
+from aprilcam.calibration import geometry
 from aprilcam.calibration.calibration import Calibration, Calibrator
 from aprilcam.calibration.deskew import Deskewer
-from aprilcam.calibration.interfaces import CalibrationResult
+from aprilcam.calibration.flatfield import FlatFieldCapturer
+from aprilcam.calibration.interfaces import CalibrationResult, FlatFieldInfo, FlatFieldResult
 from aprilcam.camera.backends import CaptureBackend, ControlBackend, resolve_capture_backend
 from aprilcam.camera.backends.libcamera import LibcameraDevice
 from aprilcam.camera.backends.opencv_backend import OpenCVBackend
@@ -122,6 +124,7 @@ from aprilcam.daemon.streaming import (
 from aprilcam.errors import (
     AnnotationLimitExceeded,
     CameraNotPresent,
+    NoFieldMask,
     NotCalibrated,
     UnknownCamera,
     UnknownGuide,
@@ -145,6 +148,7 @@ from aprilcam.types import (
     TagRecord,
     WorldPoint,
 )
+from aprilcam.vision.detector import TagDetector
 
 __all__ = ["DaemonService"]
 
@@ -166,6 +170,19 @@ MOUNTS_FILENAME = "registry.json"
 #: the camera fails to deliver (``Camera.read()`` returning ``None``)
 #: are simply not counted towards this budget's worth of usable frames.
 CALIBRATION_FRAME_COUNT = 30
+
+#: Name every camera's flat-field metadata sidecar gets under
+#: ``<state_dir>/cameras/<camera>/`` (sprint 037), next to
+#: ``camera.camera.FLATFIELD_FILENAME``'s ``flatfield.npy`` -- the same
+#: two-file shape ``calibration.json`` already established.
+FLATFIELD_INFO_FILENAME = "flatfield.json"
+
+#: How many frames :meth:`DaemonService._capture_flatfield_frames` reads
+#: for one :meth:`DaemonService.capture_flat_field` call, absent an
+#: explicit ``frames=`` override -- ``docs/knowledge/flat-field-gain-map.md``'s
+#: manual recipe used "4-8 frames per camera"; 6 sits in the middle of
+#: that confirmed-working range.
+FLATFIELD_FRAME_COUNT = 6
 
 logger = logging.getLogger(__name__)
 
@@ -320,6 +337,55 @@ def _mount_params_from_dict(data: object) -> MountParameters:
     )
 
 
+# -- flat-field metadata sidecar (de)serialization (sprint 037) --------------
+#
+# ``FlatFieldInfo`` has no ``to_dict``/``from_dict`` of its own by design
+# (its own docstring: "persistence itself... is daemon/service.py's job",
+# the same division ``Calibration.to_dict``/``from_dict`` establishes for
+# ``calibration.json``). These two module-level functions are
+# ``flatfield.json``'s inline (de)serialization, mirroring
+# ``_mount_params_to_dict``/``_mount_params_from_dict``'s shape immediately
+# above (omit an optional field entirely rather than writing JSON ``null``;
+# raise on malformed input for the caller to treat as one corrupt record).
+
+
+def _flatfield_info_to_dict(info: FlatFieldInfo) -> Dict[str, object]:
+    """Serialize one :class:`FlatFieldInfo` for ``flatfield.json``."""
+    data: Dict[str, object] = {"present": info.present, "stale": info.stale}
+    if info.captured_at is not None:
+        data["captured_at"] = info.captured_at
+    if info.shape is not None:
+        data["shape"] = list(info.shape)
+    if info.gain_min is not None:
+        data["gain_min"] = info.gain_min
+    if info.gain_max is not None:
+        data["gain_max"] = info.gain_max
+    return data
+
+
+def _flatfield_info_from_dict(data: object) -> FlatFieldInfo:
+    """The inverse of :func:`_flatfield_info_to_dict`. Raises
+    ``TypeError``/``KeyError``/``ValueError`` on a malformed record --
+    :meth:`DaemonService._load_flatfields` treats that the same way
+    :meth:`DaemonService._load_mounts` treats a malformed mount entry:
+    logged and skipped (here, falling back to the bare "present, no
+    metadata" record a missing sidecar itself produces), never a reason
+    to fail daemon construction."""
+    if not isinstance(data, dict):
+        raise TypeError(f"flatfield info entry is not a JSON object: {data!r}")
+    shape_raw = data.get("shape")
+    return FlatFieldInfo(
+        present=bool(data.get("present", True)),
+        captured_at=(
+            float(data["captured_at"]) if data.get("captured_at") is not None else None
+        ),
+        shape=tuple(int(x) for x in shape_raw) if shape_raw is not None else None,
+        gain_min=float(data["gain_min"]) if data.get("gain_min") is not None else None,
+        gain_max=float(data["gain_max"]) if data.get("gain_max") is not None else None,
+        stale=bool(data.get("stale", False)),
+    )
+
+
 class DaemonService(Daemon):
     """Concrete ``daemon.interfaces.Daemon`` (this sprint's slice only).
 
@@ -409,6 +475,23 @@ class DaemonService(Daemon):
         ``daemon.__main__.build()``, sprint.md Architecture "Modules"
         point 1). Defaults to a real ``config.loader.ConfigLoader``;
         tests substitute their own when they need to.
+    flatfield_capturer:
+        The gain-map-building engine (``calibration.flatfield.
+        FlatFieldCapturer``, sprint 037) that :meth:`capture_flat_field`
+        delegates all pixel math to -- the identical
+        orchestration-vs-math split :attr:`calibrator` above establishes
+        for ``Calibrator``. Defaults to a real ``FlatFieldCapturer``;
+        tests that want pinned tuning constants (e.g. a lower quality-gate
+        threshold to force a deterministic refusal) construct their own
+        and pass it here instead.
+    flatfield_detector_factory:
+        ``() -> vision.detector.TagDetector``, used to build the one
+        detector :meth:`_mask_from_aruco` runs when a camera has no
+        stored calibration to derive its flat-field field-interior mask
+        from -- the same "() -> TagDetector" shape ``Calibrator``'s own
+        ``detector_factory`` parameter uses. Defaults to a real
+        ``TagDetector``; overridable for headless tests exactly like
+        every other factory parameter above.
     """
 
     def __init__(
@@ -427,6 +510,8 @@ class DaemonService(Daemon):
         detection: Optional[DetectionEngine] = None,
         calibrator: Optional[Calibrator] = None,
         config_loader: Optional[ConfigLoaderIface] = None,
+        flatfield_capturer: Optional[FlatFieldCapturer] = None,
+        flatfield_detector_factory: Callable[[], TagDetector] = TagDetector,
     ) -> None:
         self._registry = registry
         self._discovery = discovery
@@ -529,6 +614,19 @@ class DaemonService(Daemon):
         self._calibrations: Dict[str, Calibration] = {}
         self._load_calibrations()
         self._load_mounts()
+        self._flatfield_capturer = (
+            flatfield_capturer if flatfield_capturer is not None else FlatFieldCapturer()
+        )
+        self._flatfield_detector = flatfield_detector_factory()
+        # slug -> FlatFieldInfo (sprint 037): the eighth in-memory store,
+        # guarded by the same self._lock -- disk-backed the same way
+        # self._calibrations is (see _persist_flatfield/_load_flatfields).
+        # Only ever holds an entry for a camera that currently has a
+        # flatfield.npy on disk; get_flatfield/clear_flat_field's "None
+        # means never built, or cleared" contract falls out of that
+        # invariant directly rather than needing a separate flag.
+        self._flatfields: Dict[str, FlatFieldInfo] = {}
+        self._load_flatfields()
 
     # -- beyond the interface: CameraDiscovery's active_slugs wiring -----
 
@@ -575,12 +673,19 @@ class DaemonService(Daemon):
         ``playfield view`` all read the real calibration correctly. Pure
         display/state-reporting bug: the calibration itself was never
         wrong, only what this method told a caller about it.
+
+        ``flatfield_present``/``flatfield_stale`` (sprint 037) are
+        overlaid the same way, from :meth:`get_flatfield` -- the same
+        "daemon-level concern, not something ``Camera.state`` knows
+        about" division ``calibrated``/``calibration_stale`` already
+        establish, applied to the ``self._flatfields`` store instead.
         """
         present = self._discovery.known_present()
         states = []
         for record in self._registry.records():
             playfield = self._playfield_link(record.slug)
             calibrated, calibration_stale = self._calibration_flags(record.slug)
+            flatfield_present, flatfield_stale = self._flatfield_flags(record.slug)
             held = self._cameras.get(record.slug)
             if held is not None:
                 states.append(
@@ -589,6 +694,8 @@ class DaemonService(Daemon):
                         playfield=playfield,
                         calibrated=calibrated,
                         calibration_stale=calibration_stale,
+                        flatfield_present=flatfield_present,
+                        flatfield_stale=flatfield_stale,
                     )
                 )
                 continue
@@ -601,6 +708,8 @@ class DaemonService(Daemon):
                     playfield=playfield,
                     calibrated=calibrated,
                     calibration_stale=calibration_stale,
+                    flatfield_present=flatfield_present,
+                    flatfield_stale=flatfield_stale,
                     number=record.number,
                 )
             )
@@ -617,6 +726,16 @@ class DaemonService(Daemon):
         if calibration is None:
             return False, False
         return True, calibration.stale
+
+    def _flatfield_flags(self, slug: str) -> Tuple[bool, bool]:
+        """``(flatfield_present, flatfield_stale)`` for *slug*, from
+        whatever :meth:`get_flatfield` currently holds -- ``(False,
+        False)`` for a camera with no gain map built yet, mirroring
+        :meth:`_calibration_flags` exactly (sprint 037)."""
+        info = self.get_flatfield(slug)
+        if info is None:
+            return False, False
+        return info.present, info.stale
 
     def probe_cameras(self) -> ProbeReport:
         """See ``daemon.interfaces.Daemon.probe_cameras``. Pure
@@ -1236,13 +1355,44 @@ class DaemonService(Daemon):
         returns the previous state") -- storing first and applying
         after would leave the stored document ahead of the hardware on
         exactly the failure path this rule exists to prevent.
+
+        **Flags a resolution-changing push as flat-field-stale (sprint
+        037).** A flat-field gain map is pixel-for-pixel tied to the
+        resolution it was captured at (``Camera._apply_flatfield``
+        already skips, with a warning, a map whose shape does not match
+        the live frame) -- comparing *config*'s ``frame_width``/
+        ``frame_height`` against whatever this daemon previously held for
+        this camera (:meth:`_is_resolution_change`) and calling
+        :meth:`_mark_flatfield_stale` on a real change is the same
+        "advisory, still applied" staleness signal :meth:`_on_camera_reopen`
+        already raises for a reopen -- never a refusal to serve frames,
+        just a flag a client can act on.
         """
         with self._lock:
             cam = self._cameras.get(config.name)
+            prior = self._camera_configs.get(config.name)
         if cam is not None:
             cam.apply_config(config)
+        if self._is_resolution_change(prior, config):
+            self._mark_flatfield_stale(config.name)
         with self._lock:
             self._camera_configs[config.name] = config
+
+    @staticmethod
+    def _is_resolution_change(prior: Optional[CameraConfig], new: CameraConfig) -> bool:
+        """Whether *new* changes ``frame_width``/``frame_height`` from
+        whatever *prior* held (sprint 037) -- ``False`` when *prior* is
+        ``None`` (nothing to change from, a first-ever push) or when
+        neither config states a real value for either key (nothing
+        comparable)."""
+        if prior is None:
+            return False
+        for key in ("frame_width", "frame_height"):
+            old_value = prior.settings.get(key)
+            new_value = new.settings.get(key)
+            if old_value is not None and new_value is not None and old_value != new_value:
+                return True
+        return False
 
     def reset_camera_config(self, camera: str) -> None:
         """See ``daemon.interfaces.Daemon.reset_camera_config`` --
@@ -1934,6 +2084,17 @@ class DaemonService(Daemon):
             self._calibrations[slug] = updated
         self._persist_calibration(slug, updated)
 
+    def _on_camera_reopen(self, slug: str) -> None:
+        """``Camera``'s ``on_reopen`` callback, wired in :meth:`_camera_for`
+        (sprint 037): a successful self-heal/explicit reopen is the same
+        real-world "camera may have moved" event for a flat-field gain
+        map as it already is for a calibration (``Camera.__init__``'s own
+        ``on_reopen`` docstring), so it flags both -- :meth:`_mark_stale`
+        unchanged from before this ticket, plus :meth:`_mark_flatfield_stale`
+        as the new sibling trigger."""
+        self._mark_stale(slug)
+        self._mark_flatfield_stale(slug)
+
     def _camera_config_for_calibration(self, camera: str) -> Optional[CameraConfig]:
         """``Calibrator``'s ``get_camera_config`` callable -- a locked
         read of :attr:`_camera_configs`, the same store
@@ -2047,6 +2208,376 @@ class DaemonService(Daemon):
                 )
                 continue
             self._calibrations[entry.name] = calibration
+
+    # -- flat-field gain map (sprint 037) ------------------------------------
+    #
+    # ``capture_flat_field``/``get_flatfield``/``clear_flat_field`` are the
+    # thin orchestrator this daemon owns -- the identical ``calibrate``/
+    # ``Calibrator`` split (module docstring): this class resolves the
+    # camera, derives the field-interior mask, pushes/restores a temporary
+    # exposure override, and persists the result; ``calibration.flatfield.
+    # FlatFieldCapturer`` (``self._flatfield_capturer``) does the actual
+    # per-pixel math. ``self._flatfields`` (``str -> FlatFieldInfo``) is the
+    # eighth in-memory store, disk-backed the same way ``self._calibrations``
+    # is (``_persist_flatfield``/``_load_flatfields``, called from the
+    # constructor and from every successful capture respectively).
+
+    def capture_flat_field(
+        self,
+        camera: str,
+        *,
+        exposure: Optional[float] = None,
+        frames: Optional[int] = None,
+        force: bool = False,
+        dry_run: bool = False,
+    ) -> FlatFieldResult:
+        """See ``daemon.interfaces.Daemon.capture_flat_field``.
+
+        Opens *camera* (:meth:`_camera_for`, on-demand-open discipline
+        every other camera-addressed method uses -- ``UnknownCamera``/
+        ``CameraNotPresent`` propagate exactly as they would from
+        ``get_frame``/``calibrate``) and derives the field-interior mask
+        (:meth:`_field_mask_for`, raising :class:`~aprilcam.errors.NoFieldMask`
+        when neither a stored calibration nor a live ArUco-corner
+        detection can produce one) **before** anything about the K-frame
+        capture burst happens -- mirrors :meth:`calibrate`'s "precondition
+        fails before any hardware disturbance" discipline.
+
+        *exposure*, when given, is pushed as a temporary override on top
+        of whatever this daemon currently holds for *camera*
+        (:meth:`get_camera_config`'s existing stored-or-effective
+        contract) -- the exact prior document is restored, unconditionally,
+        in a ``finally`` covering the capture burst and the
+        ``FlatFieldCapturer.build`` call alike, so a quality-gate refusal
+        or an exception mid-capture never leaves the camera parked at the
+        override.
+
+        On a successful (or forced) result, persists ``flatfield.npy`` +
+        ``flatfield.json`` (:meth:`_persist_flatfield`) and reloads the
+        live-applied map on the held-open ``Camera`` -- no daemon restart.
+        ``dry_run=True`` returns the evaluated result without writing
+        anything or touching the live map; an unforced quality-gate
+        refusal does the same, structurally (there is simply no write
+        path taken on that branch).
+        """
+        cam = self._camera_for(camera)
+        slug = cam.slug
+        mask = self._field_mask_for(cam)
+
+        prior_config = self.get_camera_config(slug)
+        pushed_override = False
+        try:
+            if exposure is not None:
+                override_settings = dict(prior_config.settings)
+                override_settings["exposure"] = exposure
+                cam.apply_config(replace(prior_config, settings=override_settings))
+                pushed_override = True
+
+            frame_count = frames if frames is not None else FLATFIELD_FRAME_COUNT
+            burst = self._capture_flatfield_frames(cam, frame_count)
+            result = self._flatfield_capturer.build(burst, mask, force=force)
+        finally:
+            if pushed_override:
+                cam.apply_config(prior_config)
+
+        if dry_run or not result.succeeded:
+            return result
+
+        self._persist_flatfield(slug, result)
+        return result
+
+    def get_flatfield(self, camera: str) -> Optional[FlatFieldInfo]:
+        """See ``daemon.interfaces.Daemon.get_flatfield``.
+
+        *camera* accepts a persistent number or a slug (SUC-005),
+        resolved via :meth:`_resolve_slug_if_known` -- ``self._flatfields``
+        is always keyed by the resolved slug (see :meth:`_persist_flatfield`),
+        mirroring :meth:`get_calibration`'s identical addressing.
+        """
+        slug = self._resolve_slug_if_known(camera)
+        with self._lock:
+            return self._flatfields.get(slug)
+
+    def clear_flat_field(self, camera: str) -> None:
+        """See ``daemon.interfaces.Daemon.clear_flat_field``.
+
+        Deletes both on-disk files (a missing file is a no-op, not an
+        error -- clearing an already-clear camera is a legitimate,
+        idempotent call), drops *camera*'s entry from ``self._flatfields``,
+        and -- when this daemon currently holds *camera* open -- reloads
+        its live map (:meth:`Camera._load_flatfield`, the same reload
+        mechanism a fresh capture uses), which naturally clears to "no
+        correction" now that the file is gone. Never opens *camera* itself
+        for a not-currently-held one: there is nothing to reload on a
+        closed handle, only the on-disk state to clean up.
+        """
+        slug = self._resolve_slug_if_known(camera)
+        for path in (self._flatfield_path_for(slug), self._flatfield_info_path_for(slug)):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        with self._lock:
+            self._flatfields.pop(slug, None)
+            cam = self._cameras.get(slug)
+        if cam is not None:
+            cam._load_flatfield()
+
+    def _field_mask_for(self, cam: Camera) -> np.ndarray:
+        """The boolean field-interior mask :meth:`capture_flat_field`
+        builds *cam*'s gain map against (sprint 037): from *cam*'s stored
+        ``Calibration`` when one exists (:meth:`_mask_from_calibration`),
+        else from *cam*'s linked playfield's required ArUco corners
+        detected live in one probe frame (:meth:`_mask_from_aruco`), else
+        raises :class:`~aprilcam.errors.NoFieldMask` -- before any
+        capture burst, matching this method's only caller's own
+        precondition discipline.
+
+        The probe frame this reads is also what supplies the mask's
+        ``(height, width)`` and, on the ArUco fallback path, the pixels
+        the detector runs against -- one read serves both, at *cam*'s
+        current (pre-override) exposure.
+        """
+        slug = cam.slug
+        probe = cam.read()
+        if probe is None:
+            raise NoFieldMask(slug)
+
+        calibration = self.get_calibration(slug)
+        if calibration is not None:
+            definition = self._playfield_for_calibration(calibration.playfield)
+            if definition is not None:
+                return self._mask_from_calibration(calibration, definition, probe.shape[:2])
+
+        playfield_name = self._playfield_link(slug)
+        if playfield_name is not None:
+            definition = self._playfield_for_calibration(playfield_name)
+            if definition is not None:
+                mask = self._mask_from_aruco(probe, definition)
+                if mask is not None:
+                    return mask
+
+        raise NoFieldMask(slug)
+
+    def _mask_from_calibration(
+        self,
+        calibration: Calibration,
+        definition: PlayfieldDefinitionIface,
+        shape: Tuple[int, int],
+    ) -> np.ndarray:
+        """The field rectangle's four world corners
+        (:func:`~aprilcam.calibration.geometry.world_corners`, the shared
+        helper this ticket promoted out of ``calibration/deskew.py``'s own
+        ``_world_corners``), mapped through *calibration*'s already-solved
+        homography (:meth:`Calibration.to_pixel`) and filled as a polygon
+        into a boolean ``shape``-sized mask."""
+        height, width = shape
+        corners_world = geometry.world_corners(definition.width_cm, definition.height_cm)
+        pixel_corners = np.array(
+            [[p.x, p.y] for p in (calibration.to_pixel(w) for w in corners_world)],
+            dtype=np.float64,
+        )
+        filled = np.zeros((height, width), dtype=np.uint8)
+        cv.fillPoly(filled, [np.round(pixel_corners).astype(np.int32)], 1)
+        return filled.astype(bool)
+
+    def _mask_from_aruco(
+        self, frame: np.ndarray, definition: PlayfieldDefinitionIface
+    ) -> Optional[np.ndarray]:
+        """*definition*'s required ArUco corner ids, detected directly in
+        *frame* (``self._flatfield_detector``, a real ``vision.detector.
+        TagDetector`` by default), filled as the convex hull of every
+        detected corner point. ``None`` when *definition* names no
+        required ArUco ids, or none of them are actually detected in
+        *frame* -- :meth:`_field_mask_for` treats that as "this fallback
+        also failed," not an error of its own."""
+        required_ids = set(definition.required_aruco_ids())
+        if not required_ids:
+            return None
+        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+        detections = self._flatfield_detector.detect(gray)
+        points = [
+            d.corners for d in detections if d.family == TagFamily.ARUCO and d.number in required_ids
+        ]
+        if not points:
+            return None
+        all_points = np.concatenate(points, axis=0).astype(np.float32)
+        if len(all_points) < 3:
+            return None
+        hull = cv.convexHull(all_points)
+        filled = np.zeros(frame.shape[:2], dtype=np.uint8)
+        cv.fillConvexPoly(filled, np.round(hull).astype(np.int32), 1)
+        return filled.astype(bool)
+
+    def _capture_flatfield_frames(self, cam: Camera, count: int) -> Tuple[np.ndarray, ...]:
+        """Read up to *count* frames from *cam*, skipping any individual
+        read that returns ``None`` (a transient capture miss) rather than
+        failing the whole burst -- mirrors :meth:`_capture_calibration_frames`
+        exactly; ``FlatFieldCapturer.build`` is what decides whether the
+        frames actually collected are enough (it raises ``ValueError`` on
+        an empty burst)."""
+        frames: List[np.ndarray] = []
+        for _ in range(count):
+            frame = cam.read()
+            if frame is not None:
+                frames.append(frame)
+        return tuple(frames)
+
+    def _flatfield_info_path_for(self, slug: str) -> Path:
+        """``<state_dir>/cameras/<slug>/flatfield.json`` -- the metadata
+        sidecar next to ``_flatfield_path_for``'s ``flatfield.npy``."""
+        return self._directories.state_dir / "cameras" / slug / FLATFIELD_INFO_FILENAME
+
+    def _persist_flatfield(self, slug: str, result: FlatFieldResult) -> None:
+        """Atomically write *result*'s gain array to ``flatfield.npy`` and
+        its derived :class:`FlatFieldInfo` to ``flatfield.json`` (tmp file,
+        ``fsync``, ``os.replace`` -- the identical pattern
+        :meth:`_persist_calibration` uses), update ``self._flatfields``,
+        then reload the live-applied map on *slug*'s ``Camera`` when this
+        daemon currently holds it open.
+
+        Reload uses :meth:`Camera._load_flatfield` directly -- the exact
+        mechanism ``camera/camera.py``'s own module docstring already
+        documents as how a replaced/deleted map takes effect live (via
+        ``Camera.reset()``); calling it here instead of going through a
+        full ``reset()`` avoids also re-pushing every other camera
+        setting just to pick up a new gain map.
+        """
+        assert result.gain is not None, (
+            "DaemonService._persist_flatfield called with a refused "
+            "(gain=None) FlatFieldResult -- a capture_flat_field bug"
+        )
+        gain = result.gain
+        npy_path = self._flatfield_path_for(slug)
+        info = FlatFieldInfo(
+            present=True,
+            captured_at=time.time(),
+            shape=tuple(int(x) for x in gain.shape),
+            gain_min=float(gain.min()),
+            gain_max=float(gain.max()),
+            stale=False,
+        )
+
+        try:
+            npy_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise OSError(f"cannot create flatfield directory {npy_path.parent}: {exc}") from exc
+
+        tmp_npy = npy_path.with_suffix(npy_path.suffix + ".tmp")
+        try:
+            with open(tmp_npy, "wb") as fh:
+                np.save(fh, gain)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_npy, npy_path)
+        except OSError as exc:
+            raise OSError(f"cannot write flatfield file {npy_path}: {exc}") from exc
+        finally:
+            try:
+                if tmp_npy.exists():
+                    tmp_npy.unlink()
+            except OSError:  # pragma: no cover - best-effort cleanup
+                pass
+
+        self._persist_flatfield_info(slug, info)
+
+        with self._lock:
+            self._flatfields[slug] = info
+            cam = self._cameras.get(slug)
+        if cam is not None:
+            cam._load_flatfield()
+
+    def _persist_flatfield_info(self, slug: str, info: FlatFieldInfo) -> None:
+        """Atomically write *info* to *slug*'s ``flatfield.json`` -- the
+        same tmp+fsync+``os.replace`` pattern :meth:`_persist_calibration`
+        uses, factored out so :meth:`_mark_flatfield_stale` (which only
+        ever changes the ``stale`` bit, never the gain array itself) can
+        rewrite the sidecar alone without touching ``flatfield.npy``."""
+        path = self._flatfield_info_path_for(slug)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise OSError(f"cannot create flatfield directory {path.parent}: {exc}") from exc
+
+        text = json.dumps(_flatfield_info_to_dict(info), indent=2, sort_keys=True) + "\n"
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except OSError as exc:
+            raise OSError(f"cannot write flatfield info file {path}: {exc}") from exc
+        finally:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:  # pragma: no cover - best-effort cleanup
+                pass
+
+    def _mark_flatfield_stale(self, slug: str) -> None:
+        """Flip *slug*'s currently-held flat-field info's ``stale`` bit,
+        if it has one (sprint 037) -- the sibling of :meth:`_mark_stale`,
+        sharing both of that method's trigger points
+        (:meth:`_on_camera_reopen`, a resolution-changing
+        :meth:`set_camera_config` push) rather than inventing new ones.
+        A no-op for a slug with no flat-field entry (nothing built yet --
+        nothing to flag) or one already marked stale (idempotent, avoids
+        a redundant disk write on repeated triggers). Unlike
+        ``calibration.stale``, this never withholds the map from
+        :meth:`~aprilcam.camera.camera.Camera._apply_flatfield` -- purely
+        advisory, surfaced through :meth:`get_flatfield`/:meth:`list_cameras`.
+        """
+        with self._lock:
+            info = self._flatfields.get(slug)
+            if info is None or info.stale:
+                return
+            updated = replace(info, stale=True)
+            self._flatfields[slug] = updated
+        self._persist_flatfield_info(slug, updated)
+
+    def _load_flatfields(self) -> None:
+        """Reload every camera's flat-field state at construction time
+        (sprint 037), mirroring :meth:`_load_calibrations` exactly:
+        scans ``<state_dir>/cameras/*/`` directly, tolerates a missing
+        ``state_dir`` or a corrupt sidecar by skipping/degrading rather
+        than failing daemon construction.
+
+        Only a directory whose ``flatfield.npy`` actually exists gets an
+        entry -- the file is the source of truth for "present," never the
+        sidecar alone. A present ``flatfield.npy`` with a missing or
+        corrupt ``flatfield.json`` still gets an entry, just with no
+        metadata beyond ``present=True`` -- the acceptance criterion for
+        a pre-sprint-037 map installed via the manual recipe: ``present``
+        is real, ``captured_at`` stays ``None`` rather than a fabricated
+        timestamp.
+        """
+        cameras_dir = self._directories.state_dir / "cameras"
+        if not cameras_dir.is_dir():
+            return
+        for entry in sorted(cameras_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            npy_path = entry / FLATFIELD_FILENAME
+            if not npy_path.exists():
+                continue
+            json_path = entry / FLATFIELD_INFO_FILENAME
+            info = FlatFieldInfo(present=True)
+            if json_path.exists():
+                try:
+                    data = json.loads(json_path.read_text(encoding="utf-8"))
+                    info = _flatfield_info_from_dict(data)
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    logger.warning(
+                        "corrupt flatfield info for %s at %s: %s -- treating as "
+                        "present with no metadata",
+                        entry.name,
+                        json_path,
+                        exc,
+                    )
+                    info = FlatFieldInfo(present=True)
+            self._flatfields[entry.name] = info
 
     # -- beyond the interface: shutdown cleanup ----------------------------
 
@@ -2185,7 +2716,7 @@ class DaemonService(Daemon):
             number=record.number,
             config_loader=self._config_loader,
             config_path=self._config_path_for(record.slug),
-            on_reopen=lambda: self._mark_stale(record.slug),
+            on_reopen=lambda: self._on_camera_reopen(record.slug),
             flatfield_path=self._flatfield_path_for(record.slug),
         )
         cam.open()

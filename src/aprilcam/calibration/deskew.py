@@ -60,18 +60,13 @@ __all__ = ["Deskewer"]
 def _world_corners(
     width_cm: float, height_cm: float
 ) -> Tuple[WorldPoint, WorldPoint, WorldPoint, WorldPoint]:
-    """The field rectangle's four corners, A1-centred, in
-    NW, NE, SE, SW order -- matching the anchor invariant's own
-    starting corner (``geometry.world_to_deskewed_pixel``'s docstring:
-    image ``(0, 0)`` is the field's north-west corner)."""
-    half_w = width_cm / 2.0
-    half_h = height_cm / 2.0
-    return (
-        WorldPoint(x=-half_w, y=half_h),  # NW
-        WorldPoint(x=half_w, y=half_h),  # NE
-        WorldPoint(x=half_w, y=-half_h),  # SE
-        WorldPoint(x=-half_w, y=-half_h),  # SW
-    )
+    """The field rectangle's four corners, A1-centred, in NW, NE, SE, SW
+    order. A thin wrapper over ``calibration.geometry.world_corners``
+    (sprint 037 ticket 002 promoted this function's body there, as a
+    shared helper ``daemon/service.py``'s flat-field mask derivation also
+    needs) -- kept here, under this module's own name, so every existing
+    caller in this file is unchanged."""
+    return geometry.world_corners(width_cm, height_cm)
 
 
 class Deskewer(_DeskewerBase):

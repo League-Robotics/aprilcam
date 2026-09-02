@@ -387,6 +387,17 @@ class CameraState:
     calibrated: bool
     calibration_stale: bool = False
     frame_dark: bool = False
+    flatfield_present: bool = False
+    """Whether this camera currently has a flat-field gain-map correction
+    applied (sprint 037). Overlaid by ``DaemonService.list_cameras`` from
+    ``DaemonService.get_flatfield``, the same way ``calibrated`` is
+    overlaid from ``get_calibration`` -- ``Camera`` itself has no notion
+    of this daemon-level state."""
+    flatfield_stale: bool = False
+    """Whether the applied flat-field map may no longer match this
+    camera's current mounting/lighting/resolution (sprint 037) --
+    advisory only, mirroring ``calibration_stale``: a stale map is still
+    applied, never withheld."""
     number: Optional[int] = None
     """Stable registry enumeration (UC-14.S-1).
 

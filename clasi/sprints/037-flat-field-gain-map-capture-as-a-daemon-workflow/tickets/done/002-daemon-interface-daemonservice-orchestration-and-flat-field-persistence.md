@@ -1,10 +1,14 @@
 ---
-id: "002"
-title: "Daemon interface, DaemonService orchestration, and flat-field persistence"
-status: open
-use-cases: [SUC-001, SUC-002, SUC-003]
-depends-on: ["001"]
-github-issue: ""
+id: '002'
+title: Daemon interface, DaemonService orchestration, and flat-field persistence
+status: done
+use-cases:
+- SUC-001
+- SUC-002
+- SUC-003
+depends-on:
+- '001'
+github-issue: ''
 issue: flat-field-gain-map-capture-as-a-daemon-workflow.md
 completes_issue: false
 ---
@@ -62,33 +66,33 @@ bool = False` to `types.CameraState` and overlay real values in
 
 ## Acceptance Criteria
 
-- [ ] `daemon/interfaces.py`'s `Daemon` gains `capture_flat_field(camera,
+- [x] `daemon/interfaces.py`'s `Daemon` gains `capture_flat_field(camera,
       *, exposure=None, frames=None, force=False, dry_run=False) ->
       FlatFieldResult`, `get_flatfield(camera) -> Optional[FlatFieldInfo]`,
       `clear_flat_field(camera) -> None`.
-- [ ] `DaemonService` derives the field mask from a stored `Calibration`
+- [x] `DaemonService` derives the field mask from a stored `Calibration`
       when present, else from detected ArUco corners, else raises
       `NoFieldMask` before any capture.
-- [ ] The camera's prior configuration is restored after capture on
+- [x] The camera's prior configuration is restored after capture on
       every exit path — success, quality-gate refusal, and an exception
       raised mid-capture.
-- [ ] A successful (or forced) capture writes `flatfield.npy` +
+- [x] A successful (or forced) capture writes `flatfield.npy` +
       `flatfield.json` atomically and reloads the live map with no
       daemon restart, verified via a subsequent `get_frame`/read on the
       same held-open camera.
-- [ ] `dry_run=True` writes nothing and does not change the live-applied
+- [x] `dry_run=True` writes nothing and does not change the live-applied
       map.
-- [ ] A refused (non-forced) capture makes no filesystem write and does
+- [x] A refused (non-forced) capture makes no filesystem write and does
       not touch the live-applied map.
-- [ ] `get_flatfield` answers from `_flatfields`, reloaded at
+- [x] `get_flatfield` answers from `_flatfields`, reloaded at
       construction (`_load_flatfields`); a pre-existing `flatfield.npy`
       with no `.json` sidecar reports `present=True`, `captured_at=None`.
-- [ ] `clear_flat_field` deletes both files and drops the live map, no
+- [x] `clear_flat_field` deletes both files and drops the live map, no
       restart.
-- [ ] A camera reopen (self-heal or explicit) and a resolution-changing
+- [x] A camera reopen (self-heal or explicit) and a resolution-changing
       `set_camera_config` push both mark that camera's flat-field state
       stale.
-- [ ] `types.CameraState` gains `flatfield_present`/`flatfield_stale`;
+- [x] `types.CameraState` gains `flatfield_present`/`flatfield_stale`;
       `DaemonService.list_cameras` overlays real values for both, for a
       held-open and a not-held-open camera alike.
 
