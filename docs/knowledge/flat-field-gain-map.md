@@ -247,3 +247,13 @@ A neutral-density filter went onto camera 3. Consequences, measured:
   Frame-to-frame flicker at exposure 60 is 0.6%, versus ~25% at
   exposure 1 without the ND filter -- the longer exposure integrates
   out the mains flicker.
+- **Why more light in the NE corner barely helps (2026-09-03, third
+  rebuild):** the raw white-sheet profile from centre to the NE corner
+  falls smoothly 123 -> 24 starting about halfway out, while the other
+  three corners stay at 93-139. A smooth, one-sided falloff of that
+  depth is the ND filter sitting off-centre and shading the lens toward
+  the NE; it is a *throughput* loss (~20% at the corner), so light adds
+  proportionally (a spotlight took the corner from 25 to 33, not to 100).
+  Re-centre the filter rather than adding lamps. With the map (target
+  235, cap 16) the corrected sheet is 232-241 everywhere regardless, at
+  the cost of ~8x noise amplification in that corner.
