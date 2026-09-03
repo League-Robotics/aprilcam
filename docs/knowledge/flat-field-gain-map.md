@@ -196,3 +196,36 @@ A neutral-density filter went onto camera 3. Consequences, measured:
   Recapture with the tarp (`aprilcam camera flatfield 3 --exposure 20`),
   then re-run the tag-paper white balance until the follow-up issue lands.
   Stakeholder chose to stop before this step ("good enough").
+
+## 2026-09-03 (later): capture at the working exposure, and the burst-reads-corrected-frames bug
+
+- **Capture at the working exposure, not a low override, whenever the
+  sheet does not clip there.** Through the ND filter the sheet reads
+  ~110 at camera 3's working `exposure 60 / gain 8`, so no override is
+  needed. A map captured at exposure 20 and applied at 60/8 left a green
+  patch in the NE and a magenta patch in the SE of the corrected sheet:
+  this sensor's per-channel response does not scale proportionally
+  between those settings. The map already normalises all channels to one
+  common grey, so it *is* a per-pixel, per-channel white balance -- the
+  patches were a capture/working mismatch, not a missing feature.
+- **Bug fixed (commit fca2d62, out of process):** the capture burst read
+  frames through `Camera.read()`, which applies the currently loaded map,
+  so a recapture with a map live built a residual-only map and replaced
+  the good one. `Camera.read_raw()` now feeds
+  `_capture_flatfield_frames`. **On a daemon older than that commit,
+  run `camera flatfield <cam> --clear` immediately before capturing.**
+- **Brightness is a map property.** The daemon normalises the corrected
+  sheet to its own mean (~104 here), which reads dim. Camera 3's installed
+  map was rebuilt by hand from raw frames with an absolute target of 235
+  for the sheet and a gain cap of 12 (`scratchpad` script, same
+  median-31/Gaussian-40 math): corrected sheet p50 234, neutral to 2%
+  everywhere but the NE corner. Follow-up for the workflow: a `--target`
+  (absolute level) and a higher/configurable cap.
+- **The ND filter vignettes the NE corner** of camera 3 to ~25/255 raw on
+  a white sheet; even a 12x gain leaves it at ~130 and pink. That is the
+  corner where ArUco 3 fails to detect. Physical fix: re-centre the
+  filter or use a larger one.
+- After hand-installing `flatfield.npy`/`flatfield.json` while the daemon
+  runs, `camera list` says `flatfield=absent` (the in-memory record was
+  cleared) although `Camera` applies the file on the next reset; the
+  record comes back on the next daemon start.
