@@ -257,3 +257,15 @@ A neutral-density filter went onto camera 3. Consequences, measured:
   Re-centre the filter rather than adding lamps. With the map (target
   235, cap 16) the corrected sheet is 232-241 everywhere regardless, at
   the cost of ~8x noise amplification in that corner.
+- **Brightness trim without touching the sensor (2026-09-03, white game
+  mat on the field):** a map normalised to 235 for the tarp clips a whiter
+  paper mat (63% of the field at 255). Scaling the whole map by 0.6
+  (`flatfield_..._t235_c16_x0.6.npy` in the scratchpad) put the mat at
+  median 202 / p98 231 with 1.3% clipped, wood and tags unchanged in
+  colour. Prefer scaling the map over changing exposure on camera 3: an
+  exposure change re-opens the per-channel mismatch. Camera 5 (unity-
+  normalised map) was instead dropped to `exposure 12` (no clipping).
+  Known residual: faint pink/green blotches on white paper, from the
+  round-4 map's lighter smoothing (median 21 / sigma 20) letting tarp
+  wrinkle colour through; next sheet capture, keep the nearest-edge
+  extension but return to sigma ~40 in the interior.
