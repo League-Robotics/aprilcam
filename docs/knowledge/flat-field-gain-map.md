@@ -239,3 +239,11 @@ A neutral-density filter went onto camera 3. Consequences, measured:
   at the green cap. Installed on camera 3 (`flatfield_cam3_bright235_edge.npy`
   in the session scratchpad is the copy). Filed as
   `clasi/issues/flat-field-capture-target-level-gain-cap-and-edge-extension.md`.
+- **2026-09-03, spotlight added in the NE corner, both maps rebuilt.**
+  Camera 3 (hand-built at working exposure, `scratchpad/build_map_v2.py`,
+  target 235, cap 16): raw sheet p2 33 (was 25), no pixel at the cap,
+  corrected sheet 228-238 with the NE corner at 232/236/235. Camera 5
+  (daemon workflow, `--clear` then `--exposure 4`): spread 1.26x -> 1.08x.
+  Frame-to-frame flicker at exposure 60 is 0.6%, versus ~25% at
+  exposure 1 without the ND filter -- the longer exposure integrates
+  out the mains flicker.
