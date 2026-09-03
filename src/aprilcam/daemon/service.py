@@ -2410,15 +2410,20 @@ class DaemonService(Daemon):
         return filled.astype(bool)
 
     def _capture_flatfield_frames(self, cam: Camera, count: int) -> Tuple[np.ndarray, ...]:
-        """Read up to *count* frames from *cam*, skipping any individual
-        read that returns ``None`` (a transient capture miss) rather than
-        failing the whole burst -- mirrors :meth:`_capture_calibration_frames`
-        exactly; ``FlatFieldCapturer.build`` is what decides whether the
+        """Read up to *count* **raw** frames from *cam* (``Camera.read_raw``
+        -- the live flat-field map is deliberately bypassed, see the inline
+        comment), skipping any individual read that returns ``None`` (a
+        transient capture miss) rather than failing the whole burst --
+        otherwise mirrors :meth:`_capture_calibration_frames`; ``FlatFieldCapturer.build`` is what decides whether the
         frames actually collected are enough (it raises ``ValueError`` on
         an empty burst)."""
         frames: List[np.ndarray] = []
         for _ in range(count):
-            frame = cam.read()
+            # read_raw, never read(): the burst is the *reference* a new
+            # gain map is built from, so it must not have the currently
+            # loaded map already multiplied in (a recapture would otherwise
+            # persist a map of the residual only and lose the correction).
+            frame = cam.read_raw()
             if frame is not None:
                 frames.append(frame)
         return tuple(frames)

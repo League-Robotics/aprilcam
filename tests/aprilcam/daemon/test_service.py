@@ -6501,3 +6501,16 @@ def test_list_cameras_reports_flatfield_absent_for_a_not_held_registered_camera(
 
     assert states[slug].flatfield_present is False
     assert states[slug].flatfield_stale is False
+
+
+def test_capture_flatfield_burst_reads_raw_frames_not_map_corrected(service, held_camera, monkeypatch):
+    """OOP fix 2026-09-03: `_capture_flatfield_frames` must use
+    `Camera.read_raw`, so a recapture with a map already loaded builds the
+    new map from sensor frames, not from already-corrected ones."""
+    _, slug, cam = held_camera
+    calls = []
+    monkeypatch.setattr(cam, "read_raw", lambda: (calls.append("raw"), np.full((4, 6, 3), 7, dtype=np.uint8))[1])
+    monkeypatch.setattr(cam, "read", lambda: (calls.append("corrected"), np.full((4, 6, 3), 99, dtype=np.uint8))[1])
+    frames = service._capture_flatfield_frames(cam, 3)
+    assert len(frames) == 3 and all(int(f[0, 0, 0]) == 7 for f in frames)
+    assert calls == ["raw", "raw", "raw"]

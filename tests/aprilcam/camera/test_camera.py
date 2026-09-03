@@ -1581,3 +1581,19 @@ def test_reset_reloads_flatfield_from_disk(tmp_path):
     _write_gain(path, np.full((4, 6, 3), 0.5, dtype=np.float32))
     cam.reset()
     assert int(cam.read()[0, 0, 0]) == 50
+
+
+def test_read_raw_bypasses_loaded_flatfield_map(tmp_path):
+    """OOP fix 2026-09-03: reference captures must see raw sensor frames
+    even while a gain map is loaded and applied to ordinary reads."""
+    from aprilcam.camera.camera import FLATFIELD_FILENAME
+
+    path = tmp_path / FLATFIELD_FILENAME
+    _write_gain(path, np.full((4, 6, 3), 2.0, dtype=np.float32))
+    frame = _flat_frame(100)
+    cam = Camera("cam-a", FakeBackend(read_queue=[frame, frame, None] * 2), flatfield_path=path)
+    cam.open()
+    assert int(cam.read()[0, 0, 0]) == 200
+    assert np.array_equal(cam.read_raw(), frame)
+    assert cam.read_raw() is None  # failure accounting is shared with read()
+    assert cam._consecutive_failures == 1

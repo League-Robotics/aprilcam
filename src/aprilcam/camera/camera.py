@@ -439,13 +439,32 @@ class Camera(_CameraBase):
         unnecessary serialization (see this method's docstring and
         ticket 027-002's acceptance criteria).
         """
+        return self._read_frame(apply_flatfield=True)
+
+    def read_raw(self) -> Optional[np.ndarray]:
+        """Exactly :meth:`read` -- same lock, same failure counting, same
+        self-heal -- but **without** the flat-field gain map applied
+        (:meth:`_apply_flatfield` is skipped). This is the read every
+        *reference* capture must use: ``DaemonService.
+        _capture_flatfield_frames`` builds a new gain map from these
+        frames, and reading them through :meth:`read` while a map is
+        already loaded would build a correction of already-corrected
+        frames and then replace the good map with it (found live
+        2026-09-03: a recapture with a map loaded produced a map that was
+        only the residual). Not part of ``camera.interfaces.Camera``'s
+        declared contract -- an addition specific to this concrete class,
+        like :meth:`stored_config`.
+        """
+        return self._read_frame(apply_flatfield=False)
+
+    def _read_frame(self, *, apply_flatfield: bool) -> Optional[np.ndarray]:
         with self._read_lock:
             frame = self._safe_read()
             if frame is not None:
                 self._consecutive_failures = 0
                 self._reopens = 0
                 self._exhausted = False
-                return self._apply_flatfield(frame)
+                return self._apply_flatfield(frame) if apply_flatfield else frame
             self._consecutive_failures += 1
             if self._consecutive_failures >= FAILURE_THRESHOLD:
                 self._consecutive_failures = 0
