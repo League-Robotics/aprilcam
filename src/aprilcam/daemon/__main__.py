@@ -152,6 +152,7 @@ def build(
         held cameras -- so no socket-driven subscriber outlives a clean
         shutdown (sprint.md Migration Concerns' "Clean daemon shutdown",
         extended through this transport layer by ticket 005)."""
+        service.stop_control_watchdog()
         transport.stop()
         service.close()
 
@@ -169,6 +170,9 @@ def build(
         """
         discovery.probe()
         discovery.watch()
+        # UVC-drift watchdog (2026-09-03): re-assert applied controls when
+        # the hardware silently reverts them (USB re-enumeration etc.).
+        service.start_control_watchdog()
 
     return DaemonLifecycle(
         directories=directories,

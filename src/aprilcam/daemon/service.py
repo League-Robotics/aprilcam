@@ -156,6 +156,14 @@ __all__ = ["DaemonService"]
 #: ``<state_dir>/cameras/<camera>/`` -- design.md §7's storage layout.
 CALIBRATION_FILENAME = "calibration.json"
 
+#: How often the control watchdog (:meth:`DaemonService.start_control_watchdog`)
+#: reads every held camera's UVC controls back and re-asserts the applied
+#: config when they drifted (2026-09-03 out-of-process fix; see
+#: ``Camera.reassert_config``). Each readback is one ``get_property`` per
+#: applied key -- a ``uvc-util`` subprocess each on macOS -- so this is
+#: deliberately seconds, not frames.
+CONTROL_READBACK_INTERVAL_S = 15.0
+
 #: Name of the one shared mount-registry file under ``<state_dir>/mounts/``
 #: (ticket 036-007) -- ``camera/registry.py``'s ``<state_dir>/cameras/
 #: registry.json`` sibling layout, one flat file for the whole registry
@@ -517,6 +525,9 @@ class DaemonService(Daemon):
         self._discovery = discovery
         self._directories = directories
         self._cameras: Dict[str, Camera] = cameras if cameras is not None else {}
+        #: Control watchdog thread state (:meth:`start_control_watchdog`).
+        self._watchdog_thread: Optional[threading.Thread] = None
+        self._watchdog_stop: Optional[threading.Event] = None
         self._identity_source = identity_source
         self._backend_factory = backend_factory
         self._control_backend_factory = control_backend_factory
@@ -2606,6 +2617,7 @@ class DaemonService(Daemon):
         loop does not need to distinguish active from idle producers
         first.
         """
+        self.stop_control_watchdog()
         with self._lock:
             tag_producers = list(self._tag_stream_producers.values())
             self._tag_stream_producers.clear()
@@ -2745,6 +2757,53 @@ class DaemonService(Daemon):
         (ticket 023-004), whether or not anything is actually installed
         there yet."""
         return self._directories.config_dir / "cameras" / slug / "config.json"
+
+    # -- UVC control drift watchdog (2026-09-03, out of process) -----------
+
+    def reassert_controls(self) -> Dict[str, Tuple[str, ...]]:
+        """One watchdog pass: ``Camera.reassert_config`` on every held-open
+        camera. Returns ``{slug: drifted_keys}`` for the cameras whose
+        hardware had drifted and were re-asserted (empty when all agree).
+        A camera whose re-assert raises is logged and skipped -- a
+        watchdog must never take the daemon down."""
+        with self._lock:
+            held = list(self._cameras.items())
+        drifted: Dict[str, Tuple[str, ...]] = {}
+        for slug, cam in held:
+            try:
+                keys = cam.reassert_config()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("%s: control re-assert failed: %s", slug, exc)
+                continue
+            if keys:
+                drifted[slug] = keys
+        return drifted
+
+    def start_control_watchdog(self, interval_s: float = CONTROL_READBACK_INTERVAL_S) -> None:
+        """Start the background thread that calls :meth:`reassert_controls`
+        every *interval_s* seconds. Idempotent."""
+        if self._watchdog_thread is not None and self._watchdog_thread.is_alive():
+            return
+        stop = threading.Event()
+
+        def _loop() -> None:
+            while not stop.wait(interval_s):
+                self.reassert_controls()
+
+        thread = threading.Thread(target=_loop, name="aprilcam-control-watchdog", daemon=True)
+        self._watchdog_stop = stop
+        self._watchdog_thread = thread
+        thread.start()
+        logger.info("control watchdog started (every %.0fs)", interval_s)
+
+    def stop_control_watchdog(self) -> None:
+        """Stop the watchdog thread, if running. Idempotent."""
+        if self._watchdog_stop is not None:
+            self._watchdog_stop.set()
+        if self._watchdog_thread is not None:
+            self._watchdog_thread.join(timeout=5.0)
+        self._watchdog_thread = None
+        self._watchdog_stop = None
 
     def _flatfield_path_for(self, slug: str) -> Path:
         """``state_dir/cameras/<slug>/flatfield.npy`` -- the optional

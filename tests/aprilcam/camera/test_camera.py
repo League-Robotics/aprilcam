@@ -1597,3 +1597,56 @@ def test_read_raw_bypasses_loaded_flatfield_map(tmp_path):
     assert np.array_equal(cam.read_raw(), frame)
     assert cam.read_raw() is None  # failure accounting is shared with read()
     assert cam._consecutive_failures == 1
+
+
+# ---------------------------------------------------------------------------
+# UVC control drift: read back + re-assert (out-of-process fix, 2026-09-03)
+# ---------------------------------------------------------------------------
+
+
+def test_reassert_config_restores_drifted_hardware_controls():
+    backend = FakeBackend(read_queue=[_flat_frame(100)] * 4)
+    cam = Camera("cam-a", backend)
+    cam.open()
+    cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"exposure": 60, "gain": 8}))
+    assert cam.applied_settings == {"exposure": 60.0, "gain": 8.0}
+    assert cam.reassert_config() == ()
+    # the camera silently reverts to its power-on defaults
+    backend._properties["exposure"] = 2500.0
+    backend._properties["gain"] = 100.0
+    drifted = cam.reassert_config()
+    assert set(drifted) == {"exposure", "gain"}
+    assert backend._properties["exposure"] == 60.0 and backend._properties["gain"] == 8.0
+    assert cam.reassert_config() == ()
+
+
+def test_reassert_config_ignores_unreadable_keys_and_small_jitter():
+    backend = FakeBackend(read_queue=[_flat_frame(100)] * 4)
+    cam = Camera("cam-a", backend)
+    cam.open()
+    cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"exposure": 60, "gain": 8}))
+    backend._properties["exposure"] = 60.3  # within tolerance
+    del backend._properties["gain"]  # reads back None
+    assert cam.reassert_config() == ()
+
+
+def test_reassert_config_is_a_noop_before_any_push_or_when_closed():
+    backend = FakeBackend(read_queue=[_flat_frame(100)] * 2)
+    cam = Camera("cam-a", backend)
+    cam.open()
+    assert cam.reassert_config() == ()
+    cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"exposure": 60}))
+    cam.close()
+    backend._properties["exposure"] = 2500.0
+    assert cam.reassert_config() == ()
+
+
+def test_reset_updates_what_reassert_considers_applied(tmp_path):
+    backend = FakeBackend(read_queue=[_flat_frame(100)] * 4)
+    cam = Camera("cam-a", backend)
+    cam.open()
+    cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"exposure": 60}))
+    cam.reset()  # nothing on disk -> empty push; the last *successful* push is now the empty one
+    assert cam.applied_settings == {}
+    backend._properties["exposure"] = 2500.0
+    assert cam.reassert_config() == ()

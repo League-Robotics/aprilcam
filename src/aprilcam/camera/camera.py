@@ -330,6 +330,16 @@ class Camera(_CameraBase):
         #: :meth:`_apply_flatfield`, so a wrong-sized map does not log on
         #: every frame at 30 fps.
         self._flatfield_warned = False
+        #: The numeric settings the last *successful* :meth:`apply_config`
+        #: pushed (key -> value), i.e. what the hardware is *supposed* to
+        #: hold right now. Empty until the first push. Read by
+        #: :meth:`reassert_config` (UVC-drift fix, 2026-09-03).
+        self._applied_settings: Dict[str, float] = {}
+        #: Serialises :meth:`apply_config`/:meth:`reset`/
+        #: :meth:`reassert_config` against each other -- an RPC push and
+        #: the daemon's control watchdog may now run concurrently.
+        #: Re-entrant because ``reassert_config`` calls ``apply_config``.
+        self._config_lock = threading.RLock()
         self._present = False
         self._consecutive_failures = 0
         self._reopens = 0
@@ -659,99 +669,166 @@ class Camera(_CameraBase):
         *control_backend*, ``frame_width``/``frame_height`` through
         *backend*) still rolls back atomically as one whole-push unit.
         """
-        if not self._backend.is_open:
-            raise RuntimeError(f"{self._slug}: cannot apply_config while not open")
+        with self._config_lock:
+            if not self._backend.is_open:
+                raise RuntimeError(f"{self._slug}: cannot apply_config while not open")
 
-        settable = self._settable_names()
-        for key in config.settings:
-            if key not in settable:
-                raise UnsupportedSetting(key, reason="not a setting this camera's backend(s) expose")
+            settable = self._settable_names()
+            for key in config.settings:
+                if key not in settable:
+                    raise UnsupportedSetting(key, reason="not a setting this camera's backend(s) expose")
 
-        # Resolve each key's get/set pair up front. A key whose backend
-        # exposes no settings surface at all (e.g. v4l2 loopback -- the
-        # stream format is fixed by its writer, per v1's comment on
-        # V4l2CtlCapture.set()) fails immediately, per-key rather than
-        # per-camera -- unchanged in effect from the prior whole-backend
-        # check for every case this codebase actually exercises, since a
-        # key can only be in *settable* if its own backend advertised it.
-        accessors: Dict[str, Tuple[Any, Any, Any]] = {}
-        for key in config.settings:
-            backend = self._backend_for_key(key)
-            get_property = getattr(backend, "get_property", None)
-            set_property = getattr(backend, "set_property", None)
-            if get_property is None or set_property is None:
-                raise UnsupportedSetting(
-                    key, reason="this camera's backend exposes no settings control surface"
-                )
-            accessors[key] = (backend, get_property, set_property)
+            # Resolve each key's get/set pair up front. A key whose backend
+            # exposes no settings surface at all (e.g. v4l2 loopback -- the
+            # stream format is fixed by its writer, per v1's comment on
+            # V4l2CtlCapture.set()) fails immediately, per-key rather than
+            # per-camera -- unchanged in effect from the prior whole-backend
+            # check for every case this codebase actually exercises, since a
+            # key can only be in *settable* if its own backend advertised it.
+            accessors: Dict[str, Tuple[Any, Any, Any]] = {}
+            for key in config.settings:
+                backend = self._backend_for_key(key)
+                get_property = getattr(backend, "get_property", None)
+                set_property = getattr(backend, "set_property", None)
+                if get_property is None or set_property is None:
+                    raise UnsupportedSetting(
+                        key, reason="this camera's backend exposes no settings control surface"
+                    )
+                accessors[key] = (backend, get_property, set_property)
 
-        previous: Dict[str, float] = {}
-        for key, (_backend, get_property, _set_property) in accessors.items():
-            value = get_property(key)
-            if value is not None:
-                previous[key] = value
+            previous: Dict[str, float] = {}
+            for key, (_backend, get_property, _set_property) in accessors.items():
+                value = get_property(key)
+                if value is not None:
+                    previous[key] = value
 
-        ordered = [k for k in _GATE_KEYS if k in config.settings]
-        ordered += [k for k in config.settings if k not in _GATE_KEYS]
+            ordered = [k for k in _GATE_KEYS if k in config.settings]
+            ordered += [k for k in config.settings if k not in _GATE_KEYS]
 
-        # Ticket 030-005 (reopened): the first real write following a
-        # fresh open gets a settle drain first -- see the module
-        # docstring's "Settle-after-open" section. Gated on there being
-        # at least one real (non-None) value to push so an empty/blank
-        # push (e.g. DaemonService._camera_for's apply-on-open call with
-        # nothing stored yet) never pays this cost or disturbs a
-        # headless test's frame-queue accounting for no reason.
-        if (
-            self._pending_open_settle
-            and self._control_backend is not None
-            and any(config.settings.get(k) is not None for k in ordered)
-        ):
-            self._settle_after_open()
-            self._pending_open_settle = False
+            # Ticket 030-005 (reopened): the first real write following a
+            # fresh open gets a settle drain first -- see the module
+            # docstring's "Settle-after-open" section. Gated on there being
+            # at least one real (non-None) value to push so an empty/blank
+            # push (e.g. DaemonService._camera_for's apply-on-open call with
+            # nothing stored yet) never pays this cost or disturbs a
+            # headless test's frame-queue accounting for no reason.
+            if (
+                self._pending_open_settle
+                and self._control_backend is not None
+                and any(config.settings.get(k) is not None for k in ordered)
+            ):
+                self._settle_after_open()
+                self._pending_open_settle = False
 
-        applied: list = []
-        for key in ordered:
-            value = config.settings[key]
-            if value is None:
-                continue  # blank -- nothing to push for this key
-            backend, _get_property, set_property = accessors[key]
+            applied: list = []
+            for key in ordered:
+                value = config.settings[key]
+                if value is None:
+                    continue  # blank -- nothing to push for this key
+                backend, _get_property, set_property = accessors[key]
 
+                try:
+                    numeric_value = float(value)
+                except (TypeError, ValueError) as exc:
+                    # A non-numeric settings value (e.g. a stray JSON string
+                    # like "100" -- ticket: camera 3's persisted config held
+                    # exactly this) must never reach set_property or
+                    # _describe_set_failure below: both assume a real float,
+                    # and a bare comparison against a str
+                    # (UvcUtilBackend.describe_set_failure's
+                    # ``minimum <= value <= maximum``) raises an untyped
+                    # TypeError that crosses the RPC boundary unclean
+                    # instead of a typed, diagnosable error (2026-08-22
+                    # hotfix). config/loader.py's ``_coerce_settings``
+                    # rejects this at load time for every document that goes
+                    # through it, but this is the one place every settings
+                    # value is actually used regardless of origin, so it is
+                    # also where the last-resort, always-clean guarantee has
+                    # to live.
+                    self._rollback_applied(applied, accessors, previous)
+                    raise UnsupportedSetting(
+                        key,
+                        reason=(
+                            f"{self._slug}: value {value!r} for setting {key!r} is not a "
+                            f"number ({type(value).__name__})"
+                        ),
+                    ) from exc
+                if not set_property(key, numeric_value):
+                    # Whole push fails; undo everything already applied
+                    # this call, each key through its own backend, so the
+                    # camera is left exactly as it was (interfaces.py's
+                    # Camera.apply_config contract).
+                    self._rollback_applied(applied, accessors, previous)
+                    raise UnsupportedSetting(
+                        key, reason=self._describe_set_failure(key, numeric_value, backend)
+                    )
+                applied.append(key)
+            self._applied_settings = {
+                key: float(config.settings[key]) for key in ordered if config.settings[key] is not None
+            }
+
+    @property
+    def applied_settings(self) -> Dict[str, float]:
+        """What the last successful :meth:`apply_config` pushed (a copy);
+        empty before any push. Diagnostic/test accessor for the
+        UVC-drift fix -- see :meth:`reassert_config`."""
+        return dict(self._applied_settings)
+
+    def read_back_settings(self) -> Dict[str, Optional[float]]:
+        """Read every key of :attr:`applied_settings` back from the
+        hardware through the same backend :meth:`apply_config` wrote it
+        with -- ``None`` for a key the backend cannot read right now.
+        Never raises for an ordinary readback failure."""
+        out: Dict[str, Optional[float]] = {}
+        for key in self._applied_settings:
             try:
-                numeric_value = float(value)
-            except (TypeError, ValueError) as exc:
-                # A non-numeric settings value (e.g. a stray JSON string
-                # like "100" -- ticket: camera 3's persisted config held
-                # exactly this) must never reach set_property or
-                # _describe_set_failure below: both assume a real float,
-                # and a bare comparison against a str
-                # (UvcUtilBackend.describe_set_failure's
-                # ``minimum <= value <= maximum``) raises an untyped
-                # TypeError that crosses the RPC boundary unclean
-                # instead of a typed, diagnosable error (2026-08-22
-                # hotfix). config/loader.py's ``_coerce_settings``
-                # rejects this at load time for every document that goes
-                # through it, but this is the one place every settings
-                # value is actually used regardless of origin, so it is
-                # also where the last-resort, always-clean guarantee has
-                # to live.
-                self._rollback_applied(applied, accessors, previous)
-                raise UnsupportedSetting(
-                    key,
-                    reason=(
-                        f"{self._slug}: value {value!r} for setting {key!r} is not a "
-                        f"number ({type(value).__name__})"
-                    ),
-                ) from exc
-            if not set_property(key, numeric_value):
-                # Whole push fails; undo everything already applied
-                # this call, each key through its own backend, so the
-                # camera is left exactly as it was (interfaces.py's
-                # Camera.apply_config contract).
-                self._rollback_applied(applied, accessors, previous)
-                raise UnsupportedSetting(
-                    key, reason=self._describe_set_failure(key, numeric_value, backend)
-                )
-            applied.append(key)
+                backend = self._backend_for_key(key)
+                get_property = getattr(backend, "get_property", None)
+                out[key] = get_property(key) if get_property is not None else None
+            except Exception as exc:  # readback must never take the daemon down
+                logger.debug("%s: readback of %s failed: %s", self._slug, key, exc)
+                out[key] = None
+        return out
+
+    def reassert_config(self, *, tolerance: float = 0.5) -> Tuple[str, ...]:
+        """Detect and undo UVC control drift (2026-09-03, out of process).
+
+        The exposure/gain/white-balance controls live in the camera's
+        firmware, and a USB re-enumeration or an AVFoundation session
+        rebuild silently puts them back to the sensor's power-on defaults
+        (camera 3 was found at ``exposure 2500 / gain 100`` while the
+        daemon believed ``60 / 8`` -- a 40x washed-out picture that
+        ``camera list`` reported as healthy). This reads every key the
+        last :meth:`apply_config` pushed back from the hardware and, if
+        any differs from what was pushed by more than *tolerance*,
+        re-pushes the whole last config through :meth:`apply_config`
+        (same ordering/rollback contract as any push) and returns the
+        drifted keys. A key that reads back ``None`` is not counted as
+        drift. Returns ``()`` when nothing was ever pushed, the camera is
+        not open, or the hardware agrees. ``DaemonService``'s control
+        watchdog calls this periodically for every held-open camera;
+        :meth:`reset`/live pushes update what "supposed to hold" means.
+        """
+        with self._config_lock:
+            if not self._applied_settings or not self._backend.is_open:
+                return ()
+            readback = self.read_back_settings()
+            drifted = tuple(
+                key
+                for key, value in readback.items()
+                if value is not None and abs(float(value) - self._applied_settings[key]) > tolerance
+            )
+            if not drifted:
+                return ()
+            logger.warning(
+                "%s: hardware controls drifted from applied config -- %s; re-asserting",
+                self._slug,
+                ", ".join(f"{k}: read {readback[k]!r}, expected {self._applied_settings[k]!r}" for k in drifted),
+            )
+            self.apply_config(
+                CameraConfig(name=self._slug, playfield=self._playfield, settings=dict(self._applied_settings))
+            )
+            return drifted
 
     @staticmethod
     def _rollback_applied(
@@ -888,10 +965,11 @@ class Camera(_CameraBase):
         the *template* for display/config-service purposes; this method
         only ever touches hardware with real, settable values.
         """
-        config = self._on_disk_config()
-        if config is None:
-            config = CameraConfig(name=self._slug, playfield=self._playfield, settings={})
-        self.apply_config(config)
+        with self._config_lock:
+            config = self._on_disk_config()
+            if config is None:
+                config = CameraConfig(name=self._slug, playfield=self._playfield, settings={})
+            self.apply_config(config)
         # Same "re-read exactly what is installed on disk" contract for the
         # flat-field gain map: a replaced file is picked up, a deleted file
         # clears the correction -- live, no restart (FLATFIELD_FILENAME).

@@ -96,3 +96,9 @@ config change, check the hardware readback first; the map, the lights,
 and the calibration were all innocent this time. Durable fix remains
 `clasi/issues/later/daemon-cannot-detect-uvc-control-drift-camera-left-dark.md`
 (read controls back periodically / after any reopen and re-assert).
+
+**Durable fix landed 2026-09-03:** the daemon now reads applied controls
+back every 15 s and re-asserts them when they drift
+(`Camera.reassert_config`, `DaemonService.start_control_watchdog`);
+look for `hardware controls drifted from applied config` in the daemon
+log. Needs a daemon started from a build at or after that commit.

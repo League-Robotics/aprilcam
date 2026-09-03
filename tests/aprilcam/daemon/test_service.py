@@ -6514,3 +6514,39 @@ def test_capture_flatfield_burst_reads_raw_frames_not_map_corrected(service, hel
     frames = service._capture_flatfield_frames(cam, 3)
     assert len(frames) == 3 and all(int(f[0, 0, 0]) == 7 for f in frames)
     assert calls == ["raw", "raw", "raw"]
+
+
+def test_reassert_controls_reapplies_drifted_settings_on_held_cameras(service, held_camera):
+    """UVC-drift fix (2026-09-03, out of process): one watchdog pass finds a
+    held camera whose hardware reverted and re-pushes its applied config."""
+    from aprilcam.config.interfaces import CameraConfig
+
+    _, slug, cam = held_camera
+    cam.apply_config(CameraConfig(name=slug, playfield=None, settings={"exposure": 60, "gain": 8}))
+    assert service.reassert_controls() == {}
+    cam._backend._properties["exposure"] = 2500.0
+    cam._backend._properties["gain"] = 100.0
+    result = service.reassert_controls()
+    assert set(result) == {slug} and set(result[slug]) == {"exposure", "gain"}
+    assert cam._backend._properties["exposure"] == 60.0 and cam._backend._properties["gain"] == 8.0
+
+
+def test_control_watchdog_thread_restores_drift_and_stops(service, held_camera):
+    import time as _time
+
+    from aprilcam.config.interfaces import CameraConfig
+
+    _, slug, cam = held_camera
+    cam.apply_config(CameraConfig(name=slug, playfield=None, settings={"exposure": 60}))
+    service.start_control_watchdog(interval_s=0.05)
+    service.start_control_watchdog(interval_s=0.05)  # idempotent
+    try:
+        cam._backend._properties["exposure"] = 2500.0
+        deadline = _time.monotonic() + 3.0
+        while _time.monotonic() < deadline and cam._backend._properties["exposure"] != 60.0:
+            _time.sleep(0.02)
+        assert cam._backend._properties["exposure"] == 60.0
+    finally:
+        service.stop_control_watchdog()
+    assert service._watchdog_thread is None
+    service.stop_control_watchdog()  # idempotent

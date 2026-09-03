@@ -40,3 +40,20 @@ Operational remedy (documented in
 - At minimum: surface drift in `camera list` / frame status (the
   existing `frame_dark` advisory fired, but nothing pointed at
   exposure drift as the cause).
+
+## Resolution (2026-09-03, out of process, commit on master)
+
+Fixed as a control watchdog rather than a per-frame check:
+`Camera.apply_config` now records the numeric settings it pushed;
+`Camera.reassert_config()` reads each of them back through the same
+backend and, when any differs by more than 0.5 from what was pushed,
+re-pushes the whole last config (same ordering/rollback contract) and
+returns the drifted keys; `DaemonService.start_control_watchdog()`
+(started with hotplug watching in `daemon/__main__.py`, stopped in
+`close()`/`on_stop`) runs `reassert_controls()` over every held camera
+every `CONTROL_READBACK_INTERVAL_S = 15` s. Drift is logged at WARNING
+with read vs expected values. Tests: `tests/aprilcam/camera/test_camera.py`
+(re-assert, tolerance, unreadable keys, noop when closed, reset
+semantics) and `tests/aprilcam/daemon/test_service.py` (one pass, and
+the thread end to end). Not done: surfacing drift counts in
+`list_cameras`/status -- log only.
