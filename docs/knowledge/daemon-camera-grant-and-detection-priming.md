@@ -122,3 +122,15 @@ reprojection error only because four points fit a homography exactly.
 Treat that residual as meaningless, not as precision.
 
 Expected-detection sets in tests must therefore be **per camera**.
+
+## A deskewed view opened before a recalibration keeps the old warp
+
+Seen 2026-09-03: after `calibrate` on camera 3 (the camera had shifted
+~30 px), the stakeholder's deskewed view showed the AprilTag-1 overlay
+about a third of a tag above the tag. A fresh `get_frame(deskewed=True)`
+put the tag exactly at the canvas centre, so the calibration was fine.
+`daemon/streaming.py`'s `ImageStreamProducer` builds **one** `Deskewer`
+when the stream starts and keeps it for the stream's life, so an open
+view warps with the *old* homography while tag overlays use the new
+world coordinates. Reopen the view (or restart the daemon) after any
+`calibrate`; nothing marks the stream stale.
