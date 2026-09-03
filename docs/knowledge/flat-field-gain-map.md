@@ -169,3 +169,30 @@ is implemented -- rebalance again afterwards.
 Also: white paper already clips at camera 3's working exposure before any
 map, and the map's >1 gains clip more of the field. For colour
 measurements drop the exposure; tags do not care.
+
+## 2026-09-03: ND filter on camera 3 -- exposure retune, and the map is out of date
+
+A neutral-density filter went onto camera 3. Consequences, measured:
+
+- **Exposure ceiling.** At 30 fps the OV9782's exposure control stops
+  having any effect above ~60 (frame median luma 107-111 for exposure
+  60, 80, 100, 130). Gain helps only a little (median 111 -> 133 from
+  gain 4 to 16) while clipping the tag paper more. Persisted:
+  `exposure 60, gain 4` (was 6 / 2), field median ~110, no clipping.
+  `power-line-frequency` on this camera reads 2 (60 Hz) already.
+- **The camera moved ~30 px** (down) when the filter was fitted:
+  calibration is stale and must be redone, which needs the mat off
+  markers 4, 9, 10 and the centre AprilTag.
+- **Corner markers 3, 5, 7 are flaky** through the filter at every
+  exposure, with and without the gain map, and not because of blur
+  (contrast-normalised sharpness unchanged). The filter adds a purple
+  veiling haze at the frame edges (visible in every frame); that is the
+  leading suspect. Unresolved.
+- **The gain map is not being applied.** A `camera flatfield --clear`
+  test followed by copying the `.npy` back and `camera config --reset`
+  left the daemon with no flat-field record and frames uncorrected
+  (magenta cast back, west/east wood ratio 3.5x). The map was also built
+  without the filter and at the old pointing, so it is stale anyway.
+  Recapture with the tarp (`aprilcam camera flatfield 3 --exposure 20`),
+  then re-run the tag-paper white balance until the follow-up issue lands.
+  Stakeholder chose to stop before this step ("good enough").
