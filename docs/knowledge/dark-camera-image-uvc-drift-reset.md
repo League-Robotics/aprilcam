@@ -77,3 +77,22 @@ detectability without the confirmation gate) — script pattern in the
 2026-08-23 session; ~1 minute end to end. Persist the winner to
 `~/.config/aprilcam/cameras/<slug>/config.json` and
 `camera config --reset <n>`.
+
+## Recurrence 2026-09-03 -- the other direction: washed out, colours gone
+
+Camera 3 (`arducam-ov9782-usb-camera`) went from a good picture to fully
+washed out (white mat at 255, the green square invisible) with no config
+change. Hardware readback: `exposure-time-abs = 2500`, `gain = 100`
+while the daemon's live and on-disk config said `exposure 60 / gain 8`.
+Those two numbers are the sensor's power-on defaults, which points at a
+camera reset (USB re-enumeration or AVFoundation session rebuild) rather
+than another writer. The daemon had been restarted ~2 h earlier and
+`camera list` still reported everything healthy -- the daemon never
+reads controls back, so it cannot notice.
+
+Fix, as before: `aprilcam camera config --reset 3` re-applied 60/8 live
+(verified with `uvc-util -g`). Whenever the picture changes with no
+config change, check the hardware readback first; the map, the lights,
+and the calibration were all innocent this time. Durable fix remains
+`clasi/issues/later/daemon-cannot-detect-uvc-control-drift-camera-left-dark.md`
+(read controls back periodically / after any reopen and re-assert).
