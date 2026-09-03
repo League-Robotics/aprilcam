@@ -229,3 +229,13 @@ A neutral-density filter went onto camera 3. Consequences, measured:
   runs, `camera list` says `flatfield=absent` (the in-memory record was
   cleared) although `Camera` applies the file on the next reset; the
   record comes back on the next daemon start.
+- **Correction to the NE-corner note above:** the corner *can* be
+  corrected. The daemon's math fills outside the field mask with the
+  field's mean before the sigma-40 blur, and at a steep dark corner that
+  bright fill bleeds in (raw 25, estimate 58 -> half the needed gain).
+  Rebuilding with nearest-in-field extension (`cv2.distanceTransformWithLabels`),
+  median 21 / sigma 20, target 235, cap 16 gives a corrected white field of
+  225-235 everywhere, NE 233 neutral; only the last few corner pixels sit
+  at the green cap. Installed on camera 3 (`flatfield_cam3_bright235_edge.npy`
+  in the session scratchpad is the copy). Filed as
+  `clasi/issues/flat-field-capture-target-level-gain-cap-and-edge-extension.md`.
