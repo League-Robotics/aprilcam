@@ -116,7 +116,18 @@ __all__ = ["DaemonLifecycle"]
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_START_TIMEOUT = 10.0
+#: How long ``start()`` waits for the spawned daemon's control socket
+#: before killing it and reporting "exited before becoming ready". The
+#: daemon's ``start()`` runs a full camera probe (open + settle reads on
+#: every attached camera) *before* it opens the control plane, and that
+#: probe alone measured 11 s on this rig with six cameras even when
+#: every open was refused, longer still when they succeed -- so the
+#: original 10 s made ``aprilcam daemon start``/``restart`` fail every
+#: time from a shell that has camera access while a foreground
+#: ``python -m aprilcam.daemon`` came up fine (2026-09-03, out of
+#: process). 90 s is generous on purpose: a genuinely dead child is
+#: caught by ``poll()`` immediately regardless of this bound.
+_DEFAULT_START_TIMEOUT = 90.0
 _DEFAULT_STOP_TIMEOUT = 10.0
 _DEFAULT_POLL_INTERVAL = 0.05
 

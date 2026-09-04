@@ -586,3 +586,13 @@ def test_start_stop_status_round_trip_against_a_real_daemon_process(
         lifecycle.stop()
 
     assert lifecycle.status().running is False
+
+
+def test_default_start_timeout_covers_a_real_multi_camera_probe():
+    """2026-09-03 (out of process): the daemon probes every camera before
+    opening its socket; measured 11 s on a six-camera rig with every
+    open refused, longer when they succeed. The launcher's default must
+    comfortably exceed that or ``daemon start`` kills a healthy child."""
+    from aprilcam.client.lifecycle import _DEFAULT_START_TIMEOUT
+
+    assert _DEFAULT_START_TIMEOUT >= 60.0

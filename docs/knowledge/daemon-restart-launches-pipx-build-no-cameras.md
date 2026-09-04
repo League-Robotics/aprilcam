@@ -152,3 +152,14 @@ Do **not** `pipx install cv2-enumerate-cameras` on its own: that creates
 an isolated app venv (it was present on this host, exposing `lscam`)
 which `aprilcam` can never import from. Use the extra, or
 `pipx inject aprilcam <pkg>`.
+
+## `daemon start`/`restart` fails with "exited before becoming ready" while a foreground run works (fixed 2026-09-03)
+
+Cause: `client/lifecycle.py`'s launcher waited only 10 s for the child's
+control socket, but the daemon probes every camera (open + settle reads)
+*before* opening the socket -- measured 11.1 s on this six-camera rig
+even with every open refused, longer when they succeed -- so the launcher
+killed a healthy child every time. `python -m aprilcam.daemon` in the
+foreground has no such bound, which is why it "worked". The default is
+now 90 s (a dead child is still caught immediately via `poll()`). If the
+error ever comes back with no stderr detail, suspect the bound first.
