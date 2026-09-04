@@ -163,3 +163,16 @@ killed a healthy child every time. `python -m aprilcam.daemon` in the
 foreground has no such bound, which is why it "worked". The default is
 now 90 s (a dead child is still caught immediately via `poll()`). If the
 error ever comes back with no stderr detail, suspect the bound first.
+
+### Recurrence 2026-09-04 on camera 2 (`hd-usb-camera`), same signature
+
+`camera view 2` hung while camera 3 viewed fine. `camera list`: camera 2
+`present unusable` (self-heal reopen budget spent); `camera image 2`
+fails fast with "no frame available"; `camera probe` flipped it to
+`usable` and reported "in use by a live subscriber" (the hung view's
+stream subscription), but reads still failed and it flipped back to
+`unusable` within seconds. As before, only a daemon restart recovers
+it; close the hung view first (its subscription dies with the daemon
+anyway). The new control watchdog does not help here -- the controls
+read fine, the capture session itself is dead. Durable fix is still
+`clasi/issues/camera-capture-session-wedge-is-silent-and-needs-a-daemon-restart.md`.
