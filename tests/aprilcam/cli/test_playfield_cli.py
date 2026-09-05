@@ -49,7 +49,7 @@ from aprilcam.types import (
     Text,
     WorldPoint,
 )
-from aprilcam.view.viewer import NoDisplayAvailable
+from aprilcam.view.viewer import FirstFrameTimeout, NoDisplayAvailable
 
 
 def _definition(name: str = "main-playfield") -> PlayfieldDefinition:
@@ -695,6 +695,27 @@ def test_view_no_display_points_at_playfield_image_instead_of_a_backtrace(capsys
     assert code == 1
     err = capsys.readouterr().err
     assert "playfield image" in err
+
+
+def test_view_first_frame_timeout_names_the_camera_instead_of_a_backtrace(capsys):
+    """A stalled stream surfaces as a diagnostic naming the resolved
+    camera (the daemon-side slug, not the playfield), never as an
+    uncaught ``FirstFrameTimeout`` -- the traceback the stakeholder
+    pasted on 2026-09-05 ended in ``no frame received from ''``."""
+    daemon = _FakeDaemon(cameras=(_camera("arducam", playfield="main-playfield"),))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    def raising_run_view(camera, connected, bare):
+        raise FirstFrameTimeout(camera)
+
+    code = playfield_cli.cmd_view(
+        _args(), discovery_factory=lambda: discovery, run_view=raising_run_view
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "no frame received from 'arducam'" in err
+    assert "Traceback" not in err
 
 
 def test_view_uncalibrated_camera_points_at_camera_calibrate(capsys):

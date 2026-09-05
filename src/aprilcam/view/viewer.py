@@ -962,6 +962,7 @@ def run_playfield_view(
     renderer_factory: Callable[[], RendererBase] = PillowRenderer,
     window_factory: Callable[..., Window] = TkWindow,
     bare: bool = False,
+    first_frame_timeout_s: float = _DEFAULT_FIRST_FRAME_TIMEOUT_S,
 ) -> None:
     """``playfield view`` (UC-18, ticket 022-006, streaming per ticket
     027-007): open a window and subscribe to ``stream_images(camera,
@@ -1021,6 +1022,12 @@ def run_playfield_view(
             convert = _convert_bare_playfield_frame
         else:
             convert = _make_playfield_converter(renderer_factory())
-        StreamLoop(window, stream, convert).run()
+        StreamLoop(
+            window,
+            stream,
+            convert,
+            camera=camera,
+            first_frame_timeout_s=first_frame_timeout_s,
+        ).run()
     finally:
         window.close()

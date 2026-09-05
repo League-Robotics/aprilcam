@@ -1069,6 +1069,27 @@ def test_run_playfield_view_propagates_no_display_available_before_any_daemon_ca
     assert daemon.requested_camera is None
 
 
+def test_run_playfield_view_raises_first_frame_timeout_naming_the_camera():
+    """``playfield view`` gets the same bounded first-frame wait as
+    ``camera view`` (it previously constructed ``StreamLoop`` without a
+    camera, so a stalled deskewed stream surfaced as ``FirstFrameTimeout``
+    with an empty camera name, after the loop's default bound)."""
+    window = _FakeWindow(close_after_frames=None)
+    daemon = _FakeStreamDaemon(stream=_ScriptedImageStream([]))
+
+    with pytest.raises(viewer.FirstFrameTimeout) as excinfo:
+        viewer.run_playfield_view(
+            "hd-usb-camera",
+            daemon,
+            renderer_factory=_PassThroughRenderer,
+            window_factory=lambda title, **kwargs: window,
+            first_frame_timeout_s=_SHORT_FIRST_FRAME_TIMEOUT_S,
+        )
+
+    assert excinfo.value.camera == "hd-usb-camera"
+    assert window.close_called is True
+
+
 def test_run_playfield_view_closes_the_window_even_when_the_stream_raises():
     window = _FakeWindow(close_after_frames=None)
     daemon = _FakeStreamDaemon(stream=_BoomImageStream())

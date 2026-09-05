@@ -258,7 +258,13 @@ def run_worker(
                     ring = FrameRing.create(shape=frame.shape, dtype=frame.dtype, num_slots=ring_slots)
                     _send_ready_ok(conn, ring, frame)
                 ring.publish(frame)
-            serve_one(conn, handler, timeout=0)
+            try:
+                serve_one(conn, handler, timeout=0)
+            except (EOFError, OSError):
+                # The parent closed the control channel (it is shutting
+                # this worker down, or it died): a clean, quiet exit --
+                # not a traceback into the parent's log.
+                break
         return 0
     finally:
         try:
@@ -293,18 +299,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--ring-slots", type=int, default=DEFAULT_RING_SLOTS)
     args = parser.parse_args(argv)
 
-    backend: CaptureBackend
-    if args.synthetic is not None:
-        width, height, fps = _parse_synthetic(args.synthetic)
-        backend = SyntheticBackend(width, height, fps)
-    else:
-        if args.index is None:
-            parser.error("--index is required unless --synthetic is given")
-        from aprilcam.camera.backends.opencv_backend import OpenCVBackend  # noqa: PLC0415 -- lazy, see module docstring
+    if args.synthetic is None and args.index is None:
+        parser.error("--index is required unless --synthetic is given")
 
-        backend = OpenCVBackend(args.index, width=args.width, height=args.height, backend=args.backend)
-
+    # Connect *before* importing cv2 or constructing the backend: the
+    # parent's connect timeout then only has to cover interpreter
+    # start-up, and anything that goes wrong from here on -- an import
+    # failure, a backend constructor raising -- reaches the parent as a
+    # ready-error with the exception text instead of as a silent early
+    # exit it can only report as "did not connect".
     conn = Client(args.control_address)
+
+    backend: CaptureBackend
+    try:
+        if args.synthetic is not None:
+            width, height, fps = _parse_synthetic(args.synthetic)
+            backend = SyntheticBackend(width, height, fps)
+        else:
+            from aprilcam.camera.backends.opencv_backend import OpenCVBackend  # noqa: PLC0415 -- lazy, see module docstring
+
+            backend = OpenCVBackend(args.index, width=args.width, height=args.height, backend=args.backend)
+    except Exception as exc:  # noqa: BLE001 -- any construction failure must be reported, never crash silently
+        _send_ready_error(conn, f"{type(exc).__name__}: {exc}")
+        conn.close()
+        return 1
+
     return run_worker(backend, conn, ring_slots=args.ring_slots)
 
 

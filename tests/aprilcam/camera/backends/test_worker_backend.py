@@ -323,25 +323,56 @@ def test_control_channel_round_trips():
 # ---------------------------------------------------------------------------
 
 
-def test_open_raises_worker_startup_error_on_timeout():
+def test_open_raises_worker_startup_error_on_first_frame_timeout():
     # fps=1 means the synthetic source's first frame (and therefore the
     # ready handshake) is not available for ~1s -- comfortably past a
-    # 0.2s startup_timeout, so this deterministically exercises the
-    # "startup timeout exceeded" path without needing a malformed
-    # invocation.
-    backend = WorkerBackend(synthetic="64x48@1", startup_timeout=0.2)
-    with pytest.raises(WorkerStartupError):
+    # 0.2s ready_timeout, so this deterministically exercises the
+    # "first frame not reported in time" path. The connect timeout is
+    # left generous: the child connects long before its first frame.
+    backend = WorkerBackend(synthetic="64x48@1", startup_timeout=10.0, ready_timeout=0.2)
+    with pytest.raises(WorkerStartupError, match="did not report its first frame"):
         backend.open()
     assert backend.is_open is False
 
 
-def test_open_raises_when_child_exits_before_handshake():
-    # A malformed --synthetic spec makes capture_worker.main() raise
-    # during argument handling, before it ever connects/sends a ready
-    # message -- exercises "the child exited before reporting" branch.
-    backend = WorkerBackend(synthetic="not-a-valid-spec", startup_timeout=5.0)
-    with pytest.raises(WorkerStartupError):
+def test_open_raises_worker_startup_error_on_connect_timeout():
+    # A connect timeout no interpreter can beat exercises the "never
+    # connected" branch on its own, separately from the first-frame
+    # bound above (the two are distinct timeouts with distinct meanings).
+    backend = WorkerBackend(synthetic="64x48@30", startup_timeout=0.001)
+    with pytest.raises(WorkerStartupError, match="did not connect"):
         backend.open()
+    assert backend.is_open is False
+
+
+def test_open_reports_a_backend_construction_failure_through_the_handshake():
+    # A malformed --synthetic spec makes capture_worker.main() raise
+    # while building the backend. Because the worker connects *before*
+    # that, the failure arrives as a ready-error carrying the exception
+    # text -- not as a bare "did not connect".
+    backend = WorkerBackend(synthetic="not-a-valid-spec", startup_timeout=5.0)
+    with pytest.raises(WorkerStartupError, match="ValueError"):
+        backend.open()
+    assert backend.is_open is False
+
+
+def test_open_reports_exit_code_and_stderr_when_child_dies_before_connecting():
+    # An argparse failure exits (code 2) with usage text on stderr before
+    # the worker ever connects -- the one shape of failure the parent can
+    # only diagnose from the child's exit code and captured stderr. The
+    # message must carry both, and open() must return promptly rather
+    # than sit out the whole connect timeout.
+    backend = WorkerBackend(synthetic="64x48@30", startup_timeout=10.0)
+    real_build = backend._build_command
+    backend._build_command = lambda address: real_build(address) + ["--ring-slots", "x"]  # type: ignore[method-assign]
+    started = time.monotonic()
+    with pytest.raises(WorkerStartupError) as excinfo:
+        backend.open()
+    elapsed = time.monotonic() - started
+    message = str(excinfo.value)
+    assert "exited with code 2" in message
+    assert "invalid int value" in message
+    assert elapsed < 5.0, f"open() waited {elapsed:.1f}s instead of failing on the child's exit"
     assert backend.is_open is False
 
 

@@ -2852,6 +2852,8 @@ class DaemonService(Daemon):
         with self._lock:
             held = list(self._cameras.items())
         stalled: List[str] = []
+        recovered: List[str] = []
+        failed: List[str] = []
         for slug, cam in held:
             try:
                 respawned = cam.check_stall()
@@ -2860,8 +2862,17 @@ class DaemonService(Daemon):
                 continue
             if respawned:
                 stalled.append(slug)
-        if stalled:
-            logger.warning("stall watchdog respawned: %s", ", ".join(stalled))
+                # ``check_stall`` returning True means a respawn was
+                # *attempted*; whether it worked is what ``usable`` says.
+                (recovered if cam.state.usable else failed).append(slug)
+        if recovered:
+            logger.warning("stall watchdog respawned: %s", ", ".join(recovered))
+        if failed:
+            logger.error(
+                "stall watchdog respawn FAILED (camera left unusable, retried every %.0fs): %s",
+                STALLED_CAMERA_RETRY_INTERVAL_S,
+                ", ".join(failed),
+            )
         return tuple(stalled)
 
     def _retry_exhausted_cameras(self) -> Tuple[str, ...]:

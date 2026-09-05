@@ -53,8 +53,9 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from multiprocessing.connection import Connection, Listener
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -70,6 +71,7 @@ __all__ = [
     "DEFAULT_CLOSE_GRACE",
     "DEFAULT_CONTROL_TIMEOUT",
     "DEFAULT_READ_TIMEOUT",
+    "DEFAULT_READY_TIMEOUT",
     "DEFAULT_STARTUP_TIMEOUT",
     "WorkerBackend",
     "WorkerStartupError",
@@ -79,11 +81,28 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 #: Default bound for WorkerBackend.open() to wait for the child to
-#: connect and report its first frame before giving up and raising --
+#: *connect* to the control channel before giving up and raising --
 #: an implementation-time choice, not an architectural one (camera-
 #: DESIGN.md's Open Questions names this explicitly as left to a
-#: ticket to decide).
+#: ticket to decide). The child connects before it imports cv2 or
+#: touches the camera (``capture_worker.main``), so this only has to
+#: cover interpreter start-up plus the ``aprilcam``/``numpy`` imports.
 DEFAULT_STARTUP_TIMEOUT = 10.0
+
+#: Default bound, counted from the moment the child connected, for it
+#: to open the camera and report its first frame. Separate from
+#: :data:`DEFAULT_STARTUP_TIMEOUT` because the two failures mean
+#: different things (a child that never connects died or could not
+#: import; a connected child that never reports a frame is the camera
+#: itself misbehaving), and because a real AVFoundation session can
+#: legitimately take several seconds to deliver its first frame after
+#: a respawn, particularly right after the host wakes from sleep.
+DEFAULT_READY_TIMEOUT = 30.0
+
+#: How many trailing lines of the child's stderr are kept for inclusion
+#: in a ``WorkerStartupError`` message. Every line is also logged as it
+#: arrives, so the daemon log carries the full text.
+_STDERR_TAIL_LINES = 20
 
 #: Default bound for a single control-channel round trip
 #: (get_property/set_property/settable_names/frame_size).
@@ -140,6 +159,7 @@ class WorkerBackend(CaptureBackend):
         backend: Optional[int] = None,
         synthetic: Optional[str] = None,
         startup_timeout: float = DEFAULT_STARTUP_TIMEOUT,
+        ready_timeout: float = DEFAULT_READY_TIMEOUT,
         control_timeout: float = DEFAULT_CONTROL_TIMEOUT,
         close_grace: float = DEFAULT_CLOSE_GRACE,
         read_timeout: float = DEFAULT_READ_TIMEOUT,
@@ -153,6 +173,7 @@ class WorkerBackend(CaptureBackend):
         self._backend_id = backend
         self._synthetic = synthetic
         self._startup_timeout = startup_timeout
+        self._ready_timeout = ready_timeout
         self._control_timeout = control_timeout
         self._close_grace = close_grace
         self._read_timeout = read_timeout
@@ -161,6 +182,9 @@ class WorkerBackend(CaptureBackend):
         self._process: "Optional[subprocess.Popen[bytes]]" = None
         self._control: Optional[ControlChannel] = None
         self._ring: Optional[FrameRing] = None
+        #: Trailing stderr lines of the most recently spawned child --
+        #: the diagnostic every startup failure message ends with.
+        self._stderr_tail: Deque[str] = deque(maxlen=_STDERR_TAIL_LINES)
 
     # -- CaptureBackend ---------------------------------------------------
 
@@ -174,12 +198,20 @@ class WorkerBackend(CaptureBackend):
 
         listener = Listener()
         process: "Optional[subprocess.Popen[bytes]]" = None
+        self._stderr_tail.clear()
         try:
+            # stderr is piped, never discarded: a child that dies before
+            # it can connect has *only* its stderr to say why (a
+            # traceback from an import failure, an interpreter that could
+            # not start), and the whole point of the respawn path is that
+            # the daemon keeps running long after anyone was watching a
+            # terminal. Every line goes to the daemon log via _drain_stderr.
             process = subprocess.Popen(
                 self._build_command(str(listener.address)),
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
             )
+            self._start_stderr_drain(process)
             conn = self._accept(listener, process)
             ready = self._read_ready(conn, process)
         finally:
@@ -189,6 +221,7 @@ class WorkerBackend(CaptureBackend):
             self._terminate(process)
             raise WorkerStartupError(
                 f"capture worker failed to start: {ready.get('error') or 'no detail reported'}"
+                f"{self._stderr_suffix()}"
             )
 
         shape: Tuple[int, ...] = tuple(ready["shape"])
@@ -337,6 +370,53 @@ class WorkerBackend(CaptureBackend):
                 cmd += ["--backend", str(self._backend_id)]
         return cmd
 
+    def _start_stderr_drain(self, process: "subprocess.Popen[bytes]") -> None:
+        """Copy the child's stderr into the log (and the tail buffer)
+        until the pipe closes -- i.e. until the child exits. Daemon
+        thread: it can never keep the parent alive, and it costs nothing
+        while the child is quiet."""
+        pipe = process.stderr
+        if pipe is None:  # pragma: no cover - Popen was given stderr=PIPE
+            return
+        label = f"capture_worker[index={self._index} pid={process.pid}]"
+        tail = self._stderr_tail
+
+        def _drain() -> None:
+            try:
+                for raw in iter(pipe.readline, b""):
+                    line = raw.decode("utf-8", errors="replace").rstrip()
+                    if not line:
+                        continue
+                    tail.append(line)
+                    logger.warning("%s: %s", label, line)
+            except Exception:  # noqa: BLE001 -- a broken pipe at shutdown is not an error
+                pass
+            finally:
+                try:
+                    pipe.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        threading.Thread(target=_drain, name=f"{label} stderr", daemon=True).start()
+
+    def _stderr_suffix(self) -> str:
+        """The child's trailing stderr lines, formatted for appending to
+        a ``WorkerStartupError`` message -- empty when it said nothing.
+        Waits briefly for the drain thread to catch up, since the child
+        usually writes its traceback in the same instant it exits."""
+        deadline = time.monotonic() + 0.5
+        while not self._stderr_tail and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not self._stderr_tail:
+            return " (worker stderr: empty)"
+        return " (worker stderr: " + " | ".join(self._stderr_tail) + ")"
+
+    def _exit_suffix(self, process: "subprocess.Popen[bytes]") -> str:
+        code = process.poll()
+        if code is None:
+            return ""
+        return f"; the worker process exited with code {code}"
+
     def _accept(self, listener: Listener, process: "subprocess.Popen[bytes]") -> Connection:
         result: Dict[str, Any] = {}
 
@@ -348,34 +428,59 @@ class WorkerBackend(CaptureBackend):
 
         thread = threading.Thread(target=_accept_target, daemon=True)
         thread.start()
-        thread.join(self._startup_timeout)
+        # Wait in short slices so a child that dies before connecting is
+        # reported at once, with its exit code, instead of after the
+        # full connect timeout has elapsed with nothing to show for it.
+        deadline = time.monotonic() + self._startup_timeout
+        while "conn" not in result and "error" not in result:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(min(remaining, _READY_POLL_INTERVAL))
+            if "conn" not in result and process.poll() is not None:
+                # Give a connect that raced the exit one more slice.
+                thread.join(_READY_POLL_INTERVAL)
+                break
         if "conn" not in result:
             self._terminate(process)
             detail = f" ({result['error']})" if "error" in result else ""
             raise WorkerStartupError(
                 f"capture worker did not connect to the control channel within "
-                f"{self._startup_timeout}s{detail}"
+                f"{self._startup_timeout}s{detail}{self._exit_suffix(process)}"
+                f"{self._stderr_suffix()}"
             )
         conn: Connection = result["conn"]
         return conn
 
     def _read_ready(self, conn: Connection, process: "subprocess.Popen[bytes]") -> Dict[str, Any]:
-        deadline = time.monotonic() + self._startup_timeout
+        deadline = time.monotonic() + self._ready_timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._terminate(process)
                 conn.close()
                 raise WorkerStartupError(
-                    f"capture worker did not report its first frame within {self._startup_timeout}s"
+                    f"capture worker did not report its first frame within {self._ready_timeout}s"
+                    f"{self._stderr_suffix()}"
                 )
             if conn.poll(min(remaining, _READY_POLL_INTERVAL)):
-                payload: Dict[str, Any] = json.loads(conn.recv_bytes().decode("utf-8"))
+                try:
+                    payload: Dict[str, Any] = json.loads(conn.recv_bytes().decode("utf-8"))
+                except (EOFError, OSError) as exc:
+                    # poll() also wakes for a closed connection: the child
+                    # connected and then died before its handshake.
+                    self._terminate(process)
+                    conn.close()
+                    raise WorkerStartupError(
+                        f"capture worker closed the control channel before reporting its "
+                        f"first frame ({exc!r}){self._exit_suffix(process)}{self._stderr_suffix()}"
+                    ) from None
                 return payload
             if process.poll() is not None:
                 conn.close()
                 raise WorkerStartupError(
                     f"capture worker exited (code {process.returncode}) before reporting its first frame"
+                    f"{self._stderr_suffix()}"
                 )
 
     def _request(self, method: str, params: Optional[Dict[str, Any]] = None) -> Any:

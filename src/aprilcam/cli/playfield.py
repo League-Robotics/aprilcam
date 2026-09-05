@@ -357,6 +357,15 @@ def cmd_view(
             file=sys.stderr,
         )
         return EXIT_ERROR
+    except viewer.FirstFrameTimeout as exc:
+        print(
+            f"error: no frame received from {camera!r} -- the camera's "
+            "capture session may be wedged or its worker down. Check "
+            "'aprilcam camera list' (usable?) and the daemon log, or restart "
+            f"the daemon ({exc}).",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
     except NotCalibrated as exc:
         print(
             f"error: {exc} -- calibrate first with 'aprilcam camera "

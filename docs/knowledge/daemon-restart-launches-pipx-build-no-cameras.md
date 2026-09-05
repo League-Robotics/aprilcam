@@ -223,3 +223,56 @@ camera arrived within 15-50 minutes of a stream starting. Not proof the
 wedge cannot recur inside a worker -- only that if it does, the respawn
 path is now armed to catch it within ~15 s; watch the log for
 `check_stall`/respawn lines.
+
+## Overnight 2026-09-05: both worker-backed cameras stalled after host sleep and every respawn failed
+
+The first real stall on the sprint-038 build came at 01:30, while the
+Mac was in maintenance sleep: cameras 2 and 3 both stalled (heartbeat
+>10 s), the watchdog caught both within its interval as designed, and
+then **every respawn failed the same way** -- ten reopen attempts each,
+then the 60 s exhausted-retry, all logging
+`capture worker did not connect to the control channel within 10.0s`.
+By 06:47 both cameras were `unusable` with no `capture_worker` process
+alive. Watching one retry live showed the daemon-spawned child become a
+zombie (state `Z`) within 1.5 s of spawn: it exited immediately. Its
+stderr had been `DEVNULL`, no crash report was written, and the identical
+command run by hand from any cwd, including the daemon's, connected in
+0.15 s and reported the expected ready-error. The daemon's environment,
+file-descriptor count (211), thread count (31), and interpreter path were
+all normal. **The child's actual failure reason was never captured** --
+that is the finding.
+
+What changed in response (commit after this note):
+
+- **The worker's stderr is now piped into the daemon log**
+  (`capture_worker[index=N pid=P]: ...` lines at WARNING), and the last
+  20 lines are appended to every `WorkerStartupError` message, together
+  with the child's exit code when it has already exited. The next
+  failure of this kind will say *why* in `aprilcamd.log`.
+- **`WorkerBackend.open()` fails fast on a dead child** instead of
+  sitting out the full connect timeout: a child that exits before
+  connecting is reported within ~0.4 s, so the reopen budget is no
+  longer burned in ten silent 10 s waits.
+- **Connect and first-frame are separate timeouts**
+  (`DEFAULT_STARTUP_TIMEOUT` 10 s for the connect, new
+  `DEFAULT_READY_TIMEOUT` 30 s for the first frame), and the worker
+  now **connects before importing cv2 or constructing the backend**,
+  so import time can never eat the connect window and an import or
+  constructor failure reaches the parent as a ready-error with the
+  exception text.
+- The worker exits quietly (no traceback) when the parent closes the
+  control channel, and `check_stalled_cameras` logs a respawn that left
+  the camera unusable as `stall watchdog respawn FAILED` (ERROR) rather
+  than "respawned".
+- `aprilcam playfield view` now names the camera and prints a
+  diagnostic on a first-frame timeout instead of a traceback ending in
+  `no frame received from ''`.
+
+Still open: whether the stall itself is the AVFoundation wedge inside the
+worker (expected, now respawnable) or something sleep-related that also
+breaks *spawning*. If the log shows the child failing in the interpreter
+or on import after a sleep, that is the lead to chase; note that
+`pipx install --force` had rewritten the venv at 00:20 while this daemon
+was running, which is the one thing that changed on disk between the
+23:17 spawns that worked and the 01:30 ones that did not. Restart the
+daemon after any reinstall.
