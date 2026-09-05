@@ -394,6 +394,16 @@ def cmd_view(
     unchanged by this ticket; only the visibility of that fact is new
     (see ``view/viewer.py``'s ``run_raw_view`` for the window-title
     half of the same signposting).
+
+    **Sprint 038, SUC-004**: if no frame ever arrives, ``run_view``
+    raises ``view.viewer.FirstFrameTimeout`` (a client-local, bounded
+    timeout -- see that module) instead of the process hanging forever
+    with the window open and no error. Caught here alongside
+    ``NoDisplayAvailable``/``AprilCamError``: prints a diagnostic naming
+    the camera, the likely cause (a wedged capture session), and the
+    remedy (``aprilcam camera probe`` or a daemon restart, until the
+    worker-process fix lands), then returns ``EXIT_ERROR`` -- never an
+    unhandled exception, never a silent hang.
     """
     if args.all:
         print(
@@ -421,6 +431,15 @@ def cmd_view(
         print(
             f"error: no display available ({exc}) -- run 'aprilcam camera "
             f"image {args.camera}' instead (UC-16.S-3).",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    except viewer.FirstFrameTimeout as exc:
+        print(
+            f"error: no frame received from {args.camera!r} -- the capture "
+            "session may be wedged. Try 'aprilcam camera probe' or restart "
+            "the daemon (sprint 038's per-camera worker-process fix targets "
+            f"this) ({exc}).",
             file=sys.stderr,
         )
         return EXIT_ERROR

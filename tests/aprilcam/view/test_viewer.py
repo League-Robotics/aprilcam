@@ -62,7 +62,7 @@ from PIL import Image
 from aprilcam.calibration.geometry import world_to_deskewed_pixel
 from aprilcam.client.renderer import Renderer
 from aprilcam.daemon.interfaces import ImageStream
-from aprilcam.errors import NotCalibrated
+from aprilcam.errors import AprilCamError, NotCalibrated
 from aprilcam.view import viewer
 from aprilcam.types import (
     ImageFrame,
@@ -722,6 +722,96 @@ def test_stream_loop_propagates_a_stream_error_and_stops():
 
 
 # ---------------------------------------------------------------------------
+# StreamLoop -- bounded first-frame timeout (sprint 038, SUC-004): a
+# stream that never delivers a first frame fails within a bounded,
+# diagnosable timeout instead of StreamLoop.run pumping forever.
+# ---------------------------------------------------------------------------
+
+
+#: A short, real (not virtual-clock) timeout for the tests below --
+#: comfortably larger than ``_FAST_PUMP_INTERVAL_S`` so several pump
+#: cycles elapse before the bound fires, but small enough to keep the
+#: test suite fast.
+_SHORT_FIRST_FRAME_TIMEOUT_S = 0.05
+
+
+def test_stream_loop_raises_first_frame_timeout_when_no_frame_ever_arrives():
+    """Acceptance criterion: a stub ``ImageStream`` that never yields a
+    frame causes ``StreamLoop.run`` to raise ``FirstFrameTimeout`` within
+    the configured bound, with the stream closed and the reader thread
+    joined before the exception propagates."""
+    window = _FakeWindow(close_after_frames=None)  # never closes on its own
+    stream = _ScriptedImageStream([])  # yields nothing -- idles until close()
+
+    with pytest.raises(viewer.FirstFrameTimeout) as excinfo:
+        viewer.StreamLoop(
+            window,
+            stream,
+            viewer._convert_raw_frame,
+            pump_interval=_FAST_PUMP_INTERVAL_S,
+            camera="wedged-camera",
+            first_frame_timeout_s=_SHORT_FIRST_FRAME_TIMEOUT_S,
+        ).run()
+
+    assert excinfo.value.camera == "wedged-camera"
+    assert window.shown == []
+    assert stream.close_called is True
+    assert _no_reader_thread_alive()
+
+
+def test_first_frame_timeout_is_not_an_aprilcam_error():
+    """The ticket's own acceptance criterion, stated as literally as
+    the class itself: ``FirstFrameTimeout`` must not be an
+    ``aprilcam.errors.AprilCamError`` -- it is a client-local condition,
+    mirroring ``NoDisplayAvailable``'s existing pattern, not a member of
+    the daemon-facing error taxonomy."""
+    assert not isinstance(viewer.FirstFrameTimeout("cam"), AprilCamError)
+
+
+def test_stream_loop_shows_a_frame_promptly_when_within_a_short_timeout():
+    """Regression: a stream that delivers its first frame within the
+    bound is completely unaffected -- no timing regression to the
+    ordinary pump/display path, even with a short injected
+    ``first_frame_timeout_s``."""
+    window = _FakeWindow(close_after_frames=1)
+    stream = _ScriptedImageStream([_image_frame(data=b"frame-1")])
+
+    viewer.StreamLoop(
+        window,
+        stream,
+        viewer._convert_raw_frame,
+        pump_interval=_FAST_PUMP_INTERVAL_S,
+        first_frame_timeout_s=_SHORT_FIRST_FRAME_TIMEOUT_S,
+    ).run()
+
+    assert window.shown == [b"frame-1"]
+
+
+def test_stream_loop_first_frame_timeout_never_fires_again_once_a_frame_arrived():
+    """Acceptance criterion: once any frame has been received, the
+    timeout logic never fires again for the rest of that stream's life
+    -- proven by holding the window open, via real wall-clock time, well
+    past ``first_frame_timeout_s`` after the one frame the stream ever
+    yields, and confirming no ``FirstFrameTimeout`` is raised."""
+    window = _TimedFakeWindow(duration_s=0.15)
+    stream = _ScriptedImageStream([_image_frame(data=b"frame-1")])
+
+    # Must not raise -- the window closes normally (via _TimedFakeWindow's
+    # own real-time bound) even though it stays open several multiples of
+    # _SHORT_FIRST_FRAME_TIMEOUT_S past the one frame ever shown.
+    viewer.StreamLoop(
+        window,
+        stream,
+        viewer._convert_raw_frame,
+        pump_interval=_FAST_PUMP_INTERVAL_S,
+        first_frame_timeout_s=_SHORT_FIRST_FRAME_TIMEOUT_S,
+    ).run()
+
+    assert window.shown == [b"frame-1"]
+    assert window.close_called is False  # StreamLoop itself never calls close()
+
+
+# ---------------------------------------------------------------------------
 # run_raw_view -- UC-16 wiring: subscribes deskewed=False, raw bytes
 # only, frame_dark advisory, no-display propagation, cleanup guarantee
 # ---------------------------------------------------------------------------
@@ -836,6 +926,29 @@ def test_run_raw_view_closes_the_window_even_when_the_stream_raises():
         viewer.run_raw_view("cam", daemon, window_factory=lambda title: window)
 
     assert window.close_called is True
+
+
+def test_run_raw_view_propagates_first_frame_timeout_and_still_closes_the_window():
+    """Acceptance criterion: ``run_raw_view`` propagates
+    ``FirstFrameTimeout`` unchanged -- the window is closed in this
+    function's existing ``finally``, exactly like any other stream
+    failure (e.g. the ``_BoomImageStream`` case above)."""
+    window = _FakeWindow(close_after_frames=None)
+    stream = _ScriptedImageStream([])  # never yields a frame
+    daemon = _FakeStreamDaemon(stream=stream)
+
+    with pytest.raises(viewer.FirstFrameTimeout) as excinfo:
+        viewer.run_raw_view(
+            "wedged-cam",
+            daemon,
+            window_factory=lambda title: window,
+            first_frame_timeout_s=_SHORT_FIRST_FRAME_TIMEOUT_S,
+        )
+
+    assert excinfo.value.camera == "wedged-cam"
+    assert window.close_called is True
+    assert stream.close_called is True
+    assert _no_reader_thread_alive()
 
 
 # ---------------------------------------------------------------------------

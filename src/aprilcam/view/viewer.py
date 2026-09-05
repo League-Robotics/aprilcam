@@ -147,6 +147,7 @@ from aprilcam.types import ImageFrame, TagFamily, TagId, TagRecord
 __all__ = [
     "DEFAULT_POLL_HZ",
     "NoDisplayAvailable",
+    "FirstFrameTimeout",
     "DisplayFrame",
     "Window",
     "TkWindow",
@@ -182,6 +183,15 @@ _PUMP_INTERVAL_S = 0.05
 #: socket read.
 _READER_JOIN_TIMEOUT_S = 2.0
 
+#: Default bound (sprint 038) on how long :meth:`StreamLoop.run` waits
+#: for the *first* frame before giving up and raising
+#: :class:`FirstFrameTimeout` -- the production default; tests inject a
+#: much shorter value via the constructor's ``first_frame_timeout_s``
+#: parameter. Named and documented per the ticket's own requirement
+#: ("a real default for production use, injectable short for tests"),
+#: not a magic number inlined at the call site.
+_DEFAULT_FIRST_FRAME_TIMEOUT_S = 10.0
+
 #: The background reader thread's name -- distinctive enough that a
 #: test can confirm via ``threading.enumerate()`` that no reader thread
 #: survives past a :meth:`StreamLoop.run` call returning.
@@ -202,6 +212,26 @@ class NoDisplayAvailable(Exception):
     See the module docstring for why this is not an
     ``aprilcam.errors.AprilCamError``.
     """
+
+
+class FirstFrameTimeout(Exception):
+    """No frame arrived within :meth:`StreamLoop.run`'s bounded
+    first-frame timeout (sprint 038, SUC-004).
+
+    Deliberately **not** an ``aprilcam.errors.AprilCamError`` -- like
+    :class:`NoDisplayAvailable`, this condition is local to the client
+    process (an elapsed-time observation about its own stream
+    subscription), not a distinction the daemon-facing error taxonomy
+    exists to carry. Carries *camera* so a caller's diagnostic (see
+    ``cli/camera.py``'s ``cmd_view``) can name it without re-threading
+    the value through separately.
+    """
+
+    def __init__(self, camera: str) -> None:
+        self.camera = camera
+        super().__init__(
+            f"no frame received from {camera!r} within the first-frame timeout"
+        )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -681,6 +711,21 @@ class StreamLoop:
         Overridable so tests exercise the sampling cadence without a
         real clock cost (``_PUMP_INTERVAL_S``/``time.sleep`` by
         default).
+    camera:
+        The camera name -- carried only so a bounded first-frame
+        timeout (below) can name it in :class:`FirstFrameTimeout`
+        without threading the value through separately. Never used for
+        anything else (no daemon call, no lookup).
+    first_frame_timeout_s:
+        How long (wall-clock, ``time.monotonic()``-measured) :meth:`run`
+        waits for a first frame before giving up and raising
+        :class:`FirstFrameTimeout` (sprint 038, SUC-004) --
+        :data:`_DEFAULT_FIRST_FRAME_TIMEOUT_S` in production, overridden
+        short in tests. Once any frame has been received, this bound
+        never fires again for the rest of the stream's life -- it
+        bounds only the *first* frame, not an ongoing liveness check
+        (see the module docstring's "Open Questions" analogue in
+        ``view-DESIGN.md`` §6 for why that is a deliberate scope limit).
 
     **Best-effort thread cleanup.** ``stream.close()`` closes the
     client-side socket (``client/streams.py``'s ``SocketImageStream``);
@@ -701,12 +746,18 @@ class StreamLoop:
         *,
         pump_interval: float = _PUMP_INTERVAL_S,
         sleep: Callable[[float], None] = time.sleep,
+        camera: str = "",
+        first_frame_timeout_s: float = _DEFAULT_FIRST_FRAME_TIMEOUT_S,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._window = window
         self._stream = stream
         self._convert = convert
         self._pump_interval = pump_interval
         self._sleep = sleep
+        self._camera = camera
+        self._first_frame_timeout_s = first_frame_timeout_s
+        self._clock = clock
         self._lock = threading.Lock()
         self._latest: Optional[DisplayFrame] = None
         self._error: Optional[Exception] = None
@@ -736,26 +787,42 @@ class StreamLoop:
 
     def run(self) -> None:
         """Start the reader thread, then pump *window* and display the
-        latest available frame until the window closes or the reader
-        thread reports a failure -- whichever happens first.
+        latest available frame until the window closes, the reader
+        thread reports a failure, or no first frame has arrived within
+        ``first_frame_timeout_s`` -- whichever happens first.
 
         Returns normally once :meth:`Window.pump` reports the window
         closed -- never raises for that case, since a closed window is
         the expected way this loop ends. Re-raises whatever exception
         the stream raised, once the reader thread has stopped, if that
-        is instead why the loop ended.
+        is instead why the loop ended. Raises :class:`FirstFrameTimeout`
+        (sprint 038, SUC-004) if ``first_frame_timeout_s`` elapses with
+        no frame ever having been received -- checked on the caller's
+        own thread (this loop), the same place "has anything ever been
+        shown yet" is already tracked, so no new cross-thread signal is
+        needed. Once a first frame has been received, this check never
+        fires again for the rest of the loop's life -- it bounds only
+        the *first* frame.
         """
         thread = threading.Thread(target=self._read_stream, name=_READER_THREAD_NAME, daemon=True)
         thread.start()
+        start = self._clock()
+        first_frame_received = False
         try:
             while self._window.pump():
                 frame, error = self._take_latest()
                 if error is not None:
                     raise error
                 if frame is not None:
+                    first_frame_received = True
                     self._window.show(frame.data)
                     self._window.update_tags(frame.tags)
                     self._window.set_status(frame.status)
+                elif (
+                    not first_frame_received
+                    and (self._clock() - start) >= self._first_frame_timeout_s
+                ):
+                    raise FirstFrameTimeout(self._camera)
                 self._sleep(self._pump_interval)
         finally:
             self._stream.close()
@@ -775,6 +842,7 @@ def run_raw_view(
     daemon: Daemon,
     *,
     window_factory: Callable[[str], Window] = TkWindow,
+    first_frame_timeout_s: float = _DEFAULT_FIRST_FRAME_TIMEOUT_S,
 ) -> None:
     """``camera view <camera>`` (UC-16, SUC-002): open a window and
     subscribe to ``stream_images(camera, deskewed=False)``, displaying
@@ -787,6 +855,12 @@ def run_raw_view(
     UC-16.S-3 message pointing at ``camera image``. Any
     ``aprilcam.errors.AprilCamError`` raised mid-view (e.g. the camera
     disconnects) propagates the same way, after the window is closed.
+    **Sprint 038, SUC-004**: :class:`FirstFrameTimeout` propagates the
+    same way too -- if no frame arrives within *first_frame_timeout_s*,
+    the window is closed in this function's existing ``finally`` and
+    the exception propagates unchanged; ``cli/camera.py``'s ``cmd_view``
+    is the boundary that turns it into a diagnostic naming the camera
+    and the likely cause.
 
     The window title carries an explicit ``[RAW]`` marker for the whole
     session (sprint 031 ticket 004, SUC-004) -- UC-16's "raw means raw"
@@ -800,7 +874,13 @@ def run_raw_view(
     window = window_factory(f"aprilcam camera view [RAW] -- {camera}")
     try:
         stream = daemon.stream_images(camera, deskewed=False)
-        StreamLoop(window, stream, _convert_raw_frame).run()
+        StreamLoop(
+            window,
+            stream,
+            _convert_raw_frame,
+            camera=camera,
+            first_frame_timeout_s=first_frame_timeout_s,
+        ).run()
     finally:
         window.close()
 

@@ -38,7 +38,7 @@ from aprilcam.types import (
     TagRecord,
     WorldPoint,
 )
-from aprilcam.view.viewer import NoDisplayAvailable
+from aprilcam.view.viewer import FirstFrameTimeout, NoDisplayAvailable
 
 
 def _camera(name: str = "arducam-ov9782-usb-camera", number: int = 1, **overrides) -> CameraState:
@@ -1180,6 +1180,31 @@ def test_view_no_display_points_at_camera_image_instead_of_a_backtrace(capsys):
     err = capsys.readouterr().err
     assert "camera image" in err
     assert "arducam-ov9782-usb-camera" in err
+
+
+def test_view_first_frame_timeout_names_the_camera_and_suggests_a_remedy(capsys):
+    """Sprint 038, SUC-004: ``cmd_view`` catches
+    ``view.viewer.FirstFrameTimeout`` (raised when no frame ever
+    arrives, instead of the process hanging forever) and prints a
+    diagnostic naming the camera and the likely cause/remedy (a wedged
+    capture session -- ``camera probe``/daemon restart), returning
+    ``EXIT_ERROR`` rather than letting the exception escape unhandled."""
+    discovery = _FakeDiscovery(daemon=_FakeDaemon())
+
+    def raising_run_view(camera, connected):
+        raise FirstFrameTimeout(camera)
+
+    code = camera_cli.cmd_view(
+        _args(camera="wedged-camera"),
+        discovery_factory=lambda: discovery,
+        run_view=raising_run_view,
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "wedged-camera" in err
+    assert "no frame" in err.lower()
+    assert "probe" in err.lower() or "restart" in err.lower()
 
 
 def test_view_surfaces_a_typed_error_raised_mid_view(capsys):

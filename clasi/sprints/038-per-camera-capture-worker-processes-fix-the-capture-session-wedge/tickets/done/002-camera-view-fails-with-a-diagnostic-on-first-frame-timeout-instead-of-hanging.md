@@ -1,7 +1,7 @@
 ---
 id: '002'
 title: camera view fails with a diagnostic on first-frame timeout instead of hanging
-status: open
+status: done
 use-cases:
 - SUC-004
 depends-on: []
@@ -44,25 +44,25 @@ lives in `view/viewer.py`'s existing polling loop rather than as a new
 
 ## Acceptance Criteria
 
-- [ ] `StreamLoop` accepts a `first_frame_timeout_s` parameter (a real
+- [x] `StreamLoop` accepts a `first_frame_timeout_s` parameter (a real
       default for production use, injectable short for tests).
-- [ ] A stub `ImageStream` that never yields a frame causes
+- [x] A stub `ImageStream` that never yields a frame causes
       `StreamLoop.run` to raise `FirstFrameTimeout` within the
       configured bound, with the stream closed and the reader thread
       joined before the exception propagates.
-- [ ] `FirstFrameTimeout` is a plain exception (not
+- [x] `FirstFrameTimeout` is a plain exception (not
       `aprilcam.errors.AprilCamError`), carrying the camera name.
-- [ ] `run_raw_view` propagates `FirstFrameTimeout` unchanged (window
+- [x] `run_raw_view` propagates `FirstFrameTimeout` unchanged (window
       closed in its existing `finally`, same as any other stream
       failure).
-- [ ] `cli/camera.py`'s `cmd_view` catches `FirstFrameTimeout` and
+- [x] `cli/camera.py`'s `cmd_view` catches `FirstFrameTimeout` and
       prints a diagnostic naming the camera and suggesting the likely
       cause (a wedged capture session) and a next step, then returns
       `EXIT_ERROR` — never an unhandled exception, never a hang.
-- [ ] A stream that *does* deliver a first frame within the bound is
+- [x] A stream that *does* deliver a first frame within the bound is
       completely unaffected — no timing regression to the existing
       `_PUMP_INTERVAL_S` cadence or ordinary shutdown path.
-- [ ] Once any frame has been received, the timeout logic never fires
+- [x] Once any frame has been received, the timeout logic never fires
       again for the rest of that stream's life (this bounds only the
       *first* frame).
 
