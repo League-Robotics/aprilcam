@@ -73,3 +73,25 @@ daemon stored is compensating placement, not distortion. Consequences:
   four corner markers to 0.1 cm (2.5 cm when a robot covers the cross);
   the field template and tooling live in
   `radio-robot-lib/config/playfields/secondary-playfield/`.
+
+## 2026-09-05: why the overlay sat off the tags in `playfield view`
+
+Two unrelated effects, diagnosed by re-detecting tags in the deskewed
+frame and comparing with the daemon's reported world positions:
+
+- **Robot tags (registered `mount_z` ~11 cm, camera 2 located at 144 cm
+  over nadir (3.47, -2.85)) are ~5 cm inside their image position by
+  design** -- parallax projection to the floor plus the registered
+  `mount_x` offset. The overlay marks the robot's ground centre, not the
+  tag's image. Reproducible by hand to 0.5 cm from the raw pixels.
+- **Ground tags were ~1 cm / 8 px off radially, zero at the centre**,
+  because `Deskewer` warped the *distorted* raw frame with a plain
+  four-corner perspective transform while positions went through the
+  lens model. Fixed the same day (deskewer remaps through the lens
+  model; see `clasi/issues/done/deskewer-ignores-the-lens-model-...md`).
+  With the fix, ground tags agree to 0.1 cm.
+
+The fitted k1 of -0.30 is still stronger than the plumb-line estimate
+(-0.12); it absorbs mid-edge marker placement error. World coordinates
+are within ~1 cm of the survey regardless, but an honest lens fit needs
+accurately surveyed markers 4-7 or a centre marker added to the definition.

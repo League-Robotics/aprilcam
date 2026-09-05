@@ -44,7 +44,7 @@ re-detected.
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import cv2 as cv
 import numpy as np
@@ -120,6 +120,12 @@ class Deskewer(_DeskewerBase):
         # docstring for why width, specifically, is the one dimension this
         # scalar is guaranteed to satisfy exactly.
         self._px_per_cm = self._output_width / self._width_cm
+        #: Lazily-built ``cv2.remap`` lookup tables for a calibration
+        #: that carries a lens model (see :meth:`_build_lens_maps`);
+        #: stays ``None`` for a homography-only calibration, which keeps
+        #: the original ``warpPerspective`` path untouched.
+        self._lens_maps: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        self._lens_maps_built = False
 
     @property
     def output_size(self) -> Tuple[int, int]:
@@ -155,13 +161,43 @@ class Deskewer(_DeskewerBase):
         throughout (:func:`_world_corners`), matching
         ``cv2.getPerspectiveTransform``'s requirement that both point
         lists describe the same four physical corners in the same order.
+
+        **Lens model (2026-09-05 fix).** When the calibration carries a
+        lens model (``camera_matrix``/``dist_coeffs``), a plain
+        ``warpPerspective`` of the *distorted* raw frame is wrong
+        everywhere but at the four corners: the frame keeps its barrel
+        distortion while ``Calibration.to_world`` (and so every tag
+        position drawn over this image) undistorts, and the two
+        disagree radially -- measured at ~1 cm / 8 px on the ground tags
+        near the corners of ``secondary-playfield``, zero at the centre.
+        For that case the warp is a single ``cv2.remap`` through lookup
+        tables that compose the inverse perspective (canvas -> undistorted
+        raw pixel) with the forward lens model (undistorted -> distorted
+        raw pixel), built once per instance (:meth:`_build_lens_maps`),
+        so image and overlay agree by construction and the per-frame
+        cost stays one interpolation pass. A calibration with no lens
+        model takes exactly the original path below, unchanged.
         """
+        if not self._lens_maps_built:
+            self._lens_maps = self._build_lens_maps()
+            self._lens_maps_built = True
+        if self._lens_maps is not None:
+            map_x, map_y = self._lens_maps
+            return cv.remap(frame, map_x, map_y, cv.INTER_LINEAR)
+
         world_corners = _world_corners(self._width_cm, self._height_cm)
         src = np.array(
             [[p.x, p.y] for p in (self._calibration.to_pixel(w) for w in world_corners)],
             dtype=np.float32,
         )
-        dst = np.array(
+        matrix = cv.getPerspectiveTransform(src, self._canvas_corners())
+        return cv.warpPerspective(frame, matrix, (self._output_width, self._output_height))
+
+    def _canvas_corners(self) -> np.ndarray:
+        """The literal output-canvas corners, NW, NE, SE, SW -- the
+        destination quad both warp paths share (see :meth:`deskew`'s
+        docstring for why these, not ``world_to_deskewed_pixel``)."""
+        return np.array(
             [
                 [0.0, 0.0],
                 [float(self._output_width), 0.0],
@@ -170,5 +206,69 @@ class Deskewer(_DeskewerBase):
             ],
             dtype=np.float32,
         )
-        matrix = cv.getPerspectiveTransform(src, dst)
-        return cv.warpPerspective(frame, matrix, (self._output_width, self._output_height))
+
+    def _build_lens_maps(self) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """``(map_x, map_y)`` for ``cv2.remap``, or ``None`` when the
+        calibration has no lens model.
+
+        For every output pixel: invert the perspective transform that
+        maps the field's four corners in *undistorted* raw pixel space
+        (``geometry.world_to_pixel`` -- the homography alone, before
+        ``Calibration.to_pixel`` re-applies distortion) onto the canvas,
+        giving the undistorted raw pixel this output pixel samples; then
+        push that through the forward lens model -- normalise with the
+        camera matrix, apply OpenCV's radial (k1..k3, rational k4..k6)
+        and tangential (p1, p2) terms, project back -- giving the
+        distorted raw pixel to actually read. This is the closed-form
+        direction of the model (the same one ``distortion.distort_point``
+        iterates ``cv2.undistortPoints`` to reach for a single point),
+        evaluated for the whole canvas at once. At the four canvas
+        corners the result equals ``Calibration.to_pixel`` of the world
+        corners exactly, so the anchor invariant is preserved.
+        """
+        cam = self._calibration.camera_matrix
+        dist = self._calibration.dist_coeffs
+        if cam is None or dist is None:
+            return None
+        coeffs = np.zeros(8, dtype=np.float64)
+        dist_arr = np.asarray(dist, dtype=np.float64).ravel()
+        if dist_arr.size > 8:
+            raise ValueError(
+                f"Deskewer supports at most 8 distortion coefficients (k1 k2 p1 p2 k3 k4 k5 k6), "
+                f"got {dist_arr.size}"
+            )
+        coeffs[: dist_arr.size] = dist_arr
+        k1, k2, p1, p2, k3, k4, k5, k6 = coeffs
+        camera_matrix = np.asarray(cam, dtype=np.float64)
+        homography = np.asarray(self._calibration.homography, dtype=np.float64)
+
+        world_corners = _world_corners(self._width_cm, self._height_cm)
+        undistorted_src = np.array(
+            [[p.x, p.y] for p in (geometry.world_to_pixel(homography, w) for w in world_corners)],
+            dtype=np.float32,
+        )
+        perspective = cv.getPerspectiveTransform(undistorted_src, self._canvas_corners())
+        inverse = np.linalg.inv(np.asarray(perspective, dtype=np.float64))
+
+        us, vs = np.meshgrid(
+            np.arange(self._output_width, dtype=np.float64),
+            np.arange(self._output_height, dtype=np.float64),
+        )
+        ones = np.ones_like(us)
+        canvas = np.stack([us, vs, ones])  # (3, H, W)
+        raw = np.tensordot(inverse, canvas, axes=([1], [0]))  # undistorted raw, homogeneous
+        raw_x = raw[0] / raw[2]
+        raw_y = raw[1] / raw[2]
+
+        k_inv = np.linalg.inv(camera_matrix)
+        norm = np.tensordot(k_inv, np.stack([raw_x, raw_y, ones]), axes=([1], [0]))
+        xn = norm[0] / norm[2]
+        yn = norm[1] / norm[2]
+        r2 = xn * xn + yn * yn
+        radial = (1.0 + k1 * r2 + k2 * r2**2 + k3 * r2**3) / (1.0 + k4 * r2 + k5 * r2**2 + k6 * r2**3)
+        xd = xn * radial + 2.0 * p1 * xn * yn + p2 * (r2 + 2.0 * xn * xn)
+        yd = yn * radial + p1 * (r2 + 2.0 * yn * yn) + 2.0 * p2 * xn * yn
+        distorted = np.tensordot(camera_matrix, np.stack([xd, yd, ones]), axes=([1], [0]))
+        map_x = (distorted[0] / distorted[2]).astype(np.float32)
+        map_y = (distorted[1] / distorted[2]).astype(np.float32)
+        return map_x, map_y

@@ -284,3 +284,156 @@ def test_moving_north_moves_the_marker_up_the_y_flip_catching_check():
     # which is exactly what a hardcoded/backwards y-flip would produce.
     assert _color_distance(at_north, (0, 255, 0)) < _color_distance(at_north, (0, 0, 255))
     assert _color_distance(at_south, (0, 0, 255)) < _color_distance(at_south, (0, 255, 0))
+
+
+# ---------------------------------------------------------------------------
+# Lens model (2026-09-05 fix): a calibration that carries camera_matrix /
+# dist_coeffs must produce a deskewed image on which tag positions computed
+# from the calibration (``world_to_deskewed_pixel`` of ``to_world``) land on
+# the image content -- the plain warpPerspective of the distorted frame did
+# not, and was ~1 cm / 8 px off at the corners of secondary-playfield.
+# ---------------------------------------------------------------------------
+
+# A strong barrel lens for the 1200x1000 fixture canvas: short focal length
+# and a large k1 so the distortion is tens of pixels near the corners.
+_LENS_K = ((600.0, 0.0, 600.0), (0.0, 600.0, 500.0), (0.0, 0.0, 1.0))
+_LENS_D = (-0.45, 0.08, 0.001, -0.0005, 0.0)
+
+
+def _lens_calibration() -> Calibration:
+    base = _hand_built_calibration()
+    return Calibration(
+        stale=base.stale,
+        calibrated_at=base.calibrated_at,
+        playfield=base.playfield,
+        homography=base.homography,
+        matched_ids=base.matched_ids,
+        reprojection_error_cm=base.reprojection_error_cm,
+        camera_matrix=_LENS_K,
+        dist_coeffs=_LENS_D,
+    )
+
+
+def _paint_marker_at_raw(canvas: np.ndarray, px: float, py: float, *, color: Tuple[int, int, int], size: int = 16) -> None:
+    half = size // 2
+    x0, y0 = int(round(px - half)), int(round(py - half))
+    canvas[y0 : y0 + size, x0 : x0 + size] = color
+
+
+def _red_centroid(image: np.ndarray) -> Tuple[float, float]:
+    b, g, r = image[..., 0].astype(int), image[..., 1].astype(int), image[..., 2].astype(int)
+    mask = (r > 150) & (g < 100) & (b < 100)
+    ys, xs = np.nonzero(mask)
+    assert xs.size > 0, "no red marker found in the deskewed image"
+    return float(xs.mean()), float(ys.mean())
+
+
+def _deskewed_to_world(deskewer: Deskewer, x: float, y: float) -> WorldPoint:
+    w, h = deskewer.world_extent
+    return WorldPoint(x=x / deskewer.px_per_cm - w / 2.0, y=h / 2.0 - y / deskewer.px_per_cm)
+
+
+def test_lens_model_deskew_puts_image_content_where_the_calibration_says_it_is():
+    """The defect, stated as an acceptance test: paint a marker at the
+    *distorted* raw pixel the calibration's own ``to_pixel`` gives for a
+    world point near a corner, deskew, and the marker's centroid must
+    land within a pixel of ``world_to_deskewed_pixel`` for that world
+    point -- exactly where ``client/renderer.py`` draws an overlay for a
+    tag the daemon reports there."""
+    calibration = _lens_calibration()
+    half_w, half_h = _WIDTH_CM / 2.0, _HEIGHT_CM / 2.0
+    world = WorldPoint(x=-half_w + 12.0, y=half_h - 10.0)
+    raw = calibration.to_pixel(world)
+    canvas = _blank_canvas()
+    size = 8
+    _paint_marker_at_raw(canvas, raw.x, raw.y, color=(0, 0, 255), size=size)
+    # The painted square sits on whole pixels, so predict from its actual
+    # centre (pixel-centre convention: index i covers [i-0.5, i+0.5)),
+    # not from the unrounded target.
+    x0, y0 = int(round(raw.x - size // 2)), int(round(raw.y - size // 2))
+    painted_centre = calibration.to_world(
+        type(raw)(x=x0 + (size - 1) / 2.0, y=y0 + (size - 1) / 2.0)
+    )
+
+    deskewer = Deskewer(calibration=calibration, width_cm=_WIDTH_CM, height_cm=_HEIGHT_CM)
+    warped = deskewer.deskew(canvas)
+    predicted = geometry.world_to_deskewed_pixel(
+        painted_centre, world_extent=deskewer.world_extent, px_per_cm=deskewer.px_per_cm
+    )
+    cx, cy = _red_centroid(warped)
+
+    assert abs(cx - predicted.x) < 1.0 and abs(cy - predicted.y) < 1.0, (
+        f"marker centroid ({cx:.1f}, {cy:.1f}) vs predicted ({predicted.x:.1f}, {predicted.y:.1f})"
+    )
+
+
+def test_without_lens_correction_the_same_scene_is_visibly_off_proving_the_test_has_teeth():
+    """Warp the identical distorted scene with the pre-fix homography-
+    only path (a calibration stripped of its lens model, so ``to_pixel``
+    of the corners is the plain homography) and the marker lands several
+    pixels from the prediction -- the radial disagreement this fix removes."""
+    lens = _lens_calibration()
+    half_w, half_h = _WIDTH_CM / 2.0, _HEIGHT_CM / 2.0
+    world = WorldPoint(x=-half_w + 12.0, y=half_h - 10.0)
+    raw = lens.to_pixel(world)  # distorted, as a real camera would show it
+    canvas = _blank_canvas()
+    _paint_marker_at_raw(canvas, raw.x, raw.y, color=(0, 0, 255))
+
+    # Same corners, distorted, but warped without undistortion: build the
+    # source quad the way the old path did (to_pixel through the lens) and
+    # feed it to a lens-less Deskewer via a calibration whose homography
+    # is that same quad's plain solve -- simplest is to call cv2 directly.
+    deskewer = Deskewer(calibration=lens, width_cm=_WIDTH_CM, height_cm=_HEIGHT_CM)
+    corners = geometry.world_corners(_WIDTH_CM, _HEIGHT_CM)
+    src = np.array([[p.x, p.y] for p in (lens.to_pixel(w) for w in corners)], dtype=np.float32)
+    out_w, out_h = deskewer.output_size
+    dst = np.array([[0, 0], [out_w, 0], [out_w, out_h], [0, out_h]], dtype=np.float32)
+    naive = cv.warpPerspective(canvas, cv.getPerspectiveTransform(src, dst), (out_w, out_h))
+
+    predicted = geometry.world_to_deskewed_pixel(world, world_extent=deskewer.world_extent, px_per_cm=deskewer.px_per_cm)
+    cx, cy = _red_centroid(naive)
+    assert np.hypot(cx - predicted.x, cy - predicted.y) > 4.0
+
+
+def test_lens_maps_match_the_calibration_to_pixel_everywhere():
+    """The remap tables must agree with ``Calibration.to_pixel`` (which
+    reaches the same distorted pixel by iterating ``cv2.undistortPoints``)
+    to well under a pixel across the whole canvas, not just at the four
+    corners -- this ties the closed-form model in ``_build_lens_maps`` to
+    OpenCV's own."""
+    calibration = _lens_calibration()
+    deskewer = Deskewer(calibration=calibration, width_cm=_WIDTH_CM, height_cm=_HEIGHT_CM)
+    maps = deskewer._build_lens_maps()
+    assert maps is not None
+    map_x, map_y = maps
+    out_w, out_h = deskewer.output_size
+    assert map_x.shape == (out_h, out_w) and map_x.dtype == np.float32
+
+    rng = np.random.default_rng(7)
+    worst = 0.0
+    for _ in range(200):
+        u = int(rng.integers(0, out_w))
+        v = int(rng.integers(0, out_h))
+        expected = calibration.to_pixel(_deskewed_to_world(deskewer, u, v))
+        worst = max(worst, float(np.hypot(map_x[v, u] - expected.x, map_y[v, u] - expected.y)))
+    assert worst < 0.1, f"worst map/to_pixel disagreement {worst:.3f} px"
+
+
+def test_no_lens_model_takes_the_original_warp_path_unchanged():
+    """A homography-only calibration must produce byte-identical output
+    to a direct ``cv2.warpPerspective`` through the corner quad -- the
+    pre-fix behaviour, preserved exactly for every camera without a lens
+    model (Linux/Pi fleets calibrate without intrinsics by default)."""
+    calibration = _hand_built_calibration()
+    canvas = _blank_canvas()
+    _paint_marker(canvas, WorldPoint(x=20.0, y=-10.0), color=(0, 0, 255))
+    deskewer = Deskewer(calibration=calibration, width_cm=_WIDTH_CM, height_cm=_HEIGHT_CM)
+    warped = deskewer.deskew(canvas)
+    assert deskewer._build_lens_maps() is None
+
+    corners = geometry.world_corners(_WIDTH_CM, _HEIGHT_CM)
+    src = np.array([[p.x, p.y] for p in (calibration.to_pixel(w) for w in corners)], dtype=np.float32)
+    out_w, out_h = deskewer.output_size
+    dst = np.array([[0, 0], [out_w, 0], [out_w, out_h], [0, out_h]], dtype=np.float32)
+    expected = cv.warpPerspective(canvas, cv.getPerspectiveTransform(src, dst), (out_w, out_h))
+    assert np.array_equal(warped, expected)
