@@ -1,7 +1,7 @@
 ---
 id: '003'
 title: Shared-memory frame ring and control-channel IPC protocol
-status: open
+status: done
 use-cases:
 - SUC-001
 - SUC-002
@@ -47,7 +47,7 @@ why shared memory was chosen over a pipe for frame transport.
 
 ## Acceptance Criteria
 
-- [ ] A frame-ring writer can publish a sequence of frames (varying
+- [x] A frame-ring writer can publish a sequence of frames (varying
       sizes/dtypes across test cases, at least one matching a real
       1080p BGR shape) into the shared-memory segment; a reader in a
       different process (or thread, if that's sufficient to exercise
@@ -56,18 +56,18 @@ why shared memory was chosen over a pipe for frame transport.
       each new frame exactly once per sequence advance and gets a
       "no new frame" signal (not a stale copy, not a crash) when
       nothing new has been published.
-- [ ] The ring never returns a torn/partially-written frame to a
+- [x] The ring never returns a torn/partially-written frame to a
       reader — the header's sequence-number-advances-last discipline is
       verified by a test that reads concurrently with writes.
-- [ ] The control channel supports `get_property`/`set_property`/
+- [x] The control channel supports `get_property`/`set_property`/
       `settable_names`/`frame_size` request/response round-trips with a
       fake handler on the other end (no real camera).
-- [ ] Shared-memory segments are named/sized correctly and are cleanly
+- [x] Shared-memory segments are named/sized correctly and are cleanly
       unlinked/closed on both ends — a test confirms no leaked shared-
       memory segment survives a normal open/close cycle (this matters
       because leaked `/dev/shm`-style segments are a real, observable
       OS resource, unlike an in-process object).
-- [ ] No dependency on a real `cv2.VideoCapture` or real camera
+- [x] No dependency on a real `cv2.VideoCapture` or real camera
       hardware anywhere in this ticket's tests.
 
 ## Testing
