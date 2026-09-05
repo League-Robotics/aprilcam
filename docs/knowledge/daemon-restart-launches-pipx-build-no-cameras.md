@@ -214,3 +214,12 @@ With `opencv` forced, every recurrence recipe above (kill the hung
 view, then `aprilcam daemon stop && aprilcam daemon start`) still
 applies unchanged, since none of sprint 038's self-healing exists for
 that backend.
+
+**First soak on the sprint-038 build (2026-09-05, daemon 0.20260904.1, worker
+backend):** a raw image stream held on camera 2 for 75 minutes at a steady
+12.6-14.1 fps, with a one-shot `get_frame` every minute (75/75 OK) and zero
+stall/respawn/reopen events in the daemon log. Every earlier wedge on this
+camera arrived within 15-50 minutes of a stream starting. Not proof the
+wedge cannot recur inside a worker -- only that if it does, the respawn
+path is now armed to catch it within ~15 s; watch the log for
+`check_stall`/respawn lines.
