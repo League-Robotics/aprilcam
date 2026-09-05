@@ -1,7 +1,7 @@
 ---
 id: 038
 title: Per-camera capture worker processes (fix the capture-session wedge)
-status: executing
+status: done
 branch: sprint/038-per-camera-capture-worker-processes-fix-the-capture-session-wedge
 use-cases:
 - SUC-001
