@@ -98,3 +98,49 @@ Two signals actively point the wrong way:
   issue's cameras never work; this issue's cameras work and then stop.
   Both surface as "cameras look absent/broken with no useful error,"
   so a fix for either should keep the two diagnoses distinguishable.
+
+## Root cause established 2026-09-04 (with the new daemon log file)
+
+Third and fourth occurrences, both on camera 2 (`hd-usb-camera`, 1920x1080),
+both while an image stream (`camera view 2` / `playfield view 2`) was
+subscribed for tens of minutes; the last one 2 h after a clean start, at
+20:13:38. The log shows exactly what the daemon did: reads returned
+`None`, and `Camera._attempt_self_heal` closed and reopened the backend
+ten times in one minute (`read failing, reopen attempt n/10`); every
+reopen "succeeded" (`isOpened()` true) and never delivered a frame, so the
+camera went `unusable`. The device index had not changed (still 2).
+
+**Decisive test, run by the stakeholder from Terminal.app while the
+daemon was still wedged:**
+
+```
+python -c "import cv2; c=cv2.VideoCapture(2, cv2.CAP_AVFOUNDATION); print(c.isOpened()); print(c.read()[0], c.read()[1].shape)"
+-> opened True / frame True (1080, 1920, 3)
+```
+
+A **fresh process** reads the camera fine at the very moment the daemon
+cannot, through the same index and backend. The wedge is therefore
+**process-local**: OpenCV's AVFoundation backend leaves the device's
+capture session in a state that no new `VideoCapture` in the *same*
+process can recover from (`release()` does not fully tear it down), and
+only a process boundary clears it. Every in-process reopen strategy
+(delays, backoff, fresh backend objects, re-resolved index) is therefore
+futile for this failure. This is why a daemon restart was always the only
+cure.
+
+**The fix: per-camera capture worker processes.** The daemon spawns one
+small worker per opened camera (`python -m aprilcam.camera.capture_worker
+--index N ...`), which owns the `VideoCapture` and publishes frames to the
+daemon over shared memory (a ring of a few frames; 6 MB each at 1080p,
+so a pipe is the wrong transport) with a control channel for
+`get/set_property` and settle reads. `Camera.read()` becomes "latest
+frame from the worker"; self-heal becomes **kill and respawn the worker**
+(which is what the stakeholder's test did), with the existing failure
+counting and budget on top. TCC camera access is inherited by children
+of the daemon, so a worker has the same grant the daemon has. Bonus: a
+worker crash no longer takes the daemon or the other cameras down, and
+the probe's `usable` can finally mean "delivers frames".
+
+Gaps 1 and 2 from the original write-up still apply (probe should read a
+frame; `camera view` must not hang forever). Gap 3 is now precisely
+"respawn the worker".
