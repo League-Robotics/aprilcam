@@ -1,7 +1,7 @@
 ---
 id: '001'
 title: usable means delivers a frame (probe reads before reporting healthy)
-status: open
+status: done
 use-cases:
 - SUC-003
 depends-on: []
@@ -36,20 +36,20 @@ overlay copy) §3 ("`usable` means 'delivered a frame,' not merely
 
 ## Acceptance Criteria
 
-- [ ] `_probe_openable` performs `open()`, one bounded frame read, then
+- [x] `_probe_openable` performs `open()`, one bounded frame read, then
       `close()`, in that order, for every non-libcamera backend path
       (the libcamera branch's own device resolution is unaffected).
-- [ ] A fake `CaptureBackend` whose `open()` succeeds but `read()`
+- [x] A fake `CaptureBackend` whose `open()` succeeds but `read()`
       always returns `None` causes `_probe_openable` to report
       `usable=False` — where it previously reported `True`.
-- [ ] A fake `CaptureBackend` whose `read()` returns a real frame
+- [x] A fake `CaptureBackend` whose `read()` returns a real frame
       promptly still reports `usable=True`, unchanged from before.
-- [ ] The read bound is a named constant (not a magic number inline),
+- [x] The read bound is a named constant (not a magic number inline),
       documented with the tradeoff it accepts.
-- [ ] No change to `CameraDiscovery.probe()`'s non-disturbance
+- [x] No change to `CameraDiscovery.probe()`'s non-disturbance
       guarantee (UC-25.S-7) — a camera the daemon already holds open
       (`active_slugs`) is still never opened by this probe path at all.
-- [ ] Existing `camera/discovery.py` tests continue to pass; add new
+- [x] Existing `camera/discovery.py` tests continue to pass; add new
       tests rather than loosening existing assertions.
 
 ## Testing

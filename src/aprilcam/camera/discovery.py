@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import AbstractSet, Callable, Dict, FrozenSet, List, Optional, Set
 
 from aprilcam.camera.backends import CaptureBackend, resolve_capture_backend
@@ -56,6 +57,32 @@ logger = logging.getLogger(__name__)
 #: Seconds between passive-watch polls. Small enough that a hotplugged
 #: camera shows up in ``camera list`` "within a few seconds" (UC-25.S-5).
 DEFAULT_WATCH_INTERVAL = 2.0
+
+#: Wall-clock bound (seconds) ``_probe_openable`` waits -- across as many
+#: ``backend.read()`` attempts as fit within it -- for a real frame after
+#: ``open()`` before giving up and reporting ``usable=False`` (sprint 038,
+#: closing gap 1 of ``clasi/issues/camera-capture-session-wedge-is-silent-
+#: and-needs-a-daemon-restart.md``). Before this, ``_probe_openable`` never
+#: read at all: a device whose capture session is wedged -- ``open()``
+#: succeeds, ``isOpened()``-equivalent state still reports true, but every
+#: ``read()`` returns ``None`` indefinitely -- probed healthy anyway, the
+#: single most misleading signal that issue identified. Deliberately
+#: short: order of one frame interval, not ``daemon/DESIGN.md``'s
+#: stall-watchdog window -- a healthy camera's first read after open
+#: resolves quickly, and a wedged camera's read never resolves into a
+#: real frame no matter how long this waits, so a longer bound would only
+#: add latency, never catch anything a short one misses. This is an
+#: explicit, accepted cost: ``probe()`` runs over every camera and is now
+#: measurably slower per camera (``camera-DESIGN.md`` sprint 038 §3).
+#: Overridable per :class:`CameraDiscovery` instance (``probe_read_timeout``)
+#: so a test can inject a short bound rather than waiting out the default.
+DEFAULT_PROBE_READ_TIMEOUT = 1.0
+
+#: Pause between ``backend.read()`` attempts within
+#: :data:`DEFAULT_PROBE_READ_TIMEOUT`'s bound -- gives a camera whose
+#: first frame needs a moment (but is not actually wedged) more than one
+#: instantaneous try, without busy-looping the probe thread.
+_PROBE_READ_POLL_INTERVAL = 0.05
 
 
 def _default_backend_factory(index: int) -> CaptureBackend:
@@ -89,6 +116,12 @@ class CameraDiscovery(_CameraDiscoveryBase):
     watch_interval:
         Seconds between ``watch()`` polls. Overridable so tests need
         not wait :data:`DEFAULT_WATCH_INTERVAL` seconds for a poll.
+    probe_read_timeout:
+        Seconds :meth:`_probe_openable` waits for a real frame after
+        ``open()`` before reporting ``usable=False`` (sprint 038). See
+        :data:`DEFAULT_PROBE_READ_TIMEOUT` for the bound and the
+        tradeoff it accepts. Overridable so a test can inject a short
+        bound rather than waiting out the default.
     list_loopback_cameras:
         () -> ``[LibcameraDevice, ...]``. Consulted only for a
         libcamera-identified camera (``identity.hardware_key`` prefixed
@@ -109,6 +142,7 @@ class CameraDiscovery(_CameraDiscoveryBase):
         backend_factory: Callable[[int], CaptureBackend] = _default_backend_factory,
         identity_source: Callable[[], Dict[int, CameraIdentity]] = resolve_all,
         watch_interval: float = DEFAULT_WATCH_INTERVAL,
+        probe_read_timeout: float = DEFAULT_PROBE_READ_TIMEOUT,
         list_loopback_cameras: Optional[Callable[[], List[LibcameraDevice]]] = None,
     ) -> None:
         self._registry = registry
@@ -116,6 +150,7 @@ class CameraDiscovery(_CameraDiscoveryBase):
         self._backend_factory = backend_factory
         self._identity_source = identity_source
         self._watch_interval = watch_interval
+        self._probe_read_timeout = probe_read_timeout
         self._list_loopback_cameras = list_loopback_cameras
 
         self._lock = threading.Lock()
@@ -257,18 +292,26 @@ class CameraDiscovery(_CameraDiscoveryBase):
         return record.number if record is not None else None
 
     def _probe_openable(self, slug: str, index: int, hardware_key: str) -> bool:
-        """Open-then-close a fresh ``Camera`` over *index* to determine
-        usability, per ``camera/discovery.py``'s module docstring
-        ("delegates to Camera instances" -- sprint architecture module
-        table). Any exception from ``open()`` means unusable, not a
-        probe failure -- the camera still gets reported (UC-25.S-4).
+        """Open, one bounded frame read, then close a fresh ``Camera``
+        over *index* to determine usability (sprint 038, closing gap 1 of
+        ``clasi/issues/camera-capture-session-wedge-is-silent-and-needs-
+        a-daemon-restart.md``). ``usable`` means "delivered a frame,"
+        not merely "opened": a device whose capture session opens fine
+        but is wedged -- every ``read()`` returns ``None`` forever -- must
+        report ``usable=False``, where a bare open-then-close previously
+        reported it healthy. Any exception from ``open()`` still means
+        unusable, not a probe failure -- the camera still gets reported
+        (UC-25.S-4); this ticket only adds a check *after* a successful
+        open.
 
         *hardware_key* selects the backend via
         :func:`~aprilcam.camera.backends.resolve_capture_backend`
         (ticket 031-006): ``self._backend_factory`` (``OpenCVBackend`` by
         default) for every identity source except libcamera, which opens
         through :class:`~aprilcam.camera.backends.v4l2_loopback.V4l2LoopbackBackend`
-        instead.
+        instead -- that branch point is unaffected by this ticket; the
+        bounded read below runs uniformly afterward regardless of which
+        backend was resolved.
         """
         backend = resolve_capture_backend(
             hardware_key,
@@ -283,10 +326,42 @@ class CameraDiscovery(_CameraDiscoveryBase):
             logger.info("probe: %s present but unopenable: %s", slug, exc)
             return False
         try:
-            camera.close()
-        except Exception:  # pragma: no cover - defensive
-            pass
-        return True
+            usable = self._await_probe_frame(backend)
+            if not usable:
+                logger.info(
+                    "probe: %s opened but delivered no frame within %.1fs -- reporting unusable",
+                    slug,
+                    self._probe_read_timeout,
+                )
+        finally:
+            try:
+                camera.close()
+            except Exception:  # pragma: no cover - defensive
+                pass
+        return usable
+
+    def _await_probe_frame(self, backend: CaptureBackend) -> bool:
+        """Read *backend* directly -- bypassing ``Camera.read()``'s
+        failure-counting/self-heal, exactly like :meth:`Camera.
+        _settle_after_open`'s own direct-backend reads, since this
+        ``Camera`` is discarded right after :meth:`_probe_openable`
+        returns -- until a real frame arrives or :attr:`_probe_read_timeout`
+        elapses, whichever comes first. See :data:`DEFAULT_PROBE_READ_TIMEOUT`
+        for the bound and the tradeoff it accepts.
+        """
+        deadline = time.monotonic() + self._probe_read_timeout
+        while True:
+            try:
+                frame = backend.read()
+            except Exception as exc:  # pragma: no cover - defensive, read() should not raise
+                logger.warning("probe: read() raised while probing usability: %s", exc)
+                frame = None
+            if frame is not None:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(_PROBE_READ_POLL_INTERVAL, remaining))
 
     def _watch_loop(self) -> None:
         while not self._watch_stop.is_set():

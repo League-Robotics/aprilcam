@@ -42,13 +42,28 @@ def _identity(hardware_key: str, device_name: str, **kw) -> CameraIdentity:
     return CameraIdentity(**base)
 
 
-class _FakeBackend:
-    """Minimal CaptureBackend double for discovery's openability probe."""
+_FAKE_FRAME = np.zeros((2, 2, 3), dtype=np.uint8)
 
-    def __init__(self, *, fail_open: bool = False) -> None:
+
+class _FakeBackend:
+    """Minimal CaptureBackend double for discovery's openability probe.
+
+    Delivers a real frame promptly from ``read()`` by default -- since
+    sprint 038's ``_probe_openable`` now performs a bounded frame read
+    between ``open()`` and ``close()`` (usable means "delivered a
+    frame," not merely "opened"), every existing test relying on this
+    double reporting ``usable=True`` needs it to actually hand back a
+    frame. Pass ``never_reads=True`` to simulate the wedged-session case
+    this ticket exists to catch: ``open()`` succeeds but every
+    subsequent ``read()`` returns ``None`` forever.
+    """
+
+    def __init__(self, *, fail_open: bool = False, never_reads: bool = False) -> None:
         self._is_open = False
         self.fail_open = fail_open
+        self.never_reads = never_reads
         self.open_calls = 0
+        self.read_calls = 0
 
     @property
     def is_open(self) -> bool:
@@ -61,7 +76,10 @@ class _FakeBackend:
         self._is_open = True
 
     def read(self) -> Optional[np.ndarray]:
-        return None
+        self.read_calls += 1
+        if self.never_reads:
+            return None
+        return _FAKE_FRAME
 
     def close(self) -> None:
         self._is_open = False
@@ -150,6 +168,70 @@ def test_probe_reports_present_but_unopenable_camera_never_omitted(registry):
     assert state.present is True
     assert state.usable is False
     assert report.skipped == ()  # unopenable is reported, not "skipped"
+
+
+def test_probe_reports_unusable_when_backend_never_delivers_a_frame(registry):
+    """038-001 AC2: open() succeeding is no longer enough -- a backend
+    whose capture session is wedged (opens fine, but every read() comes
+    back None forever) must probe unusable, not healthy."""
+    identity = _identity("hw:wedged", "Wedged Camera")
+
+    discovery = CameraDiscovery(
+        registry,
+        identity_source=lambda: {0: identity},
+        backend_factory=lambda index: _FakeBackend(never_reads=True),
+        probe_read_timeout=0.05,
+    )
+    report = discovery.probe()
+
+    assert len(report.cameras) == 1
+    state = report.cameras[0]
+    assert state.name == registry.resolve(identity)
+    assert state.present is True
+    assert state.usable is False
+    assert report.skipped == ()  # unusable is reported, not "skipped"
+
+
+def test_probe_reports_usable_when_backend_delivers_a_frame_promptly(registry):
+    """038-001 AC3: a backend whose read() returns a real frame right
+    away still reports usable=True, unchanged from before this ticket."""
+    identity = _identity("hw:healthy", "Healthy Camera")
+    backend = _FakeBackend()
+
+    discovery = CameraDiscovery(
+        registry,
+        identity_source=lambda: {0: identity},
+        backend_factory=lambda index: backend,
+    )
+    report = discovery.probe()
+
+    assert len(report.cameras) == 1
+    assert report.cameras[0].usable is True
+    assert backend.read_calls >= 1  # the probe actually read a frame
+
+
+def test_probe_openable_bounded_read_does_not_hang_the_test_suite(registry):
+    """038-001 AC4/testing plan: the read bound is a real, injectable
+    timeout, not an unbounded retry loop -- a wedged backend with a
+    short injected probe_read_timeout must return promptly rather than
+    waiting out DEFAULT_PROBE_READ_TIMEOUT (or hanging forever)."""
+    identity = _identity("hw:wedged-timed", "Wedged Timed Camera")
+
+    discovery = CameraDiscovery(
+        registry,
+        identity_source=lambda: {0: identity},
+        backend_factory=lambda index: _FakeBackend(never_reads=True),
+        probe_read_timeout=0.05,
+    )
+
+    started = time.monotonic()
+    report = discovery.probe()
+    elapsed = time.monotonic() - started
+
+    assert report.cameras[0].usable is False
+    # generous margin above the injected 0.05s bound -- proves the probe
+    # did not fall back to DEFAULT_PROBE_READ_TIMEOUT (1.0s) or hang.
+    assert elapsed < 0.5
 
 
 def test_probe_populates_known_present(registry):
@@ -279,7 +361,7 @@ class _RecordingV4l2Backend:
         self._is_open = True
 
     def read(self) -> Optional[np.ndarray]:
-        return None
+        return _FAKE_FRAME
 
     def close(self) -> None:
         self._is_open = False
