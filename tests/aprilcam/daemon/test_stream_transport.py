@@ -545,3 +545,23 @@ def test_daemon_main_on_stop_calls_transport_stop(tmp_path, short_socket_dir, mo
     finally:
         lifecycle.stop()
     assert recording.stopped is True
+
+
+def test_unix_socket_path_is_shortened_to_fit_sun_path_and_is_stable(tmp_path):
+    """2026-09-04 (out of process): a tag stream named after a full camera
+    slug produced a 105-byte path under macOS's $TMPDIR and failed to bind
+    ("AF_UNIX path too long"). Long names must be shortened deterministically."""
+    from pathlib import Path
+
+    from aprilcam.daemon.stream_transport import MAX_UNIX_SOCKET_PATH_BYTES, unix_socket_path
+
+    short = unix_socket_path(Path("/tmp/x"), "images-raw-2")
+    assert short == Path("/tmp/x/stream-images-raw-2.sock")
+    long_dir = Path("/var/folders/f_/xrglkf752lxg31tz3b57_fl00000gn/T/aprilcam-501")
+    name = "tags-arducam-ov9782-usb-camera"
+    assert len(str(long_dir / f"stream-{name}.sock").encode()) > MAX_UNIX_SOCKET_PATH_BYTES
+    p1 = unix_socket_path(long_dir, name)
+    assert len(str(p1).encode()) <= MAX_UNIX_SOCKET_PATH_BYTES
+    assert p1.name.startswith("stream-") and p1.suffix == ".sock"
+    assert p1 == unix_socket_path(long_dir, name)  # stable
+    assert p1 != unix_socket_path(long_dir, "tags-arducam-ov9281-usb-camera")  # distinct per name

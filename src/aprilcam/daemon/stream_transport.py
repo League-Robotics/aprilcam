@@ -97,7 +97,9 @@ from aprilcam import framing
 from aprilcam.daemon.interfaces import Daemon
 from aprilcam.types import ImageFrame, TagFrame
 
-__all__ = ["StreamEndpoint", "StreamTransportManager"]
+__all__ = [
+    "MAX_UNIX_SOCKET_PATH_BYTES",
+    "unix_socket_path","StreamEndpoint", "StreamTransportManager"]
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +135,36 @@ def _safe_name(name: str) -> str:
     return _UNSAFE_NAME_CHARS.sub("_", name) or "_"
 
 
+#: Longest unix-socket path this module will try to bind. ``sun_path`` is
+#: 104 bytes on macOS (108 on Linux) *including* the trailing NUL; macOS's
+#: ``$TMPDIR`` socket dir alone is ~60 bytes, so a stream named after a
+#: full camera slug (``stream-tags-arducam-ov9782-usb-camera.sock``)
+#: overflowed it on the rig (2026-09-04: "AF_UNIX path too long", the tag
+#: stream for camera 3 could not bind while the same stream requested by
+#: camera *number* bound fine). Clients learn the path from the
+#: ``StreamEndpoint`` the RPC returns, so the on-disk name is free to be
+#: shortened.
+MAX_UNIX_SOCKET_PATH_BYTES = 100
+
+
+def unix_socket_path(socket_dir: Path, name: str) -> Path:
+    """``socket_dir/stream-<name>.sock``, or -- when that would exceed
+    :data:`MAX_UNIX_SOCKET_PATH_BYTES` -- a stable shortened form
+    ``stream-<name prefix>-<8 hex of sha1(name)>.sock`` that still fits.
+    Deterministic for a given (dir, name), so the same stream always
+    gets the same path within a daemon."""
+    import hashlib
+
+    safe = _safe_name(name)
+    path = socket_dir / f"stream-{safe}.sock"
+    if len(str(path).encode()) <= MAX_UNIX_SOCKET_PATH_BYTES:
+        return path
+    digest = hashlib.sha1(name.encode()).hexdigest()[:8]
+    budget = MAX_UNIX_SOCKET_PATH_BYTES - len(str(socket_dir / f"stream--{digest}.sock").encode())
+    prefix = safe[: max(budget, 1)]
+    return socket_dir / f"stream-{prefix}-{digest}.sock"
+
+
 def _bind_unix_socket(socket_dir: Path, name: str) -> "Tuple[Optional[socket.socket], Optional[Path]]":
     """Bind a unix stream socket at ``socket_dir/stream-<name>.sock``,
     retrying once after removing a stale file left by a crashed prior
@@ -142,7 +174,7 @@ def _bind_unix_socket(socket_dir: Path, name: str) -> "Tuple[Optional[socket.soc
     into this function happens after the daemon's singleton lock is
     already held, so no live daemon can own the path being replaced.
     """
-    path = socket_dir / f"stream-{_safe_name(name)}.sock"
+    path = unix_socket_path(socket_dir, name)
     path.parent.mkdir(parents=True, exist_ok=True)
     for attempt in range(2):
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
