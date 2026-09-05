@@ -226,6 +226,51 @@ def _load_config_dir(service: DaemonService, directories: Directories) -> None:
         service.set_camera_config(camera_config)
 
 
+#: Daemon log file name under ``state_dir`` (2026-09-04, out of process):
+#: ``aprilcam daemon start`` spawns the daemon with its stderr piped to a
+#: parent that exits as soon as the socket is up, so until this file
+#: existed every warning the daemon logged after startup was lost --
+#: every camera-wedge investigation was done blind. Rotated at 5 MB x 3.
+LOG_FILENAME = "aprilcamd.log"
+_LOG_MAX_BYTES = 5 * 1024 * 1024
+_LOG_BACKUPS = 3
+
+
+def configure_logging(state_dir: Path) -> Path:
+    """Root logging to stderr *and* ``<state_dir>/aprilcamd.log``
+    (rotating), level from ``APRILCAM_LOG_LEVEL`` (default INFO).
+    Idempotent: a second call on the same process adds no duplicate
+    handlers. Returns the log file path. A state dir that cannot be
+    written falls back to stderr only rather than refusing to start."""
+    import logging.handlers
+
+    level = os.environ.get("APRILCAM_LOG_LEVEL", "INFO")
+    fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    root = logging.getLogger()
+    root.setLevel(level)
+    log_path = state_dir / LOG_FILENAME
+    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in root.handlers):
+        stream = logging.StreamHandler()
+        stream.setFormatter(logging.Formatter(fmt))
+        root.addHandler(stream)
+    already = any(
+        isinstance(h, logging.handlers.RotatingFileHandler)
+        and Path(getattr(h, "baseFilename", "")) == log_path
+        for h in root.handlers
+    )
+    if not already:
+        try:
+            state_dir.mkdir(parents=True, exist_ok=True)
+            fh = logging.handlers.RotatingFileHandler(
+                log_path, maxBytes=_LOG_MAX_BYTES, backupCount=_LOG_BACKUPS, encoding="utf-8"
+            )
+            fh.setFormatter(logging.Formatter(fmt))
+            root.addHandler(fh)
+        except OSError as exc:
+            root.warning("cannot open daemon log file %s: %s -- logging to stderr only", log_path, exc)
+    return log_path
+
+
 def main() -> None:
     """Block until SIGTERM/SIGINT, mirroring v1's ``DaemonServer.run()``
     wait-for-shutdown loop. ``lifecycle.start()`` acquires the singleton
@@ -235,9 +280,10 @@ def main() -> None:
     as an ordinary uncaught exception, since this process's exit status
     *is* the signal a spawning parent reads.
     """
-    logging.basicConfig(level=os.environ.get("APRILCAM_LOG_LEVEL", "INFO"))
+    log_path = configure_logging(Directories().state_dir)
 
     lifecycle = build()
+    logger.info("aprilcamd logging to %s", log_path)
     lifecycle.start()
     logger.info(
         "aprilcamd ready (pid=%d): socket=%s", os.getpid(), lifecycle.socket_path

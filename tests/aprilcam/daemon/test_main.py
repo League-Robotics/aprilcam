@@ -263,3 +263,35 @@ def test_build_with_a_malformed_file_among_valid_ones_still_starts_and_loads_the
         lifecycle.stop()
 
     assert any("broken.json" in record.message for record in caplog.records)
+
+
+def test_configure_logging_writes_a_rotating_file_under_state_dir_and_is_idempotent(tmp_path):
+    """2026-09-04 (out of process): the daemon's warnings must survive a
+    `daemon start` launch, whose stderr pipe is discarded once the parent
+    returns -- so root logging gains a rotating file under state_dir."""
+    import logging
+    import logging.handlers
+
+    from aprilcam.daemon.__main__ import LOG_FILENAME, configure_logging
+
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        path = configure_logging(tmp_path)
+        assert path == tmp_path / LOG_FILENAME
+        path2 = configure_logging(tmp_path)
+        assert path2 == path
+        file_handlers = [
+            h for h in root.handlers
+            if isinstance(h, logging.handlers.RotatingFileHandler) and h.baseFilename == str(path)
+        ]
+        assert len(file_handlers) == 1
+        logging.getLogger("aprilcam.test.logging").warning("wedge-probe marker 12345")
+        for h in file_handlers:
+            h.flush()
+        assert "wedge-probe marker 12345" in path.read_text(encoding="utf-8")
+    finally:
+        for h in list(root.handlers):
+            if h not in before:
+                root.removeHandler(h)
+                h.close()
