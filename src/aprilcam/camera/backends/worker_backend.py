@@ -35,12 +35,14 @@ spawned child; that connection carries first the child's one-shot
 every subsequent :class:`~aprilcam.camera.backends._control_channel.ControlChannel`
 request/response for the lifetime of the worker.
 
-**Selection.** ``default_worker_backend_factory`` is the plain
-``backend_factory``-shaped constructor for ticket 005 to wire into
-``resolve_capture_backend`` in place of ``OpenCVBackend`` when the
-worker-process path is config/env-enabled -- this ticket does not
-change that selection (``camera-DESIGN.md``'s Migration Concerns:
-`WorkerBackend` is additive until deliberately flipped on).
+**Selection (ticket 005).** ``default_worker_backend_factory`` is the
+plain ``backend_factory``-shaped constructor
+``camera.backends.default_capture_backend_factory`` wires in as
+``resolve_capture_backend``'s default in place of ``OpenCVBackend`` --
+unconditionally on macOS (``sys.platform == "darwin"``, where the wedge
+this module exists to fix actually occurs), everywhere else only when
+``APRILCAM_CAPTURE_BACKEND=worker`` forces it. See that function's own
+docstring for the full selection contract and the env-var override.
 """
 
 from __future__ import annotations
@@ -241,6 +243,37 @@ class WorkerBackend(CaptureBackend):
         if result is None:
             return None
         return (int(result[0]), int(result[1]))
+
+    def heartbeat_age(self) -> Optional[float]:
+        """Seconds since the shared-memory ring's last published frame
+        (sprint 038 ticket 005) -- ``camera.camera.Camera.check_stall``'s
+        stall-detection primitive, see
+        ``CaptureBackend.heartbeat_age``'s docstring for the full
+        contract this overrides.
+
+        Uses :meth:`~aprilcam.camera.backends._frame_ring.FrameRing.peek`
+        -- a cheap ``(sequence, timestamp)`` snapshot, no frame copy --
+        rather than :meth:`~aprilcam.camera.backends._frame_ring.
+        FrameRing.read_latest`, so calling this on a fixed interval from
+        a background watchdog never disturbs
+        :meth:`WorkerBackend.read`'s own "seen" bookkeeping (the two
+        methods are independent by design -- see ``peek``'s own
+        docstring). The ring header's ``timestamp`` is written with
+        ``time.time()`` (``_frame_ring.py``'s ``publish``, wall-clock,
+        not ``time.monotonic()``), which is what makes a child-process
+        timestamp comparable against this parent process's own
+        ``time.time()`` call here -- both processes' wall clocks agree
+        (unlike ``time.monotonic()``'s per-process-arbitrary epoch).
+
+        ``None`` when not currently open (nothing to report, matching
+        the base class default for "no heartbeat available right now")
+        -- never raises, mirroring every other ``CaptureBackend``
+        method's "only ``open()`` raises" discipline.
+        """
+        if self._ring is None:
+            return None
+        _, timestamp = self._ring.peek()
+        return max(0.0, time.time() - timestamp)
 
     # -- ControlBackend-shaped surface (duck-typed, mirrors OpenCVBackend) --
 

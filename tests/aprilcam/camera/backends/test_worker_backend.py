@@ -76,6 +76,67 @@ def test_is_open_false_before_open_and_frame_size_none():
     assert backend.read() is None
 
 
+def test_heartbeat_age_is_none_before_open():
+    """Camera.check_stall's no-op contract (sprint 038 ticket 005): no
+    ring attached yet -- nothing to report."""
+    backend = WorkerBackend(synthetic=_FAST_SYNTHETIC)
+    assert backend.heartbeat_age() is None
+
+
+def test_heartbeat_age_reports_a_small_age_while_the_worker_is_publishing():
+    """A live synthetic worker keeps publishing -- heartbeat_age() should
+    stay small (well under the read timeout) and never negative."""
+    backend = WorkerBackend(synthetic="160x120@60", read_timeout=0.5)
+    try:
+        backend.open()
+        assert _read_until(backend) is not None  # worker is genuinely publishing
+
+        age = backend.heartbeat_age()
+
+        assert age is not None
+        assert 0.0 <= age < 2.0
+    finally:
+        backend.close()
+
+
+def test_heartbeat_age_none_again_after_close():
+    backend = WorkerBackend(synthetic=_FAST_SYNTHETIC, read_timeout=0.5)
+    backend.open()
+    assert _read_until(backend) is not None
+    backend.close()
+
+    assert backend.heartbeat_age() is None
+
+
+def test_heartbeat_age_grows_stale_after_the_worker_is_killed():
+    """Kill the child out-of-band (mirrors
+    test_read_returns_none_after_out_of_band_kill_never_raises below) --
+    the ring's last-published timestamp stops advancing, so heartbeat_age
+    keeps growing rather than resetting or erroring, exactly the signal
+    Camera.check_stall needs to notice a wedged/dead worker with nobody
+    reading."""
+    backend = WorkerBackend(synthetic=_FAST_SYNTHETIC, read_timeout=0.5)
+    backend.open()
+    assert _read_until(backend) is not None
+    pid = backend.pid
+    assert pid is not None
+
+    os.kill(pid, signal.SIGKILL)
+    deadline = time.monotonic() + 3.0
+    while backend.is_open and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert backend.is_open is False
+
+    first = backend.heartbeat_age()
+    time.sleep(0.3)
+    second = backend.heartbeat_age()
+
+    assert first is not None
+    assert second is not None
+    assert second > first  # still frozen at the last real publish -- age keeps climbing
+    backend.close()
+
+
 def test_open_spawns_worker_and_publishes_real_frames():
     backend = WorkerBackend(synthetic="160x120@60", read_timeout=0.5)
     try:

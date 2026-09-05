@@ -16,10 +16,17 @@ from typing import List, Optional
 import numpy as np
 import pytest
 
-from aprilcam.camera.backends import libcamera, resolve_capture_backend, v4l2_loopback
+from aprilcam.camera.backends import (
+    CAPTURE_BACKEND_ENV,
+    default_capture_backend_factory,
+    libcamera,
+    resolve_capture_backend,
+    v4l2_loopback,
+)
 from aprilcam.camera.backends.libcamera import LibcameraDevice
-from aprilcam.camera.backends.opencv_backend import default_backend_priority, property_map
+from aprilcam.camera.backends.opencv_backend import OpenCVBackend, default_backend_priority, property_map
 from aprilcam.camera.backends.v4l2_loopback import V4l2LoopbackBackend
+from aprilcam.camera.backends.worker_backend import WorkerBackend
 
 
 # ---------------------------------------------------------------------------
@@ -324,3 +331,82 @@ def test_resolve_capture_backend_falls_back_when_no_matching_loopback_device(cap
 
     assert isinstance(backend, _FakeOpenCVBackend)
     assert any("no matching loopback device" in rec.message for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# default_capture_backend_factory -- config/env-gated selection (sprint 038
+# ticket 005). Every case is headless: OpenCVBackend/WorkerBackend
+# construction alone never touches hardware or spawns a subprocess (that
+# happens in .open(), never called here).
+# ---------------------------------------------------------------------------
+
+
+def test_default_capture_backend_factory_env_worker_forces_workerbackend(monkeypatch):
+    """APRILCAM_CAPTURE_BACKEND=worker forces WorkerBackend regardless of
+    platform -- e.g. exercising the worker path from a non-macOS CI
+    runner, or a test on this Mac that wants it explicitly."""
+    monkeypatch.setenv(CAPTURE_BACKEND_ENV, "worker")
+    monkeypatch.setattr("sys.platform", "linux")
+
+    backend = default_capture_backend_factory(3)
+
+    assert isinstance(backend, WorkerBackend)
+
+
+def test_default_capture_backend_factory_env_opencv_forces_opencvbackend(monkeypatch):
+    """APRILCAM_CAPTURE_BACKEND=opencv forces OpenCVBackend regardless of
+    platform -- e.g. an operator opting a wedge-prone Mac back out of the
+    worker-process path."""
+    monkeypatch.setenv(CAPTURE_BACKEND_ENV, "opencv")
+    monkeypatch.setattr("sys.platform", "darwin")
+
+    backend = default_capture_backend_factory(3)
+
+    assert isinstance(backend, OpenCVBackend)
+
+
+def test_default_capture_backend_factory_env_is_case_insensitive(monkeypatch):
+    monkeypatch.setenv(CAPTURE_BACKEND_ENV, "WORKER")
+    monkeypatch.setattr("sys.platform", "linux")
+
+    assert isinstance(default_capture_backend_factory(0), WorkerBackend)
+
+
+def test_default_capture_backend_factory_unset_defaults_to_worker_on_darwin(monkeypatch):
+    """Team-lead override of this ticket's original 'always OpenCVBackend'
+    default (recorded on the stakeholder_approval gate): with no env
+    override, darwin -- where the AVFoundation capture-session wedge
+    occurs -- gets WorkerBackend by default."""
+    monkeypatch.delenv(CAPTURE_BACKEND_ENV, raising=False)
+    monkeypatch.setattr("sys.platform", "darwin")
+
+    backend = default_capture_backend_factory(0)
+
+    assert isinstance(backend, WorkerBackend)
+
+
+def test_default_capture_backend_factory_unset_defaults_to_opencv_off_darwin(monkeypatch):
+    """No env override, non-macOS platform -- OpenCVBackend, unchanged
+    from every platform's behaviour before this ticket."""
+    monkeypatch.delenv(CAPTURE_BACKEND_ENV, raising=False)
+    monkeypatch.setattr("sys.platform", "linux")
+
+    backend = default_capture_backend_factory(0)
+
+    assert isinstance(backend, OpenCVBackend)
+
+
+def test_default_capture_backend_factory_unrecognised_env_value_falls_back_and_warns(
+    monkeypatch, caplog
+):
+    """An unrecognised APRILCAM_CAPTURE_BACKEND value is logged and
+    ignored -- falls through to the platform default -- rather than
+    raising and taking a working daemon down over a typo."""
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setenv(CAPTURE_BACKEND_ENV, "bogus")
+    monkeypatch.setattr("sys.platform", "linux")
+
+    backend = default_capture_backend_factory(0)
+
+    assert isinstance(backend, OpenCVBackend)
+    assert any("unrecognised" in rec.message for rec in caplog.records)

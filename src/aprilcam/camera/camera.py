@@ -44,6 +44,19 @@ end of a *successful* :meth:`Camera._attempt_self_heal`, mirroring
 injection pattern. ``daemon.service.DaemonService`` is the one thing
 that wires this to anything meaningful.
 
+**Proactive self-heal via a backend heartbeat (sprint 038 ticket
+005).** :meth:`check_stall` is the demand-driven self-heal above's
+proactive counterpart: a camera nobody is currently reading (no active
+stream, no recent RPC) can stay silently wedged forever under
+consecutive-failure counting alone, since nothing is calling
+:meth:`read` to notice. ``daemon.service.DaemonService``'s watchdog
+thread (ticket 006) calls this on every held-open camera each pass;
+:meth:`check_stall` itself just duck-types an optional
+``heartbeat_age()`` on *backend* (``None`` for any backend without the
+concept -- an unconditional no-op) and, past a threshold, calls the
+same :meth:`_attempt_self_heal` above -- no second respawn path, no
+duplicated budget accounting. See :meth:`check_stall`'s own docstring.
+
 **Real UVC control, validated live (ticket 023-001).** ``apply_config``
 was originally implemented only against the small set of controls
 ``camera.backends.opencv_backend.property_map()`` exposes generically
@@ -218,6 +231,25 @@ _OPEN_SETTLE_READS = 5
 #: get/set, never through *control_backend* -- see the module docstring's
 #: "Real UVC control, validated live" section and :meth:`Camera._backend_for_key`.
 _RESOLUTION_KEYS = frozenset({"frame_width", "frame_height"})
+
+#: Default heartbeat-age threshold (seconds) :meth:`Camera.check_stall`
+#: treats as a stalled capture session, for any backend that reports one
+#: (``WorkerBackend`` only -- see ``camera.backends.CaptureBackend.
+#: heartbeat_age``'s docstring; ``OpenCVBackend``/``V4l2LoopbackBackend``
+#: report no heartbeat at all, so this threshold is simply never
+#: consulted for them). Sprint 038 ticket 005 -- not yet validated
+#: against real hardware (``camera-DESIGN.md``'s own Open Questions says
+#: as much of the daemon-level watchdog that calls this), so this is a
+#: conservative first guess rather than a measured number: an order of
+#: magnitude above ``worker_backend.DEFAULT_READ_TIMEOUT`` (1s) and a
+#: typical multi-frame publish interval at any real playfield frame
+#: rate, so a few transient dropped frames or one slow-but-recovering
+#: read never falsely trips it, while a genuinely wedged worker (which
+#: never publishes again) is still caught well within one daemon
+#: restart's worth of downtime. ``check_stall``'s *threshold_s*
+#: parameter lets ticket 006's daemon-level watchdog override this per
+#: call without needing a second named constant.
+DEFAULT_STALL_THRESHOLD_S = 10.0
 
 
 class Camera(_CameraBase):
@@ -622,6 +654,71 @@ class Camera(_CameraBase):
             return
         if self._on_reopen is not None:
             self._on_reopen()
+
+    def check_stall(self, threshold_s: float = DEFAULT_STALL_THRESHOLD_S) -> bool:
+        """The proactive half of self-heal (sprint 038 ticket 005): notice
+        a wedged capture session even when nobody is calling :meth:`read`.
+
+        ``Camera.read()``/self-heal is demand-driven -- a camera nobody
+        is polling (no active stream, no recent RPC) can stay silently
+        wedged indefinitely under that scheme alone (the original
+        ``clasi/issues/camera-capture-session-wedge-is-silent-and-needs-
+        a-daemon-restart.md`` gap this sprint exists to close). This
+        method is what ``daemon/service.py``'s watchdog thread calls on
+        every held-open camera each pass (ticket 006) to close that gap.
+
+        Duck-types an optional ``heartbeat_age() -> Optional[float]`` on
+        the primary *backend* -- the same discipline
+        :meth:`_describe_set_failure`/:meth:`apply_config` already use
+        for a backend-specific capability not every backend implements
+        (``getattr(backend, "describe_set_failure", None)``).
+        ``camera.backends.CaptureBackend.heartbeat_age``'s own default
+        returns ``None``, so ``OpenCVBackend``/``V4l2LoopbackBackend``
+        (which never override it) and every pre-existing hand-rolled
+        fake backend in the test suite (which never defined it in the
+        first place) are both indistinguishable here, and this method is
+        an unconditional no-op for either -- returns ``False``
+        immediately, **never touches the backend at all**, not even a
+        call to ``heartbeat_age()`` itself.
+
+        For a backend that *does* report an age (``WorkerBackend``):
+        an age at or below *threshold_s* is healthy -- returns ``False``,
+        nothing to do. An age past *threshold_s* calls the exact same
+        :meth:`_attempt_self_heal` a demand-driven read-failure streak
+        already uses -- no second respawn code path, no duplicated
+        failure-counting, and therefore the same :data:`MAX_REOPENS`
+        budget and exhausted-camera behaviour already documented there:
+        an already-exhausted camera gets no bonus reopen attempt from
+        this path, exactly as :meth:`_attempt_self_heal`'s own budget
+        check already guarantees regardless of caller. Returns whether
+        it did, purely for a caller's own logging (``Camera`` itself
+        does not use the return value for anything).
+
+        Runs under :attr:`_read_lock` -- the same lock :meth:`read`
+        already holds for its own body, including its own self-heal
+        call -- rather than a new lock, so a stall check racing an
+        in-flight :meth:`read` (e.g. the watchdog polling a camera a
+        background stream producer is simultaneously reading) is simply
+        serialized against it like any other concurrent ``read()`` call
+        would be; it can never observe or trigger a second, overlapping
+        reopen of the same backend handle.
+        """
+        heartbeat_age = getattr(self._backend, "heartbeat_age", None)
+        if heartbeat_age is None:
+            return False
+        with self._read_lock:
+            age = heartbeat_age()
+            if age is None or age <= threshold_s:
+                return False
+            logger.warning(
+                "%s: heartbeat stalled (%.1fs since last frame, threshold %.1fs); "
+                "attempting self-heal",
+                self._slug,
+                age,
+                threshold_s,
+            )
+            self._attempt_self_heal()
+            return True
 
     # -- config --------------------------------------------------------
 

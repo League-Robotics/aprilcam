@@ -316,6 +316,140 @@ def test_reopen_failure_leaves_camera_unusable_but_present():
 
 
 # ---------------------------------------------------------------------------
+# check_stall (sprint 038 ticket 005): the proactive half of self-heal --
+# a backend heartbeat check that fires _attempt_self_heal with nobody
+# calling read() at all.
+# ---------------------------------------------------------------------------
+
+
+class _FakeHeartbeatBackend(FakeBackend):
+    """:class:`FakeBackend` plus a settable ``heartbeat_age()`` -- the
+    only difference between a backend :meth:`Camera.check_stall`
+    duck-types as heartbeat-capable (``WorkerBackend``, in production)
+    and the plain :class:`FakeBackend` every other test in this module
+    uses, which has no ``heartbeat_age`` attribute at all."""
+
+    def __init__(self, *, heartbeat_age: Optional[float], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._heartbeat_age = heartbeat_age
+        self.heartbeat_age_calls = 0
+
+    def heartbeat_age(self) -> Optional[float]:
+        self.heartbeat_age_calls += 1
+        return self._heartbeat_age
+
+
+def test_check_stall_is_a_noop_for_a_backend_without_heartbeat_age():
+    """A plain FakeBackend (mirrors OpenCVBackend/V4l2LoopbackBackend --
+    no heartbeat_age at all) makes check_stall an unconditional no-op:
+    returns False, never touches the backend."""
+    backend = FakeBackend()
+    cam = Camera("cam-a", backend)
+    cam.open()
+
+    assert cam.check_stall() is False
+    assert backend.open_calls == 1  # unchanged
+    assert backend.close_calls == 0
+
+
+def test_check_stall_noop_when_heartbeat_age_is_none():
+    """heartbeat_age() itself reporting None (e.g. WorkerBackend not
+    currently open) is also a no-op -- distinct from the method not
+    existing at all, but the same result."""
+    backend = _FakeHeartbeatBackend(heartbeat_age=None)
+    cam = Camera("cam-a", backend)
+    cam.open()
+
+    assert cam.check_stall(threshold_s=5.0) is False
+    assert backend.heartbeat_age_calls == 1
+    assert backend.open_calls == 1
+
+
+def test_check_stall_noop_when_heartbeat_is_fresh():
+    backend = _FakeHeartbeatBackend(heartbeat_age=0.1)
+    cam = Camera("cam-a", backend)
+    cam.open()
+
+    assert cam.check_stall(threshold_s=5.0) is False
+    assert backend.open_calls == 1
+    assert backend.close_calls == 0
+
+
+def test_check_stall_triggers_self_heal_exactly_once_on_a_stale_heartbeat():
+    backend = _FakeHeartbeatBackend(heartbeat_age=999.0)
+    cam = Camera("cam-a", backend)
+    cam.open()
+
+    assert cam.check_stall(threshold_s=5.0) is True
+    assert backend.close_calls == 1
+    assert backend.open_calls == 2  # self-heal reopened once
+
+
+def test_check_stall_age_exactly_at_threshold_is_not_stale():
+    """Boundary: an age equal to (not past) threshold_s is still
+    healthy -- matches the docstring's "at or below is healthy"."""
+    backend = _FakeHeartbeatBackend(heartbeat_age=5.0)
+    cam = Camera("cam-a", backend)
+    cam.open()
+
+    assert cam.check_stall(threshold_s=5.0) is False
+    assert backend.open_calls == 1
+
+
+def test_check_stall_respects_max_reopens_budget():
+    """Driving repeated self-heal attempts through check_stall alone --
+    never through read() -- still respects MAX_REOPENS: no bonus reopen
+    beyond what _attempt_self_heal already allows any caller."""
+    backend = _FakeHeartbeatBackend(heartbeat_age=999.0)  # permanently stalled
+    cam = Camera("cam-a", backend)
+    cam.open()
+
+    for _ in range(MAX_REOPENS):
+        assert cam.check_stall(threshold_s=5.0) is True
+    assert backend.open_calls == 1 + MAX_REOPENS
+    assert cam.state.usable is True  # budget not spent yet on this exact boundary
+
+    cam.check_stall(threshold_s=5.0)  # one more -- trips the exhausted path
+    assert backend.open_calls == 1 + MAX_REOPENS  # unchanged -- no bonus reopen
+    assert cam.state.present is True
+    assert cam.state.usable is False
+
+
+def test_check_stall_does_not_deadlock_with_a_concurrent_read():
+    """check_stall reuses _read_lock rather than a new lock (AC5): a
+    stall check racing an in-flight read() on another thread must
+    serialize cleanly, never deadlock, and never corrupt the
+    failure/reopen counters both paths share."""
+    backend = _FakeHeartbeatBackend(heartbeat_age=999.0, read_delay=0.02, loop=True)
+    cam = Camera("cam-a", backend)
+    cam.open()
+
+    stop = threading.Event()
+    errors: List[BaseException] = []
+
+    def _reader() -> None:
+        while not stop.is_set():
+            try:
+                cam.read()
+            except BaseException as exc:  # pragma: no cover - defensive
+                errors.append(exc)
+                return
+
+    reader = threading.Thread(target=_reader, daemon=True)
+    reader.start()
+    try:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            cam.check_stall(threshold_s=1e9)  # never actually stale -- just exercising the lock
+    finally:
+        stop.set()
+        reader.join(timeout=5.0)
+
+    assert not reader.is_alive()  # joined cleanly, no deadlock
+    assert errors == []
+
+
+# ---------------------------------------------------------------------------
 # on_reopen (ticket 023-007): staleness trigger notification hook, fired at
 # the end of a *successful* self-heal reopen only -- never on plain open(),
 # never on a failed reopen attempt, never once the reopen budget is spent.

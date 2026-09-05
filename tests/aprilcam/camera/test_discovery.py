@@ -554,3 +554,26 @@ def test_probe_does_not_disturb_a_live_read_loop():
     assert len(matching) == 1
     assert matching[0].present is True
     assert matching[0].usable is True
+
+
+# ---------------------------------------------------------------------------
+# CameraDiscovery's default backend_factory (sprint 038 ticket 005): must
+# agree with daemon/service.py's own default (AC2) -- both now delegate to
+# the one shared camera.backends.default_capture_backend_factory rather
+# than each hardcoding its own OpenCVBackend(index), so they cannot drift
+# apart independently.
+# ---------------------------------------------------------------------------
+
+
+def test_default_backend_factory_delegates_to_the_shared_selection(monkeypatch):
+    from aprilcam.camera.backends.opencv_backend import OpenCVBackend
+    from aprilcam.camera.backends.worker_backend import WorkerBackend
+    from aprilcam.camera.discovery import _default_backend_factory
+
+    monkeypatch.delenv("APRILCAM_CAPTURE_BACKEND", raising=False)
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    assert isinstance(_default_backend_factory(0), WorkerBackend)
+
+    monkeypatch.setattr("sys.platform", "linux")
+    assert isinstance(_default_backend_factory(0), OpenCVBackend)

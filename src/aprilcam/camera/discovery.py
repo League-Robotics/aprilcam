@@ -41,9 +41,12 @@ import threading
 import time
 from typing import AbstractSet, Callable, Dict, FrozenSet, List, Optional, Set
 
-from aprilcam.camera.backends import CaptureBackend, resolve_capture_backend
+from aprilcam.camera.backends import (
+    CaptureBackend,
+    default_capture_backend_factory,
+    resolve_capture_backend,
+)
 from aprilcam.camera.backends.libcamera import LibcameraDevice
-from aprilcam.camera.backends.opencv_backend import OpenCVBackend
 from aprilcam.camera.camera import Camera
 from aprilcam.camera.identity import CameraIdentity, resolve_all
 from aprilcam.camera.interfaces import CameraDiscovery as _CameraDiscoveryBase
@@ -86,7 +89,24 @@ _PROBE_READ_POLL_INTERVAL = 0.05
 
 
 def _default_backend_factory(index: int) -> CaptureBackend:
-    return OpenCVBackend(index)
+    """``_probe_openable``'s default non-libcamera ``CaptureBackend``
+    construction (sprint 038 ticket 005).
+
+    Delegates to ``camera.backends.default_capture_backend_factory`` --
+    the one place this selection (``WorkerBackend`` by default on
+    macOS, ``OpenCVBackend`` elsewhere, either forced by
+    ``APRILCAM_CAPTURE_BACKEND``) is decided, so this function and
+    ``daemon/service.py``'s identically-named, identically-delegating
+    ``_default_backend_factory`` cannot drift apart the way two
+    independently-hardcoded ``OpenCVBackend(index)`` bodies did before
+    this ticket -- both ``_probe_openable`` and ``_camera_for`` must
+    agree on which backend a camera gets. See
+    ``default_capture_backend_factory``'s own docstring for the full
+    contract. Every existing test that constructs a ``CameraDiscovery``
+    passes its own ``backend_factory=`` (a fake) and never reaches this
+    default at all.
+    """
+    return default_capture_backend_factory(index)
 
 
 class CameraDiscovery(_CameraDiscoveryBase):
@@ -108,7 +128,12 @@ class CameraDiscovery(_CameraDiscoveryBase):
         index -> :class:`CaptureBackend`. Overridable so tests can
         inject a fake that raises on ``open()`` (AC6, UC-25.S-4)
         without touching real hardware; defaults to
-        :class:`~aprilcam.camera.backends.opencv_backend.OpenCVBackend`.
+        :func:`~aprilcam.camera.backends.default_capture_backend_factory`
+        (sprint 038 ticket 005) --
+        :class:`~aprilcam.camera.backends.worker_backend.WorkerBackend`
+        on macOS, :class:`~aprilcam.camera.backends.opencv_backend.
+        OpenCVBackend` elsewhere, either forced by
+        ``APRILCAM_CAPTURE_BACKEND``.
     identity_source:
         () -> ``{index: CameraIdentity}``. Defaults to
         ``camera.identity.resolve_all`` -- fresh, non-caching, non-

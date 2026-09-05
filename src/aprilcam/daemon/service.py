@@ -100,9 +100,13 @@ from aprilcam.calibration.calibration import Calibration, Calibrator
 from aprilcam.calibration.deskew import Deskewer
 from aprilcam.calibration.flatfield import FlatFieldCapturer
 from aprilcam.calibration.interfaces import CalibrationResult, FlatFieldInfo, FlatFieldResult
-from aprilcam.camera.backends import CaptureBackend, ControlBackend, resolve_capture_backend
+from aprilcam.camera.backends import (
+    CaptureBackend,
+    ControlBackend,
+    default_capture_backend_factory,
+    resolve_capture_backend,
+)
 from aprilcam.camera.backends.libcamera import LibcameraDevice
-from aprilcam.camera.backends.opencv_backend import OpenCVBackend
 from aprilcam.camera.backends.uvc_util import UvcUtilBackend
 from aprilcam.camera.camera import FLATFIELD_FILENAME, Camera
 from aprilcam.camera.discovery import CameraDiscovery
@@ -203,7 +207,22 @@ _CV_EXTENSION = {"jpeg": ".jpg", "png": ".png"}
 
 
 def _default_backend_factory(index: int) -> CaptureBackend:
-    return OpenCVBackend(index)
+    """``_camera_for``'s default non-libcamera ``CaptureBackend``
+    construction (sprint 038 ticket 005).
+
+    Delegates to ``camera.backends.default_capture_backend_factory`` --
+    the one place this selection (``WorkerBackend`` by default on
+    macOS, ``OpenCVBackend`` elsewhere, either forced by
+    ``APRILCAM_CAPTURE_BACKEND``) is decided, so this function and
+    ``camera/discovery.py``'s identically-named, identically-delegating
+    ``_default_backend_factory`` cannot drift apart the way two
+    independently-hardcoded ``OpenCVBackend(index)`` bodies did before
+    this ticket. See that function's own docstring for the full
+    contract. Every existing test that constructs a ``DaemonService``
+    passes its own ``backend_factory=`` (a fake) and never reaches this
+    default at all.
+    """
+    return default_capture_backend_factory(index)
 
 
 def _default_control_backend_factory(device_name: str) -> Optional[ControlBackend]:

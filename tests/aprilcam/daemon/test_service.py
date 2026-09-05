@@ -140,6 +140,31 @@ def _identity(hardware_key: str, device_name: str) -> CameraIdentity:
     )
 
 
+# ---------------------------------------------------------------------------
+# DaemonService's default backend_factory (sprint 038 ticket 005): must
+# agree with camera/discovery.py's own default (AC2) -- both now delegate
+# to the one shared camera.backends.default_capture_backend_factory rather
+# than each hardcoding its own OpenCVBackend(index), so they cannot drift
+# apart independently. Every other test in this module injects its own
+# backend_factory (a FakeBackend), so this default is otherwise never
+# exercised elsewhere in this file.
+# ---------------------------------------------------------------------------
+
+
+def test_default_backend_factory_delegates_to_the_shared_selection(monkeypatch):
+    from aprilcam.camera.backends.opencv_backend import OpenCVBackend
+    from aprilcam.camera.backends.worker_backend import WorkerBackend
+    from aprilcam.daemon.service import _default_backend_factory
+
+    monkeypatch.delenv("APRILCAM_CAPTURE_BACKEND", raising=False)
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    assert isinstance(_default_backend_factory(0), WorkerBackend)
+
+    monkeypatch.setattr("sys.platform", "linux")
+    assert isinstance(_default_backend_factory(0), OpenCVBackend)
+
+
 @pytest.fixture
 def directories(tmp_path: Path) -> Directories:
     return Directories(config_dir=tmp_path / "config", state_dir=tmp_path / "state")

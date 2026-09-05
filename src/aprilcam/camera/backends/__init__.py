@@ -51,6 +51,8 @@ a client; ``camera.py`` is the only consumer.
 from __future__ import annotations
 
 import logging
+import os
+import sys
 from typing import Callable, List, Optional, Set, Tuple
 
 import numpy as np
@@ -58,7 +60,13 @@ import numpy as np
 from aprilcam.camera.backends.libcamera import LibcameraDevice
 from aprilcam.camera.backends.libcamera import list_loopback_cameras as _list_loopback_cameras
 
-__all__ = ["CaptureBackend", "ControlBackend", "resolve_capture_backend"]
+__all__ = [
+    "CAPTURE_BACKEND_ENV",
+    "CaptureBackend",
+    "ControlBackend",
+    "default_capture_backend_factory",
+    "resolve_capture_backend",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +75,18 @@ logger = logging.getLogger(__name__)
 #: libcamera-sourced camera (``f"libcamera:{lc.camera_id}"``). See
 #: :func:`resolve_capture_backend`.
 _LIBCAMERA_HARDWARE_KEY_PREFIX = "libcamera:"
+
+#: Env var naming which non-libcamera ``CaptureBackend`` construction
+#: :func:`default_capture_backend_factory` picks -- ``"worker"`` forces
+#: :class:`~aprilcam.camera.backends.worker_backend.WorkerBackend`,
+#: ``"opencv"`` forces
+#: :class:`~aprilcam.camera.backends.opencv_backend.OpenCVBackend`, unset
+#: or any other value falls through to the platform default (sprint 038
+#: ticket 005). Follows the project's established
+#: ``APRILCAM_*``-env-var-plus-named-constant convention (e.g.
+#: ``camera.backends.libcamera._LOOPBACK_LABEL_ENV``,
+#: ``config.directories.APRILCAM_CONFIG_DIR_ENV``).
+CAPTURE_BACKEND_ENV = "APRILCAM_CAPTURE_BACKEND"
 
 
 class CaptureBackend:
@@ -124,6 +144,39 @@ class CaptureBackend:
         device.
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement CaptureBackend.frame_size")
+
+    def heartbeat_age(self) -> Optional[float]:
+        """Seconds since this backend last confirmed its capture session
+        is alive, or ``None`` if this backend has no such concept
+        (sprint 038 ticket 005).
+
+        Unlike this class's other four methods, this one has a sensible
+        default (``None``, "not supported") rather than
+        ``NotImplementedError`` — a best-effort, opt-in capability, not
+        part of the core capture contract every backend must honour, the
+        same relationship :class:`ControlBackend`'s
+        ``describe_set_failure`` has to *its* base class. ``OpenCVBackend``
+        and ``V4l2LoopbackBackend`` inherit this default unmodified (they
+        expose no way to tell "still alive" apart from "the next
+        ``read()`` happens to work"), so they and every hand-rolled fake
+        backend in the test suite are untouched by this method existing.
+        :class:`~aprilcam.camera.backends.worker_backend.WorkerBackend` is
+        the one override: it reports the age of its shared-memory
+        ``FrameRing``'s last published sequence
+        (``FrameRing.peek()`` — a cheap ``(sequence, timestamp)`` snapshot,
+        no frame copy), which keeps advancing as long as the child
+        process is actually capturing, independent of whether anything is
+        currently calling :meth:`CaptureBackend.read`.
+
+        ``camera.camera.Camera.check_stall`` duck-types this the same way
+        ``apply_config`` already duck-types ``describe_set_failure`` —
+        ``getattr(backend, "heartbeat_age", None)`` — so a backend that
+        predates this method (impossible now that it lives on this base
+        class, but true of any pre-existing hand-rolled fake that does
+        not derive from ``CaptureBackend`` at all) is indistinguishable
+        from one that inherits the ``None`` default.
+        """
+        return None
 
 
 class ControlBackend:
@@ -273,3 +326,80 @@ def resolve_capture_backend(
             index,
         )
     return backend_factory(index)
+
+
+def default_capture_backend_factory(index: int) -> CaptureBackend:
+    """The one ``backend_factory``-shaped default both
+    ``camera/discovery.py``'s ``_probe_openable`` and
+    ``daemon/service.py``'s ``_camera_for`` construct their non-libcamera
+    ``CaptureBackend`` from (sprint 038 ticket 005) -- so the two call
+    sites cannot disagree about which backend an unspecified camera gets
+    the way two independently-hardcoded copies of the same function
+    could drift.
+
+    **Selection (team-lead override of this ticket's original "always
+    ``OpenCVBackend``" default, recorded on the stakeholder_approval
+    gate).** ``camera-DESIGN.md``'s "AVFoundation capture-session wedge"
+    finding (see ``worker_backend.py``'s module docstring) is
+    ``sys.platform == "darwin"``-specific, so the *default* -- with no
+    :data:`CAPTURE_BACKEND_ENV` override -- now differs by platform:
+
+    * ``darwin`` -- :func:`~aprilcam.camera.backends.worker_backend.
+      default_worker_backend_factory` (``WorkerBackend``), the only
+      backend that can actually clear the wedge (a fresh process, not a
+      fresh in-process handle).
+    * every other platform -- :class:`~aprilcam.camera.backends.
+      opencv_backend.OpenCVBackend`, unchanged -- no Linux/Raspberry Pi
+      hardware has shown this symptom, and ``V4l2LoopbackBackend``
+      already has its own, unrelated backend (``resolve_capture_backend``'s
+      libcamera branch, upstream of this function).
+
+    :data:`CAPTURE_BACKEND_ENV` (``APRILCAM_CAPTURE_BACKEND``), read
+    fresh on every call rather than cached, overrides either way:
+    ``"worker"`` or ``"opencv"`` (case-insensitive) forces that backend
+    on any platform -- an operator or a test can force ``OpenCVBackend``
+    back on a Mac, or exercise ``WorkerBackend`` on a non-Mac CI runner.
+    Any other non-empty value is logged and ignored (falls through to
+    the platform default) rather than raising -- consistent with every
+    other env-var reader in this codebase (e.g.
+    ``config.directories._resolve_dir``) tolerating an unrecognised
+    value instead of taking a working daemon down over it.
+
+    Lazy imports below (not module-level) avoid a circular import:
+    ``opencv_backend.py`` and ``worker_backend.py`` both do
+    ``from aprilcam.camera.backends import CaptureBackend`` -- importing
+    either of them back into this ``__init__.py`` at module load time
+    would re-enter this package's own not-yet-finished initialization,
+    exactly the reason :func:`resolve_capture_backend` already imports
+    ``V4l2LoopbackBackend`` the same way, lazily, inside its libcamera
+    branch above.
+    """
+    override = os.environ.get(CAPTURE_BACKEND_ENV, "").strip().lower()
+    if override == "worker":
+        return _worker_backend_factory(index)
+    if override == "opencv":
+        return _opencv_backend_factory(index)
+    if override:
+        logger.warning(
+            "default_capture_backend_factory: unrecognised %s=%r (expected "
+            "'worker' or 'opencv'); falling back to the platform default",
+            CAPTURE_BACKEND_ENV,
+            override,
+        )
+    if sys.platform == "darwin":
+        return _worker_backend_factory(index)
+    return _opencv_backend_factory(index)
+
+
+def _opencv_backend_factory(index: int) -> CaptureBackend:
+    from aprilcam.camera.backends.opencv_backend import OpenCVBackend  # noqa: PLC0415
+
+    return OpenCVBackend(index)
+
+
+def _worker_backend_factory(index: int) -> CaptureBackend:
+    from aprilcam.camera.backends.worker_backend import (  # noqa: PLC0415
+        default_worker_backend_factory,
+    )
+
+    return default_worker_backend_factory(index)
