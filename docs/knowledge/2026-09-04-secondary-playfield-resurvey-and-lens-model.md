@@ -48,3 +48,28 @@ pushed live): 2 NW, 0 NE, 3 SW, 1 SE at (+-55, +-35); 4 N (0, 35);
 **temporary** -- delete it from `april_tags` when it leaves the table
 (calibration itself needs only the ArUco set). Camera 2 calibrated with
 the fitted lens model stored in its `calibration.json`.
+
+## Later the same day: the drawn lines say the lens is rectilinear
+
+A plumb-line check on camera 2's raw frame (fit k1 so the field's long
+drawn lines are straightest; `radio-robot-lib/config/playfields/secondary-playfield/fieldtools.py analyze`)
+found the lines already straight to **0.64 px rms** over >1000 px, best
+correction k1 = -0.12 at f = 1853 (0.61 px). The daemon's nine-point fit
+(k1 = -0.30) actually *bends* those lines (0.74 px). So the 1.2-1.3 cm
+six-point homography residual was **marker placement** (the edge-middle
+markers sit 0.9-2.7 cm off their nominal spots), and the lens model the
+daemon stored is compensating placement, not distortion. Consequences:
+
+- Camera 2's current calibration still reports the markers to 0.45 cm
+  mean and the cross centre within ~1 cm, so it is fine to run on. But
+  it is a fudge: positions between markers are warped by ~0.1 cm, and it
+  would go wrong if the middle markers were ever moved to their nominal
+  spots without recalibrating.
+- The honest survey would be the corners (assumed exact) plus the
+  *measured* positions of 4-7 from the line-based frame, and no lens
+  model. Not done yet; recorded here so nobody "fixes" the lens model
+  back to zero without also fixing the survey.
+- A tag-free deskew from the cross + coloured patches reproduces the
+  four corner markers to 0.1 cm (2.5 cm when a robot covers the cross);
+  the field template and tooling live in
+  `radio-robot-lib/config/playfields/secondary-playfield/`.
