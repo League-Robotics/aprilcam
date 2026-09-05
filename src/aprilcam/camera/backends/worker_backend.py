@@ -128,6 +128,35 @@ _READ_POLL_INTERVAL = 0.005
 _READY_POLL_INTERVAL = 0.2
 
 
+def _popen_spawn_kwargs() -> Dict[str, Any]:
+    """Keyword arguments that make ``subprocess.Popen`` spawn the worker
+    through ``posix_spawn`` rather than ``fork``+``exec`` on macOS.
+
+    The daemon is a large multi-threaded process with AVFoundation,
+    CoreMedia and cv2 loaded (its start-up camera probe runs OpenCV
+    in-process). Forking such a process on macOS runs every registered
+    ``pthread_atfork`` child handler and the Objective-C runtime's
+    fork-safety checks inside the forked copy *before* ``exec`` -- and
+    those can abort the child in a few milliseconds with nothing the
+    parent can observe except a zombie (seen 2026-09-05: every respawn
+    after the host slept failed with "did not connect", the child dead
+    within 100 ms, no crash report, while the identical command from a
+    fresh process worked). ``posix_spawn`` never runs any of that: the
+    kernel creates the new image directly.
+
+    CPython uses ``posix_spawn`` only when ``close_fds`` is false (no
+    ``closefrom`` support on macOS), no ``cwd``, no ``preexec_fn`` and no
+    ``pass_fds`` -- all of which ``open()`` already satisfies. Leaving
+    ``close_fds`` false is safe here because every file descriptor
+    Python itself creates is non-inheritable by default (PEP 446), so
+    the worker inherits only the standard streams the daemon was
+    launched with. Elsewhere the default (``close_fds=True``) is kept.
+    """
+    if sys.platform == "darwin":
+        return {"close_fds": False}
+    return {}
+
+
 class WorkerStartupError(RuntimeError):
     """The capture worker child process failed to start, connect, or
     report its first frame within the startup timeout -- raised by
@@ -210,6 +239,7 @@ class WorkerBackend(CaptureBackend):
                 self._build_command(str(listener.address)),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
+                **_popen_spawn_kwargs(),
             )
             self._start_stderr_drain(process)
             conn = self._accept(listener, process)

@@ -356,6 +356,19 @@ def test_open_reports_a_backend_construction_failure_through_the_handshake():
     assert backend.is_open is False
 
 
+def test_worker_is_spawned_without_forking_the_daemon_on_macos(monkeypatch):
+    """On macOS the spawn must go through posix_spawn (close_fds=False
+    is what selects it in CPython), never fork+exec of the multi-threaded,
+    AVFoundation-loaded daemon -- see ``_popen_spawn_kwargs``. Elsewhere
+    the default close_fds=True is kept."""
+    from aprilcam.camera.backends import worker_backend as wb
+
+    monkeypatch.setattr(wb.sys, "platform", "darwin")
+    assert wb._popen_spawn_kwargs() == {"close_fds": False}
+    monkeypatch.setattr(wb.sys, "platform", "linux")
+    assert wb._popen_spawn_kwargs() == {}
+
+
 def test_open_reports_exit_code_and_stderr_when_child_dies_before_connecting():
     # An argparse failure exits (code 2) with usage text on stderr before
     # the worker ever connects -- the one shape of failure the parent can

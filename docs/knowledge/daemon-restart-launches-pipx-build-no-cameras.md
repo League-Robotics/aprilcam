@@ -268,6 +268,20 @@ What changed in response (commit after this note):
   diagnostic on a first-frame timeout instead of a traceback ending in
   `no frame received from ''`.
 
+- **The worker is spawned with `posix_spawn`, never `fork`+`exec`**
+  (`close_fds=False` on macOS is what selects it in CPython; see
+  `_popen_spawn_kwargs` in `worker_backend.py`). Watching a live retry
+  showed the daemon's listener socket was fine (a shell could connect
+  to it) but **no child process was ever visible**, even sampling every
+  100 ms: the child died before Python could start. The daemon has
+  AVFoundation, CoreMedia and cv2 loaded and 31 threads; forking it runs
+  every `pthread_atfork` child handler and the Objective-C fork-safety
+  checks in the forked copy before `exec`, which can kill the child in
+  milliseconds with nothing observable but a zombie. `posix_spawn` runs
+  none of that. Not proven to be the cause (it cannot be reproduced from
+  a fresh process), but it removes the whole class, and if the child
+  still dies it now dies *after* exec, where its stderr is captured.
+
 Still open: whether the stall itself is the AVFoundation wedge inside the
 worker (expected, now respawnable) or something sleep-related that also
 breaks *spawning*. If the log shows the child failing in the interpreter
