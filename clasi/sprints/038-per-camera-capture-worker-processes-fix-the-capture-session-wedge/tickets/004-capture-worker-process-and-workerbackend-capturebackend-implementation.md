@@ -1,7 +1,7 @@
 ---
 id: '004'
 title: capture_worker process and WorkerBackend (CaptureBackend implementation)
-status: open
+status: done
 use-cases:
 - SUC-001
 - SUC-002
@@ -50,32 +50,32 @@ instead of shared memory).
 
 ## Acceptance Criteria
 
-- [ ] `capture_worker.main()` runs as a real subprocess in at least one
+- [x] `capture_worker.main()` runs as a real subprocess in at least one
       test, using a fake/synthetic frame source injected in place of a
       real `cv2.VideoCapture` (per sprint.md's Test Strategy: no real
       camera hardware in this ticket's tests).
-- [ ] `WorkerBackend.open()` spawns the child and blocks until its
+- [x] `WorkerBackend.open()` spawns the child and blocks until its
       first heartbeat (or a bounded startup timeout is exceeded, in
       which case `open()` raises — matching `CaptureBackend.open()`'s
       "raises on failure, never a sentinel" contract).
-- [ ] `WorkerBackend.read()` returns real frames once the child is
+- [x] `WorkerBackend.read()` returns real frames once the child is
       running and publishing, and returns `None` (never raises) once
       the child process has been killed out-of-band (simulating a
       crash) or its heartbeat has gone stale.
-- [ ] `WorkerBackend.close()` terminates the child (verify via process
+- [x] `WorkerBackend.close()` terminates the child (verify via process
       exit, not just "we sent a signal") and leaves no leaked shared-
       memory segment or zombie process.
-- [ ] `WorkerBackend.get_property`/`set_property`/`settable_names`/
+- [x] `WorkerBackend.get_property`/`set_property`/`settable_names`/
       `frame_size` round-trip correctly through the control channel
       against the worker's fake capture source.
-- [ ] A test with two independent fake workers confirms one worker's
+- [x] A test with two independent fake workers confirms one worker's
       crash/kill does not affect the other's frames or control-channel
       responses (SUC-002's multi-camera independence criterion).
-- [ ] `WorkerBackend` is a real subclass of `CaptureBackend` (no
+- [x] `WorkerBackend` is a real subclass of `CaptureBackend` (no
       `typing.Protocol`, per this project's interfaces rule) and passes
       the same generic backend-contract tests (if any exist) that
       `OpenCVBackend`/`V4l2LoopbackBackend` already pass.
-- [ ] Exactly one test in this ticket may be `@pytest.mark.camera`-marked
+- [x] Exactly one test in this ticket may be `@pytest.mark.camera`-marked
       against a real capture device, and it must skip cleanly with no
       hardware present (sprint.md Test Strategy).
 
