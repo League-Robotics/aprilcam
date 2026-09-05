@@ -1,5 +1,13 @@
 ---
-status: pending
+status: in-progress
+sprint: 038
+tickets:
+- 038-001
+- 038-002
+- 038-003
+- 038-004
+- 038-005
+- 038-006
 ---
 
 # A wedged camera capture session is silent, self-reports healthy, and only a full daemon restart recovers it
