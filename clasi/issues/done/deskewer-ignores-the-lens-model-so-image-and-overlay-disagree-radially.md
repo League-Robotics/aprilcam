@@ -1,5 +1,7 @@
 ---
 status: done
+tickets:
+- NONE
 ---
 
 # Deskewer ignores the calibration's lens model, so the deskewed image and the tag overlay disagree radially
