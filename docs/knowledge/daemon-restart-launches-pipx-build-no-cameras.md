@@ -176,3 +176,41 @@ it; close the hung view first (its subscription dies with the daemon
 anyway). The new control watchdog does not help here -- the controls
 read fine, the capture session itself is dead. Durable fix is still
 `clasi/issues/camera-capture-session-wedge-is-silent-and-needs-a-daemon-restart.md`.
+
+## As of sprint 038: the wedge now self-heals, without a daemon restart
+
+Sprint 038 gave every opened camera its own capture worker process
+(`camera.backends.worker_backend.WorkerBackend`) instead of driving
+`cv2.VideoCapture` in-process — the root cause of every recurrence
+above was that the AVFoundation capture-session wedge is **process-local**,
+so no in-process reopen strategy (delays, backoff, fresh backend
+objects) could ever clear it; only a process boundary does. On top of
+that, `DaemonService`'s existing control-drift watchdog thread now also
+runs `check_stalled_cameras()` (a worker's heartbeat gone stale drives
+the same close()+open() respawn `Camera`'s demand-driven self-heal
+would eventually trigger, but proactively, even with nobody reading
+that camera) and, on a slower interval
+(`STALLED_CAMERA_RETRY_INTERVAL_S`, `daemon/service.py`), retries a
+camera whose reopen budget was fully spent instead of leaving it dead
+until a restart. In practice: a wedge like the ones documented above
+should now clear itself within roughly the watchdog interval or the
+exhausted-retry interval, with no operator action, on any camera using
+the worker backend.
+
+**`WorkerBackend` is the default on macOS as of this sprint** (Linux/Pi
+still defaults to `OpenCVBackend`). To force the old, pre-038
+in-process `cv2.VideoCapture` behaviour back on for diagnosis or
+comparison — e.g. to confirm a new symptom is or isn't this same
+process-local wedge — set `APRILCAM_CAPTURE_BACKEND=opencv` in the
+daemon's environment before starting it:
+
+```sh
+APRILCAM_CAPTURE_BACKEND=opencv uv run aprilcam daemon start
+```
+
+(`APRILCAM_CAPTURE_BACKEND=worker` forces the new backend explicitly on
+any platform; any other/unset value uses the per-platform default.)
+With `opencv` forced, every recurrence recipe above (kill the hung
+view, then `aprilcam daemon stop && aprilcam daemon start`) still
+applies unchanged, since none of sprint 038's self-healing exists for
+that backend.

@@ -1,7 +1,7 @@
 ---
 id: '006'
 title: Daemon stall-detection watchdog (check_stalled_cameras)
-status: open
+status: done
 use-cases:
 - SUC-001
 depends-on:
@@ -43,29 +43,29 @@ implementation-time decision the architecture explicitly deferred).
 
 ## Acceptance Criteria
 
-- [ ] `check_stalled_cameras()` calls `Camera.check_stall()` on every
+- [x] `check_stalled_cameras()` calls `Camera.check_stall()` on every
       held-open camera in one pass, same iteration/locking shape as
       `reassert_controls()` (snapshot `self._cameras.items()` under the
       lock, then act outside it).
-- [ ] One camera's `check_stall()` raising an unexpected exception does
+- [x] One camera's `check_stall()` raising an unexpected exception does
       not stop the pass from checking every other held-open camera
       (mirrors `reassert_controls`'s existing per-camera try/except).
-- [ ] `check_stalled_cameras()` runs from the *same* background thread
+- [x] `check_stalled_cameras()` runs from the *same* background thread
       and interval as `reassert_controls()` (no second watchdog thread
       introduced — see the sprint's `design/daemon-DESIGN.md` overlay's
       rejected-alternative on this point).
-- [ ] A camera whose `check_stall()` is a no-op (any non-worker
+- [x] A camera whose `check_stall()` is a no-op (any non-worker
       backend, or a healthy worker) produces no self-heal side effect
       from this pass — verified against a fake `OpenCVBackend`-style
       camera to confirm the extension is fully backward compatible.
-- [ ] An exhausted (`MAX_REOPENS` spent) worker-backed camera gets a
+- [x] An exhausted (`MAX_REOPENS` spent) worker-backed camera gets a
       periodic retry attempt from this pass, on an interval
       independent of the synchronous `_attempt_self_heal` budget, and a
       successful retry clears the exhausted state exactly the way a
       normal successful reopen already does (`_exhausted = False`,
       `on_reopen` fires) — no new "exhausted" bookkeeping duplicated in
       `DaemonService`.
-- [ ] No test in this ticket requires real camera hardware.
+- [x] No test in this ticket requires real camera hardware.
 
 ## Testing
 

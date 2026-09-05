@@ -57,6 +57,16 @@ concept -- an unconditional no-op) and, past a threshold, calls the
 same :meth:`_attempt_self_heal` above -- no second respawn path, no
 duplicated budget accounting. See :meth:`check_stall`'s own docstring.
 
+**Periodic retry once the reopen budget is exhausted (sprint 038
+ticket 006).** :meth:`retry_if_exhausted` closes the other half of the
+same watchdog pass: once :data:`MAX_REOPENS` is spent, ``usable`` stays
+``False`` exactly as documented above, but a camera that was
+unplugged/replugged, or whose worker was killed for an unrelated
+reason, should not require a full daemon restart to try again. This
+method gives it one fresh close/open attempt, on the caller's own slow
+interval, reusing :meth:`_attempt_self_heal`'s respawn mechanics rather
+than a second, independent one -- see its own docstring.
+
 **Real UVC control, validated live (ticket 023-001).** ``apply_config``
 was originally implemented only against the small set of controls
 ``camera.backends.opencv_backend.property_map()`` exposes generically
@@ -718,6 +728,87 @@ class Camera(_CameraBase):
                 threshold_s,
             )
             self._attempt_self_heal()
+            return True
+
+    def retry_if_exhausted(self) -> bool:
+        """The periodic-retry half of the exhausted-budget contract
+        (sprint 038 ticket 006): give an exhausted camera one fresh
+        close/open attempt, on ``daemon.service.DaemonService``'s
+        watchdog's own slow interval, instead of requiring a full daemon
+        restart to try again -- see the module docstring's
+        ``_attempt_self_heal`` note ("the camera stops attempting
+        further reopens... until an external caller closes and reopens
+        it explicitly") and ``camera-DESIGN.md``'s Open Questions, which
+        left the exact mechanism for that external caller to this
+        ticket.
+
+        A no-op (returns ``False``, touches nothing -- not even
+        *backend*) unless :attr:`_exhausted` is currently ``True``: a
+        camera that has not spent its :data:`MAX_REOPENS` budget yet has
+        nothing for this method to do -- its ordinary demand-driven
+        self-heal (:meth:`read`) or :meth:`check_stall` already covers
+        it, and calling this on a healthy or merely-degraded-but-not-yet-
+        exhausted camera would be a second, independent respawn trigger
+        this class does not want.
+
+        **Deliberately does not call :meth:`_attempt_self_heal`.** That
+        method's very first line is the budget short-circuit this method
+        exists to get past (``if self._reopens >= MAX_REOPENS:
+        self._exhausted = True; return``) -- resetting :attr:`_reopens`
+        to ``0`` first would dodge that check for exactly one call, but
+        then leave :attr:`_exhausted` permanently cleared even on a
+        *failed* attempt (nothing in :meth:`_attempt_self_heal`'s failure
+        branch re-sets it), which would silently disable every later
+        periodic retry after the first one that happened to fail. Instead
+        this method runs the same close/open/``on_reopen`` body directly
+        -- no failure counting, no budget bookkeeping, nothing
+        :meth:`_attempt_self_heal` doesn't already also do -- and only
+        clears :attr:`_exhausted` (and resets :attr:`_reopens`) on a
+        *successful* reopen. A failed attempt leaves :attr:`_exhausted`
+        ``True``, exactly where it started, so ``DaemonService``'s
+        watchdog can call this again next interval without needing any
+        "was the last attempt successful" bookkeeping of its own --
+        the "no new exhausted bookkeeping duplicated in DaemonService"
+        contract this ticket's acceptance criteria call out.
+
+        A successful respawn clears :attr:`_exhausted` and fires
+        *on_reopen* exactly the way any other successful reopen already
+        does -- same postconditions as :meth:`_attempt_self_heal`'s own
+        success branch, just reached without that method's now-spent
+        budget getting in the way.
+
+        Returns whether this attempt succeeded (``True`` only on a
+        successful reopen) -- purely for a caller's own logging, exactly
+        like :meth:`check_stall`'s return value.
+
+        Runs under :attr:`_read_lock`, exactly like :meth:`check_stall`
+        and :meth:`read` -- serialized against any concurrent
+        :meth:`read`/:meth:`check_stall` call for the same camera,
+        never a second lock.
+        """
+        with self._read_lock:
+            if not self._exhausted:
+                return False
+            logger.warning(
+                "%s: exhausted-camera watchdog retry -- giving the reopen "
+                "budget one fresh close/open attempt",
+                self._slug,
+            )
+            try:
+                self._backend.close()
+            except Exception:  # pragma: no cover - defensive
+                pass
+            try:
+                self._backend.open()
+            except Exception as exc:
+                logger.warning("%s: exhausted-camera retry failed: %s", self._slug, exc)
+                return False
+            self._present = True
+            self._pending_open_settle = True  # ticket 030-005: a fresh session again
+            self._reopens = 0
+            self._exhausted = False
+            if self._on_reopen is not None:
+                self._on_reopen()
             return True
 
     # -- config --------------------------------------------------------

@@ -539,6 +539,121 @@ def test_default_on_reopen_is_none_and_self_heal_still_works():
 
 
 # ---------------------------------------------------------------------------
+# retry_if_exhausted (sprint 038 ticket 006): the periodic-retry half of the
+# exhausted-budget contract -- daemon.service.DaemonService's watchdog calls
+# this on a slow interval to give an exhausted camera one fresh close/open
+# attempt instead of requiring a full daemon restart.
+# ---------------------------------------------------------------------------
+
+
+def _exhaust_via_reads(cam: Camera) -> None:
+    """Drive *cam* to the exhausted state purely through :meth:`Camera.read`
+    failures -- the same drive ``test_reopen_budget_capped_at_ten_then_gives_up``
+    uses: ``FAILURE_THRESHOLD * MAX_REOPENS`` failures spend the whole
+    reopen budget (``usable`` is still ``True`` on this exact boundary --
+    the budget is spent, not yet detected as exhausted), then one more
+    ``FAILURE_THRESHOLD`` run trips the exhausted path for real."""
+    for _ in range(FAILURE_THRESHOLD * MAX_REOPENS):
+        cam.read()
+    for _ in range(FAILURE_THRESHOLD):
+        cam.read()
+
+
+def test_retry_if_exhausted_is_a_noop_when_not_exhausted():
+    """A camera that has not spent its reopen budget yet has nothing for
+    this method to do -- its ordinary self-heal already covers it."""
+    backend = FakeBackend(read_queue=[_frame()])
+    cam = Camera("cam-a", backend)
+    cam.open()
+
+    assert cam.retry_if_exhausted() is False
+    assert backend.open_calls == 1  # unchanged -- never touched the backend
+    assert backend.close_calls == 0
+
+
+def test_retry_if_exhausted_recovers_an_exhausted_camera():
+    """Once MAX_REOPENS is spent, one call gives the camera a fresh
+    close/open attempt: a FakeBackend's open() trivially succeeds, so the
+    retry succeeds, clears the exhausted state, and usable becomes True
+    again -- without a daemon restart."""
+    backend = FakeBackend()  # open() always trivially succeeds; never yields frames
+    cam = Camera("cam-a", backend)
+    cam.open()
+    _exhaust_via_reads(cam)
+    assert cam.state.usable is False  # budget genuinely spent
+
+    opens_before = backend.open_calls
+    assert cam.retry_if_exhausted() is True
+    assert backend.close_calls >= 1
+    assert backend.open_calls == opens_before + 1  # exactly one fresh attempt
+    assert cam.state.usable is True  # exhausted state cleared
+
+
+def test_retry_if_exhausted_fires_on_reopen_on_a_successful_retry():
+    """A successful retry clears the exhausted state exactly the way a
+    normal successful reopen already does -- including firing
+    *on_reopen*, the same staleness-notification hook (ticket 023-007)."""
+    backend = FakeBackend()
+    calls = []
+    cam = Camera("cam-a", backend, on_reopen=lambda: calls.append(1))
+    cam.open()
+    _exhaust_via_reads(cam)
+    calls.clear()  # ignore whatever fired during the exhaustion drive itself
+
+    assert cam.retry_if_exhausted() is True
+    assert calls == [1]
+
+
+def test_retry_if_exhausted_leaves_camera_unusable_when_the_retry_itself_fails():
+    """The reopen attempt's own open() can still fail (camera genuinely
+    still unplugged) -- the retry is then reported as failed, and the
+    camera stays unusable so the watchdog knows to try again later."""
+    backend = FakeBackend()
+    cam = Camera("cam-a", backend)
+    cam.open()
+    _exhaust_via_reads(cam)
+
+    backend.fail_open = True  # the retry's own reopen attempt will fail
+    assert cam.retry_if_exhausted() is False
+    assert cam.state.usable is False
+
+
+def test_retry_if_exhausted_respects_the_read_lock():
+    """Runs under the same ``_read_lock`` :meth:`read`/:meth:`check_stall`
+    already use -- a concurrent read() must never interleave with a retry
+    attempt against the same backend handle."""
+    backend = FakeBackend(read_delay=0.02, loop=True)
+    cam = Camera("cam-a", backend)
+    cam.open()
+    _exhaust_via_reads(cam)
+
+    stop = threading.Event()
+    errors: List[BaseException] = []
+
+    def _reader() -> None:
+        while not stop.is_set():
+            try:
+                cam.read()
+            except BaseException as exc:  # pragma: no cover - defensive
+                errors.append(exc)
+                return
+
+    reader = threading.Thread(target=_reader, daemon=True)
+    reader.start()
+    try:
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            cam.retry_if_exhausted()
+    finally:
+        stop.set()
+        reader.join(timeout=5.0)
+
+    assert not reader.is_alive()
+    assert errors == []
+    assert backend.reentrant_hits == 0
+
+
+# ---------------------------------------------------------------------------
 # Concurrent read() (ticket 027-002): a background stream producer
 # (tickets 027-003/004) and one-shot RPC reads now call read() on the
 # same Camera from different threads. These tests prove Camera._read_lock

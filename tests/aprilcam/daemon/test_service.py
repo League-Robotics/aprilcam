@@ -45,7 +45,7 @@ from aprilcam.calibration.calibration import Calibration, Calibrator
 from aprilcam.calibration.geometry import apply_mount_offset
 from aprilcam.calibration.interfaces import FlatFieldInfo, FlatFieldResult
 from aprilcam.camera import identity as identity_module
-from aprilcam.camera.camera import FAILURE_THRESHOLD, Camera
+from aprilcam.camera.camera import FAILURE_THRESHOLD, MAX_REOPENS, Camera
 from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import CameraIdentity
 from aprilcam.camera.registry import CameraRegistry
@@ -61,6 +61,7 @@ from aprilcam.daemon.rpc import build_server
 from aprilcam.daemon.service import (
     CALIBRATION_FRAME_COUNT,
     FLATFIELD_FRAME_COUNT,
+    STALLED_CAMERA_RETRY_INTERVAL_S,
     VALID_ENCODINGS,
     _MAX_ANNOTATIONS_PER_LAYER,
     _MAX_POINTS_PER_SHAPE,
@@ -104,7 +105,7 @@ from tests.aprilcam.calibration.test_calibration import (
     render_playfield_frame,
     render_projective_frame,
 )
-from tests.aprilcam.camera.test_camera import FakeBackend
+from tests.aprilcam.camera.test_camera import FakeBackend, _FakeHeartbeatBackend
 from tests.aprilcam.daemon.conftest import hardware_test_camera_config
 
 
@@ -6575,3 +6576,238 @@ def test_control_watchdog_thread_restores_drift_and_stops(service, held_camera):
         service.stop_control_watchdog()
     assert service._watchdog_thread is None
     service.stop_control_watchdog()  # idempotent
+
+
+# ---------------------------------------------------------------------------
+# check_stalled_cameras / _retry_exhausted_cameras (sprint 038 ticket 006):
+# the daemon-level stall-detection watchdog, a sibling pass to
+# reassert_controls above -- same background thread, same interval.
+# ---------------------------------------------------------------------------
+
+
+def _held_heartbeat_camera(
+    registry: CameraRegistry,
+    *,
+    heartbeat_age: Optional[float],
+    hardware_key: str = "hw:heartbeat",
+    device_name: str = "Heartbeat Camera",
+):
+    """A registered, already-open ``Camera`` backed by
+    ``_FakeHeartbeatBackend`` -- the "worker-backed camera" a
+    ``check_stalled_cameras``/``_retry_exhausted_cameras`` test needs, the
+    same fake ticket 005's own ``test_camera.py`` tests use."""
+    identity = _identity(hardware_key, device_name)
+    slug = registry.resolve(identity)
+    backend = _FakeHeartbeatBackend(heartbeat_age=heartbeat_age)
+    cam = Camera(slug, backend, number=registry.get(slug).number)
+    cam.open()
+    return identity, slug, cam, backend
+
+
+class _FakeClock:
+    """A settable ``time.time()`` stand-in for testing
+    ``_retry_exhausted_cameras``'s ``STALLED_CAMERA_RETRY_INTERVAL_S``
+    gate deterministically, without a real sleep. Patched in only via
+    ``aprilcam.daemon.service``'s own module-level ``time`` name (never
+    the real, global ``time`` module), so nothing outside that one
+    module's ``_retry_exhausted_cameras``/``check_stalled_cameras`` calls
+    is affected."""
+
+    def __init__(self, start: float = 0.0) -> None:
+        self.value = start
+
+    def time(self) -> float:
+        return self.value
+
+
+def test_check_stalled_cameras_is_a_noop_for_a_non_worker_backend(service, held_camera):
+    """AC4: a camera whose check_stall() is a no-op (any non-worker
+    backend -- FakeBackend, mirroring OpenCVBackend/V4l2LoopbackBackend,
+    has no heartbeat_age at all) produces no self-heal side effect from
+    this pass -- fully backward compatible."""
+    _, slug, cam = held_camera
+    backend = cam._backend  # noqa: SLF001
+    opens_before, closes_before = backend.open_calls, backend.close_calls
+
+    assert service.check_stalled_cameras() == ()
+    assert backend.open_calls == opens_before
+    assert backend.close_calls == closes_before
+
+
+def test_check_stalled_cameras_respawns_a_stalled_worker_backed_camera(directories, registry):
+    """AC1/AC3: check_stalled_cameras() calls Camera.check_stall() on the
+    held-open camera, and a stalled heartbeat drives a respawn -- the
+    same close()+open() Camera's own demand-driven self-heal would
+    eventually trigger anyway."""
+    identity, slug, cam, backend = _held_heartbeat_camera(registry, heartbeat_age=999.0)
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    opens_before = backend.open_calls
+
+    stalled = service.check_stalled_cameras()
+
+    assert stalled == (slug,)
+    assert backend.close_calls == 1
+    assert backend.open_calls == opens_before + 1
+
+
+def test_check_stalled_cameras_leaves_a_healthy_worker_backed_camera_untouched(
+    directories, registry
+):
+    """A healthy worker (heartbeat well within threshold) is also a
+    no-op -- the extension does not fire for every worker-backed camera
+    unconditionally, only a genuinely stalled one."""
+    identity, slug, cam, backend = _held_heartbeat_camera(registry, heartbeat_age=0.1)
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+
+    assert service.check_stalled_cameras() == ()
+    assert backend.close_calls == 0
+
+
+def test_check_stalled_cameras_one_exception_does_not_stop_the_pass(
+    directories, registry, monkeypatch
+):
+    """AC2: one camera's check_stall() raising an unexpected exception
+    does not stop the pass from checking every other held-open camera --
+    mirrors reassert_controls's existing per-camera try/except."""
+    identity_a, slug_a, cam_a, _backend_a = _held_heartbeat_camera(
+        registry, heartbeat_age=999.0, hardware_key="hw:a", device_name="Cam A"
+    )
+    identity_b, slug_b, cam_b, backend_b = _held_heartbeat_camera(
+        registry, heartbeat_age=999.0, hardware_key="hw:b", device_name="Cam B"
+    )
+    monkeypatch.setattr(cam_a, "check_stall", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    cameras: Dict[str, Camera] = {slug_a: cam_a, slug_b: cam_b}
+    discovery = CameraDiscovery(
+        registry,
+        active_slugs=lambda: frozenset(cameras.keys()),
+        identity_source=lambda: {0: identity_a, 1: identity_b},
+        backend_factory=lambda index: FakeBackend(),
+    )
+    service = DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        cameras=cameras,
+        identity_source=lambda: {0: identity_a, 1: identity_b},
+    )
+
+    stalled = service.check_stalled_cameras()
+
+    assert stalled == (slug_b,)  # cam_a's exception never stopped the pass
+    assert backend_b.close_calls == 1
+
+
+def test_retry_exhausted_cameras_recovers_the_first_time(directories, registry):
+    """AC5: an exhausted (MAX_REOPENS spent) worker-backed camera gets a
+    periodic retry attempt, and a successful retry clears the exhausted
+    state exactly the way a normal successful reopen already does --
+    no daemon restart needed, and no new "exhausted" bookkeeping
+    duplicated in DaemonService (this pass just asks Camera.state.usable
+    and Camera.retry_if_exhausted, nothing else)."""
+    identity = _identity("hw:exhausted-ok", "Exhausted OK Camera")
+    slug = registry.resolve(identity)
+    backend = FakeBackend()  # open() always trivially succeeds; never yields frames
+    cam = Camera(slug, backend, number=registry.get(slug).number)
+    cam.open()
+    for _ in range(FAILURE_THRESHOLD * MAX_REOPENS):
+        cam.read()
+    for _ in range(FAILURE_THRESHOLD):  # one more run trips the exhausted path
+        cam.read()
+    assert cam.state.usable is False  # budget genuinely spent
+
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+
+    recovered = service._retry_exhausted_cameras()
+
+    assert recovered == (slug,)
+    assert cam.state.usable is True
+
+
+def test_retry_exhausted_cameras_skips_a_healthy_camera(service, held_camera):
+    """A camera that is not exhausted (usable is True) is skipped
+    outright -- nothing to retry, no backend touched."""
+    _, slug, cam = held_camera
+    backend = cam._backend  # noqa: SLF001
+    opens_before, closes_before = backend.open_calls, backend.close_calls
+
+    assert service._retry_exhausted_cameras() == ()
+    assert backend.open_calls == opens_before
+    assert backend.close_calls == closes_before
+
+
+def test_retry_exhausted_cameras_respects_the_retry_interval(directories, registry, monkeypatch):
+    """The retry interval is independent of the synchronous
+    _attempt_self_heal budget: a first attempt happens right away, a
+    second attempt this soon is gated, and only once
+    STALLED_CAMERA_RETRY_INTERVAL_S has genuinely elapsed does the next
+    attempt run (and, here, succeed)."""
+    identity = _identity("hw:exhausted-gate", "Exhausted Gate Camera")
+    slug = registry.resolve(identity)
+    backend = FakeBackend()
+    cam = Camera(slug, backend, number=registry.get(slug).number)
+    cam.open()
+    for _ in range(FAILURE_THRESHOLD * MAX_REOPENS):
+        cam.read()
+    for _ in range(FAILURE_THRESHOLD):  # one more run trips the exhausted path
+        cam.read()
+    assert cam.state.usable is False
+
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+
+    clock = _FakeClock(start=1_000.0)
+    monkeypatch.setattr("aprilcam.daemon.service.time", clock)
+
+    backend.fail_open = True  # force this first attempt to fail
+    opens_before = backend.open_calls
+    assert service._retry_exhausted_cameras() == ()
+    assert backend.open_calls == opens_before + 1  # exactly one attempt was made
+    assert cam.state.usable is False
+
+    # Immediately again, before the interval elapses: gated, no second
+    # close/open attempt this soon.
+    assert service._retry_exhausted_cameras() == ()
+    assert backend.open_calls == opens_before + 1
+
+    # Advance the fake clock past the interval and let the camera
+    # actually recover this time.
+    clock.value += STALLED_CAMERA_RETRY_INTERVAL_S
+    backend.fail_open = False
+    assert service._retry_exhausted_cameras() == (slug,)
+    assert cam.state.usable is True
+
+
+def test_control_watchdog_thread_runs_all_three_passes_on_one_interval(
+    service, held_camera, monkeypatch
+):
+    """AC3: check_stalled_cameras()/_retry_exhausted_cameras() run from
+    the *same* background thread and interval as reassert_controls() --
+    no second watchdog thread is spawned (camera-DESIGN.md's rejected
+    alternative on this point)."""
+    calls = {"reassert": 0, "stall": 0, "retry": 0}
+
+    def _count(key):
+        def _bump(*args, **kwargs):
+            calls[key] += 1
+            return {} if key == "reassert" else ()
+
+        return _bump
+
+    monkeypatch.setattr(service, "reassert_controls", _count("reassert"))
+    monkeypatch.setattr(service, "check_stalled_cameras", _count("stall"))
+    monkeypatch.setattr(service, "_retry_exhausted_cameras", _count("retry"))
+
+    threads_before = threading.active_count()
+    service.start_control_watchdog(interval_s=0.05)
+    try:
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and min(calls.values()) < 2:
+            time.sleep(0.02)
+        assert calls["reassert"] >= 2
+        assert calls["stall"] >= 2
+        assert calls["retry"] >= 2
+        # Exactly one new thread for all three passes combined.
+        assert threading.active_count() == threads_before + 1
+    finally:
+        service.stop_control_watchdog()
+    assert threading.active_count() == threads_before

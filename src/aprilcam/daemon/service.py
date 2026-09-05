@@ -165,8 +165,32 @@ CALIBRATION_FILENAME = "calibration.json"
 #: config when they drifted (2026-09-03 out-of-process fix; see
 #: ``Camera.reassert_config``). Each readback is one ``get_property`` per
 #: applied key -- a ``uvc-util`` subprocess each on macOS -- so this is
-#: deliberately seconds, not frames.
+#: deliberately seconds, not frames. **Sprint 038**: this same thread/interval
+#: also drives :meth:`DaemonService.check_stalled_cameras` and
+#: :meth:`DaemonService._retry_exhausted_cameras` -- see those methods'
+#: docstrings and ``camera-DESIGN.md``'s rejected-alternative on a second
+#: watchdog thread.
 CONTROL_READBACK_INTERVAL_S = 15.0
+
+#: How often (seconds) the watchdog thread gives an *exhausted*
+#: worker-backed camera (``Camera.state.usable`` stuck ``False`` because its
+#: :data:`~aprilcam.camera.camera.MAX_REOPENS` budget is spent -- see
+#: :meth:`Camera.retry_if_exhausted`) one fresh close/open retry, instead of
+#: requiring a full daemon restart to try again (sprint 038 ticket 006 --
+#: ``camera-DESIGN.md``'s Open Questions explicitly left the exact interval
+#: to this ticket). Deliberately independent of, and much larger than,
+#: :data:`CONTROL_READBACK_INTERVAL_S`: the watchdog thread still ticks
+#: every :data:`CONTROL_READBACK_INTERVAL_S` seconds (no second thread --
+#: same rejected-alternative as :meth:`check_stalled_cameras`), but
+#: :meth:`_retry_exhausted_cameras` only actually retries a given camera
+#: once this much wall-clock time has passed since its last attempt
+#: (:attr:`DaemonService._exhausted_retry_at`). One minute is frequent
+#: enough that a camera fixed by a replug or an unrelated worker kill comes
+#: back within about a minute of being fixed, without hammering a
+#: genuinely still-broken camera with a close/open cycle every 15s forever
+#: (a real close()+open() cycle against actual hardware is not free, and a
+#: camera that is still unplugged will simply fail again every time).
+STALLED_CAMERA_RETRY_INTERVAL_S = 60.0
 
 #: Name of the one shared mount-registry file under ``<state_dir>/mounts/``
 #: (ticket 036-007) -- ``camera/registry.py``'s ``<state_dir>/cameras/
@@ -547,6 +571,16 @@ class DaemonService(Daemon):
         #: Control watchdog thread state (:meth:`start_control_watchdog`).
         self._watchdog_thread: Optional[threading.Thread] = None
         self._watchdog_stop: Optional[threading.Event] = None
+        #: slug -> ``time.time()`` of this watchdog's last
+        #: :meth:`_retry_exhausted_cameras` attempt for that camera (sprint
+        #: 038 ticket 006). Purely a scheduling gate for
+        #: :data:`STALLED_CAMERA_RETRY_INTERVAL_S` -- **not** a duplicate of
+        #: ``Camera``'s own ``_exhausted`` bookkeeping (that stays entirely
+        #: inside ``Camera``/:meth:`Camera.retry_if_exhausted`; this service
+        #: never reads or sets it directly). Only ever touched from the
+        #: single watchdog thread, so it needs no lock of its own -- unlike
+        #: :attr:`_cameras`, nothing else in this class reads or writes it.
+        self._exhausted_retry_at: Dict[str, float] = {}
         self._identity_source = identity_source
         self._backend_factory = backend_factory
         self._control_backend_factory = control_backend_factory
@@ -2798,9 +2832,106 @@ class DaemonService(Daemon):
                 drifted[slug] = keys
         return drifted
 
+    def check_stalled_cameras(self) -> Tuple[str, ...]:
+        """One watchdog pass: ``Camera.check_stall()`` on every held-open
+        camera (sprint 038 ticket 006). Returns the slugs this pass found
+        stalled and attempted to respawn (empty when every held camera's
+        heartbeat is healthy, or has no heartbeat concept at all -- an
+        ``OpenCVBackend``-backed camera makes :meth:`Camera.check_stall`
+        an unconditional no-op, so this pass is fully backward compatible
+        with every camera that predates the worker-backend feature gate).
+
+        Same snapshot-under-lock-then-iterate-outside-lock shape as
+        :meth:`reassert_controls`, and the same per-camera ``try``/
+        ``except`` discipline: one camera's ``check_stall()`` raising an
+        unexpected exception is logged and skipped, never allowed to stop
+        the pass from reaching every other held-open camera -- a watchdog
+        must never take the daemon down (mirrors :meth:`reassert_controls`
+        exactly).
+        """
+        with self._lock:
+            held = list(self._cameras.items())
+        stalled: List[str] = []
+        for slug, cam in held:
+            try:
+                respawned = cam.check_stall()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("%s: stall check failed: %s", slug, exc)
+                continue
+            if respawned:
+                stalled.append(slug)
+        if stalled:
+            logger.warning("stall watchdog respawned: %s", ", ".join(stalled))
+        return tuple(stalled)
+
+    def _retry_exhausted_cameras(self) -> Tuple[str, ...]:
+        """One watchdog pass giving every *exhausted* held-open camera
+        (``Camera.state.usable`` stuck ``False`` -- its
+        :data:`~aprilcam.camera.camera.MAX_REOPENS` budget spent) a fresh
+        close/open retry via :meth:`Camera.retry_if_exhausted`, at most
+        once every :data:`STALLED_CAMERA_RETRY_INTERVAL_S` seconds per
+        camera (sprint 038 ticket 006 -- see that constant's own
+        docstring for why this interval, independent of this thread's own
+        tick rate, needs no second thread of its own).
+
+        Same snapshot-under-lock-then-iterate-outside-lock shape and
+        per-camera ``try``/``except`` discipline as :meth:`reassert_controls`/
+        :meth:`check_stalled_cameras`. A camera that is currently usable
+        is skipped outright (nothing to retry) and its scheduling entry in
+        :attr:`_exhausted_retry_at` is cleared, so a camera that recovers
+        on its own (a normal demand-driven self-heal, or a prior retry
+        from this same pass) does not carry a stale "last attempted" time
+        that would otherwise delay a *future* exhaustion's first retry.
+        :meth:`Camera.retry_if_exhausted` itself is what decides whether
+        there is actually anything exhausted to retry -- this method adds
+        no second "is this camera exhausted" flag of its own, only the
+        per-slug retry-scheduling timestamp the ticket's acceptance
+        criteria call out as *not* being that duplicate bookkeeping.
+
+        Returns the slugs whose retry this pass attempted *and* which
+        came back usable afterwards (empty when nothing was due for a
+        retry, or every attempted retry failed).
+        """
+        now = time.time()
+        with self._lock:
+            held = list(self._cameras.items())
+        recovered: List[str] = []
+        for slug, cam in held:
+            if cam.state.usable:
+                self._exhausted_retry_at.pop(slug, None)
+                continue
+            last_attempt = self._exhausted_retry_at.get(slug)
+            if last_attempt is not None and now - last_attempt < STALLED_CAMERA_RETRY_INTERVAL_S:
+                continue
+            self._exhausted_retry_at[slug] = now
+            try:
+                succeeded = cam.retry_if_exhausted()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("%s: exhausted-camera retry failed: %s", slug, exc)
+                continue
+            if succeeded:
+                recovered.append(slug)
+        if recovered:
+            logger.info("exhausted-camera retry recovered: %s", ", ".join(recovered))
+        return tuple(recovered)
+
     def start_control_watchdog(self, interval_s: float = CONTROL_READBACK_INTERVAL_S) -> None:
-        """Start the background thread that calls :meth:`reassert_controls`
-        every *interval_s* seconds. Idempotent."""
+        """Start the background thread that calls :meth:`reassert_controls`,
+        :meth:`check_stalled_cameras`, and :meth:`_retry_exhausted_cameras`
+        every *interval_s* seconds. Idempotent.
+
+        **One thread, three passes (sprint 038 ticket 006).** ``camera-
+        DESIGN.md``'s rejected-alternative: a second thread dedicated to
+        stall detection would duplicate this exact "iterate every
+        held-open camera on a fixed interval, take a bounded per-camera
+        corrective action, never let one camera's failure stop the pass"
+        shape for no isolation benefit, since all three passes already
+        tolerate one camera's exception independently of the others.
+        :meth:`_retry_exhausted_cameras` runs on every tick of *this*
+        thread too, but throttles itself internally to
+        :data:`STALLED_CAMERA_RETRY_INTERVAL_S` per camera -- see that
+        method's docstring.
+        """
         if self._watchdog_thread is not None and self._watchdog_thread.is_alive():
             return
         stop = threading.Event()
@@ -2808,6 +2939,8 @@ class DaemonService(Daemon):
         def _loop() -> None:
             while not stop.wait(interval_s):
                 self.reassert_controls()
+                self.check_stalled_cameras()
+                self._retry_exhausted_cameras()
 
         thread = threading.Thread(target=_loop, name="aprilcam-control-watchdog", daemon=True)
         self._watchdog_stop = stop
