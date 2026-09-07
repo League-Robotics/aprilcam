@@ -1,7 +1,7 @@
 ---
 id: 039
 title: Reliable uncalibrated cameras with image-space tag yaw and a follow mode
-status: ticketing
+status: executing
 branch: sprint/039-reliable-uncalibrated-cameras-with-image-space-tag-yaw-and-a-follow-mode
 use-cases: []
 issues:
