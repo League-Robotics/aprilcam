@@ -359,6 +359,8 @@ def _tag_record_to_proto(record: TagRecord) -> aprilcam_v2_pb2.TagRecord:
         msg.world_corners.extend(_world_point_to_proto(p) for p in record.world_corners)
     if record.pixel_corners is not None:
         msg.pixel_corners.extend(_pixel_point_to_proto(p) for p in record.pixel_corners)
+    if record.image_yaw_deg is not None:
+        msg.image_yaw_deg = record.image_yaw_deg
     return msg
 
 

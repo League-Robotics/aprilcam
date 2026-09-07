@@ -66,11 +66,19 @@ def _args(**overrides) -> argparse.Namespace:
 
 
 def _uncalibrated_record(
-    family: TagFamily = TagFamily.APRILTAG, number: int = 7, x: float = 123.4, y: float = 56.7
+    family: TagFamily = TagFamily.APRILTAG,
+    number: int = 7,
+    x: float = 123.4,
+    y: float = 56.7,
+    image_yaw_deg: Optional[float] = None,
 ) -> TagRecord:
     """A record shaped exactly as ``daemon/detection.py`` produces this
     sprint (sprint.md: 'every tag record from this sprint reports
-    calibrated=False, world=None' -- see the module docstring)."""
+    calibrated=False, world=None' -- see the module docstring).
+
+    ``image_yaw_deg`` defaults to ``None`` (matching every pre-039-002
+    caller of this helper, which never sets it) -- pass it explicitly
+    to exercise ticket 039-002's uncalibrated-branch yaw suffix."""
     return TagRecord(
         tag=TagId(family, number),
         world=None,
@@ -80,6 +88,7 @@ def _uncalibrated_record(
         timestamp=0.0,
         pixel=PixelPoint(x, y),
         calibrated=False,
+        image_yaw_deg=image_yaw_deg,
     )
 
 
@@ -91,6 +100,7 @@ def _calibrated_record(
     heading_rad: Optional[float] = 0.5,
     speed: Optional[float] = 12.5,
     yaw_rad: Optional[float] = 0.2,
+    image_yaw_deg: Optional[float] = None,
 ) -> TagRecord:
     """A record shaped as a real calibrated camera produces this sprint
     (ticket 022-003 onward) -- exercises ``_format_tag_row``'s
@@ -99,7 +109,13 @@ def _calibrated_record(
     022-007): ``heading_rad=None`` with a real ``speed``/``yaw_rad``,
     exactly what ``vision.motion.compute_motion`` now reports for a tag
     whose two most recent samples are within
-    ``MIN_RELIABLE_DISPLACEMENT_CM`` of each other."""
+    ``MIN_RELIABLE_DISPLACEMENT_CM`` of each other.
+
+    ``image_yaw_deg`` is overridable too (default ``None``) so a test
+    can shape ticket 039-002's "a real calibrated record can carry
+    ``image_yaw_deg`` too (it is populated whenever ``pixel_corners``
+    is, calibrated or not), but the calibrated row must never print
+    it" regression."""
     return TagRecord(
         tag=TagId(family, number),
         world=WorldPoint(wx, wy),
@@ -110,6 +126,7 @@ def _calibrated_record(
         pixel=PixelPoint(1.0, 2.0),
         calibrated=True,
         yaw_rad=yaw_rad,
+        image_yaw_deg=image_yaw_deg,
     )
 
 
@@ -518,6 +535,39 @@ def test_tags_prints_uncalibrated_flag_and_pixel_never_a_world_looking_number(ca
     assert daemon.requested_tags_camera == "arducam-ov9782-usb-camera"
 
 
+def test_tags_uncalibrated_record_prints_image_yaw_deg_next_to_pixel(capsys):
+    """Ticket 039-002: the uncalibrated branch prints
+    ``record.image_yaw_deg`` (a separate, diagnostic-only field from
+    the calibrated branch's ``yaw_rad``) alongside the pixel position,
+    since an uncalibrated camera has no world frame to report
+    ``yaw_rad`` in at all."""
+    record = _uncalibrated_record(x=777.6, y=764.9, image_yaw_deg=12.34)
+    daemon = _FakeDaemon(tag_frame=_tag_frame((record,)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    camera_cli.cmd_tags(_args(), discovery_factory=lambda: discovery)
+
+    out = capsys.readouterr().out
+    assert "UNCALIBRATED" in out
+    assert "yaw=12.3°" in out
+
+
+def test_tags_uncalibrated_record_with_no_image_yaw_deg_prints_a_dash(capsys):
+    """The ``"-"`` placeholder convention already used for the
+    calibrated branch's ``yaw``/``heading``/``speed`` fields extends to
+    the uncalibrated branch's ``image_yaw_deg`` when it is ``None``
+    (e.g. no ``pixel_corners`` were available to derive it from)."""
+    record = _uncalibrated_record(image_yaw_deg=None)
+    daemon = _FakeDaemon(tag_frame=_tag_frame((record,)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    camera_cli.cmd_tags(_args(), discovery_factory=lambda: discovery)
+
+    out = capsys.readouterr().out
+    assert "UNCALIBRATED" in out
+    assert "yaw=-" in out
+
+
 def test_tags_distinguishes_apriltag_and_aruco_of_the_same_number(capsys):
     """UC-09.S-3's disambiguation, exercised through the CLI: family
     plus id, never id alone."""
@@ -564,6 +614,25 @@ def test_tags_calibrated_record_prints_yaw_ahead_of_heading_and_speed(capsys):
     assert "heading=0.500" in out
     assert "speed=12.50" in out
     assert out.index("yaw=") < out.index("heading="), "yaw must print ahead of heading"
+
+
+def test_tags_calibrated_record_never_prints_image_yaw_deg_even_when_set(capsys):
+    """Ticket 039-002 acceptance criterion: the calibrated branch is
+    unchanged. ``image_yaw_deg`` is populated whenever ``pixel_corners``
+    is available, calibrated or not (``TagRecord``'s own docstring), so
+    a real calibrated record can carry both ``yaw_rad`` and
+    ``image_yaw_deg`` at once -- the row must show exactly one ``yaw=``
+    (the world-frame one) and never a second, confusing image-space
+    yaw."""
+    record = _calibrated_record(yaw_rad=0.2, image_yaw_deg=99.9)
+    daemon = _FakeDaemon(tag_frame=_tag_frame((record,)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    camera_cli.cmd_tags(_args(), discovery_factory=lambda: discovery)
+
+    out = capsys.readouterr().out
+    assert out.count("yaw=") == 1
+    assert "99.9" not in out
 
 
 def test_tags_stationary_tag_shows_undefined_heading_but_a_real_yaw_and_speed(capsys):

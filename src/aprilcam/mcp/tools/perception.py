@@ -151,6 +151,13 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         the camera is calibrated, ``None`` (with ``pixel`` as the only
         representation) otherwise -- never a fabricated world position.
         An empty field returns an empty frame, not an error.
+
+        Each record's ``image_yaw_deg`` (sprint 039) is a separate,
+        diagnostic-only orientation, populated whether or not the
+        camera is calibrated: 0 = the tag's front edge toward the top
+        of the raw image, clockwise-positive as seen on screen -- the
+        opposite rotational sense from ``yaw_rad``'s CCW-positive world
+        convention, and never a substitute for it.
         """
         return connection.call(lambda d: d.get_tags(camera), host=daemon)
 
@@ -168,6 +175,9 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         ``None`` when the tag is not currently detected -- never a
         fabricated ``(0, 0)`` position, which would be indistinguishable
         from a tag genuinely detected at the field's centre.
+
+        See ``get_tags``' docstring for ``image_yaw_deg``'s convention
+        (sprint 039) -- identical here.
         """
         tag = TagId(family=family, number=number)
         return connection.call(lambda d: d.get_tag(camera, tag), host=daemon)
@@ -198,6 +208,9 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         get_tag_history``'s own ``tag`` parameter). Gaps where a tag
         was absent stay explicit in the returned frames -- nothing here
         interpolates across one.
+
+        See ``get_tags``' docstring for ``image_yaw_deg``'s convention
+        (sprint 039) -- identical here, per historical frame.
         """
         tag = _tag_id_or_none(family, number)
         return connection.call(lambda d: d.get_tag_history(camera, tag, frames), host=daemon)

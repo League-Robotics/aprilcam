@@ -220,7 +220,19 @@ def tag_record_from_proto(msg: aprilcam_v2_pb2.TagRecord) -> TagRecord:
     ``0.0``/empty: an uncalibrated record's ``world``/``heading_rad``/
     ``world_velocity``/``speed``/``yaw_rad``/``world_corners`` all come
     back as ``None``, exactly as they went in (this sprint's binding
-    contract -- no calibration subsystem exists yet)."""
+    contract -- no calibration subsystem exists yet).
+
+    ``image_yaw_deg`` (sprint 039, ticket 002) follows the same
+    ``HasField()`` discipline -- populated whenever ``pixel_corners``
+    is, calibrated or not, ``None`` otherwise. A real end-to-end RPC
+    round-trip test (``tests/aprilcam/client/test_daemon_client.py``)
+    caught this field silently dropping across the wire before this
+    ticket added it to ``aprilcam_v2.proto`` (field 12) and to both
+    proto converters -- the sprint's architecture had assumed the
+    dataclass field alone was enough since ``TagRecord`` "rides the
+    existing RPCs," which is true for the MCP/pydantic boundary but not
+    for this gRPC one.
+    """
     return TagRecord(
         tag=tag_id_from_proto(msg.tag),
         world=_world_point_from_proto(msg.world) if msg.HasField("world") else None,
@@ -237,6 +249,7 @@ def tag_record_from_proto(msg: aprilcam_v2_pb2.TagRecord) -> TagRecord:
         yaw_rad=msg.yaw_rad if msg.HasField("yaw_rad") else None,
         world_corners=_world_corners_from_proto(msg.world_corners),
         pixel_corners=_pixel_corners_from_proto(msg.pixel_corners),
+        image_yaw_deg=msg.image_yaw_deg if msg.HasField("image_yaw_deg") else None,
     )
 
 

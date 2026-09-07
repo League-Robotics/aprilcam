@@ -1,7 +1,7 @@
 ---
 id: '002'
 title: CLI and MCP surfaces carry image_yaw_deg
-status: open
+status: done
 use-cases: []
 depends-on:
 - '001'
@@ -41,22 +41,41 @@ pydantic version bump could silently change that.
 
 ## Acceptance Criteria
 
-- [ ] `_format_tag_row`'s uncalibrated branch prints `image_yaw_deg`
+- [x] `_format_tag_row`'s uncalibrated branch prints `image_yaw_deg`
       next to the pixel position, with a `"-"` placeholder when it is
       `None`.
-- [ ] The calibrated branch is unchanged (it does not print
+- [x] The calibrated branch is unchanged (it does not print
       `image_yaw_deg` — that branch already has `yaw_rad`; do not add a
       redundant/confusing second yaw to the calibrated row).
-- [ ] `get_tags`, `get_tag`, and `get_tag_history` (MCP) each return
+- [x] `get_tags`, `get_tag`, and `get_tag_history` (MCP) each return
       `image_yaw_deg` for a record that has it, verified by a test
       against a fake/stub daemon, not just read from the source code.
-- [ ] No RPC/proto change and no `mcp/tools/perception.py` code change
+- [x] No RPC/proto change and no `mcp/tools/perception.py` code change
       is needed if the round-trip test in fact passes without one — if
       it does *not* pass (the field is silently dropped), add whatever
       minimal explicit serialization is needed and update
       `mcp-DESIGN.md`'s note accordingly (this would be new information
       contradicting what this sprint's architecture assumed from
       reading the existing code — flag it, don't just quietly fix it).
+
+      **Resolved as the "does not pass" branch, but at a layer the
+      ticket text didn't anticipate.** The MCP round-trip test (fake
+      `Daemon`, `mcp/tools/perception.py`) passes with zero code
+      change, exactly as `mcp-DESIGN.md` claimed — the pydantic
+      boundary really does carry a new dataclass field for free.
+      What does *not* survive for free is the separate real gRPC
+      boundary between the daemon process and any CLI/MCP client: a
+      genuine end-to-end round-trip test
+      (`tests/aprilcam/client/test_daemon_client.py`) showed
+      `image_yaw_deg` coming back `None` because `proto/
+      aprilcam_v2.proto`'s `TagRecord` message had no field for it.
+      Fixed by widening the message (`image_yaw_deg = 12`, additive
+      per the proto file's own header rule) and adding the matching
+      case to `daemon/rpc.py`'s `_tag_record_to_proto` and
+      `client/models.py`'s `tag_record_from_proto`. `daemon-DESIGN.md`
+      (not `mcp-DESIGN.md` — the wrong assumption was there) is
+      corrected accordingly, since it had claimed "no proto change"
+      for this exact field.
 
 ## Testing
 

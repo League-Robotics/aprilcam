@@ -246,6 +246,14 @@ def _format_tag_row(record: TagRecord) -> str:
     module's docstring), while ``yaw_rad`` is a per-frame orientation
     reading with no such motion precondition and stays populated
     whether or not the tag is moving.
+
+    The uncalibrated branch (ticket 039-002) prints ``record.
+    image_yaw_deg`` -- a *different* field from ``yaw_rad``, in a
+    different (image-space, clockwise) convention (see ``TagRecord``'s
+    docstring) -- since an uncalibrated camera has no world frame to
+    report ``yaw_rad`` in at all. It is never printed alongside the
+    calibrated branch's ``yaw=`` field; that would be two conflicting
+    "yaw" numbers on the same line.
     """
     header = f"{record.tag.family.value} {record.tag.number}"
     if record.calibrated and record.world is not None:
@@ -260,7 +268,8 @@ def _format_tag_row(record: TagRecord) -> str:
         pixel = f"({record.pixel.x:.1f}, {record.pixel.y:.1f})"
     else:
         pixel = "(unavailable)"
-    return f"  {header:<14} UNCALIBRATED -- pixel={pixel}"
+    image_yaw = "-" if record.image_yaw_deg is None else f"{record.image_yaw_deg:.1f}°"
+    return f"  {header:<14} UNCALIBRATED -- pixel={pixel} yaw={image_yaw}"
 
 
 def _print_tags(frame: TagFrame) -> None:
