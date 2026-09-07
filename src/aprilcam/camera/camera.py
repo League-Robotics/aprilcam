@@ -172,7 +172,7 @@ from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 import numpy as np
 
-from aprilcam.camera.backends import CaptureBackend, ControlBackend
+from aprilcam.camera.backends import CameraNotEnumeratedError, CaptureBackend, ControlBackend
 from aprilcam.camera.interfaces import Camera as _CameraBase
 from aprilcam.config.interfaces import CameraConfig
 from aprilcam.config.interfaces import ConfigLoader as ConfigLoaderIface
@@ -643,6 +643,32 @@ class Camera(_CameraBase):
         about the camera's mount if the reopen itself didn't happen)
         and never when the budget is already exhausted (the ``return``
         above short-circuits before this point).
+
+        **Not-currently-enumerated is budget-neutral (sprint 039).** A
+        backend's ``open()`` can raise
+        :class:`~aprilcam.camera.backends.CameraNotEnumeratedError` --
+        ``OpenCVBackend``'s ``index_resolver`` hook reporting "this
+        hardware key is not enumerated right now", as opposed to an
+        ordinary open failure ("enumerated, but opening it failed").
+        This is the ticket-level choice for
+        ``camera-DESIGN.md``'s "Not-currently-enumerated is a distinct
+        state from budget-exhausted" open question (option (a) of the
+        two the ticket names): the reopen attempt above is undone --
+        :attr:`_reopens` decremented back -- so a camera that is simply
+        unplugged never burns through :data:`MAX_REOPENS` the way a
+        genuinely present-but-broken camera does, and can be retried
+        indefinitely by the daemon's watchdog. It also gets a stronger
+        ``present`` signal than an ordinary failure: a resolver
+        reporting "not found" is positive evidence the hardware itself
+        is gone (unlike a bare read/open failure, whose cause is
+        unknown), so :attr:`_present` is set ``False`` here -- the one
+        place in this class besides :meth:`close` that does so.
+        Rejected alternative (option (b), extending
+        ``daemon.service.DaemonService.check_stalled_cameras`` to poll
+        identity independently of this budget): kept the distinction
+        entirely inside ``Camera``/``OpenCVBackend``, with no new
+        daemon-level watchdog responsibility and no change to that
+        method's signature or call sites.
         """
         if self._reopens >= MAX_REOPENS:
             self._exhausted = True
@@ -659,6 +685,15 @@ class Camera(_CameraBase):
             self._backend.open()
             self._present = True
             self._pending_open_settle = True  # ticket 030-005: a fresh session again
+        except CameraNotEnumeratedError as exc:
+            self._reopens -= 1  # budget-neutral -- see this method's docstring
+            self._present = False
+            logger.warning(
+                "%s: reopen skipped -- hardware key not currently enumerated: %s",
+                self._slug,
+                exc,
+            )
+            return
         except Exception as exc:
             logger.warning("%s: reopen failed: %s", self._slug, exc)
             return
@@ -800,6 +835,23 @@ class Camera(_CameraBase):
                 pass
             try:
                 self._backend.open()
+            except CameraNotEnumeratedError as exc:
+                # Sprint 039: same distinction _attempt_self_heal makes --
+                # a resolver reporting "not found" is positive evidence
+                # the hardware itself is gone, not just "this attempt
+                # failed" -- so present goes False here too, on top of
+                # the exhausted-camera retry's own unchanged False return
+                # (this method has no budget of its own to protect, but
+                # the watchdog's periodic retry above already *is* "keep
+                # retrying the identity lookup" for this case).
+                self._present = False
+                logger.warning(
+                    "%s: exhausted-camera retry skipped -- hardware key not "
+                    "currently enumerated: %s",
+                    self._slug,
+                    exc,
+                )
+                return False
             except Exception as exc:
                 logger.warning("%s: exhausted-camera retry failed: %s", self._slug, exc)
                 return False

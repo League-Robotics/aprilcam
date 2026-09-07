@@ -1,7 +1,7 @@
 ---
 id: '006'
 title: Guide text and knowledge-base updates for follow mode and identity-safe reopen
-status: open
+status: done
 use-cases: []
 depends-on:
 - '003'
@@ -47,18 +47,18 @@ so it documents the shipped behavior, not the planned behavior.
 
 ## Acceptance Criteria
 
-- [ ] `aprilcam guide` (or the relevant named sub-guide) mentions
+- [x] `aprilcam guide` (or the relevant named sub-guide) mentions
       `camera tags --follow`/`--json` and `image_yaw_deg`, readable
       with no daemon running (verify by running the guide command with
       no daemon started).
-- [ ] A new `docs/knowledge/` entry documents the stale-index/identity-
+- [x] A new `docs/knowledge/` entry documents the stale-index/identity-
       substitution incident, its root cause, and the fix, named for the
       topic per the existing knowledge-base convention (one topic per
       file).
-- [ ] `docs/design/use-cases/cli.md`'s UC-20 open-question note is
+- [x] `docs/design/use-cases/cli.md`'s UC-20 open-question note is
       updated to reflect the `--json` exception this sprint ships; no
       existing UC/scenario numbers are changed or reused.
-- [ ] No source code changes in this ticket — docs and guide text only.
+- [x] No source code changes in this ticket — docs and guide text only.
 
 ## Testing
 

@@ -43,6 +43,59 @@ unconditionally on macOS (``sys.platform == "darwin"``, where the wedge
 this module exists to fix actually occurs), everywhere else only when
 ``APRILCAM_CAPTURE_BACKEND=worker`` forces it. See that function's own
 docstring for the full selection contract and the env-var override.
+
+**Identity-safe reopen (sprint 039 ticket 003, corrected).** The
+ticket that introduced ``OpenCVBackend``'s ``index_resolver``/
+``expected_hardware_key`` contract (see ``opencv_backend.py``'s module
+docstring) originally scoped ``WorkerBackend`` out as "out of scope,
+gated off by default" -- wrong: ``default_capture_backend_factory``
+selects ``WorkerBackend`` *unconditionally* on macOS, which is exactly
+where the source incident happened (the daemon log showed a respawn at
+a shifted ``--index`` serving a different physical camera's frames).
+``WorkerBackend`` gets the identical additive, optional constructor
+contract: *index_resolver* is called fresh on every :meth:`open` --
+including a kill-and-respawn triggered by ``Camera._attempt_self_heal``/
+``check_stall``, which (per this module's own "Why this exists" note
+above) only ever call ``close()``/``open()`` on this same object -- and
+:attr:`_index` is updated to whatever it returns *before* the spawn
+command is built, so a respawn after the hardware key shifted indices
+never spawns the worker at the stale index. ``None`` raises
+:class:`~aprilcam.camera.backends.CameraNotEnumeratedError`, exactly
+like ``OpenCVBackend``.
+
+**Post-open identity verification: parent-side, not child-side.**
+Unlike ``OpenCVBackend`` (where the process that calls
+``cv2.VideoCapture`` *is* the process that can re-resolve the freshly
+opened index's identity), the worker child is a separate process from
+the one holding *expected_hardware_key*. Two designs were possible:
+(a) teach the worker an ``--expected-hardware-key`` CLI flag and have
+*it* call ``camera/identity.py``'s resolution machinery and refuse to
+report "ready" on a mismatch, or (b) have the parent (this class) call
+:func:`~aprilcam.camera.identity.resolve_identity` itself, immediately
+after the child reports its first frame, and refuse to keep a
+mismatched worker running. **Chosen: (b).**
+:func:`~aprilcam.camera.identity.resolve_identity` is a plain,
+side-effect-free function over ``cv2-enumerate-cameras``/
+``system_profiler`` enumeration state -- it needs no open capture
+handle, so it works identically whether called by the process that
+opened the device or not, and it is exactly the same call
+``OpenCVBackend.open()`` already makes. Design (a) would duplicate that
+machinery across a process boundary for no verification benefit (the
+worker has no more reliable way to answer "what index is this hardware
+key at right now" than the parent does) while adding a wire-protocol
+field this module's control channel does not otherwise need. (b)
+catches precisely the race this ticket cares about -- the enumeration
+shifting again in the window between *index_resolver*'s pre-spawn
+resolution and the child's first-frame report -- because it
+re-resolves at call time rather than trusting either snapshot. Guarded
+by the same :meth:`_can_verify_identity` restriction as
+``OpenCVBackend`` (macOS, ``avf:``-tier keys only -- see that method's
+docstring for why the other fallback tiers are not safe to check this
+way). A mismatch closes the just-spawned worker (:meth:`close`, so the
+process is killed and the shared-memory ring unlinked, not merely
+abandoned) and raises, logged at WARNING naming both identities --
+turning a silent substitution into an explicit, loud failure exactly
+like ``OpenCVBackend``.
 """
 
 from __future__ import annotations
@@ -55,17 +108,18 @@ import threading
 import time
 from collections import deque
 from multiprocessing.connection import Connection, Listener
-from typing import Any, Deque, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
-from aprilcam.camera.backends import CaptureBackend
+from aprilcam.camera.backends import CameraNotEnumeratedError, CaptureBackend
 from aprilcam.camera.backends._control_channel import (
     ControlChannel,
     ControlError,
     ControlTimeout,
 )
 from aprilcam.camera.backends._frame_ring import DEFAULT_RING_SLOTS, FrameRing
+from aprilcam.camera.identity import resolve_identity
 
 __all__ = [
     "DEFAULT_CLOSE_GRACE",
@@ -177,6 +231,16 @@ class WorkerBackend(CaptureBackend):
     (``capture_worker.SyntheticBackend``) instead of opening real
     hardware -- see that module's ``--synthetic WxH@fps`` flag. Exactly
     one of *index*/*synthetic* must be given.
+
+    *index_resolver* and *expected_hardware_key* (sprint 039 ticket 003)
+    are the identical additive, optional contract
+    :class:`~aprilcam.camera.backends.opencv_backend.OpenCVBackend`
+    has -- see this module's docstring's "Identity-safe reopen" section
+    for the full mechanism and why post-open verification is done here
+    (parent-side, via :func:`~aprilcam.camera.identity.resolve_identity`)
+    rather than inside the spawned child. Both default to ``None``,
+    preserving every existing direct ``WorkerBackend(index)``/
+    ``WorkerBackend(synthetic=...)`` construction's behaviour exactly.
     """
 
     def __init__(
@@ -187,6 +251,8 @@ class WorkerBackend(CaptureBackend):
         height: Optional[int] = None,
         backend: Optional[int] = None,
         synthetic: Optional[str] = None,
+        index_resolver: Optional[Callable[[], Optional[int]]] = None,
+        expected_hardware_key: Optional[str] = None,
         startup_timeout: float = DEFAULT_STARTUP_TIMEOUT,
         ready_timeout: float = DEFAULT_READY_TIMEOUT,
         control_timeout: float = DEFAULT_CONTROL_TIMEOUT,
@@ -201,6 +267,8 @@ class WorkerBackend(CaptureBackend):
         self._height = height
         self._backend_id = backend
         self._synthetic = synthetic
+        self._index_resolver = index_resolver
+        self._expected_hardware_key = expected_hardware_key
         self._startup_timeout = startup_timeout
         self._ready_timeout = ready_timeout
         self._control_timeout = control_timeout
@@ -222,8 +290,29 @@ class WorkerBackend(CaptureBackend):
         return self._process is not None and self._process.poll() is None
 
     def open(self) -> None:
+        """Spawn (or respawn) the capture worker child process.
+
+        **Fresh re-resolution, every call (sprint 039).** When
+        *index_resolver* is set, it is called here -- unconditionally,
+        before the spawn command is built, on *every* :meth:`open`
+        including a self-heal/stall-triggered respawn that closes and
+        reopens this exact object -- and :attr:`_index` is updated to
+        whatever it returns. ``None`` (hardware key not currently
+        enumerated) raises :class:`~aprilcam.camera.backends.
+        CameraNotEnumeratedError` immediately, before anything is
+        spawned -- never a stale index. See this module's docstring's
+        "Identity-safe reopen" section.
+        """
         if self.is_open:
             return
+        if self._index_resolver is not None:
+            resolved = self._index_resolver()
+            if resolved is None:
+                raise CameraNotEnumeratedError(
+                    f"camera hardware key is not currently enumerated "
+                    f"(last known index {self._index})"
+                )
+            self._index = resolved
 
         listener = Listener()
         process: "Optional[subprocess.Popen[bytes]]" = None
@@ -266,6 +355,57 @@ class WorkerBackend(CaptureBackend):
         self._process = process
         self._control = ControlChannel(conn)
         self._ring = ring
+
+        # Post-open identity verification (sprint 039) -- parent-side,
+        # after the child has reported its first frame: see this
+        # module's docstring's "Post-open identity verification" section
+        # for why this runs here rather than inside the worker. Runs
+        # after self._process/_control/_ring are all assigned so a
+        # mismatch can tear the worker down via the ordinary close()
+        # path rather than duplicating its cleanup.
+        index = self._index
+        if (
+            self._expected_hardware_key is not None
+            and index is not None
+            and self._can_verify_identity()
+        ):
+            observed = resolve_identity(index)
+            if observed.hardware_key != self._expected_hardware_key:
+                pid = process.pid
+                self.close()
+                logger.warning(
+                    "WorkerBackend: post-open identity mismatch at index %d "
+                    "(worker pid %s) -- expected hardware_key %r, observed %r; "
+                    "refusing to keep this worker running (killing it rather "
+                    "than silently serving a different physical camera's "
+                    "frames)",
+                    index,
+                    pid,
+                    self._expected_hardware_key,
+                    observed.hardware_key,
+                )
+                raise RuntimeError(
+                    f"post-open identity mismatch at index {index}: expected "
+                    f"hardware_key {self._expected_hardware_key!r}, observed "
+                    f"{observed.hardware_key!r}"
+                )
+
+    def _can_verify_identity(self) -> bool:
+        """Whether this platform/*expected_hardware_key* combination can
+        be checked post-open (sprint 039) -- identical restriction to
+        :meth:`~aprilcam.camera.backends.opencv_backend.OpenCVBackend.
+        _can_verify_identity`: only macOS AVFoundation's ``uniqueID``
+        tier is reliable enough to re-resolve per-index after the fact,
+        never a fallback tier (``vidpid``/``loc``/``name``) that can
+        legitimately change value across a re-enumeration for reasons
+        unrelated to a substitution bug. Also requires a real *index*
+        (``None`` only when this backend is *synthetic*-only, which
+        never carries a meaningful hardware identity to check)."""
+        return (
+            self._index is not None
+            and sys.platform == "darwin"
+            and (self._expected_hardware_key or "").startswith("avf:")
+        )
 
     def read(self) -> Optional[np.ndarray]:
         if not self.is_open or self._ring is None:

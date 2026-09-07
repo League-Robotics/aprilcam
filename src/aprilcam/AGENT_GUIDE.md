@@ -76,6 +76,26 @@ is the only usable position in that state. Treat an uncalibrated result
 as pixel-only diagnostic data, never as a stand-in for world
 coordinates.
 
+An uncalibrated record's only orientation reading is `image_yaw_deg` —
+a diagnostic, **image-pixel-space** field: `0°` means the tag's front
+edge points toward the top of the image, and the angle increases
+**clockwise as seen on screen**. This is a different field, and a
+different rotational sense, from the world-frame `yaw_rad` you get once
+a camera is calibrated (`yaw_rad` is CCW-positive, §1) — do not mix the
+two or assume one is a stand-in for the other.
+
+Watching an uncalibrated camera's tags with a single `aprilcam camera
+tags <camera>` call right after any gap often reports "(no tags
+detected)" even with tags plainly in view — the daemon's multi-frame
+confirmation filter has to rebuild its confirmed streak from zero on
+each isolated call. `aprilcam camera tags <camera> --follow` streams
+continuously instead (one row per tag per frame, until Ctrl-C) and lets
+that streak build up, which makes it the reliable way to watch an
+uncalibrated camera's tag rotation over time — a one-shot call is not.
+Add `--json` for JSON Lines output (one object per line, `image_yaw_deg`
+included) if you are piping the stream into another process rather than
+reading it yourself.
+
 ## 5. Surveyed Definition vs. Live Vision
 
 Two questions look similar but are answered from different sources:
@@ -213,7 +233,7 @@ world-frame and staleness rules as everywhere else in this guide —
 | Camera | `aprilcam camera list` | enumerate cameras |
 | | `aprilcam camera probe` | force a deep hardware re-probe |
 | | `aprilcam camera image <camera>` | capture one raw frame |
-| | `aprilcam camera tags <camera>` | current tag detections |
+| | `aprilcam camera tags <camera> [--follow] [--json]` | current tag detections, or a continuous stream (§4) |
 | | `aprilcam camera calibrate <camera>` | calibrate against the linked playfield (§3) |
 | | `aprilcam camera flatfield <camera>` | build (or `--clear`) a flat-field gain-map lighting correction (§9) |
 | | `aprilcam camera locate <camera> --reference TAG:SLUG:HEIGHT_CM ...` | solve real ground position + height from staged elevated references — **CLI-only, no MCP tool** (§6) |

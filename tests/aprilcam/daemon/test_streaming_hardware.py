@@ -179,7 +179,7 @@ def _real_arducam_service(tmp_path: Path) -> Tuple[DaemonService, str, Camera]:
     cameras: Dict[str, Camera] = {slug: cam}
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(cameras.keys()),
+        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
         identity_source=lambda: {index: identity},
         backend_factory=lambda idx: OpenCVBackend(idx),
     )

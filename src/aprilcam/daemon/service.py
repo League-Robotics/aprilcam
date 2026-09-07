@@ -69,13 +69,21 @@ camera *at most once*: the first successful open is cached in
 lets ``Camera``'s self-heal (5 consecutive failures -> reopen, capped
 at 10) actually accumulate state across calls rather than resetting on
 every request. This cache **is** the daemon's live-subscriber table:
-:meth:`active_slugs` exposes its keys to ``CameraDiscovery`` as the
-``active_slugs`` callback (``camera/discovery.py``'s constructor;
-ticket 003 left this defaulting to "nothing is active" and named this
-exact wiring as this ticket's job) so ``probe_cameras()``'s
-non-disturbance guarantee (UC-25.S-7) holds for real work, not just the
-mechanism-level unit test ticket 003 could write without a service to
-wire into.
+:meth:`active_slugs` exposes its keys, and ``daemon/__main__.py`` wires
+the same ``self._cameras`` dict object into ``CameraDiscovery`` as the
+``active_camera_state`` callback (``camera/discovery.py``'s
+constructor; ticket 003 left this defaulting to "nothing is active"
+and named this exact wiring as this ticket's job) so
+``probe_cameras()``'s non-disturbance guarantee (UC-25.S-7) holds for
+real work, not just the mechanism-level unit test ticket 003 could
+write without a service to wire into. **Sprint 039 ticket 004**
+changed what that callback reports: instead of a bare slug membership
+check (which made ``probe()`` hardcode ``usable=True`` for any active
+slug), ``active_camera_state`` hands back the held-open ``Camera``'s
+own ``.state`` -- the identical ``CameraState`` :meth:`list_cameras`
+already reads for a held camera -- so a stalled, self-heal-exhausted
+camera probes ``usable=False`` exactly as ``list_cameras`` reports it,
+instead of the two methods disagreeing.
 """
 
 from __future__ import annotations
@@ -107,7 +115,9 @@ from aprilcam.camera.backends import (
     resolve_capture_backend,
 )
 from aprilcam.camera.backends.libcamera import LibcameraDevice
+from aprilcam.camera.backends.opencv_backend import OpenCVBackend
 from aprilcam.camera.backends.uvc_util import UvcUtilBackend
+from aprilcam.camera.backends.worker_backend import WorkerBackend
 from aprilcam.camera.camera import FLATFIELD_FILENAME, Camera
 from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import CameraIdentity, resolve_all
@@ -454,9 +464,12 @@ class DaemonService(Daemon):
         The persistent identity -> slug/number mapping (ticket 002).
     discovery:
         Passive-watch + active-probe camera discovery (ticket 003).
-        Its ``active_slugs`` callback should be wired to this service's
-        :meth:`active_slugs` at construction (``daemon/__main__.py``
-        does this) so probe's non-disturbance guarantee holds.
+        Its ``active_camera_state`` callback should be wired (at
+        construction, ``daemon/__main__.py`` does this) to read this
+        service's own ``cameras`` dict -- see ``camera/discovery.py``'s
+        ``active_camera_state`` parameter -- so probe's non-disturbance
+        guarantee holds *and* an active camera's reported ``usable``
+        agrees with :meth:`list_cameras` (sprint 039 ticket 004).
     directories:
         Reported verbatim by :meth:`status` (``config_dir``/
         ``state_dir``) -- UC-01's "which roots were chosen is never a
@@ -465,10 +478,10 @@ class DaemonService(Daemon):
         The held-open-camera cache, keyed by slug. Accepts an
         externally-owned dict (rather than always constructing its own)
         so ``daemon/__main__.py`` can hand the *same* dict object to
-        both this service and ``CameraDiscovery``'s ``active_slugs``
-        closure -- see the module docstring. Defaults to a fresh, empty
-        dict when not supplied (tests that do not care about this
-        wiring).
+        both this service and ``CameraDiscovery``'s
+        ``active_camera_state`` closure -- see the module docstring.
+        Defaults to a fresh, empty dict when not supplied (tests that
+        do not care about this wiring).
     identity_source / backend_factory:
         Resolve a registered camera's *current* OS-probe index on
         demand (only needed the first time a given slug is requested
@@ -692,14 +705,19 @@ class DaemonService(Daemon):
         self._flatfields: Dict[str, FlatFieldInfo] = {}
         self._load_flatfields()
 
-    # -- beyond the interface: CameraDiscovery's active_slugs wiring -----
+    # -- beyond the interface: CameraDiscovery's active_camera_state wiring --
 
     def active_slugs(self) -> frozenset:
         """Slugs this service currently holds a ``Camera`` open for.
 
-        Passed as ``CameraDiscovery(..., active_slugs=service.
-        active_slugs)`` so ``probe_cameras()`` never opens a backend
-        already held here (UC-25.S-7). See the module docstring.
+        A convenience read of ``self._cameras.keys()`` under the lock,
+        independent of ``CameraDiscovery``'s own ``active_camera_state``
+        callback (``daemon/__main__.py`` wires that directly against the
+        same shared ``cameras`` dict object rather than through this
+        method -- see the module docstring and sprint 039 ticket 004,
+        which changed that callback from a bare membership check into a
+        per-slug ``CameraState`` accessor so ``probe_cameras()`` reports
+        real held-open health instead of assuming it (UC-25.S-7)).
         """
         with self._lock:
             return frozenset(self._cameras.keys())
@@ -2738,6 +2756,45 @@ class DaemonService(Daemon):
         reliably (that class's own module docstring). Every other
         identity source is unaffected.
 
+        **Identity-safe reopen (sprint 039, corrected).** When the
+        backend :func:`~aprilcam.camera.backends.resolve_capture_backend`
+        returns is an :class:`~aprilcam.camera.backends.opencv_backend.
+        OpenCVBackend` *or* a :class:`~aprilcam.camera.backends.
+        worker_backend.WorkerBackend` -- see ``camera-DESIGN.md``'s
+        "Identity-safe reopen" section -- it is rebuilt with its
+        ``index_resolver``/``expected_hardware_key`` wired: a closure
+        over *this exact call's* ``record`` that re-invokes
+        :meth:`_index_for` fresh every time it is called, plus
+        ``record.hardware_key`` for the post-open identity check (both
+        backends verify it the same way -- see
+        :meth:`~aprilcam.camera.backends.worker_backend.WorkerBackend.
+        _can_verify_identity`). This ticket's own file originally scoped
+        ``WorkerBackend`` out as "gated off by default" -- wrong:
+        :func:`~aprilcam.camera.backends.default_capture_backend_factory`
+        selects ``WorkerBackend`` *unconditionally* on macOS, which is
+        exactly the backend the source incident hit (a respawn at a
+        shifted index served a different physical camera's frames), so
+        both branches are needed, not just the ``OpenCVBackend`` one.
+        Rebuilding (rather than mutating the instance
+        ``resolve_capture_backend`` returned) is safe and cheap --
+        constructing either backend performs no I/O, the spawn/open only
+        happens in :meth:`Camera.open` below -- and this is what makes
+        *every later* self-heal/stall reopen of this ``Camera``
+        (``Camera._attempt_self_heal``/``check_stall``, which only ever
+        call ``close()``/``open()`` on this one backend object) re-resolve
+        the index fresh too, not just this first open: the resolver
+        closure is called again inside the backend's own ``open()``,
+        every time it runs. Reuses :meth:`_index_for` -- the same helper
+        that already resolved *index* just above -- rather than a second
+        implementation of "find the current index for this hardware
+        key". A camera resolved to any other backend
+        (``V4l2LoopbackBackend``, or a test's injected fake) is untouched
+        by this branch -- ``camera/discovery.py``'s ``_probe_openable``
+        needs no equivalent wiring, since it constructs a fresh backend
+        (and a fresh, discarded ``Camera``) on every single probe call
+        rather than holding one open across a reopen -- there is no
+        persistent object for a stale index to survive in.
+
         **Apply-on-open (ticket 023-003).** A freshly-opened camera
         checks :attr:`_camera_configs` for a config already held under
         its slug -- populated either by a live :meth:`set_camera_config`
@@ -2773,14 +2830,46 @@ class DaemonService(Daemon):
         if index is None:
             raise CameraNotPresent(record.slug)
 
+        capture_backend = resolve_capture_backend(
+            record.hardware_key,
+            index,
+            backend_factory=self._backend_factory,
+            list_loopback_cameras=self._list_loopback_cameras,
+        )
+        if isinstance(capture_backend, OpenCVBackend):
+            # Sprint 039 identity-safe reopen -- see this method's own
+            # docstring's "Identity-safe reopen" section for why this is
+            # a rebuild rather than a mutation, and why closing over
+            # `record` here is what makes every later self-heal/stall
+            # reopen of this Camera re-resolve fresh too.
+            capture_backend = OpenCVBackend(
+                index,
+                index_resolver=lambda: self._index_for(record),
+                expected_hardware_key=record.hardware_key,
+            )
+        elif isinstance(capture_backend, WorkerBackend):
+            # Sprint 039 ticket 003 (corrected): WorkerBackend is the
+            # backend default_capture_backend_factory actually selects
+            # on macOS -- the exact backend the source incident hit --
+            # so it needs the identical identity-safe-reopen wiring the
+            # OpenCVBackend branch above gets, not just OpenCVBackend.
+            # Same rebuild-not-mutate reasoning applies: constructing a
+            # WorkerBackend does no I/O (the spawn happens in .open(),
+            # called below), so discarding the instance
+            # resolve_capture_backend returned is cheap, and closing
+            # over `record` here is what makes every later self-heal/
+            # stall respawn of this Camera (which only ever calls
+            # close()/open() on this one backend object) re-resolve the
+            # index fresh too, not just this first open.
+            capture_backend = WorkerBackend(
+                index,
+                index_resolver=lambda: self._index_for(record),
+                expected_hardware_key=record.hardware_key,
+            )
+
         cam = Camera(
             record.slug,
-            resolve_capture_backend(
-                record.hardware_key,
-                index,
-                backend_factory=self._backend_factory,
-                list_loopback_cameras=self._list_loopback_cameras,
-            ),
+            capture_backend,
             control_backend=self._control_backend_factory(record.device_name),
             device_name=record.device_name,
             number=record.number,

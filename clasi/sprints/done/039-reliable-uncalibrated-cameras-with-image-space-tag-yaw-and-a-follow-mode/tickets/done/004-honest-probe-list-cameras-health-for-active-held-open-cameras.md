@@ -1,7 +1,7 @@
 ---
 id: '004'
 title: Honest probe()/list_cameras() health for active (held-open) cameras
-status: open
+status: done
 use-cases: []
 depends-on:
 - '003'
@@ -59,25 +59,25 @@ a per-slug state accessor was chosen over duplicating health logic in
 
 ## Acceptance Criteria
 
-- [ ] `CameraDiscovery`'s constructor takes `active_camera_state`
+- [x] `CameraDiscovery`'s constructor takes `active_camera_state`
       instead of `active_slugs`; every production and test call site is
       updated in this ticket, none left on the old signature.
-- [ ] **Core regression test**: a simulated stalled active camera (a
+- [x] **Core regression test**: a simulated stalled active camera (a
       fake/stub `CameraState` with `usable=False` returned from
       `active_camera_state` for a held-open slug) makes `probe()`
       report `usable=False` for that slug — this must fail against
       today's code (which hardcodes `True`) and pass after the fix.
-- [ ] A healthy active camera still reports `usable=True` — no
+- [x] A healthy active camera still reports `usable=True` — no
       regression on the common case.
-- [ ] `ProbeSkip.reason` text distinguishably differs between
+- [x] `ProbeSkip.reason` text distinguishably differs between
       healthy-in-use and stalled-in-use — a test asserts the two
       strings are not equal and each names its condition.
-- [ ] `daemon/service.py`'s `list_cameras()` and `probe_cameras()` now
+- [x] `daemon/service.py`'s `list_cameras()` and `probe_cameras()` now
       agree on an active camera's `usable` value (both read from the
       same `Camera.state`) — a test calling both against the same
       daemon state for a stalled active camera gets the same `usable`
       value from each.
-- [ ] `CameraDiscovery.probe()`'s non-disturbance invariant (UC-25.S-7)
+- [x] `CameraDiscovery.probe()`'s non-disturbance invariant (UC-25.S-7)
       is unchanged — verify no test needs to open a real backend for an
       active slug; the health read is against already-known state.
 

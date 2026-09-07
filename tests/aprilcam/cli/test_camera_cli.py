@@ -60,17 +60,26 @@ def _frame(data: bytes = b"\xff\xd8\xff\xd9", encoding: str = "jpeg") -> ImageFr
 
 def _args(**overrides) -> argparse.Namespace:
     base = dict(daemon=None, all=False, camera="arducam-ov9782-usb-camera", output=None,
-                base64=False, encoding="jpeg", force=False, reset=False, dump=False)
+                base64=False, encoding="jpeg", force=False, reset=False, dump=False,
+                follow=False, json=False)
     base.update(overrides)
     return argparse.Namespace(**base)
 
 
 def _uncalibrated_record(
-    family: TagFamily = TagFamily.APRILTAG, number: int = 7, x: float = 123.4, y: float = 56.7
+    family: TagFamily = TagFamily.APRILTAG,
+    number: int = 7,
+    x: float = 123.4,
+    y: float = 56.7,
+    image_yaw_deg: Optional[float] = None,
 ) -> TagRecord:
     """A record shaped exactly as ``daemon/detection.py`` produces this
     sprint (sprint.md: 'every tag record from this sprint reports
-    calibrated=False, world=None' -- see the module docstring)."""
+    calibrated=False, world=None' -- see the module docstring).
+
+    ``image_yaw_deg`` defaults to ``None`` (matching every pre-039-002
+    caller of this helper, which never sets it) -- pass it explicitly
+    to exercise ticket 039-002's uncalibrated-branch yaw suffix."""
     return TagRecord(
         tag=TagId(family, number),
         world=None,
@@ -80,6 +89,7 @@ def _uncalibrated_record(
         timestamp=0.0,
         pixel=PixelPoint(x, y),
         calibrated=False,
+        image_yaw_deg=image_yaw_deg,
     )
 
 
@@ -91,6 +101,7 @@ def _calibrated_record(
     heading_rad: Optional[float] = 0.5,
     speed: Optional[float] = 12.5,
     yaw_rad: Optional[float] = 0.2,
+    image_yaw_deg: Optional[float] = None,
 ) -> TagRecord:
     """A record shaped as a real calibrated camera produces this sprint
     (ticket 022-003 onward) -- exercises ``_format_tag_row``'s
@@ -99,7 +110,13 @@ def _calibrated_record(
     022-007): ``heading_rad=None`` with a real ``speed``/``yaw_rad``,
     exactly what ``vision.motion.compute_motion`` now reports for a tag
     whose two most recent samples are within
-    ``MIN_RELIABLE_DISPLACEMENT_CM`` of each other."""
+    ``MIN_RELIABLE_DISPLACEMENT_CM`` of each other.
+
+    ``image_yaw_deg`` is overridable too (default ``None``) so a test
+    can shape ticket 039-002's "a real calibrated record can carry
+    ``image_yaw_deg`` too (it is populated whenever ``pixel_corners``
+    is, calibrated or not), but the calibrated row must never print
+    it" regression."""
     return TagRecord(
         tag=TagId(family, number),
         world=WorldPoint(wx, wy),
@@ -110,11 +127,35 @@ def _calibrated_record(
         pixel=PixelPoint(1.0, 2.0),
         calibrated=True,
         yaw_rad=yaw_rad,
+        image_yaw_deg=image_yaw_deg,
     )
 
 
 def _tag_frame(tags: Tuple[TagRecord, ...] = ()) -> TagFrame:
     return TagFrame(tags=tags, timestamp=0.0, frame_index=0)
+
+
+@dataclass
+class _FakeTagStream:
+    """A headless stand-in for ``client.streams.SocketTagStream`` (ticket
+    039-005): yields a fixed sequence of ``TagFrame``\\ s, optionally
+    raising ``KeyboardInterrupt`` partway through to simulate Ctrl-C
+    without needing a real signal or a real socket. ``closed`` records
+    whether ``close()`` was ever called, so a test can assert the
+    stream is always cleaned up -- interrupted or not."""
+
+    frames: Tuple[TagFrame, ...] = ()
+    interrupt_after: Optional[int] = None
+    closed: bool = False
+
+    def __iter__(self):
+        for index, frame in enumerate(self.frames):
+            if self.interrupt_after is not None and index == self.interrupt_after:
+                raise KeyboardInterrupt()
+            yield frame
+
+    def close(self) -> None:
+        self.closed = True
 
 
 @dataclass
@@ -128,6 +169,9 @@ class _FakeDaemon:
     tag_frame: Optional[TagFrame] = None
     get_tags_raises: Optional[Exception] = None
     requested_tags_camera: Optional[str] = None
+    tag_stream: Optional[_FakeTagStream] = None
+    stream_tags_raises: Optional[Exception] = None
+    requested_stream_tags_camera: Optional[str] = None
     set_camera_config_raises: Optional[Exception] = None
     pushed_camera_config: Optional[object] = None
     reset_camera_config_raises: Optional[Exception] = None
@@ -154,6 +198,12 @@ class _FakeDaemon:
         if self.get_tags_raises is not None:
             raise self.get_tags_raises
         return self.tag_frame if self.tag_frame is not None else _tag_frame()
+
+    def stream_tags(self, camera: str) -> _FakeTagStream:
+        self.requested_stream_tags_camera = camera
+        if self.stream_tags_raises is not None:
+            raise self.stream_tags_raises
+        return self.tag_stream if self.tag_stream is not None else _FakeTagStream()
 
     def set_camera_config(self, config) -> None:
         if self.set_camera_config_raises is not None:
@@ -518,6 +568,39 @@ def test_tags_prints_uncalibrated_flag_and_pixel_never_a_world_looking_number(ca
     assert daemon.requested_tags_camera == "arducam-ov9782-usb-camera"
 
 
+def test_tags_uncalibrated_record_prints_image_yaw_deg_next_to_pixel(capsys):
+    """Ticket 039-002: the uncalibrated branch prints
+    ``record.image_yaw_deg`` (a separate, diagnostic-only field from
+    the calibrated branch's ``yaw_rad``) alongside the pixel position,
+    since an uncalibrated camera has no world frame to report
+    ``yaw_rad`` in at all."""
+    record = _uncalibrated_record(x=777.6, y=764.9, image_yaw_deg=12.34)
+    daemon = _FakeDaemon(tag_frame=_tag_frame((record,)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    camera_cli.cmd_tags(_args(), discovery_factory=lambda: discovery)
+
+    out = capsys.readouterr().out
+    assert "UNCALIBRATED" in out
+    assert "yaw=12.3°" in out
+
+
+def test_tags_uncalibrated_record_with_no_image_yaw_deg_prints_a_dash(capsys):
+    """The ``"-"`` placeholder convention already used for the
+    calibrated branch's ``yaw``/``heading``/``speed`` fields extends to
+    the uncalibrated branch's ``image_yaw_deg`` when it is ``None``
+    (e.g. no ``pixel_corners`` were available to derive it from)."""
+    record = _uncalibrated_record(image_yaw_deg=None)
+    daemon = _FakeDaemon(tag_frame=_tag_frame((record,)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    camera_cli.cmd_tags(_args(), discovery_factory=lambda: discovery)
+
+    out = capsys.readouterr().out
+    assert "UNCALIBRATED" in out
+    assert "yaw=-" in out
+
+
 def test_tags_distinguishes_apriltag_and_aruco_of_the_same_number(capsys):
     """UC-09.S-3's disambiguation, exercised through the CLI: family
     plus id, never id alone."""
@@ -564,6 +647,25 @@ def test_tags_calibrated_record_prints_yaw_ahead_of_heading_and_speed(capsys):
     assert "heading=0.500" in out
     assert "speed=12.50" in out
     assert out.index("yaw=") < out.index("heading="), "yaw must print ahead of heading"
+
+
+def test_tags_calibrated_record_never_prints_image_yaw_deg_even_when_set(capsys):
+    """Ticket 039-002 acceptance criterion: the calibrated branch is
+    unchanged. ``image_yaw_deg`` is populated whenever ``pixel_corners``
+    is available, calibrated or not (``TagRecord``'s own docstring), so
+    a real calibrated record can carry both ``yaw_rad`` and
+    ``image_yaw_deg`` at once -- the row must show exactly one ``yaw=``
+    (the world-frame one) and never a second, confusing image-space
+    yaw."""
+    record = _calibrated_record(yaw_rad=0.2, image_yaw_deg=99.9)
+    daemon = _FakeDaemon(tag_frame=_tag_frame((record,)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    camera_cli.cmd_tags(_args(), discovery_factory=lambda: discovery)
+
+    out = capsys.readouterr().out
+    assert out.count("yaw=") == 1
+    assert "99.9" not in out
 
 
 def test_tags_stationary_tag_shows_undefined_heading_but_a_real_yaw_and_speed(capsys):
@@ -686,6 +788,166 @@ def test_tags_all_reports_discovery_failed_distinctly(capsys):
 
 
 # ---------------------------------------------------------------------------
+# camera tags --follow / --json -- AC: ticket 039-005. Headless throughout,
+# via the fake ``_FakeTagStream`` above -- this cannot be a real-hardware
+# test (no @pytest.mark.camera): it drives cmd_tags with a synthetic
+# TagStream and a simulated KeyboardInterrupt, never a real socket.
+# ---------------------------------------------------------------------------
+
+
+def test_tags_follow_prints_a_timestamped_row_per_tag_per_frame_until_interrupt(capsys):
+    frame_1 = _tag_frame((_uncalibrated_record(number=7, x=1.0, y=2.0),))
+    frame_1 = TagFrame(tags=frame_1.tags, timestamp=100.5, frame_index=0)
+    frame_2 = TagFrame(
+        tags=(_uncalibrated_record(number=9, x=3.0, y=4.0),), timestamp=101.25, frame_index=1
+    )
+    stream = _FakeTagStream(frames=(frame_1, frame_2), interrupt_after=2)
+    daemon = _FakeDaemon(tag_stream=stream)
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = camera_cli.cmd_tags(_args(follow=True), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "100.500" in out and "apriltag 7" in out
+    assert "101.250" in out and "apriltag 9" in out
+    assert daemon.requested_stream_tags_camera == "arducam-ov9782-usb-camera"
+    assert stream.closed is True
+
+
+def test_tags_follow_json_emits_one_parseable_json_object_per_line(capsys):
+    frame_1 = TagFrame(
+        tags=(_uncalibrated_record(number=7, x=1.0, y=2.0, image_yaw_deg=12.3),),
+        timestamp=10.0,
+        frame_index=0,
+        calibration_stale=True,
+    )
+    frame_2 = TagFrame(
+        tags=(_calibrated_record(number=1, wx=5.0, wy=6.0, yaw_rad=0.4),),
+        timestamp=11.0,
+        frame_index=1,
+    )
+    stream = _FakeTagStream(frames=(frame_1, frame_2), interrupt_after=2)
+    discovery = _FakeDiscovery(daemon=_FakeDaemon(tag_stream=stream))
+
+    code = camera_cli.cmd_tags(_args(follow=True, json=True), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert len(lines) == 2
+
+    first = json.loads(lines[0])
+    assert first["timestamp"] == 10.0
+    assert first["frame_index"] == 0
+    assert first["calibration_stale"] is True
+    assert len(first["tags"]) == 1
+    tag = first["tags"][0]
+    assert tag["tag"] == {"family": "apriltag", "number": 7}
+    assert tag["pixel"] == {"x": 1.0, "y": 2.0}
+    assert tag["image_yaw_deg"] == 12.3
+    assert tag["world"] is None
+
+    second = json.loads(lines[1])
+    assert second["tags"][0]["world"] == {"x": 5.0, "y": 6.0}
+    assert second["tags"][0]["yaw_rad"] == 0.4
+
+
+def test_tags_follow_with_no_tags_that_frame_prints_no_row(capsys):
+    """``--follow`` prints one row per tag per frame -- an empty frame
+    contributes zero rows, not a repeated ``(no tags detected)`` that
+    would flood a recording session every quiet frame."""
+    stream = _FakeTagStream(frames=(_tag_frame(()),), interrupt_after=1)
+    discovery = _FakeDiscovery(daemon=_FakeDaemon(tag_stream=stream))
+
+    code = camera_cli.cmd_tags(_args(follow=True), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_tags_follow_closes_the_stream_even_when_it_runs_to_completion(capsys):
+    """``stream.close()`` runs in a ``finally``, not only on the
+    ``KeyboardInterrupt`` path -- a stream that ends on its own (no
+    interrupt injected) is still cleaned up."""
+    stream = _FakeTagStream(frames=(_tag_frame((_uncalibrated_record(),)),), interrupt_after=None)
+    discovery = _FakeDiscovery(daemon=_FakeDaemon(tag_stream=stream))
+
+    code = camera_cli.cmd_tags(_args(follow=True), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    assert stream.closed is True
+
+
+def test_tags_follow_all_is_refused_before_any_connection(capsys):
+    class _ExplodingDiscovery:
+        def connect(self, host=None):
+            raise AssertionError("must not connect when --follow --all is refused up front")
+
+    code = camera_cli.cmd_tags(
+        _args(follow=True, all=True), discovery_factory=lambda: _ExplodingDiscovery()
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "--all" in err
+    assert "--follow" in err
+    assert "single" in err.lower()
+
+
+def test_tags_follow_passes_the_daemon_flag_through_to_connect():
+    discovery = _FakeDiscovery(daemon=_FakeDaemon(tag_stream=_FakeTagStream(interrupt_after=0)))
+
+    camera_cli.cmd_tags(
+        _args(follow=True, daemon="pi-field.local"), discovery_factory=lambda: discovery
+    )
+
+    assert discovery.connected_with == "pi-field.local"
+
+
+def test_tags_follow_connection_failure_reports_the_typed_error(capsys):
+    discovery = _FakeDiscovery(connect_raises=ConnectionFailed("pi-field.local", reason="refused"))
+
+    code = camera_cli.cmd_tags(
+        _args(follow=True, daemon="pi-field.local"), discovery_factory=lambda: discovery
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "pi-field.local" in err and "refused" in err
+
+
+def test_tags_follow_stream_open_failure_reports_the_typed_error(capsys):
+    daemon = _FakeDaemon(stream_tags_raises=UnknownCamera("no-such-cam", ("hd-usb-camera",)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = camera_cli.cmd_tags(
+        _args(follow=True, camera="no-such-cam"), discovery_factory=lambda: discovery
+    )
+
+    assert code == 1
+    assert "no-such-cam" in capsys.readouterr().err
+
+
+def test_tags_one_shot_json_emits_a_single_json_object(capsys):
+    """``--json`` without ``--follow`` still applies to the one-shot
+    burst (a single object, not a stream of lines) -- the pre-existing
+    human-formatted default (exercised throughout the rest of this
+    file) is otherwise completely unchanged (this ticket adds a new
+    code path; it does not modify the existing one)."""
+    record = _uncalibrated_record(number=7, x=1.0, y=2.0)
+    daemon = _FakeDaemon(tag_frame=_tag_frame((record,)))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = camera_cli.cmd_tags(_args(json=True), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload["tags"][0]["tag"] == {"family": "apriltag", "number": 7}
+
+
+# ---------------------------------------------------------------------------
 # argparse wiring
 # ---------------------------------------------------------------------------
 
@@ -756,6 +1018,36 @@ def test_tags_h_prints_help_not_a_missing_hostname_error():
     with pytest.raises(SystemExit) as excinfo:
         parser.parse_args(["camera", "tags", "some-camera", "-h"])
     assert excinfo.value.code == 0
+
+
+def test_tags_follow_and_json_flags_are_wired_and_default_off():
+    parser = _build_parser()
+    args = parser.parse_args(["camera", "tags", "arducam-ov9782-usb-camera"])
+    assert args.follow is False
+    assert args.json is False
+
+
+def test_tags_follow_flag_parses():
+    parser = _build_parser()
+    args = parser.parse_args(["camera", "tags", "some-camera", "--follow"])
+    assert args.follow is True
+
+
+def test_tags_json_flag_parses():
+    parser = _build_parser()
+    args = parser.parse_args(["camera", "tags", "some-camera", "--json"])
+    assert args.json is True
+
+
+def test_tags_accepts_follow_and_all_together_at_parse_time_but_cmd_tags_refuses_it():
+    """``--all`` is wired onto this subparser (so ``-h`` documents it and
+    the runtime refusal message can explain itself, matching ``camera
+    view --all``'s pattern) -- argparse accepts the combination;
+    ``cmd_tags`` is what refuses it, exercised above."""
+    parser = _build_parser()
+    args = parser.parse_args(["camera", "tags", "some-camera", "--follow", "--all"])
+    assert args.follow is True
+    assert args.all is True
 
 
 # ---------------------------------------------------------------------------

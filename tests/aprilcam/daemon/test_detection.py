@@ -55,7 +55,7 @@ from aprilcam.daemon.detection import (
     _DETECTOR_CONFIG_OVERRIDES,
     _default_detector_factory,
 )
-from aprilcam.types import MountParameters, PixelPoint, TagFamily, TagId, WorldPoint
+from aprilcam.types import MountParameters, PixelPoint, TagFamily, TagId, TagRecord, WorldPoint
 from aprilcam.vision.detector import Detection, DetectorConfig, TagDetector
 
 from tests.aprilcam.calibration.test_calibration import (
@@ -766,6 +766,142 @@ def test_uncalibrated_camera_output_is_byte_for_byte_sprint_021_shape():
     assert record.pixel is not None
     assert record.pixel_corners is not None
     assert len(record.pixel_corners) == 4
+
+
+# ---------------------------------------------------------------------------
+# Image-space yaw (ticket 039-001) -- TagRecord.image_yaw_deg, a raw-pixel
+# diagnostic distinct from yaw_rad, populated for every record that has
+# pixel_corners (calibrated or not). Convention (design.md Sec.6's new
+# bullet, stakeholder-fixed): 0 = front edge toward the top of the image,
+# clockwise-positive as seen on screen (image y grows downward).
+# ---------------------------------------------------------------------------
+
+
+def _pixel_quad_with_front_edge(
+    dx: float,
+    dy: float,
+    *,
+    half_size: float = 5.0,
+    centre: Tuple[float, float] = (450.0, 350.0),
+) -> np.ndarray:
+    """A synthetic ``(4, 2)`` pixel-space quad (front-left, front-right,
+    back-right, back-left) whose front edge (``corners[0]`` ->
+    ``corners[1]``) points in raw-pixel direction *(dx, dy)* -- the
+    minimal fixture :func:`_image_space_yaw`/:func:`_build_tag_record`
+    need, without a real detector. Mirrors :func:`_detection_at`'s
+    world-space construction, but directly in pixel space since
+    image-space yaw has no world frame to go through. *centre* defaults
+    to ``test_calibration.py``'s ``ORIGIN_PX``, so a quad built here is
+    also valid input to a real ``Calibration.to_world`` call."""
+    length = math.hypot(dx, dy)
+    ux, uy = dx / length, dy / length  # front-edge unit direction
+    vx, vy = -uy, ux  # perpendicular: front-edge -> back-edge direction
+    cx, cy = centre
+    return np.array(
+        [
+            (cx - half_size * ux - half_size * vx, cy - half_size * uy - half_size * vy),
+            (cx + half_size * ux - half_size * vx, cy + half_size * uy - half_size * vy),
+            (cx + half_size * ux + half_size * vx, cy + half_size * uy + half_size * vy),
+            (cx - half_size * ux + half_size * vx, cy - half_size * uy + half_size * vy),
+        ],
+        dtype=np.float32,
+    )
+
+
+def _pixel_corners_tuple(corners: np.ndarray) -> Tuple[PixelPoint, PixelPoint, PixelPoint, PixelPoint]:
+    pts = [PixelPoint(x=float(x), y=float(y)) for x, y in corners]
+    return (pts[0], pts[1], pts[2], pts[3])
+
+
+@pytest.mark.parametrize(
+    ("dx", "dy", "expected_deg"),
+    [
+        (0.0, -1.0, 0.0),  # front edge points toward the top of the image
+        (1.0, 0.0, 90.0),  # front edge points right
+        (0.0, 1.0, 180.0),  # front edge points toward the bottom of the image
+        (-1.0, 0.0, -90.0),  # front edge points left
+        (1.0, -1.0, 45.0),  # oblique: up-and-right
+    ],
+)
+def test_image_space_yaw_matches_the_stakeholder_sign_convention(
+    dx: float, dy: float, expected_deg: float
+) -> None:
+    """Ticket 039-001's four cardinal facings plus one oblique angle:
+    0 = top of image, clockwise-positive as seen on screen. Derived
+    independently from the ticket's suggested formula and cross-checked
+    against its own worked examples (image y grows downward, so
+    ``atan2(dx, -dy)`` -- not the world convention's ``atan2(dy, dx)`` --
+    is what turns "clockwise on screen" into increasing degrees)."""
+    from aprilcam.daemon.detection import _image_space_yaw
+
+    pixel_corners = _pixel_corners_tuple(_pixel_quad_with_front_edge(dx, dy))
+    assert _image_space_yaw(pixel_corners) == pytest.approx(expected_deg)
+
+
+def test_build_tag_record_populates_image_yaw_deg_for_an_uncalibrated_record() -> None:
+    """The field that motivated this ticket: an uncalibrated camera has
+    no world frame for ``yaw_rad``, but still reports *some* orientation
+    via ``image_yaw_deg``, derived straight from ``pixel_corners``."""
+    from aprilcam.daemon.detection import _build_tag_record
+
+    corners = _pixel_quad_with_front_edge(1.0, 0.0)  # front edge -> right => 90 deg
+    detection = Detection(
+        family=TagFamily.APRILTAG,
+        number=1,
+        corners=corners,
+        center=PixelPoint(x=450.0, y=350.0),
+    )
+
+    record = _build_tag_record(detection, timestamp=0.0, calibration=None)
+
+    assert record.calibrated is False
+    assert record.yaw_rad is None
+    assert record.pixel_corners is not None
+    assert record.image_yaw_deg == pytest.approx(90.0)
+
+
+def test_build_tag_record_populates_image_yaw_deg_for_a_calibrated_record_without_touching_yaw_rad() -> None:
+    """A calibrated record gets both fields -- ``image_yaw_deg`` from raw
+    ``pixel_corners`` and ``yaw_rad`` from ``world_corners`` -- and
+    neither conflicts with or overrides the other (acceptance criterion:
+    ``yaw_rad``'s existing behaviour is completely unchanged)."""
+    from aprilcam.daemon.detection import _build_tag_record, _front_edge_yaw
+
+    calibration = _fixture_calibration()
+    corners = _pixel_quad_with_front_edge(0.0, 1.0)  # front edge -> down => 180 deg
+    detection = Detection(
+        family=TagFamily.APRILTAG,
+        number=1,
+        corners=corners,
+        center=PixelPoint(x=450.0, y=350.0),
+    )
+
+    record = _build_tag_record(detection, timestamp=0.0, calibration=calibration)
+
+    assert record.calibrated is True
+    assert record.image_yaw_deg == pytest.approx(180.0)
+    assert record.world_corners is not None
+    assert record.yaw_rad == pytest.approx(_front_edge_yaw(record.world_corners))
+
+
+def test_tag_record_image_yaw_deg_defaults_to_none_without_pixel_corners() -> None:
+    """Degrades safely (acceptance criterion): a ``TagRecord`` built
+    without ``pixel_corners`` never fabricates an ``image_yaw_deg`` --
+    this should not occur in practice (``_build_tag_record`` always
+    populates ``pixel_corners`` from a real ``Detection``), but the
+    dataclass default must never silently invent a value."""
+    record = TagRecord(
+        tag=TagId(family=TagFamily.APRILTAG, number=1),
+        world=None,
+        heading_rad=None,
+        world_velocity=None,
+        speed=None,
+        timestamp=0.0,
+        calibrated=False,
+    )
+
+    assert record.pixel_corners is None
+    assert record.image_yaw_deg is None
 
 
 # ---------------------------------------------------------------------------

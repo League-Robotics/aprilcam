@@ -596,8 +596,13 @@ Architecture Decision 3 has the full reasoning).
   Never world coordinates from an absent homography.
 
 **Open questions.** Is there a machine-readable output mode (JSON) as
-well as the human table? The Python module covers programmatic access,
-but shell pipelines are a real use.
+well as the human table? **Partially answered by sprint 039:**
+`aprilcam camera tags <camera> --json` emits JSON Lines (one object per
+line) instead of the human table — this package's first
+machine-readable output mode — and the same sprint's `--follow` adds
+continuous streaming in place of a one-shot burst (UC-20.S-4). The
+Python module remains the primary programmatic path; `--json`/`--follow`
+cover shell-pipeline use instead.
 
 #### Scenarios
 
@@ -620,6 +625,19 @@ Tags are listed with pixel positions and an explicit uncalibrated flag,
 with no world coordinates presented. This is exactly what sprint 021
 ships: every camera is uncalibrated by construction, so `aprilcam
 camera tags <camera>` always takes this path this sprint, never S-1's.
+
+**UC-20.S-4 — Continuous watch, machine-readable or not** · _happy path_
+`aprilcam camera tags <camera> --follow` streams one row per tag per
+frame, continuously, until Ctrl-C (closing cleanly, `EXIT_OK`, not a
+traceback) instead of S-3's single one-shot burst — this is the mode
+the daemon's multi-frame confirmation filter needs to reliably report
+tags at all, since a one-shot call right after a gap rebuilds its
+confirmed streak from zero. Add `--json` for JSON Lines output (one
+parseable object per line, same fields as the human row) instead of the
+printed table. `--follow --all` is refused before any connection is
+attempted — mirroring S-2's fan-out note, a single blocking stream
+cannot fan out the way a one-shot RPC does. Shipped sprint 039, ticket
+005; answers this use case's Open Questions note above.
 
 ---
 
@@ -1320,7 +1338,10 @@ writes, with or without `--force`.
 
 ## Traceability
 
-This file covers 14 use cases and 54 scenarios. Tests are filled for
+This file covers 14 use cases and 55 scenarios (UC-20.S-4 added by
+sprint 039, ticket 006, documenting the `--follow`/`--json` continuous
+mode -- no existing use case or scenario number was renumbered or
+reused). Tests are filled for
 every use case named in sprint 035's Success Criteria (13, 14, 15, 18,
 19, 20, 22, 25, 29); UC-16, UC-17, UC-21, UC-23, and UC-24 remain
 unassigned — out of scope for sprint 035's layered test system, named
@@ -1344,7 +1365,7 @@ on disk. UC-25.S-1 walks the whole chain end to end.
 | UC-17 Raw frame | JTBD-02 | A-03, A-02 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗ | yes | — |
 | UC-18 Playfield video | JTBD-02, 01 | A-03 | S-1 ✓, S-2 ✗ | no | `tests/aprilcam/view/test_viewer.py::test_run_playfield_view_draws_apriltag_1_at_the_image_centre_for_a_centred_world_position`, `tests/aprilcam/view/test_viewer.py::test_run_playfield_view_surfaces_calibration_stale_as_a_status`, `tests/aprilcam/cli/test_playfield_cli.py::test_view_uncalibrated_camera_points_at_camera_calibrate` |
 | UC-19 Playfield frame | JTBD-02 | A-03, A-02 | S-1 ✓, S-2 ✗ | yes | `tests/aprilcam/cli/test_playfield_cli.py::test_config_dump_h_prints_help_not_a_missing_hostname_error`, `tests/aprilcam/daemon/test_service.py::test_get_frame_deskewed_uncalibrated_never_touches_the_camera_backend` |
-| UC-20 List tags | JTBD-01 | A-03, A-02 | S-1 ✓, S-2 ✓, S-3 ✗ | yes | `tests/aprilcam/cli/test_camera_cli.py::test_tags_prints_uncalibrated_flag_and_pixel_never_a_world_looking_number`, `tests/aprilcam/cli/test_camera_cli.py::test_tags_with_nothing_detected_prints_an_empty_result_not_an_error`, `tests/aprilcam/daemon/test_detection_hardware.py::test_camera_tags_cli_output_is_legible_against_real_hardware` |
+| UC-20 List tags | JTBD-01 | A-03, A-02 | S-1 ✓, S-2 ✓, S-3 ✗, S-4 ✓ | yes | `tests/aprilcam/cli/test_camera_cli.py::test_tags_prints_uncalibrated_flag_and_pixel_never_a_world_looking_number`, `tests/aprilcam/cli/test_camera_cli.py::test_tags_with_nothing_detected_prints_an_empty_result_not_an_error`, `tests/aprilcam/daemon/test_detection_hardware.py::test_camera_tags_cli_output_is_legible_against_real_hardware`, `tests/aprilcam/cli/test_camera_cli.py::test_tags_follow_prints_a_timestamped_row_per_tag_per_frame_until_interrupt`, `tests/aprilcam/cli/test_camera_cli.py::test_tags_follow_json_emits_one_parseable_json_object_per_line`, `tests/aprilcam/cli/test_camera_cli.py::test_tags_follow_all_is_refused_before_any_connection` |
 | UC-21 Generate tags | JTBD-05 | A-03 | S-1 ✓, S-2 ✓, S-3 ✗ | n/a (local) | — |
 | UC-22 MCP server | JTBD-01, 02, 03 | A-02, A-03 | S-1 ✓, S-2 ✓, S-3 ✗ | n/a | `tests/aprilcam/mcp/test_integration.py::test_golden_path_against_a_fake_daemon`, `tests/aprilcam/mcp/test_integration.py::test_daemon_restart_mid_session_fails_then_recovers`, `tests/aprilcam/mcp/test_integration.py::test_no_daemon_at_startup_then_recovers_once_one_starts` |
 | UC-23 Push config | JTBD-05 | A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗, S-5 ✗ | no | — |

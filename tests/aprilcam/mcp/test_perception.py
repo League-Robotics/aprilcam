@@ -267,6 +267,34 @@ async def test_get_tags_returns_the_tag_frame(tmp_path):
     assert daemon.requested_camera == "arducam-ov9782-usb-camera"
 
 
+async def test_get_tags_carries_image_yaw_deg_through_the_mcp_round_trip(tmp_path):
+    """Ticket 039-002 acceptance criterion: ``image_yaw_deg`` must
+    survive the real MCP round trip (FastMCP's ``CallToolRequest``
+    handler and its pydantic-based structured-output serialization),
+    not merely exist on the source dataclass. This is a stub/fake
+    ``Daemon`` -- it does not exercise the separate gRPC proto boundary
+    ``daemon/rpc.py``/``client/models.py`` own (covered by
+    ``tests/aprilcam/client/test_daemon_client.py``'s real round trip)."""
+    record = TagRecord(
+        tag=TagId(TagFamily.APRILTAG, 7),
+        world=None,
+        heading_rad=None,
+        world_velocity=None,
+        speed=None,
+        timestamp=0.0,
+        calibrated=False,
+        image_yaw_deg=42.5,
+    )
+    daemon = _FakeDaemon(tag_frame=TagFrame(tags=(record,), timestamp=0.0, frame_index=0))
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(server, "get_tags", {"camera": "arducam-ov9782-usb-camera"})
+
+    assert result.root.isError is False
+    (tag,) = result.root.structuredContent["tags"]
+    assert tag["image_yaw_deg"] == 42.5
+
+
 async def test_get_tags_unknown_camera_surfaces_the_typed_error_with_available_list(tmp_path):
     daemon = _FakeDaemon(get_tags_raises=UnknownCamera("no-such-cam", ("arducam-ov9782-usb-camera",)))
     server, _ = _build(daemon, tmp_path)
@@ -305,6 +333,29 @@ async def test_get_tag_returns_the_matching_record(tmp_path):
     assert daemon.requested_tag == TagId(TagFamily.ARUCO, 5)
 
 
+async def test_get_tag_carries_image_yaw_deg_through_the_mcp_round_trip(tmp_path):
+    """Ticket 039-002 acceptance criterion, ``get_tag`` variant."""
+    record = TagRecord(
+        tag=TagId(TagFamily.ARUCO, 5),
+        world=None,
+        heading_rad=None,
+        world_velocity=None,
+        speed=None,
+        timestamp=0.0,
+        calibrated=False,
+        image_yaw_deg=-17.25,
+    )
+    daemon = _FakeDaemon(tag_record=record)
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(
+        server, "get_tag", {"camera": "arducam-ov9782-usb-camera", "family": "aruco", "number": 5}
+    )
+
+    assert result.root.isError is False
+    assert result.root.structuredContent["result"]["image_yaw_deg"] == -17.25
+
+
 async def test_get_tag_not_detected_returns_null_never_a_fabricated_origin(tmp_path):
     daemon = _FakeDaemon(tag_record=None)
     server, _ = _build(daemon, tmp_path)
@@ -336,6 +387,32 @@ async def test_get_tag_history_returns_every_frame(tmp_path):
     assert result.root.isError is False
     assert len(result.root.structuredContent["result"]) == 2
     assert daemon.requested_history_tag is None
+
+
+async def test_get_tag_history_carries_image_yaw_deg_through_the_mcp_round_trip(tmp_path):
+    """Ticket 039-002 acceptance criterion, ``get_tag_history`` variant --
+    the field must survive per historical frame, not just on the
+    current-state ``get_tags``/``get_tag`` tools."""
+    record = TagRecord(
+        tag=TagId(TagFamily.APRILTAG, 7),
+        world=None,
+        heading_rad=None,
+        world_velocity=None,
+        speed=None,
+        timestamp=0.0,
+        calibrated=False,
+        image_yaw_deg=88.0,
+    )
+    frames = (TagFrame(tags=(record,), timestamp=0.0, frame_index=0),)
+    daemon = _FakeDaemon(tag_history=frames)
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(server, "get_tag_history", {"camera": "arducam-ov9782-usb-camera"})
+
+    assert result.root.isError is False
+    (frame,) = result.root.structuredContent["result"]
+    (tag,) = frame["tags"]
+    assert tag["image_yaw_deg"] == 88.0
 
 
 async def test_get_tag_history_filters_by_family_and_number_together(tmp_path):

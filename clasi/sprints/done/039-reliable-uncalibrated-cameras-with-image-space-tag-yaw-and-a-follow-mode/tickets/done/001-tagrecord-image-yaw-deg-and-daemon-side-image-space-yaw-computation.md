@@ -1,7 +1,7 @@
 ---
 id: '001'
 title: TagRecord.image_yaw_deg and daemon-side image-space yaw computation
-status: open
+status: done
 use-cases: []
 depends-on: []
 github-issue: ''
@@ -52,23 +52,23 @@ overlay directory for the full rationale before implementing.
 
 ## Acceptance Criteria
 
-- [ ] `types.TagRecord` gains `image_yaw_deg: Optional[float] = None`,
+- [x] `types.TagRecord` gains `image_yaw_deg: Optional[float] = None`,
       documented with the sign convention (0 = top of image,
       clockwise-positive as seen on screen) directly in the class
       docstring, clearly distinguished from `yaw_rad`.
-- [ ] `daemon/detection.py`'s `_build_tag_record` computes
+- [x] `daemon/detection.py`'s `_build_tag_record` computes
       `image_yaw_deg` from `pixel_corners` whenever `pixel_corners` is
       not `None` — in **both** the calibrated and uncalibrated
       branches (a calibrated record also gets it; it never conflicts
       with or overrides `yaw_rad`).
-- [ ] `yaw_rad`'s existing behavior is completely unchanged — no
+- [x] `yaw_rad`'s existing behavior is completely unchanged — no
       change to `_front_edge_yaw`, no change to what world-calibrated
       records report.
-- [ ] Unit tests on recorded/synthetic `pixel_corners` sets cover the
+- [x] Unit tests on recorded/synthetic `pixel_corners` sets cover the
       four cardinal facings (front edge pointing up/right/down/left in
       image space) plus one oblique angle, asserting the exact
       `image_yaw_deg` value each produces.
-- [ ] A record with `pixel_corners is None` (should not occur in
+- [x] A record with `pixel_corners is None` (should not occur in
       practice, but the field must degrade safely) leaves
       `image_yaw_deg` as `None`, never a fabricated value.
 

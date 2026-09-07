@@ -135,7 +135,7 @@ def service(directories, registry, held_camera):
     cameras: Dict[str, Camera] = {slug: cam}
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(cameras.keys()),
+        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -534,6 +534,16 @@ def test_get_tags_round_trip_returns_a_tag_frame_of_honestly_uncalibrated_record
     assert record.pixel is not None
     assert record.pixel_corners is not None
     assert len(record.pixel_corners) == 4
+    # Ticket 039-002: image_yaw_deg is a real end-to-end RPC round-trip
+    # concern, not just a dataclass field -- daemon/rpc.py's
+    # _tag_record_to_proto and client/models.py's tag_record_from_proto
+    # both need an explicit case for it (aprilcam_v2.proto field 12),
+    # unlike the MCP/pydantic boundary where the field rides along for
+    # free. _detection(7)'s square corners give a known, non-degenerate
+    # front edge (front_left=(0,0), front_right=(10,0) -> straight
+    # "right" on screen -> 90.0 degrees per _image_space_yaw's
+    # convention), so this is not just "not None" but the exact value.
+    assert record.image_yaw_deg == pytest.approx(90.0)
 
 
 def test_get_tags_round_trip_empty_field_returns_empty_tag_frame(tag_client_factory):

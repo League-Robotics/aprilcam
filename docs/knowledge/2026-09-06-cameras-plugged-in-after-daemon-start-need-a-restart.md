@@ -45,3 +45,11 @@ for c in enumerate_cameras(): print(c.index, repr(c.name), c.vid, c.pid, c.path)
 
 If this lists the camera and `aprilcam camera list` does not, the
 daemon's device list is stale; restart it.
+
+## See also
+
+- `2026-09-06-usb-hub-bandwidth-flapping-with-five-cameras-on-one-root-port.md`
+  — a related but distinct incident from the same day: *existing*
+  cameras briefly leaving and rejoining the bus (and coming back at
+  shifted indices) under USB bandwidth pressure, rather than a *new*
+  camera never being seen at all.

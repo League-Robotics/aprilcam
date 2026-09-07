@@ -181,7 +181,14 @@ MCP tool groups, registered in this order by `server.py`'s
 - **Perception** (`tools/perception.py`) — `list_cameras`,
   `probe_cameras`, `get_frame` (raw or deskewed, base64/file),
   `get_tags`, `get_tag`, `get_tag_history`, `where`. Read-only; never
-  mutates daemon state.
+  mutates daemon state. **Sprint 039**: `get_tags`/`get_tag`/
+  `get_tag_history` carry `TagRecord`'s new `image_yaw_deg` field with
+  no code change in this file — none of the three needs a `.to_dict()`
+  shim (§3's "fetch tools return `to_dict()`-equivalent shapes" rule
+  only applies where the wire shape has *diverged* from the dataclass
+  shape; `TagRecord` has not), so FastMCP's pydantic introspection
+  picks up the new field automatically, the same way it already picks
+  up every other `TagRecord` field.
 - **Configuration** (`tools/configuration.py`) — `get_camera_config`,
   `set_camera_config`, `reset_camera_config`, `get_playfield`,
   `set_playfield`, `list_playfields`, `calibrate`, `get_calibration`,

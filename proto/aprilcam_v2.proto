@@ -556,6 +556,19 @@ message TagRecord {
   // because an empty `TagFrame` is itself a valid answer).
   repeated WorldPoint world_corners = 10;
   repeated PixelPoint pixel_corners = 11;
+  // Sprint 039: a separate, diagnostic-only pixel-space yaw -- see
+  // aprilcam.types.TagRecord.image_yaw_deg's docstring for the sign
+  // convention. Populated whenever pixel_corners is, calibrated or
+  // not, specifically so an uncalibrated camera (no world frame to
+  // report yaw_rad in) still reports some orientation. This field
+  // widens an already-shipped message (field 12, additive-only per
+  // this file's own header rule); ticket 039-001 added the dataclass
+  // field first and this ticket (039-002) discovered, by writing a
+  // real end-to-end RPC round-trip test, that the field does not
+  // survive the wire without an explicit proto field -- daemon-
+  // DESIGN.md previously assumed otherwise (corrected alongside this
+  // change).
+  optional double image_yaw_deg = 12;
 }
 
 // Every tag detected in a single frame, with when it was captured.

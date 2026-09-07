@@ -574,6 +574,31 @@ def _front_edge_yaw(
     return math.atan2(front_right.y - front_left.y, front_right.x - front_left.x)
 
 
+def _image_space_yaw(
+    pixel_corners: Tuple[PixelPoint, PixelPoint, PixelPoint, PixelPoint]
+) -> float:
+    """``TagRecord.image_yaw_deg`` from the observed front edge, in raw
+    pixel space.
+
+    Distinct from :func:`_front_edge_yaw`: that function computes
+    ``yaw_rad`` from *world* corners (0 = east, CCW-positive). This one
+    computes a diagnostic, pixel-space angle from ``pixel_corners`` (the
+    same ``corners[0]→corners[1]`` front edge -- ``types.TagRecord``'s
+    corner-order contract), for cameras that may have no world frame at
+    all. Convention (stakeholder-fixed, ``types.TagRecord`` docstring):
+    0 = the front edge pointing toward the top of the image,
+    clockwise-positive as seen on screen. Image y grows downward, so
+    ``atan2(dx, -dy)`` (rather than the world convention's
+    ``atan2(dy, dx)``) is what turns clockwise-on-screen into
+    increasing degrees: up (0, -1) -> 0 deg, right (1, 0) -> 90 deg,
+    down (0, 1) -> 180 deg, left (-1, 0) -> -90 deg.
+    """
+    front_left, front_right = pixel_corners[0], pixel_corners[1]
+    dx = front_right.x - front_left.x
+    dy = front_right.y - front_left.y
+    return math.degrees(math.atan2(dx, -dy))
+
+
 def _build_tag_record(
     detection: Detection, *, timestamp: float, calibration: Optional[Calibration]
 ) -> TagRecord:
@@ -582,13 +607,18 @@ def _build_tag_record(
     *calibration* ``None`` reproduces sprint 021's honestly-uncalibrated
     output exactly: ``world``/``heading_rad``/``world_velocity``/
     ``speed``/``yaw_rad``/``world_corners`` all ``None``, ``calibrated``
-    ``False``, only ``pixel``/``pixel_corners`` populated.
+    ``False``, only ``pixel``/``pixel_corners`` populated -- plus, as of
+    sprint 039, ``image_yaw_deg`` (:func:`_image_space_yaw`), since that
+    field is a raw-pixel diagnostic that needs no world frame at all.
 
     A real *calibration* populates ``world`` (via ``Calibration.to_world``
     on the detection's centre), ``world_corners`` (the same conversion
     applied to each of the four ``pixel_corners`` in order -- never
     independently recomputed), and ``yaw_rad`` (:func:`_front_edge_yaw`
     on those ``world_corners``), and sets ``calibrated=True``.
+    ``image_yaw_deg`` is populated here too, from ``pixel_corners`` --
+    it never conflicts with or overrides ``yaw_rad``, and ``yaw_rad``'s
+    computation is completely unaffected by its presence.
     ``heading_rad``/``world_velocity``/``speed`` are left ``None`` here
     regardless -- :meth:`DetectionEngine.run_burst` fills those in once
     it has assembled this tag's world-position history, which this
@@ -597,6 +627,7 @@ def _build_tag_record(
     """
     tag = TagId(family=detection.family, number=detection.number)
     pixel_corners = _pixel_corners(detection.corners)
+    image_yaw_deg = _image_space_yaw(pixel_corners)
 
     if calibration is None:
         return TagRecord(
@@ -611,6 +642,7 @@ def _build_tag_record(
             yaw_rad=None,
             world_corners=None,
             pixel_corners=pixel_corners,
+            image_yaw_deg=image_yaw_deg,
         )
 
     world = calibration.to_world(detection.center)
@@ -632,6 +664,7 @@ def _build_tag_record(
         yaw_rad=_front_edge_yaw(world_corners),
         world_corners=world_corners,
         pixel_corners=pixel_corners,
+        image_yaw_deg=image_yaw_deg,
     )
 
 

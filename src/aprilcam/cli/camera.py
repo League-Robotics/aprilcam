@@ -48,6 +48,26 @@ uncalibrated by construction (``daemon/detection.py`` never sets
 plus pixel coordinates and never falls through to printing
 ``None``-derived zeros as if they were a world position
 (UC-20.S-3, the ``TagRecord`` "world-first contract" in ``types.py``).
+
+**``camera tags --follow``/``--json`` (sprint 039, ticket 005).**
+``cmd_tags`` gains a continuous mode: instead of one ``get_tags`` burst,
+``--follow`` opens ``Daemon.stream_tags`` (``client.streams.
+SocketTagStream``, already used by nothing in this package before this
+ticket) and prints rows until Ctrl-C. This is the mode the daemon's
+multi-frame confirmation filter (``_confirm_detections``) was designed
+for -- a one-shot call after any gap reports ``(no tags detected)``
+even with tags plainly visible, because the confirmation streak has to
+rebuild from zero each isolated call, while a continuous stream lets it
+build up and stay confirmed. ``--follow`` is read-only but is still
+refused together with ``--all`` -- a documented, narrow exception to
+"fan-out is restricted to read-only commands" (``cli-DESIGN.md`` §3):
+``fan_out``'s per-target "call, render, move on" shape cannot interleave
+several concurrently-blocking streams, so the combination is refused up
+front, before any connection, mirroring ``cmd_view``'s single-target
+refusal. ``--json`` is this package's first machine-readable output
+mode, scoped narrowly to ``camera tags``: one ``json.dumps(...)`` line
+per frame (JSON Lines with ``--follow``; a single line for the one-shot
+burst without it), never changing the human-formatted default's output.
 """
 
 from __future__ import annotations
@@ -77,7 +97,7 @@ from aprilcam.cli import locate as locate_cli
 from aprilcam.client.discovery import Discovery
 from aprilcam.config.interfaces import ConfigLoader
 from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
-from aprilcam.daemon.interfaces import Daemon
+from aprilcam.daemon.interfaces import Daemon, TagStream
 from aprilcam.errors import AprilCamError
 from aprilcam.types import TagFrame, TagRecord
 from aprilcam.view import viewer
@@ -246,6 +266,14 @@ def _format_tag_row(record: TagRecord) -> str:
     module's docstring), while ``yaw_rad`` is a per-frame orientation
     reading with no such motion precondition and stays populated
     whether or not the tag is moving.
+
+    The uncalibrated branch (ticket 039-002) prints ``record.
+    image_yaw_deg`` -- a *different* field from ``yaw_rad``, in a
+    different (image-space, clockwise) convention (see ``TagRecord``'s
+    docstring) -- since an uncalibrated camera has no world frame to
+    report ``yaw_rad`` in at all. It is never printed alongside the
+    calibrated branch's ``yaw=`` field; that would be two conflicting
+    "yaw" numbers on the same line.
     """
     header = f"{record.tag.family.value} {record.tag.number}"
     if record.calibrated and record.world is not None:
@@ -260,15 +288,71 @@ def _format_tag_row(record: TagRecord) -> str:
         pixel = f"({record.pixel.x:.1f}, {record.pixel.y:.1f})"
     else:
         pixel = "(unavailable)"
-    return f"  {header:<14} UNCALIBRATED -- pixel={pixel}"
+    image_yaw = "-" if record.image_yaw_deg is None else f"{record.image_yaw_deg:.1f}°"
+    return f"  {header:<14} UNCALIBRATED -- pixel={pixel} yaw={image_yaw}"
 
 
-def _print_tags(frame: TagFrame) -> None:
-    """A ``get_tags`` result, one row per detected tag. An empty frame
+def _tag_record_to_json(record: TagRecord) -> dict:
+    """One ``TagRecord`` as a JSON-safe ``dict`` -- ``--json``'s per-tag
+    payload, nested under a frame's ``"tags"`` list (see
+    ``_frame_to_json``). Carries both the calibrated fields
+    (``world``/``yaw_rad``/``heading_rad``/``speed``) and the
+    uncalibrated ones (``pixel``/``image_yaw_deg``) unconditionally,
+    each ``None`` when not applicable -- unlike ``_format_tag_row``'s
+    either/or human rendering, a machine consumer gets every field the
+    record actually carries and decides for itself what to use, keyed
+    off ``calibrated`` the same way the record itself is."""
+    return {
+        "tag": {"family": record.tag.family.value, "number": record.tag.number},
+        "calibrated": record.calibrated,
+        "pixel": None if record.pixel is None else {"x": record.pixel.x, "y": record.pixel.y},
+        "image_yaw_deg": record.image_yaw_deg,
+        "world": None if record.world is None else {"x": record.world.x, "y": record.world.y},
+        "yaw_rad": record.yaw_rad,
+        "heading_rad": record.heading_rad,
+        "speed": record.speed,
+    }
+
+
+def _frame_to_json(frame: TagFrame) -> dict:
+    """One ``TagFrame`` as a JSON-safe ``dict`` -- ``--json``'s unit of
+    output. One of these becomes one printed line (``json.dumps``, no
+    indentation) -- JSON Lines with ``--follow`` (one line per streamed
+    frame), or a single line for the one-shot burst without it
+    (``cli-DESIGN.md`` §3's "this package's first machine-readable
+    output mode"). ``calibration_stale`` rides along here exactly as it
+    does in-band on ``TagFrame`` itself (UC-11.S-3) -- a stream consumer
+    has no other side channel to learn calibration went stale."""
+    return {
+        "timestamp": frame.timestamp,
+        "frame_index": frame.frame_index,
+        "calibration_stale": frame.calibration_stale,
+        "tags": [_tag_record_to_json(record) for record in frame.tags],
+    }
+
+
+def _format_follow_row(record: TagRecord, timestamp: float) -> str:
+    """One ``--follow`` row: a frame timestamp (seconds, millisecond
+    precision) prefixed onto ``_format_tag_row``'s existing line, so a
+    recording session can tell which frame each row came from without
+    changing that helper's own column layout."""
+    return f"{timestamp:.3f}  {_format_tag_row(record)}"
+
+
+def _print_tags(frame: TagFrame, *, as_json: bool = False) -> None:
+    """A ``get_tags`` result, one row per detected tag -- or, with
+    ``as_json``, one ``json.dumps(...)`` line for the whole frame
+    (``_frame_to_json``). An empty frame in the default (human) mode
     prints an explicit ``(no tags detected)`` rather than nothing at
     all -- an empty field is a normal, successful state, not an error
     (UC-20's failure mode: "nothing detected" must never read as a
-    stack trace or a blank screen someone has to guess about)."""
+    stack trace or a blank screen someone has to guess about). ``--json``
+    has no such placeholder: an empty frame is simply
+    ``{"tags": [], ...}``, itself already an explicit, parseable "empty"
+    signal."""
+    if as_json:
+        print(json.dumps(_frame_to_json(frame)))
+        return
     if not frame.tags:
         print("  (no tags detected)")
         return
@@ -276,15 +360,77 @@ def _print_tags(frame: TagFrame) -> None:
         print(_format_tag_row(record))
 
 
+def _cmd_tags_follow(args: argparse.Namespace, discovery: Discovery) -> int:
+    """The ``--follow`` loop body of ``cmd_tags`` (sprint 039, ticket
+    005): a continuous subscription via ``Daemon.stream_tags`` (UC-11)
+    instead of one ``get_tags`` burst, printing one row per tag per
+    frame (or one JSON line per frame with ``--json``) until Ctrl-C.
+
+    Connecting and opening the stream share one ``try``/``except``:
+    either can raise a typed ``AprilCamError`` (an unknown camera, a
+    connection failure) and both go through the same ``report_error``
+    path every other ``cmd_*`` uses -- only the interrupt loop itself
+    treats Ctrl-C specially.
+
+    ``KeyboardInterrupt`` ends the loop cleanly: the stream is closed
+    (``TagStream.close()``) and ``EXIT_OK`` is returned -- the same
+    "Ctrl-C is a normal way to end a following command" convention
+    ``camera view``'s window-close path already establishes, never a
+    traceback. ``stream.close()`` runs in a ``finally`` so it fires
+    whether the loop ended via Ctrl-C or ran to completion (a stream
+    that closes itself, e.g. a clean daemon-side disconnect).
+    """
+    try:
+        stream: TagStream = discovery.connect(args.daemon).stream_tags(args.camera)
+    except AprilCamError as exc:
+        return report_error(exc)
+
+    try:
+        for frame in stream:
+            if args.json:
+                print(json.dumps(_frame_to_json(frame)))
+            else:
+                for record in frame.tags:
+                    print(_format_follow_row(record, frame.timestamp))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stream.close()
+
+    return EXIT_OK
+
+
 def cmd_tags(
     args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
 ) -> int:
-    """``aprilcam camera tags <camera> [-d HOST] [--all]``."""
+    """``aprilcam camera tags <camera> [-d HOST] [--all] [--follow] [--json]``.
+
+    ``--follow``/``--json`` are sprint 039 ticket 005 additions -- see
+    this module's docstring and ``_cmd_tags_follow`` for the design.
+    ``--follow --all`` is refused before ``discovery_factory`` is even
+    called, matching ``cmd_view``'s "refuse before any connection"
+    shape for its own single-target restriction. The pre-existing
+    one-shot path below (no ``--follow``) is otherwise unchanged --
+    ``--json`` is the only new behavior it gains, gated on the flag.
+    """
+    if args.follow and args.all:
+        print(
+            "error: 'camera tags --follow' is single-target -- a blocking "
+            "stream loop cannot fan out the way a one-shot query can (UC-11 "
+            "fan-out rule). Drop --all and run --follow once per daemon.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+
     discovery = discovery_factory()
+
+    if args.follow:
+        return _cmd_tags_follow(args, discovery)
+
     if args.all:
         def render(label: str, frame: TagFrame) -> None:
             print(f"{label}:")
-            _print_tags(frame)
+            _print_tags(frame, as_json=args.json)
 
         return fan_out(discovery, lambda daemon: daemon.get_tags(args.camera), render)
 
@@ -292,7 +438,7 @@ def cmd_tags(
         frame = discovery.connect(args.daemon).get_tags(args.camera)
     except AprilCamError as exc:
         return report_error(exc)
-    _print_tags(frame)
+    _print_tags(frame, as_json=args.json)
     return EXIT_OK
 
 
@@ -493,7 +639,22 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     p_tags = sub.add_parser("tags", help="list currently detected tags")
     p_tags.add_argument("camera", help="camera name (slug or persistent number)")
     add_daemon_option(p_tags)
-    add_all_option(p_tags)
+    add_all_option(p_tags, note=" (refused with --follow -- a stream cannot fan out)")
+    p_tags.add_argument(
+        "--follow",
+        action="store_true",
+        help="subscribe to the tag stream and print rows continuously until "
+        "Ctrl-C, instead of one snapshot -- the daemon's multi-frame "
+        "confirmation filter needs consecutive frames to reliably report a "
+        "tag, so this is the mode that actually sees tags reliably; "
+        "single-target, refused together with --all",
+    )
+    p_tags.add_argument(
+        "--json",
+        action="store_true",
+        help="print one JSON object per line instead of human-aligned text "
+        "(one line for a one-shot snapshot; one line per frame with --follow)",
+    )
     p_tags.set_defaults(func=cmd_tags)
 
     p_config = sub.add_parser(
