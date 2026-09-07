@@ -530,6 +530,116 @@ def test_camera_for_wires_identity_safe_index_resolver_into_opencv_backend(
     assert cam._backend._index_resolver() == 3  # noqa: SLF001
 
 
+def test_camera_for_wires_identity_safe_index_resolver_into_worker_backend(
+    directories, registry, monkeypatch
+):
+    """Team-lead review finding, sprint 039 ticket 003 (corrected): this
+    ticket originally wired index_resolver/expected_hardware_key onto
+    the OpenCVBackend branch only, but
+    ``default_capture_backend_factory`` selects ``WorkerBackend``
+    *unconditionally* on macOS -- the exact backend the source incident
+    hit (a respawn at a shifted index served a different physical
+    camera's frames). ``_camera_for`` must rebuild a WorkerBackend the
+    same way it already rebuilds an OpenCVBackend.
+
+    ``WorkerBackend.open`` is monkeypatched to a stub that marks the
+    backend "open" without spawning a real child process -- this test
+    is only about *_camera_for's wiring*, not the worker process
+    lifecycle itself (covered exhaustively, headlessly, in
+    ``tests/aprilcam/camera/backends/test_worker_backend.py``).
+    """
+    from aprilcam.camera.backends.worker_backend import WorkerBackend
+
+    class _FakeProcess:
+        def poll(self) -> Optional[int]:
+            return None
+
+    def _fake_open(self: WorkerBackend) -> None:
+        self._process = _FakeProcess()  # noqa: SLF001
+
+    monkeypatch.setattr(WorkerBackend, "open", _fake_open)
+
+    identity = _identity("avf:ARDUCAM-ID", "Arducam OV9782 USB Camera")
+    slug = registry.resolve(identity)
+    enumeration = {0: identity}
+
+    discovery = CameraDiscovery(
+        registry, identity_source=lambda: {}, backend_factory=lambda i: FakeBackend()
+    )
+    service = DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        identity_source=lambda: dict(enumeration),
+        backend_factory=lambda index: WorkerBackend(index),
+        control_backend_factory=lambda device_name: None,
+    )
+
+    cam = service._camera_for(slug)  # noqa: SLF001
+
+    assert isinstance(cam._backend, WorkerBackend)  # noqa: SLF001
+    assert cam._backend._expected_hardware_key == identity.hardware_key  # noqa: SLF001
+    assert cam._backend._index_resolver is not None  # noqa: SLF001
+    assert cam._backend._index_resolver() == 0  # noqa: SLF001
+
+    # The identity source now enumerates this hardware key at a
+    # different index (an enumeration shift) -- the resolver closure
+    # reflects that immediately, exactly like the OpenCVBackend branch.
+    enumeration.clear()
+    enumeration[3] = identity
+    assert cam._backend._index_resolver() == 3  # noqa: SLF001
+
+
+def test_camera_for_default_wiring_reaches_worker_backend_on_darwin(
+    directories, registry, monkeypatch
+):
+    """Production wiring, no injected backend_factory: on macOS the real
+    default_capture_backend_factory selects WorkerBackend, and
+    _camera_for's identity-safe-reopen branch must reach it -- this is
+    the exact path the source incident hit (the OpenCVBackend-only fix
+    never ran on this platform's real default backend at all)."""
+    from aprilcam.camera.backends.worker_backend import WorkerBackend
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    # Isolate from whatever this host/dev-shell happens to have set --
+    # this test asserts the *unforced* platform default.
+    monkeypatch.delenv("APRILCAM_CAPTURE_BACKEND", raising=False)
+
+    class _FakeProcess:
+        def poll(self) -> Optional[int]:
+            return None
+
+    def _fake_open(self: WorkerBackend) -> None:
+        self._process = _FakeProcess()  # noqa: SLF001
+
+    monkeypatch.setattr(WorkerBackend, "open", _fake_open)
+
+    identity = _identity("avf:ARDUCAM-ID", "Arducam OV9782 USB Camera")
+    slug = registry.resolve(identity)
+    enumeration = {0: identity}
+
+    discovery = CameraDiscovery(
+        registry, identity_source=lambda: {}, backend_factory=lambda i: FakeBackend()
+    )
+    service = DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        identity_source=lambda: dict(enumeration),
+        # No backend_factory override -- exercises the real
+        # _default_backend_factory -> default_capture_backend_factory
+        # selection.
+        control_backend_factory=lambda device_name: None,
+    )
+
+    cam = service._camera_for(slug)  # noqa: SLF001
+
+    assert isinstance(cam._backend, WorkerBackend)  # noqa: SLF001
+    assert cam._backend._expected_hardware_key == identity.hardware_key  # noqa: SLF001
+    assert cam._backend._index_resolver is not None  # noqa: SLF001
+    assert cam._backend._index_resolver() == 0  # noqa: SLF001
+
+
 def test_get_frame_deskewed_raises_not_calibrated(service, held_camera):
     _, slug, _ = held_camera
     with pytest.raises(NotCalibrated):

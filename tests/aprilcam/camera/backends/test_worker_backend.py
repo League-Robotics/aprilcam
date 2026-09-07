@@ -15,24 +15,38 @@ One ``@pytest.mark.camera`` test (at the bottom) additionally exercises
 own real-hardware convention -- it skips cleanly whenever no matching
 camera is enumerated, which is always true in an agent session (agents
 never open real cameras, per project rules).
+
+**Identity-safe reopen (sprint 039 ticket 003, corrected)** tests near
+the bottom of this file exercise ``index_resolver``/
+``expected_hardware_key`` -- the same additive contract
+``opencv_backend.py``'s ``OpenCVBackend`` has, wrongly scoped out of
+this class by the ticket's first pass even though
+``default_capture_backend_factory`` selects ``WorkerBackend``
+unconditionally on macOS. The index-resolution tests fake
+``subprocess.Popen`` (no real worker process needed to prove *which*
+index gets spawned); the post-open identity-verification tests spawn a
+real ``--synthetic`` worker (still no camera hardware) since the
+verification itself runs after a real first-frame handshake.
 """
 
 from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import time
 from multiprocessing.shared_memory import SharedMemory
-from typing import Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import numpy as np
 import pytest
 
-from aprilcam.camera.backends import CaptureBackend
+from aprilcam.camera.backends import CameraNotEnumeratedError, CaptureBackend
 from aprilcam.camera.backends.worker_backend import (
     WorkerBackend,
     WorkerStartupError,
 )
+from aprilcam.camera.interfaces import CameraIdentity
 
 #: Kept short so tests run fast: every synthetic worker in this file
 #: publishes at a high enough rate that "wait for the next frame"
@@ -387,6 +401,205 @@ def test_open_reports_exit_code_and_stderr_when_child_dies_before_connecting():
     assert "invalid int value" in message
     assert elapsed < 5.0, f"open() waited {elapsed:.1f}s instead of failing on the child's exit"
     assert backend.is_open is False
+
+
+# ---------------------------------------------------------------------------
+# Identity-safe reopen (sprint 039 ticket 003, corrected) -- WorkerBackend
+# gets the same index_resolver/expected_hardware_key contract OpenCVBackend
+# already has (tests/aprilcam/camera/backends/test_opencv_backend.py). The
+# fresh-index and not-enumerated tests fake subprocess.Popen entirely -- no
+# real worker process, no real camera -- since this class's own open() only
+# needs to be observed to call the resolver and use its result *before*
+# building the spawn command. The identity-verification tests spawn a real
+# --synthetic worker (still no camera hardware) because the check itself
+# runs after a genuine first-frame handshake.
+# ---------------------------------------------------------------------------
+
+
+class _NonConnectingPopen:
+    """Fake ``subprocess.Popen``: never actually spawns a process or
+    connects to the control channel -- just records the command it was
+    given (so a test can inspect exactly which ``--index`` was spawned)
+    and reports as perpetually running (``poll()`` -> ``None``), so
+    ``WorkerBackend.open()`` takes the ordinary connect-timeout path
+    (already exercised against a *real* subprocess by
+    ``test_open_raises_worker_startup_error_on_connect_timeout`` above)
+    and cleans up the same way it would for a real hung child.
+    """
+
+    instances: List["_NonConnectingPopen"] = []
+
+    def __init__(self, cmd: List[str], **kwargs: Any) -> None:
+        self.args = cmd
+        self.stdout = None
+        self.stderr = None
+        self.pid = -1
+        type(self).instances.append(self)
+
+    def poll(self) -> Optional[int]:
+        return None
+
+    def wait(self, timeout: Optional[float] = None) -> None:
+        return None
+
+    def terminate(self) -> None:
+        pass
+
+    def kill(self) -> None:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _reset_non_connecting_popen_instances():
+    _NonConnectingPopen.instances = []
+    yield
+
+
+def _spawned_index(cmd: List[str]) -> int:
+    return int(cmd[cmd.index("--index") + 1])
+
+
+def test_open_resolves_index_fresh_before_every_spawn_not_a_stale_one(monkeypatch):
+    """Regression (the exact source incident, corrected onto
+    WorkerBackend): open() must call index_resolver() and use its fresh
+    return value when building the spawn command -- never the index from
+    construction or from a previous open, which a sibling camera's USB
+    churn may have shifted to a *different* physical camera in the
+    meantime."""
+    captured: List[int] = []
+
+    class _RecordingPopen(_NonConnectingPopen):
+        def __init__(self, cmd: List[str], **kwargs: Any) -> None:
+            super().__init__(cmd, **kwargs)
+            captured.append(_spawned_index(cmd))
+
+    monkeypatch.setattr(subprocess, "Popen", _RecordingPopen)
+
+    resolved = iter([3, 7])
+    backend = WorkerBackend(0, index_resolver=lambda: next(resolved), startup_timeout=0.01)
+
+    with pytest.raises(WorkerStartupError, match="did not connect"):
+        backend.open()
+    with pytest.raises(WorkerStartupError, match="did not connect"):
+        backend.open()
+
+    # The second spawn must carry the freshly-resolved index (7), never
+    # the first call's index (3) and never the construction-time index (0).
+    assert captured == [3, 7]
+    assert backend._index == 7  # noqa: SLF001 -- private, test-only introspection
+
+
+def test_index_resolver_absent_preserves_todays_fixed_index_behaviour(monkeypatch):
+    """No index_resolver (every existing direct WorkerBackend(index)
+    construction) -- the spawned index never changes across attempts."""
+    captured: List[int] = []
+
+    class _RecordingPopen(_NonConnectingPopen):
+        def __init__(self, cmd: List[str], **kwargs: Any) -> None:
+            super().__init__(cmd, **kwargs)
+            captured.append(_spawned_index(cmd))
+
+    monkeypatch.setattr(subprocess, "Popen", _RecordingPopen)
+
+    backend = WorkerBackend(3, startup_timeout=0.01)
+    with pytest.raises(WorkerStartupError):
+        backend.open()
+    with pytest.raises(WorkerStartupError):
+        backend.open()
+
+    assert captured == [3, 3]
+
+
+def test_open_raises_camera_not_enumerated_when_resolver_returns_none(monkeypatch):
+    """The other half of the core regression: the hardware key does not
+    reappear anywhere. open() must report CameraNotEnumeratedError --
+    never fall back to spawning the stale/last-known index, which a
+    different camera might now occupy."""
+
+    def _must_not_spawn(cmd: List[str], **kwargs: Any) -> None:
+        raise AssertionError("must not spawn a worker when not currently enumerated")
+
+    monkeypatch.setattr(subprocess, "Popen", _must_not_spawn)
+
+    backend = WorkerBackend(0, index_resolver=lambda: None)
+    with pytest.raises(CameraNotEnumeratedError):
+        backend.open()
+    assert backend.is_open is False
+
+
+def _identity(hardware_key: str) -> CameraIdentity:
+    return CameraIdentity(
+        slug="camera",
+        device_name="Camera",
+        hardware_key=hardware_key,
+        source="avfoundation_unique_id",
+        is_fallback=False,
+    )
+
+
+def test_post_open_identity_mismatch_is_refused_and_kills_the_worker(monkeypatch):
+    """AC3: a deliberately mismatched post-open identity is refused --
+    the just-spawned worker is killed (not left running/leaked), and the
+    open() call raises rather than silently completing."""
+    from aprilcam.camera.backends import worker_backend as wb
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(wb, "resolve_identity", lambda index, *a, **k: _identity("avf:OBSERVED"))
+
+    backend = WorkerBackend(
+        0, synthetic=_FAST_SYNTHETIC, expected_hardware_key="avf:EXPECTED", read_timeout=0.5
+    )
+    with pytest.raises(RuntimeError, match="post-open identity mismatch"):
+        backend.open()
+
+    assert backend.is_open is False
+
+
+def test_post_open_identity_match_completes_the_open(monkeypatch):
+    from aprilcam.camera.backends import worker_backend as wb
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr(wb, "resolve_identity", lambda index, *a, **k: _identity("avf:EXPECTED"))
+
+    backend = WorkerBackend(
+        0, synthetic=_FAST_SYNTHETIC, expected_hardware_key="avf:EXPECTED", read_timeout=0.5
+    )
+    try:
+        backend.open()
+        assert backend.is_open is True
+        assert _read_until(backend) is not None
+    finally:
+        backend.close()
+
+
+def test_identity_check_skipped_off_darwin(monkeypatch):
+    """Every other platform: no reliable per-index identity read after
+    open exists, so the check is skipped entirely -- a mismatched fake
+    identity here must not raise."""
+    from aprilcam.camera.backends import worker_backend as wb
+
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr(wb, "resolve_identity", lambda index, *a, **k: _identity("avf:OBSERVED"))
+
+    backend = WorkerBackend(
+        0, synthetic=_FAST_SYNTHETIC, expected_hardware_key="avf:EXPECTED", read_timeout=0.5
+    )
+    try:
+        backend.open()  # does not raise
+        assert backend.is_open is True
+    finally:
+        backend.close()
+
+
+def test_identity_check_skipped_when_no_expected_hardware_key_given():
+    """AC5/AC6: every existing direct WorkerBackend(...) construction
+    (no expected_hardware_key at all) is completely unaffected."""
+    backend = WorkerBackend(synthetic=_FAST_SYNTHETIC, read_timeout=0.5)
+    try:
+        backend.open()
+        assert backend.is_open is True
+    finally:
+        backend.close()
 
 
 # ---------------------------------------------------------------------------
