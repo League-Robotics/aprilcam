@@ -1,7 +1,7 @@
 ---
 id: '005'
 title: camera tags --follow and --json streaming mode
-status: open
+status: done
 use-cases: []
 depends-on:
 - '002'
@@ -59,23 +59,23 @@ method. Read this sprint's `design/cli-DESIGN.md` overlay's `--follow`/
 
 ## Acceptance Criteria
 
-- [ ] `aprilcam camera tags <camera> --follow` streams rows
+- [x] `aprilcam camera tags <camera> --follow` streams rows
       continuously (one per tag per frame) until Ctrl-C, printing tag
       id, timestamp, pixel position, and `image_yaw_deg`, using no
       manual repeated invocation.
-- [ ] `--json` emits one machine-parseable JSON object per line with
+- [x] `--json` emits one machine-parseable JSON object per line with
       the same fields — verified by a test that parses each printed
       line with `json.loads` and checks the expected keys.
-- [ ] Ctrl-C (`KeyboardInterrupt`) during `--follow` closes the stream
+- [x] Ctrl-C (`KeyboardInterrupt`) during `--follow` closes the stream
       cleanly and exits `EXIT_OK`, not a traceback.
-- [ ] `--follow --all` (and `--json --all`) is refused before any
+- [x] `--follow --all` (and `--json --all`) is refused before any
       connection is attempted, with a message naming the restriction —
       argparse-level or an explicit client-side check, either is fine
       as long as it fires before `discovery.connect(...)`.
-- [ ] One-shot `camera tags` (no `--follow`) is completely unchanged in
+- [x] One-shot `camera tags` (no `--follow`) is completely unchanged in
       behavior — this ticket adds a new code path, it does not modify
       the existing one.
-- [ ] A fake-daemon/fake-stream test drives `cmd_tags` with `--follow`
+- [x] A fake-daemon/fake-stream test drives `cmd_tags` with `--follow`
       through a few synthetic `TagFrame`s and a simulated
       `KeyboardInterrupt`, asserting the printed output and clean exit
       — this cannot be a real-hardware test (no `@pytest.mark.camera`),
