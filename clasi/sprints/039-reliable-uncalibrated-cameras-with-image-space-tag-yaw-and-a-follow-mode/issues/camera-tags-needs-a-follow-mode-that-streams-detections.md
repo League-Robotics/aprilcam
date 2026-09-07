@@ -1,5 +1,8 @@
 ---
-status: pending
+status: in-progress
+sprint: 039
+tickets:
+- 039-005
 ---
 
 # `camera tags` needs a `--follow` mode that streams detections instead of one burst per call

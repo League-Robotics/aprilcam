@@ -1,5 +1,8 @@
 ---
-status: pending
+status: in-progress
+sprint: 039
+tickets:
+- 039-003
 ---
 
 # Camera reopen reuses a stale OpenCV index and can silently open a different physical camera

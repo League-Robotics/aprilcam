@@ -1,5 +1,8 @@
 ---
-status: pending
+status: in-progress
+sprint: 039
+tickets:
+- 039-004
 ---
 
 # `camera probe` reports a held-open camera as usable without checking that it delivers frames

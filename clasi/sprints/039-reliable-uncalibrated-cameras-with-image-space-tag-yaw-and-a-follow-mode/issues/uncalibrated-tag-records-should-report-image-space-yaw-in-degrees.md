@@ -1,5 +1,9 @@
 ---
-status: pending
+status: in-progress
+sprint: 039
+tickets:
+- 039-001
+- 039-002
 ---
 
 # Uncalibrated tag records should report an image-space yaw, and the CLI should print it in degrees
