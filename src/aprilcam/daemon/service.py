@@ -107,6 +107,7 @@ from aprilcam.camera.backends import (
     resolve_capture_backend,
 )
 from aprilcam.camera.backends.libcamera import LibcameraDevice
+from aprilcam.camera.backends.opencv_backend import OpenCVBackend
 from aprilcam.camera.backends.uvc_util import UvcUtilBackend
 from aprilcam.camera.camera import FLATFIELD_FILENAME, Camera
 from aprilcam.camera.discovery import CameraDiscovery
@@ -2738,6 +2739,31 @@ class DaemonService(Daemon):
         reliably (that class's own module docstring). Every other
         identity source is unaffected.
 
+        **Identity-safe reopen (sprint 039).** When the backend
+        :func:`~aprilcam.camera.backends.resolve_capture_backend` returns
+        is an :class:`~aprilcam.camera.backends.opencv_backend.OpenCVBackend`
+        (the common case, and the only backend this sprint's fix
+        targets -- see ``camera-DESIGN.md``'s "Identity-safe reopen"
+        section and this ticket's own "Scope note"), it is rebuilt with
+        its ``index_resolver``/``expected_hardware_key`` wired: a closure
+        over *this exact call's* ``record`` that re-invokes
+        :meth:`_index_for` fresh every time it is called, plus
+        ``record.hardware_key`` for the post-open AVFoundation check.
+        Rebuilding (rather than mutating the instance
+        ``resolve_capture_backend`` returned) is safe and cheap --
+        constructing an ``OpenCVBackend`` performs no I/O -- and this is
+        what makes *every later* self-heal/stall reopen of this ``Camera``
+        (``Camera._attempt_self_heal``/``check_stall``, which only ever
+        call ``close()``/``open()`` on this one backend object) re-resolve
+        the index fresh too, not just this first open: the resolver
+        closure is called again inside ``OpenCVBackend.open()`` itself,
+        every time it runs. Reuses :meth:`_index_for` -- the same helper
+        that already resolved *index* just above -- rather than a second
+        implementation of "find the current index for this hardware
+        key". A camera resolved to any other backend (``WorkerBackend``,
+        ``V4l2LoopbackBackend``, or a test's injected fake) is untouched
+        by this branch.
+
         **Apply-on-open (ticket 023-003).** A freshly-opened camera
         checks :attr:`_camera_configs` for a config already held under
         its slug -- populated either by a live :meth:`set_camera_config`
@@ -2773,14 +2799,27 @@ class DaemonService(Daemon):
         if index is None:
             raise CameraNotPresent(record.slug)
 
+        capture_backend = resolve_capture_backend(
+            record.hardware_key,
+            index,
+            backend_factory=self._backend_factory,
+            list_loopback_cameras=self._list_loopback_cameras,
+        )
+        if isinstance(capture_backend, OpenCVBackend):
+            # Sprint 039 identity-safe reopen -- see this method's own
+            # docstring's "Identity-safe reopen" section for why this is
+            # a rebuild rather than a mutation, and why closing over
+            # `record` here is what makes every later self-heal/stall
+            # reopen of this Camera re-resolve fresh too.
+            capture_backend = OpenCVBackend(
+                index,
+                index_resolver=lambda: self._index_for(record),
+                expected_hardware_key=record.hardware_key,
+            )
+
         cam = Camera(
             record.slug,
-            resolve_capture_backend(
-                record.hardware_key,
-                index,
-                backend_factory=self._backend_factory,
-                list_loopback_cameras=self._list_loopback_cameras,
-            ),
+            capture_backend,
             control_backend=self._control_backend_factory(record.device_name),
             device_name=record.device_name,
             number=record.number,

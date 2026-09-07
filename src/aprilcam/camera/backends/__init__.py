@@ -62,6 +62,7 @@ from aprilcam.camera.backends.libcamera import list_loopback_cameras as _list_lo
 
 __all__ = [
     "CAPTURE_BACKEND_ENV",
+    "CameraNotEnumeratedError",
     "CaptureBackend",
     "ControlBackend",
     "default_capture_backend_factory",
@@ -87,6 +88,28 @@ _LIBCAMERA_HARDWARE_KEY_PREFIX = "libcamera:"
 #: ``camera.backends.libcamera._LOOPBACK_LABEL_ENV``,
 #: ``config.directories.APRILCAM_CONFIG_DIR_ENV``).
 CAPTURE_BACKEND_ENV = "APRILCAM_CAPTURE_BACKEND"
+
+
+class CameraNotEnumeratedError(RuntimeError):
+    """Raised by :meth:`CaptureBackend.open` when an injected
+    ``index_resolver`` reports that this camera's ``hardware_key`` is
+    not currently enumerated (the resolver returned ``None``) -- sprint
+    039's "identity-safe reopen" (see ``camera-DESIGN.md``'s section of
+    that name and :mod:`aprilcam.camera.backends.opencv_backend`).
+
+    A distinct type, not a bare :class:`RuntimeError`, specifically so
+    :meth:`aprilcam.camera.camera.Camera._attempt_self_heal` can tell
+    "this hardware key is not enumerated right now" apart from an
+    ordinary open failure ("enumerated, but opening it failed") and
+    react differently: the former is budget-neutral (does not spend a
+    :data:`~aprilcam.camera.camera.MAX_REOPENS` attempt) and marks the
+    camera not :attr:`~aprilcam.types.CameraState.present`, since a
+    resolver reporting "not found" is positive evidence the hardware is
+    gone, not merely "read failed for some reason" -- see
+    ``camera-DESIGN.md``'s "Not-currently-enumerated is a distinct state
+    from budget-exhausted" section for the stakeholder-fixed contract
+    this implements.
+    """
 
 
 class CaptureBackend:

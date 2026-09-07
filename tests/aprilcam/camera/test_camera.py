@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pytest
 
-from aprilcam.camera.backends import ControlBackend
+from aprilcam.camera.backends import CameraNotEnumeratedError, ControlBackend
 from aprilcam.camera.backends.opencv_backend import property_map
 from aprilcam.camera.camera import _OPEN_SETTLE_READS, FAILURE_THRESHOLD, MAX_REOPENS, Camera
 from aprilcam.camera.interfaces import Camera as CameraProtocol
@@ -54,11 +54,20 @@ class FakeBackend:
         *,
         read_queue: Optional[List[Optional[np.ndarray]]] = None,
         fail_open: bool = False,
+        fail_open_exception: Optional[BaseException] = None,
         size: Tuple[int, int] = (640, 480),
         read_delay: float = 0.0,
         loop: bool = False,
     ) -> None:
         self._is_open = False
+        #: sprint 039 (ticket 003) -- when set, ``open()`` raises this
+        #: exact exception instead of the generic ``RuntimeError`` below
+        #: while ``fail_open`` is ``True``. Lets a test simulate
+        #: ``CameraNotEnumeratedError`` specifically (distinct from an
+        #: ordinary open failure) without needing a real ``OpenCVBackend``.
+        #: ``None`` (the default) preserves every pre-existing
+        #: ``fail_open=True`` test's plain ``RuntimeError`` unchanged.
+        self.fail_open_exception = fail_open_exception
         #: ticket 027-003 -- the original frames, kept aside so a
         #: ``loop=True`` backend can refill ``self._queue`` from it once
         #: exhausted, rather than exhausting to ``None`` permanently.
@@ -112,7 +121,7 @@ class FakeBackend:
         try:
             self.open_calls += 1
             if self.fail_open:
-                raise RuntimeError("simulated open failure")
+                raise self.fail_open_exception or RuntimeError("simulated open failure")
             self._is_open = True
         finally:
             self._exit()
@@ -447,6 +456,98 @@ def test_check_stall_does_not_deadlock_with_a_concurrent_read():
 
     assert not reader.is_alive()  # joined cleanly, no deadlock
     assert errors == []
+
+
+# ---------------------------------------------------------------------------
+# Identity-safe reopen (sprint 039 ticket 003): _attempt_self_heal treats a
+# CameraNotEnumeratedError reopen (a backend's index_resolver reporting "not
+# currently enumerated") as a distinct, budget-neutral case -- never the same
+# as an ordinary "present but broken" open failure. See
+# camera-DESIGN.md's "Identity-safe reopen" section and this module's own
+# docstring on _attempt_self_heal for the two options the ticket named; this
+# is option (a).
+# ---------------------------------------------------------------------------
+
+
+def test_self_heal_not_enumerated_is_budget_neutral_and_marks_absent():
+    backend = FakeBackend(fail_open=True, fail_open_exception=CameraNotEnumeratedError("gone"))
+    cam = Camera("cam-a", backend)
+    backend.fail_open = False
+    cam.open()
+    assert cam.state.present is True
+
+    backend.fail_open = True  # simulate the hardware key vanishing from enumeration
+    for _ in range(FAILURE_THRESHOLD):
+        assert cam.read() is None
+
+    # Unlike an ordinary failed reopen (present stays True, one reopen
+    # spent), a not-currently-enumerated reopen is positive evidence the
+    # hardware itself is gone, and spends nothing from the budget.
+    assert cam.state.present is False
+    assert cam.state.usable is False
+    assert cam._reopens == 0  # noqa: SLF001 -- internal; this *is* "budget-neutral"
+    assert cam._exhausted is False  # noqa: SLF001
+
+
+def test_self_heal_not_enumerated_never_exhausts_the_budget():
+    """Contrast with test_check_stall_respects_max_reopens_budget /
+    test_on_reopen_not_invoked_once_the_reopen_budget_is_exhausted:
+    an ordinary present-but-broken camera exhausts MAX_REOPENS and stops
+    trying; a not-currently-enumerated camera never does, however many
+    read-failure streaks it goes through -- the daemon's watchdog can
+    keep retrying the identity lookup indefinitely."""
+    backend = FakeBackend(fail_open=True, fail_open_exception=CameraNotEnumeratedError("gone"))
+    cam = Camera("cam-a", backend)
+    backend.fail_open = False
+    cam.open()
+    backend.fail_open = True
+
+    for _ in range(MAX_REOPENS + 3):
+        for _ in range(FAILURE_THRESHOLD):
+            assert cam.read() is None
+
+    assert cam._reopens == 0  # noqa: SLF001
+    assert cam._exhausted is False  # noqa: SLF001
+    assert cam.state.present is False
+    assert cam.state.usable is False
+
+
+def test_on_reopen_not_invoked_when_reopen_skipped_as_not_enumerated():
+    backend = FakeBackend(fail_open=True, fail_open_exception=CameraNotEnumeratedError("gone"))
+    calls = []
+    cam = Camera("cam-a", backend, on_reopen=lambda: calls.append(1))
+    backend.fail_open = False
+    cam.open()
+
+    backend.fail_open = True
+    for _ in range(FAILURE_THRESHOLD):
+        cam.read()
+
+    assert calls == []
+
+
+def test_retry_if_exhausted_not_enumerated_marks_absent_but_stays_exhausted():
+    """retry_if_exhausted's own not-enumerated handling (camera.py):
+    present goes False, same as _attempt_self_heal's, but _exhausted is
+    untouched (this method's normal failure contract) -- the daemon's
+    STALLED_CAMERA_RETRY_INTERVAL_S watchdog pass is what keeps calling
+    this again, exactly like any other failed exhausted-camera retry."""
+    backend = FakeBackend()
+    cam = Camera("cam-a", backend)
+    cam.open()
+
+    backend.fail_open = True  # every reopen attempt from here fails
+    # MAX_REOPENS triggers spend the budget; one more trips _exhausted
+    # itself (mirrors test_check_stall_respects_max_reopens_budget's own
+    # "one more -- trips the exhausted path" step).
+    for _ in range(FAILURE_THRESHOLD * (MAX_REOPENS + 1)):
+        cam.read()
+    assert cam._exhausted is True  # noqa: SLF001 -- ordinary exhaustion first
+
+    backend.fail_open_exception = CameraNotEnumeratedError("gone")
+    assert cam.retry_if_exhausted() is False
+    assert cam.state.present is False
+    assert cam._exhausted is True  # noqa: SLF001 -- retry_if_exhausted never clears this on failure
 
 
 # ---------------------------------------------------------------------------

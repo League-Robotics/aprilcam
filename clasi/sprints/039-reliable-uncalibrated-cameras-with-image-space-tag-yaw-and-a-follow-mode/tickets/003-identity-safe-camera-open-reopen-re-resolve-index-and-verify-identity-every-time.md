@@ -2,7 +2,7 @@
 id: '003'
 title: Identity-safe camera open/reopen (re-resolve index and verify identity every
   time)
-status: open
+status: done
 use-cases: []
 depends-on: []
 github-issue: ''
@@ -80,36 +80,75 @@ scope here, left for whichever sprint enables that gate for real.
 
 ## Acceptance Criteria
 
-- [ ] Every open and reopen of an `OpenCVBackend`-backed camera
+- [x] Every open and reopen of an `OpenCVBackend`-backed camera
       re-resolves the index from `hardware_key` immediately before
       opening — verified by a test that changes what the identity
       source enumerates between two reopen attempts and asserts the
       *new* index is used, not the one from the first open.
-- [ ] **Core regression test**: an enumeration snapshot where the
+- [x] **Core regression test**: an enumeration snapshot where the
       target camera's hardware key is absent (or has moved to a
       different index than a *different* camera now occupies) between
       an initial open and a triggered reopen — the reopen must not open
       the device now sitting at the old index. This is the exact
       incident from the source issue; the test must fail against
       today's code and pass after the fix.
-    - [ ] A hardware key not currently enumerated reports
+    - [x] A hardware key not currently enumerated reports
       `present=False`/`usable=False` from the reopen attempt, never a
       retried stale index.
-- [ ] Where identity can be verified post-open (AVFoundation
+- [x] Where identity can be verified post-open (AVFoundation
       `uniqueID`), a deliberately mismatched identity is refused (the
       open raises, is logged, and the camera is not silently
       substituted) — covered by a test injecting a fake post-open
       identity that disagrees with the expected `hardware_key`.
-- [ ] `camera/identity.py`'s fallback-chain order and `hardware_key`
+- [x] `camera/identity.py`'s fallback-chain order and `hardware_key`
       format are unchanged (contractual — reordering mints new
       `hardware_key`s for every camera, per `camera-DESIGN.md` §3).
-- [ ] Every existing direct `OpenCVBackend(index)` construction (tests,
+- [x] Every existing direct `OpenCVBackend(index)` construction (tests,
       `testdev/capture_matrix.py`) continues to work unmodified — the
       new parameters are additive and optional.
-- [ ] `CaptureBackend`'s public five-method surface
+- [x] `CaptureBackend`'s public five-method surface
       (`open`/`read`/`close`/`frame_size`/is_open) is unchanged — the
       new parameters are `OpenCVBackend`-constructor-only, not part of
       the behavioral interface.
+
+## Implementation notes (recorded per the ticket's own instruction)
+
+**Not-currently-enumerated vs. `MAX_REOPENS` budget (Open Questions /
+implementation approach item 3):** chose **option (a)**.
+`camera/backends/__init__.py` gains a new
+`CameraNotEnumeratedError(RuntimeError)`, raised by
+`OpenCVBackend.open()` specifically when an injected `index_resolver`
+returns `None` (as opposed to a bare `RuntimeError` for an ordinary
+"enumerated but failed to open"). `Camera._attempt_self_heal` (and
+`Camera.retry_if_exhausted`) catch this distinctly: the reopen-budget
+increment is undone (`_reopens -= 1`, so the attempt is budget-neutral)
+and `_present` is set `False` (a resolver reporting "not found" is
+positive evidence the hardware itself is gone, unlike an ordinary
+failure of unknown cause, which leaves `present` unchanged/`True` per
+the existing "plugged in and broken" contract). This keeps the
+distinction entirely inside `camera/` (`Camera`/`OpenCVBackend`), adding
+no new responsibility or signature change to
+`daemon/service.py`'s `check_stalled_cameras` watchdog pass — option
+(b) was not needed since option (a) already satisfies "never burns the
+same fixed budget as a present-but-broken camera" and "the watchdog
+keeps retrying the identity lookup" (an unplugged camera's `_reopens`
+never advances, so `check_stall`/read-triggered self-heal keep trying
+indefinitely without ever tripping `_exhausted`).
+
+**Production wiring (`daemon/service.py`'s `_camera_for`):** since
+`resolve_capture_backend`'s `backend_factory: Callable[[int],
+CaptureBackend]` contract is shared with `camera/discovery.py`'s
+`_probe_openable` and with every test's injected `backend_factory`
+(overwhelmingly `lambda index: FakeBackend()`), `_camera_for` does not
+change that shared signature. Instead, after
+`resolve_capture_backend(...)` returns, `_camera_for` checks
+`isinstance(capture_backend, OpenCVBackend)` and, only in that case,
+rebuilds it with `index_resolver=lambda: self._index_for(record)` and
+`expected_hardware_key=record.hardware_key`. Constructing an
+`OpenCVBackend` performs no I/O, so discarding the first instance is
+cheap and behaviourally inert for `WorkerBackend`/`V4l2LoopbackBackend`/
+test fakes, which are untouched by this branch (`WorkerBackend` is
+explicitly out of scope per this ticket's Scope note).
 
 ## Testing
 

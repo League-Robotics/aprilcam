@@ -461,6 +461,75 @@ def test_get_frame_uses_opencv_backend_for_non_libcamera_identity_unchanged(
     assert frame.width == 4 and frame.height == 4
 
 
+def test_camera_for_wires_identity_safe_index_resolver_into_opencv_backend(
+    directories, registry, monkeypatch
+):
+    """Sprint 039 ticket 003: when backend_factory resolves to a real
+    OpenCVBackend, _camera_for rebuilds it with index_resolver/
+    expected_hardware_key bound to this camera's own hardware_key,
+    reusing _index_for rather than a second "find the current index"
+    implementation -- so a later self-heal/stall reopen of this exact
+    Camera (which only ever calls close()/open() on this one backend
+    object) re-resolves the index fresh too, not just this first open.
+    """
+    from aprilcam.camera.backends import opencv_backend as opencv_backend_module
+    from aprilcam.camera.backends.opencv_backend import OpenCVBackend
+    from tests.aprilcam.camera.backends.test_opencv_backend import _FakeCV2Capture
+
+    _FakeCV2Capture.instances = []
+    _FakeCV2Capture.open_indices = {0}
+    monkeypatch.setattr(opencv_backend_module.cv, "VideoCapture", _FakeCV2Capture)
+    # This test's own identity is fake -- avoid resolving against
+    # whatever real camera hardware this host happens to have attached
+    # at index 0 (the post-open AVFoundation identity check calls the
+    # real resolve_identity() otherwise, and a real machine's own
+    # camera would legitimately mismatch a made-up hardware_key).
+    monkeypatch.setattr(
+        opencv_backend_module,
+        "resolve_identity",
+        lambda index, *a, **k: CameraIdentity(
+            slug="arducam-ov9782-usb-camera",
+            device_name="Arducam OV9782 USB Camera",
+            hardware_key="avf:ARDUCAM-ID",
+            source="avfoundation_unique_id",
+            is_fallback=False,
+        ),
+    )
+
+    identity = _identity("avf:ARDUCAM-ID", "Arducam OV9782 USB Camera")
+    slug = registry.resolve(identity)
+    enumeration = {0: identity}
+
+    discovery = CameraDiscovery(
+        registry, identity_source=lambda: {}, backend_factory=lambda i: FakeBackend()
+    )
+    service = DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        identity_source=lambda: dict(enumeration),
+        backend_factory=lambda index: OpenCVBackend(index),
+        control_backend_factory=lambda device_name: None,
+    )
+
+    frame = service.get_frame(slug)
+
+    cam = service._cameras[slug]
+    assert isinstance(cam._backend, OpenCVBackend)
+    assert cam._backend._expected_hardware_key == identity.hardware_key  # noqa: SLF001
+    assert cam._backend._index_resolver is not None  # noqa: SLF001
+    assert cam._backend._index_resolver() == 0  # noqa: SLF001
+    assert frame.width == 2 and frame.height == 2
+
+    # The identity source now enumerates this hardware key at a
+    # different index (an enumeration shift) -- the resolver closure
+    # reflects that immediately, with no daemon restart and no second
+    # "find the index" implementation.
+    enumeration.clear()
+    enumeration[3] = identity
+    assert cam._backend._index_resolver() == 3  # noqa: SLF001
+
+
 def test_get_frame_deskewed_raises_not_calibrated(service, held_camera):
     _, slug, _ = held_camera
     with pytest.raises(NotCalibrated):
