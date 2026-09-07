@@ -363,10 +363,14 @@ class WorkerBackend(CaptureBackend):
         # after self._process/_control/_ring are all assigned so a
         # mismatch can tear the worker down via the ordinary close()
         # path rather than duplicating its cleanup.
-        if self._expected_hardware_key is not None and self._can_verify_identity():
-            observed = resolve_identity(self._index)
+        index = self._index
+        if (
+            self._expected_hardware_key is not None
+            and index is not None
+            and self._can_verify_identity()
+        ):
+            observed = resolve_identity(index)
             if observed.hardware_key != self._expected_hardware_key:
-                index = self._index
                 pid = process.pid
                 self.close()
                 logger.warning(
