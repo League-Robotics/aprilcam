@@ -195,7 +195,7 @@ def service(directories, registry, held_camera):
     cameras: Dict[str, Camera] = {slug: cam}
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(cameras.keys()),
+        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -257,6 +257,40 @@ def test_probe_cameras_skips_the_held_open_camera(service, held_camera):
 
     assert len(report.skipped) == 1
     assert report.skipped[0].backend == slug
+
+
+def test_probe_cameras_and_list_cameras_agree_on_a_stalled_active_camera(directories, registry):
+    """Ticket 039-004, AC: ``probe_cameras()`` and ``list_cameras()`` must
+    report the identical ``usable`` value for the same held-open, stalled
+    camera -- both now read the same ``Camera.state`` through
+    ``CameraDiscovery``'s ``active_camera_state`` accessor, closing the
+    incident (``camera-probe-reports-a-held-open-camera-as-usable-
+    without-checking-it.md``) where ``camera probe`` printed
+    ``usable``/``in use by a live subscriber`` for a camera whose stall
+    watchdog had already exhausted its self-heal budget."""
+    identity = _identity("hw:stalled-active", "Stalled Active Camera")
+    slug = registry.resolve(identity)
+    backend = FakeBackend()  # open() succeeds; read() never yields a frame
+    cam = Camera(slug, backend, number=registry.get(slug).number)
+    cam.open()
+    for _ in range(FAILURE_THRESHOLD * MAX_REOPENS):
+        cam.read()
+    for _ in range(FAILURE_THRESHOLD):  # one more run trips the exhausted path
+        cam.read()
+    assert cam.state.usable is False  # budget genuinely exhausted
+    assert cam.state.present is True
+
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+
+    list_state = next(s for s in service.list_cameras() if s.name == slug)
+    probe_report = service.probe_cameras()
+    probe_state = next(s for s in probe_report.cameras if s.name == slug)
+    skip = next(s for s in probe_report.skipped if s.backend == slug)
+
+    assert list_state.usable is False
+    assert probe_state.usable == list_state.usable
+    assert probe_state.present == list_state.present
+    assert "stalled" in skip.reason
 
 
 def test_get_frame_jpeg_default(service, held_camera):
@@ -910,7 +944,7 @@ def test_stream_images_deskewed_alone_keeps_detection_running_and_tags_update(di
     cameras: Dict[str, Camera] = {slug: cam}
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(cameras.keys()),
+        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -1185,7 +1219,7 @@ def test_full_stack_start_with_zero_cameras_and_zero_config_succeeds(tmp_path, d
     cameras: Dict[str, Camera] = {}
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(cameras.keys()),
+        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
         identity_source=lambda: {},  # nothing enumerated -- no hardware at all
     )
     service = DaemonService(registry=registry, discovery=discovery, directories=directories, cameras=cameras)
@@ -1282,7 +1316,7 @@ def _build_tag_service(directories, registry, *, detector, frame_count: int = 10
     cameras: Dict[str, Camera] = {slug: cam}
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(cameras.keys()),
+        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -2003,7 +2037,7 @@ def test_find_feature_opens_no_camera(directories, registry):
     there is nothing ``find_feature`` could open even by accident."""
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(),
+        active_camera_state=lambda slug: None,
         identity_source=lambda: {},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -2200,7 +2234,7 @@ def test_camera_config_settings_round_trip_and_apply_to_held_open_camera(directo
     cameras: Dict[str, Camera] = {slug: cam}
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(cameras.keys()),
+        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -2308,7 +2342,7 @@ def test_set_camera_config_gate_key_ordering_reaches_the_real_backend(directorie
     cameras: Dict[str, Camera] = {slug: cam}
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(cameras.keys()),
+        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -2358,7 +2392,7 @@ def test_camera_for_applies_a_previously_stored_config_when_opening_for_the_firs
     cameras: Dict[str, Camera] = {}
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(cameras.keys()),
+        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -2392,7 +2426,7 @@ def test_camera_for_with_no_stored_config_opens_without_touching_the_backend_set
     cameras: Dict[str, Camera] = {}
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(cameras.keys()),
+        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -2458,7 +2492,7 @@ def test_get_camera_config_registered_but_never_opened_still_raises_unknown_came
     _, slug, _ = held_camera
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(),
+        active_camera_state=lambda slug: None,
         identity_source=lambda: {},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -2484,7 +2518,7 @@ def _fresh_service_for_reset(directories, registry, identity, backend):
     cameras: Dict[str, Camera] = {}
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(cameras.keys()),
+        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -2613,7 +2647,7 @@ def test_fresh_daemon_service_instance_has_no_playfields_or_camera_links(
     cameras: Dict[str, Camera] = {slug: cam}
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(cameras.keys()),
+        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
         identity_source=lambda: {},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -2940,7 +2974,7 @@ def _service_with_camera(directories, registry, identity, slug, cam) -> DaemonSe
     cameras: Dict[str, Camera] = {slug: cam}
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(cameras.keys()),
+        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -3079,7 +3113,7 @@ def test_calibrate_with_no_playfield_link_raises_before_touching_camera_backend(
 
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(),
+        active_camera_state=lambda slug: None,
         identity_source=lambda: {},
         backend_factory=exploding_backend_factory,
     )
@@ -3105,7 +3139,7 @@ def test_calibrate_camera_linked_but_playfield_never_pushed_raises_no_playfield_
     cameras: Dict[str, Camera] = {slug: cam}
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(cameras.keys()),
+        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
         identity_source=lambda: {},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -3134,7 +3168,7 @@ def test_fresh_daemon_service_reloads_calibration_json_after_a_simulated_restart
 
     fresh_discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(),
+        active_camera_state=lambda slug: None,
         identity_source=lambda: {},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -3154,7 +3188,7 @@ def test_fresh_daemon_service_reloads_calibration_json_after_a_simulated_restart
 
 def test_fresh_daemon_service_with_no_calibration_file_reports_none(directories, registry):
     discovery = CameraDiscovery(
-        registry, active_slugs=lambda: frozenset(), identity_source=lambda: {}, backend_factory=lambda index: FakeBackend()
+        registry, active_camera_state=lambda slug: None, identity_source=lambda: {}, backend_factory=lambda index: FakeBackend()
     )
     service = DaemonService(registry=registry, discovery=discovery, directories=directories)
 
@@ -3187,7 +3221,7 @@ def test_camera_reopen_via_self_heal_marks_the_calibration_stale_through_real_wi
     backend = FakeBackend(read_queue=[frame] * CALIBRATION_FRAME_COUNT)
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(),
+        active_camera_state=lambda slug: None,
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: backend,
     )
@@ -3782,7 +3816,7 @@ def test_missing_mounts_registry_loads_cleanly_as_empty(directories, registry):
     construction succeeds with an empty registry, no warning-as-error."""
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(),
+        active_camera_state=lambda slug: None,
         identity_source=lambda: {},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -3804,7 +3838,7 @@ def test_corrupt_mounts_registry_loads_cleanly_with_a_warning(directories, regis
     path.write_text("{not valid json", encoding="utf-8")
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(),
+        active_camera_state=lambda slug: None,
         identity_source=lambda: {},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -3837,7 +3871,7 @@ def test_mounts_registry_with_malformed_entries_skips_them_and_keeps_the_rest(
     )
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(),
+        active_camera_state=lambda slug: None,
         identity_source=lambda: {},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -3876,7 +3910,7 @@ def test_persisted_nonzero_mount_z_reloads_without_calibration_and_reports_inert
     )
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(),
+        active_camera_state=lambda slug: None,
         identity_source=lambda: {},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -4225,7 +4259,7 @@ def test_list_cameras_reports_calibrated_true_for_a_not_held_camera_after_restar
 
     fresh_discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(),
+        active_camera_state=lambda slug: None,
         identity_source=lambda: {},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -4326,7 +4360,7 @@ def test_get_frame_deskewed_uncalibrated_never_touches_the_camera_backend(direct
 
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(),
+        active_camera_state=lambda slug: None,
         identity_source=lambda: {},
         backend_factory=exploding_backend_factory,
     )
@@ -4364,7 +4398,7 @@ def test_get_frame_deskewed_missing_playfield_raises_not_calibrated(directories,
 
     fresh_discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(),
+        active_camera_state=lambda slug: None,
         identity_source=lambda: {},
         backend_factory=exploding_backend_factory,
     )
@@ -5166,7 +5200,7 @@ def test_a_fresh_daemon_service_reports_an_empty_annotation_set_at_revision_zero
 
     fresh_discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(),
+        active_camera_state=lambda slug: None,
         identity_source=lambda: {},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -5726,7 +5760,7 @@ def real_daemon_service(tmp_path: Path):
     registry = CameraRegistry(tmp_path / "state" / "cameras")
     for identity in identity_module.resolve_all().values():
         registry.resolve(identity)
-    discovery = CameraDiscovery(registry, active_slugs=lambda: frozenset())
+    discovery = CameraDiscovery(registry, active_camera_state=lambda slug: None)
     service = DaemonService(registry=registry, discovery=discovery, directories=directories)
     try:
         yield service
@@ -6041,7 +6075,7 @@ def test_dump_camera_config_round_trips_through_install_and_restart_live(
         config_path.write_text(json.dumps(dumped_once, indent=2, sort_keys=True))
 
         registry = CameraRegistry(directories.state_dir / "cameras")
-        restart_discovery = CameraDiscovery(registry, active_slugs=lambda: frozenset())
+        restart_discovery = CameraDiscovery(registry, active_camera_state=lambda slug: None)
         restarted = DaemonService(registry=registry, discovery=restart_discovery, directories=directories)
         try:
             daemon_main._load_config_dir(restarted, directories)
@@ -6373,7 +6407,7 @@ def test_capture_flat_field_persists_and_a_freshly_constructed_service_reloads_i
 
     discovery2 = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(),
+        active_camera_state=lambda slug: None,
         identity_source=lambda: {},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -6398,7 +6432,7 @@ def test_load_flatfields_reports_present_true_captured_at_none_for_an_npy_with_n
 
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(),
+        active_camera_state=lambda slug: None,
         identity_source=lambda: {},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -6590,7 +6624,7 @@ def test_camera_reopen_via_self_heal_marks_the_flatfield_stale_through_real_wiri
     backend = FakeBackend(read_queue=[frame] * CALIBRATION_FRAME_COUNT)
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(),
+        active_camera_state=lambda slug: None,
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: backend,
     )
@@ -6694,7 +6728,7 @@ def test_list_cameras_reports_flatfield_absent_for_a_not_held_registered_camera(
     slug = registry.resolve(identity)
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(),
+        active_camera_state=lambda slug: None,
         identity_source=lambda: {},
         backend_factory=lambda index: FakeBackend(),
     )
@@ -6859,7 +6893,7 @@ def test_check_stalled_cameras_one_exception_does_not_stop_the_pass(
     cameras: Dict[str, Camera] = {slug_a: cam_a, slug_b: cam_b}
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(cameras.keys()),
+        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
         identity_source=lambda: {0: identity_a, 1: identity_b},
         backend_factory=lambda index: FakeBackend(),
     )

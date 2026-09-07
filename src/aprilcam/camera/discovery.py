@@ -13,15 +13,22 @@ mapping (tickets 002 and this one's own ``camera/camera.py``).
 a camera the daemon is already streaming from. It cannot see the
 daemon's live-subscriber table directly -- that table is owned by
 ``daemon/service.py`` (ticket 004, not yet built) -- so this module
-takes an ``active_slugs`` callback at construction: a zero-argument
-function returning the set of slugs currently held open. It defaults
-to "nothing is active" (an empty set), which is exactly right for a
-freshly constructed, subscriber-less ``CameraDiscovery`` (this
-ticket's tests), and ticket 004 supplies its real table when it wires
-this class into the daemon service. A camera in that set is reported
-present/usable from what is already known about it (something is
-successfully streaming from it, which is proof enough) and named in
-``ProbeReport.skipped``, without any backend ever touching it.
+takes an ``active_camera_state`` callback at construction: a slug ->
+``Optional[CameraState]`` function. It defaults to "nothing is active"
+(always ``None``), which is exactly right for a freshly constructed,
+subscriber-less ``CameraDiscovery`` (this ticket's tests), and ticket
+004 supplies its real accessor when it wires this class into the
+daemon service. A slug for which the callback returns a real
+``CameraState`` is held open, and ``probe()`` reports **that state's
+own** ``present``/``usable`` values -- something is successfully
+streaming from it, but "streaming" is not itself proof of health, so a
+stalled/self-heal-exhausted held-open camera reports ``usable=False``
+exactly as the daemon's own ``list_cameras()`` would (sprint 039
+ticket 004, closing the gap where ``probe()`` used to hardcode
+``usable=True`` for every active slug regardless of its real health).
+Either way the slug is still named in ``ProbeReport.skipped`` --
+healthy or stalled -- without any backend ever touching it; the skip
+reason text itself distinguishes the two cases.
 
 **Passive watching (UC-25.S-5) without any OS hotplug event source.**
 Neither ``cv2-enumerate-cameras`` nor AVFoundation/V4L2 offer a
@@ -39,7 +46,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import AbstractSet, Callable, Dict, FrozenSet, List, Optional, Set
+from typing import Callable, Dict, FrozenSet, List, Optional, Set
 
 from aprilcam.camera.backends import (
     CaptureBackend,
@@ -120,10 +127,14 @@ class CameraDiscovery(_CameraDiscoveryBase):
     ----------
     registry:
         Where identities resolve to stable slugs/numbers.
-    active_slugs:
-        () -> set of slugs the daemon currently holds open. See the
-        module docstring's non-disturbance note. Defaults to "always
-        empty".
+    active_camera_state:
+        slug -> ``Optional[CameraState]``: ``None`` means the daemon
+        does not currently hold this slug open (falls through to
+        ``_probe_openable``, unchanged); a real ``CameraState`` means
+        it is held open, and ``probe()`` reports *that* state's own
+        ``usable`` value instead of assuming health (sprint 039 ticket
+        004). See the module docstring's non-disturbance note. Defaults
+        to "nothing is active" (always ``None``).
     backend_factory:
         index -> :class:`CaptureBackend`. Overridable so tests can
         inject a fake that raises on ``open()`` (AC6, UC-25.S-4)
@@ -163,7 +174,7 @@ class CameraDiscovery(_CameraDiscoveryBase):
         self,
         registry: CameraRegistry,
         *,
-        active_slugs: Optional[Callable[[], AbstractSet[str]]] = None,
+        active_camera_state: Optional[Callable[[str], Optional[CameraState]]] = None,
         backend_factory: Callable[[int], CaptureBackend] = _default_backend_factory,
         identity_source: Callable[[], Dict[int, CameraIdentity]] = resolve_all,
         watch_interval: float = DEFAULT_WATCH_INTERVAL,
@@ -171,7 +182,7 @@ class CameraDiscovery(_CameraDiscoveryBase):
         list_loopback_cameras: Optional[Callable[[], List[LibcameraDevice]]] = None,
     ) -> None:
         self._registry = registry
-        self._active_slugs = active_slugs or (lambda: frozenset())
+        self._active_camera_state = active_camera_state or (lambda slug: None)
         self._backend_factory = backend_factory
         self._identity_source = identity_source
         self._watch_interval = watch_interval
@@ -191,17 +202,23 @@ class CameraDiscovery(_CameraDiscoveryBase):
         """See ``camera.interfaces.CameraDiscovery.probe``.
 
         For every currently-enumerated identity: resolve its registry
-        slug (registering it if new), then -- unless it is in
-        ``active_slugs()`` -- briefly open a ``Camera`` over it to
+        slug (registering it if new), then call
+        ``active_camera_state(slug)``. ``None`` means the daemon does
+        not hold this slug open -- briefly open a ``Camera`` over it to
         determine ``usable`` and immediately close it again. A camera
         that raises on open is still reported, ``usable=False``,
-        ``present=True`` (UC-25.S-4), never omitted. Registry records
-        not seen in this enumeration pass are reported ``present=False``
-        (a config outliving its hardware -- ``types.CameraState``'s own
-        docstring -- not an error).
+        ``present=True`` (UC-25.S-4), never omitted. A real
+        ``CameraState`` means the slug is held open -- report *that*
+        state's own ``present``/``usable`` values instead of assuming
+        health, and record a ``ProbeSkip`` whose reason text
+        distinguishes a healthy held-open camera from a stalled one
+        (sprint 039 ticket 004: a held-open camera used to always probe
+        ``usable=True`` even after its self-heal budget was exhausted).
+        Registry records not seen in this enumeration pass are reported
+        ``present=False`` (a config outliving its hardware --
+        ``types.CameraState``'s own docstring -- not an error).
         """
         identities = self._safe_identities()
-        active = set(self._active_slugs())
 
         seen_hardware_keys: Dict[str, str] = {}  # hardware_key -> slug
         cameras = []
@@ -212,20 +229,24 @@ class CameraDiscovery(_CameraDiscoveryBase):
             seen_hardware_keys[identity.hardware_key] = slug
             number = self._number_for(slug)
 
-            if slug in active:
+            held_state = self._active_camera_state(slug)
+            if held_state is not None:
                 cameras.append(
                     CameraState(
                         name=slug,
-                        present=True,
-                        usable=True,
+                        present=held_state.present,
+                        usable=held_state.usable,
                         playfield=None,
                         calibrated=False,
                         number=number,
                     )
                 )
-                skipped.append(
-                    ProbeSkip(backend=slug, reason="in use by a live subscriber")
+                reason = (
+                    "in use by a live subscriber"
+                    if held_state.usable
+                    else "in use by a live subscriber (stalled)"
                 )
+                skipped.append(ProbeSkip(backend=slug, reason=reason))
                 continue
 
             usable = self._probe_openable(slug, index, identity.hardware_key)

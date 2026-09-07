@@ -135,7 +135,7 @@ def service(directories, registry, held_camera):
     cameras: Dict[str, Camera] = {slug: cam}
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(cameras.keys()),
+        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: FakeBackend(),
     )

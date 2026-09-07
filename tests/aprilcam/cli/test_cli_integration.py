@@ -572,7 +572,7 @@ def _bind_daemon_with_one_large_frame_camera(directories: Directories):
     cameras: Dict[str, Camera] = {slug: camera}
     discovery = CameraDiscovery(
         registry,
-        active_slugs=lambda: frozenset(cameras.keys()),
+        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: FakeBackend(),
     )

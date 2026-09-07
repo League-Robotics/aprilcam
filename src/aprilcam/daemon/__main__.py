@@ -104,14 +104,20 @@ def build(
     directories = directories or Directories()
 
     # The same dict object backs both the service's held-open-camera
-    # cache and CameraDiscovery's active_slugs callback -- see
+    # cache and CameraDiscovery's active_camera_state callback -- see
     # daemon/service.py's module docstring for why this is what makes
     # probe()'s non-disturbance guarantee (UC-25.S-7) real for a
-    # running daemon rather than just testable in isolation.
+    # running daemon rather than just testable in isolation, and
+    # camera-DESIGN.md sprint 039's "Honest active-camera health" section
+    # for why probe()/list_cameras() must read the same live Camera.state
+    # instead of assuming a held-open camera is healthy.
     held_cameras: Dict[str, Camera] = {}
     registry = CameraRegistry(directories.state_dir / "cameras")
     discovery = CameraDiscovery(
-        registry, active_slugs=lambda: frozenset(held_cameras.keys())
+        registry,
+        active_camera_state=lambda slug: (
+            held_cameras[slug].state if slug in held_cameras else None
+        ),
     )
     service = DaemonService(
         registry=registry,

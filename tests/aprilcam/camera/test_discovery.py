@@ -27,7 +27,7 @@ from aprilcam.camera.camera import Camera
 from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import CameraIdentity
 from aprilcam.camera.registry import CameraRegistry
-from aprilcam.types import ProbeReport
+from aprilcam.types import CameraState, ProbeReport
 
 
 def _identity(hardware_key: str, device_name: str, **kw) -> CameraIdentity:
@@ -40,6 +40,20 @@ def _identity(hardware_key: str, device_name: str, **kw) -> CameraIdentity:
     )
     base.update(kw)
     return CameraIdentity(**base)
+
+
+def _held_state(slug: str, *, usable: bool) -> CameraState:
+    """A minimal ``CameraState`` for a held-open camera, standing in for
+    what ``daemon/service.py`` would hand ``active_camera_state`` (ticket
+    039-004): the real ``Camera.state`` of a camera the daemon already
+    holds open, healthy or stalled."""
+    return CameraState(
+        name=slug,
+        present=True,
+        usable=usable,
+        playfield=None,
+        calibrated=False,
+    )
 
 
 _FAKE_FRAME = np.zeros((2, 2, 3), dtype=np.uint8)
@@ -247,7 +261,7 @@ def test_probe_populates_known_present(registry):
 
 
 # ---------------------------------------------------------------------------
-# probe() -- non-disturbance via active_slugs (AC4, mechanism-level;
+# probe() -- non-disturbance via active_camera_state (AC4, mechanism-level;
 # see the @pytest.mark.camera test below for the real-read-loop version)
 # ---------------------------------------------------------------------------
 
@@ -265,7 +279,7 @@ def test_probe_skips_active_camera_without_touching_its_backend(registry):
         registry,
         identity_source=lambda: {0: identity},
         backend_factory=backend_factory,
-        active_slugs=lambda: {slug},
+        active_camera_state=lambda s: _held_state(s, usable=True) if s == slug else None,
     )
     report = discovery.probe()
 
@@ -275,6 +289,72 @@ def test_probe_skips_active_camera_without_touching_its_backend(registry):
     assert report.cameras[0].usable is True
     assert len(report.skipped) == 1
     assert report.skipped[0].backend == slug
+    assert report.skipped[0].reason == "in use by a live subscriber"
+
+
+def test_probe_reports_a_stalled_active_camera_as_unusable(registry):
+    """Core regression test (ticket 039-004): ``probe()`` must consult the
+    held-open camera's actual health via ``active_camera_state`` instead of
+    hardcoding ``usable=True`` for any active slug -- this is the bug the
+    incident report (``camera-probe-reports-a-held-open-camera-as-usable-
+    without-checking-it.md``) filed: a stalled self-heal-exhausted camera
+    still probed ``usable``. Fails against pre-fix code (which returns
+    ``usable=True`` unconditionally for an active slug); passes once
+    ``probe()`` reads the fake's returned ``CameraState.usable`` instead."""
+    identity = _identity("hw:stalled", "Stalled Camera")
+    slug = registry.resolve(identity)
+    opened: List[int] = []
+
+    def backend_factory(index):
+        opened.append(index)
+        return _FakeBackend()
+
+    discovery = CameraDiscovery(
+        registry,
+        identity_source=lambda: {0: identity},
+        backend_factory=backend_factory,
+        active_camera_state=lambda s: _held_state(s, usable=False) if s == slug else None,
+    )
+    report = discovery.probe()
+
+    assert opened == []  # still non-disturbing -- no backend touched
+    assert len(report.cameras) == 1
+    assert report.cameras[0].present is True
+    assert report.cameras[0].usable is False
+    assert len(report.skipped) == 1
+    assert report.skipped[0].backend == slug
+    assert report.skipped[0].reason == "in use by a live subscriber (stalled)"
+
+
+def test_probe_skip_reason_distinguishes_healthy_from_stalled_active_cameras(registry):
+    healthy_identity = _identity("hw:healthy", "Healthy Camera")
+    stalled_identity = _identity("hw:stalled-2", "Stalled Camera Two")
+    healthy_slug = registry.resolve(healthy_identity)
+    stalled_slug = registry.resolve(stalled_identity)
+
+    def active_camera_state(slug):
+        if slug == healthy_slug:
+            return _held_state(slug, usable=True)
+        if slug == stalled_slug:
+            return _held_state(slug, usable=False)
+        return None
+
+    discovery = CameraDiscovery(
+        registry,
+        identity_source=lambda: {0: healthy_identity, 1: stalled_identity},
+        backend_factory=lambda index: _FakeBackend(),
+        active_camera_state=active_camera_state,
+    )
+    report = discovery.probe()
+
+    reasons = {skip.backend: skip.reason for skip in report.skipped}
+    assert reasons[healthy_slug] != reasons[stalled_slug]
+    assert "stalled" not in reasons[healthy_slug]
+    assert "stalled" in reasons[stalled_slug]
+
+    states = {state.name: state for state in report.cameras}
+    assert states[healthy_slug].usable is True
+    assert states[stalled_slug].usable is False
 
 
 # ---------------------------------------------------------------------------
@@ -535,7 +615,7 @@ def test_probe_does_not_disturb_a_live_read_loop():
         discovery = CameraDiscovery(
             registry,
             identity_source=lambda: {index: identity},
-            active_slugs=lambda: {slug},
+            active_camera_state=lambda s: _held_state(s, usable=True) if s == slug else None,
         )
         report = discovery.probe()
 

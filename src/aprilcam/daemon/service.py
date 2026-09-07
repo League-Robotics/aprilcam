@@ -69,13 +69,21 @@ camera *at most once*: the first successful open is cached in
 lets ``Camera``'s self-heal (5 consecutive failures -> reopen, capped
 at 10) actually accumulate state across calls rather than resetting on
 every request. This cache **is** the daemon's live-subscriber table:
-:meth:`active_slugs` exposes its keys to ``CameraDiscovery`` as the
-``active_slugs`` callback (``camera/discovery.py``'s constructor;
-ticket 003 left this defaulting to "nothing is active" and named this
-exact wiring as this ticket's job) so ``probe_cameras()``'s
-non-disturbance guarantee (UC-25.S-7) holds for real work, not just the
-mechanism-level unit test ticket 003 could write without a service to
-wire into.
+:meth:`active_slugs` exposes its keys, and ``daemon/__main__.py`` wires
+the same ``self._cameras`` dict object into ``CameraDiscovery`` as the
+``active_camera_state`` callback (``camera/discovery.py``'s
+constructor; ticket 003 left this defaulting to "nothing is active"
+and named this exact wiring as this ticket's job) so
+``probe_cameras()``'s non-disturbance guarantee (UC-25.S-7) holds for
+real work, not just the mechanism-level unit test ticket 003 could
+write without a service to wire into. **Sprint 039 ticket 004**
+changed what that callback reports: instead of a bare slug membership
+check (which made ``probe()`` hardcode ``usable=True`` for any active
+slug), ``active_camera_state`` hands back the held-open ``Camera``'s
+own ``.state`` -- the identical ``CameraState`` :meth:`list_cameras`
+already reads for a held camera -- so a stalled, self-heal-exhausted
+camera probes ``usable=False`` exactly as ``list_cameras`` reports it,
+instead of the two methods disagreeing.
 """
 
 from __future__ import annotations
@@ -456,9 +464,12 @@ class DaemonService(Daemon):
         The persistent identity -> slug/number mapping (ticket 002).
     discovery:
         Passive-watch + active-probe camera discovery (ticket 003).
-        Its ``active_slugs`` callback should be wired to this service's
-        :meth:`active_slugs` at construction (``daemon/__main__.py``
-        does this) so probe's non-disturbance guarantee holds.
+        Its ``active_camera_state`` callback should be wired (at
+        construction, ``daemon/__main__.py`` does this) to read this
+        service's own ``cameras`` dict -- see ``camera/discovery.py``'s
+        ``active_camera_state`` parameter -- so probe's non-disturbance
+        guarantee holds *and* an active camera's reported ``usable``
+        agrees with :meth:`list_cameras` (sprint 039 ticket 004).
     directories:
         Reported verbatim by :meth:`status` (``config_dir``/
         ``state_dir``) -- UC-01's "which roots were chosen is never a
@@ -467,10 +478,10 @@ class DaemonService(Daemon):
         The held-open-camera cache, keyed by slug. Accepts an
         externally-owned dict (rather than always constructing its own)
         so ``daemon/__main__.py`` can hand the *same* dict object to
-        both this service and ``CameraDiscovery``'s ``active_slugs``
-        closure -- see the module docstring. Defaults to a fresh, empty
-        dict when not supplied (tests that do not care about this
-        wiring).
+        both this service and ``CameraDiscovery``'s
+        ``active_camera_state`` closure -- see the module docstring.
+        Defaults to a fresh, empty dict when not supplied (tests that
+        do not care about this wiring).
     identity_source / backend_factory:
         Resolve a registered camera's *current* OS-probe index on
         demand (only needed the first time a given slug is requested
@@ -694,14 +705,19 @@ class DaemonService(Daemon):
         self._flatfields: Dict[str, FlatFieldInfo] = {}
         self._load_flatfields()
 
-    # -- beyond the interface: CameraDiscovery's active_slugs wiring -----
+    # -- beyond the interface: CameraDiscovery's active_camera_state wiring --
 
     def active_slugs(self) -> frozenset:
         """Slugs this service currently holds a ``Camera`` open for.
 
-        Passed as ``CameraDiscovery(..., active_slugs=service.
-        active_slugs)`` so ``probe_cameras()`` never opens a backend
-        already held here (UC-25.S-7). See the module docstring.
+        A convenience read of ``self._cameras.keys()`` under the lock,
+        independent of ``CameraDiscovery``'s own ``active_camera_state``
+        callback (``daemon/__main__.py`` wires that directly against the
+        same shared ``cameras`` dict object rather than through this
+        method -- see the module docstring and sprint 039 ticket 004,
+        which changed that callback from a bare membership check into a
+        per-slug ``CameraState`` accessor so ``probe_cameras()`` reports
+        real held-open health instead of assuming it (UC-25.S-7)).
         """
         with self._lock:
             return frozenset(self._cameras.keys())
