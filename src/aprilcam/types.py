@@ -107,6 +107,19 @@ class TagRecord:
       client-side world→pixel mapping exists — and the only one on an
       uncalibrated camera. This is principle 5's render-step carve-out,
       not a leak of the internal pipeline.
+    * ``image_yaw_deg`` (sprint 039) is a **separate, diagnostic-only**
+      field, unrelated to ``yaw_rad`` and never a substitute for it. It
+      is derived from the same ``corners[0]→corners[1]`` front edge, but
+      in raw pixel space rather than world space, and with a different
+      sign convention: **0° = the tag's front edge toward the top of the
+      image, clockwise-positive as seen on screen** (image y grows
+      downward, so this is the opposite rotational sense from
+      ``yaw_rad``'s CCW-positive world convention). It is populated
+      whenever ``pixel_corners`` is available — calibrated or not —
+      specifically so an uncalibrated camera, which has no world frame
+      to report ``yaw_rad`` in at all, still reports *some* orientation.
+      It is never computed from world corners and never overrides or is
+      overridden by ``yaw_rad``.
     """
 
     tag: TagId
@@ -124,6 +137,7 @@ class TagRecord:
     pixel_corners: Optional[
         tuple[PixelPoint, PixelPoint, PixelPoint, PixelPoint]
     ] = None
+    image_yaw_deg: Optional[float] = None
 
 
 @dataclass(frozen=True)
