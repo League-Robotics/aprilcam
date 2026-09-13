@@ -199,13 +199,35 @@ aprilcam daemon list          # rediscovered with no manual intervention
   ```
   This is unauthenticated, plaintext gRPC -- intentional for a trusted LAN
   (sprint 028); never expose port 5280 to the public internet.
-- **`aprilcam[daemon]`'s compiled dependencies on aarch64/cp312**
-  (`opencv-contrib-python`, `grpcio`, `numpy`) are audited for headless
-  Linux import safety by ticket 002, in parallel with this ticket. If a
-  wheel is genuinely unavailable from PyPI for this platform, ticket 002
-  documents a piwheels (`--extra-index-url https://www.piwheels.org/simple`)
-  fallback for the `pipx install` command in Step 3; this ticket does not
-  assume that fallback is needed.
+- **`aprilcam[daemon]`'s compiled dependencies on aarch64/cp312 -- audited,
+  sprint 040 ticket 002.** `pip install "aprilcam[daemon]"` into a
+  throwaway venv on `vidar.local` (Ubuntu 24.04.4 LTS aarch64, Python
+  3.12.3) resolved real manylinux `cp312`/`aarch64` wheels for every
+  compiled daemon-extra package straight from PyPI --
+  `opencv-contrib-python==5.0.0.93`, `grpcio==1.83.1`, `numpy==2.5.3`,
+  `grpcio-reflection==1.83.1`, `msgpack==1.2.2`, `mss==10.2.0`,
+  `websockets==17.1`, `fpdf2==2.8.8`, `cv2-enumerate-cameras==1.3.3` --
+  with no sdist-from-source build for any of them. **No piwheels
+  fallback is needed**; do not add `--extra-index-url
+  https://www.piwheels.org/simple` unless a future dependency bump
+  changes this.
+  `import aprilcam.daemon.__main__` (the exact module `python -m
+  aprilcam.daemon` runs) was also confirmed clean with `$DISPLAY` unset:
+  no `mss` import happens as a side effect (mechanically enforced by
+  `tests/test_daemon_extra_headless_import.py`), and `cv2` itself
+  imports without error. One caveat worth carrying into ticket 004:
+  `opencv-contrib-python`'s compiled extension has a hard (not
+  lazily-`dlopen`ed) ELF dependency on `libGL.so.1`/`libX11.so.6`, which
+  happened to already be present on vidar as automatic dependencies of
+  its desktop/GNOME and ROS packages (`pemmican-desktop`,
+  `gnome-remote-desktop`, `ros-kilted-*`) -- vidar is not a minimal
+  Ubuntu Server install. A genuinely minimal headless install without
+  those packages has not been tested and might need `libgl1`/`libx11-6`
+  installed via apt for `import cv2` to succeed; this is *not* added to
+  `provision-pi.sh` speculatively (this ticket's rule is "only add a
+  fallback if resolution actually fails," and it did not fail here) --
+  if ticket 004 hits an `ImportError: libGL.so.1: cannot open shared
+  object file` on a leaner image, that is the fix.
 - **v1 units still on vidar** (`/etc/systemd/system/aprilcamd.service`,
   `/etc/systemd/system/aprilcam-bridge@.service`, both currently disabled)
   are retired by ticket 004, after these v2 units are verified working --
