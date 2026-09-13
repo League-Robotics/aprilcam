@@ -1,5 +1,10 @@
 ---
-status: pending
+status: in-progress
+sprint: '040'
+tickets:
+- 040-003
+- 040-004
+- 040-005
 ---
 
 # Live AprilTag detection + systemd persistence verification on a Pi

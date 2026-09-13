@@ -1,5 +1,11 @@
 ---
-status: pending
+status: in-progress
+sprint: '040'
+tickets:
+- 040-001
+- 040-002
+- 040-004
+- 040-005
 ---
 
 # Plan: Daemon runs on a remote Raspberry Pi; every client discovers it and connects over TCP
