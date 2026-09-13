@@ -1,0 +1,69 @@
+#!/bin/bash
+# aprilcam-camera-bridge -- bridge one CSI camera (libcamera) into a
+# v4l2loopback device the AprilCam daemon reads via plain V4L2
+# (sprint 040 ticket 001; carries forward archive/scripts/
+# setup-vidar-cameras.sh's proven pipeline/stagger/watchdog design,
+# confirmed still live and unchanged on vidar.local's
+# /usr/local/bin/aprilcam-camera-bridge).
+#
+# Why this exists as a separate process, not code inside the daemon:
+# running GStreamer/libcamera in-process with the daemon's gRPC server
+# has repeatedly segfaulted (archive/docs/knowledge/
+# raspberry-pi-camera-setup.md). The daemon has zero code or process
+# dependency on this script -- they communicate only through the kernel
+# device node.
+#
+# Usage: aprilcam-camera-bridge <position 0-based> <loopback /dev/videoN>
+#
+# Installed by deploy/aprilcam-bridge@.service, one instance per camera
+# position, as: ExecStart=/usr/local/bin/aprilcam-camera-bridge %i /dev/video7%i
+set -u
+
+POS="${1:?usage: aprilcam-camera-bridge <position> <loopback device>}"
+DEV="${2:?usage: aprilcam-camera-bridge <position> <loopback device>}"
+
+# Stagger startup by camera position: two libcamerasrc instances
+# initialising at the same time race in libcamera/PiSP and can crash.
+# 4s/position is the value vidar's proven setup already uses.
+sleep "$((POS * 4))"
+
+# Resolve this position's libcamera camera id from `cam -l` output, e.g.:
+#   1: 'imx296' (/base/axi/pcie@1000120000/rp1/i2c@88000/imx296@1a)
+# `cam -l` numbers cameras 1-based; POS is 0-based.
+CID="$(cam -l 2>/dev/null | sed -n "s/^$((POS + 1)): .*(\(.*\))$/\1/p")"
+if [ -z "$CID" ]; then
+    echo "aprilcam-camera-bridge: no libcamera camera at position $POS" >&2
+    exit 1
+fi
+
+# The `queue` right after libcamerasrc gives libcamera its own thread and
+# releases capture requests downstream promptly -- the standard mitigation
+# for the libcamerasrc "requestCompleted ... assertion failed" SIGSEGV
+# under load (queue max-size-buffers=6 leaky=downstream: matches vidar's
+# proven values exactly).
+gst-launch-1.0 -q libcamerasrc camera-name="$CID" \
+    ! queue max-size-buffers=6 leaky=downstream \
+    ! video/x-raw,format=NV12,width=1280,height=720,framerate=30/1 \
+    ! videoconvert ! video/x-raw,format=YUY2 ! v4l2sink device="$DEV" sync=false &
+GST_PID=$!
+trap 'kill -9 "$GST_PID" 2>/dev/null' EXIT INT TERM
+
+# Watchdog: libcamerasrc can SIGSEGV, after which gst-launch's own fault
+# handler "spins" forever instead of exiting -- so systemd never sees the
+# failure and the loopback silently freezes with no new frames. Give the
+# pipeline 8s to start producing before the first check, then poll the
+# loopback device every ~10s; if a read stalls, kill the pipeline and exit
+# non-zero so Restart=always (StartLimitIntervalSec=0 in the unit)
+# relaunches a fresh one. v4l2loopback fans out to every reader, so this
+# watchdog read never steals a frame from the daemon's own reader.
+sleep 8
+while kill -0 "$GST_PID" 2>/dev/null; do
+    if ! timeout 6 v4l2-ctl -d "$DEV" --stream-mmap --stream-count=1 >/dev/null 2>&1; then
+        echo "aprilcam-camera-bridge: $DEV stalled (libcamerasrc likely crashed) -- restarting" >&2
+        kill -9 "$GST_PID" 2>/dev/null
+        exit 1
+    fi
+    sleep 10
+done
+echo "aprilcam-camera-bridge: gst-launch exited -- restarting" >&2
+exit 1

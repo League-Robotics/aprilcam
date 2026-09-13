@@ -1,0 +1,42 @@
+# AprilCam camera bridge -- templated systemd unit, one instance per CSI
+# camera position (sprint 040 ticket 001). Confirmed to match the live,
+# already-working unit on vidar.local byte-for-byte in every field that
+# matters (User substituted below -- vidar's v1 unit runs as `jtl`, this
+# v2 unit runs as the dedicated `aprilcam` system user instead; see
+# sprint.md Design Rationale).
+#
+# Install (one enable per camera position -- vidar has two, 0 and 1):
+#   sudo cp deploy/aprilcam-bridge@.service /etc/systemd/system/
+#   sudo cp deploy/aprilcam-camera-bridge /usr/local/bin/
+#   sudo chmod +x /usr/local/bin/aprilcam-camera-bridge
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now aprilcam-bridge@0 aprilcam-bridge@1
+#
+# %i is the 0-based camera position; the loopback device path is derived
+# from it as /dev/video7%i (70, 71, ... matching vidar's v4l2loopback
+# video_nr=70,71 module config) -- not hardcoded to a single device, so
+# adding a third camera at position 2 is `enable --now aprilcam-bridge@2`
+# with no unit-file edit, as long as the module config grows a matching
+# video_nr/card_label entry.
+
+[Unit]
+Description=AprilCam libcamera->v4l2loopback bridge (camera %i)
+After=systemd-modules-load.service
+# The watchdog inside aprilcam-camera-bridge deliberately exits non-zero to
+# recover from a libcamerasrc crash -- never let the restart-rate limiter
+# give up on that recovery loop.
+StartLimitIntervalSec=0
+
+[Service]
+User=aprilcam
+SupplementaryGroups=video
+# cam / gst-launch-1.0 live under /usr/local (see archive/docs/knowledge/
+# raspberry-pi-camera-setup.md's libcamera-0.5.x-with-PiSP build); v4l2-ctl
+# is a normal /usr/bin package (v4l-utils).
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/aprilcam-camera-bridge %i /dev/video7%i
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
