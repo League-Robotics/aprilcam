@@ -38,6 +38,33 @@ building the real wheel (``python -m build --wheel``) and ``pip
 install``-ing ``aprilcam[daemon]`` from it into a throwaway venv on
 ``vidar.local`` (Ubuntu 24.04 aarch64, Python 3.12.3), confirmed by an
 SSH session recorded in this ticket's file, not by any test here.
+
+**Why ``cv2`` is captured at module (collection) time, below.**
+``daemon/service.py``/``daemon/streaming.py`` both do a real, top-level
+``import cv2 as cv``, so re-importing ``aprilcam.daemon`` for real
+(this module's whole point) re-executes that statement. ``cv2``'s C
+extension cannot tolerate a genuine second bootstrap in the same
+process -- confirmed by hand, with no test framework involved: deleting
+every ``cv2*`` key from ``sys.modules`` after a first successful
+``import cv2`` and importing it again raises ``AttributeError: module
+'cv2.dnn' has no attribute 'DictValue'``, because the native extension
+keeps process-global state the first bootstrap already consumed.
+``tests/test_cv2_import_blocker_console_script.py`` (pre-existing,
+unrelated to this ticket) evicts ``cv2`` from ``sys.modules`` inside
+several of its own test bodies and never restores it, leaving ``cv2``
+absent from the cache for the rest of the pytest session -- discovered
+while writing this module, because it was the first test in the whole
+suite to force a genuine reimport of ``cv2``-touching ``aprilcam``
+code afterward, at which point that absence turns into exactly the
+``AttributeError`` above. This module avoids ever triggering that
+second real bootstrap by capturing a working ``cv2`` reference at
+collection time (before any test body, including that file's, can
+evict it) and re-pinning ``sys.modules`` back onto that same object
+immediately before each real ``aprilcam.daemon`` reimport -- so
+``import cv2 as cv`` inside the reimported ``daemon/service.py``
+always resolves to the one successfully-bootstrapped module object,
+regardless of what an unrelated test elsewhere in the suite did to the
+cache in the meantime.
 """
 
 from __future__ import annotations
@@ -46,6 +73,12 @@ import sys
 from typing import Iterable
 
 import pytest
+
+# Captured at collection time -- before any test body in this process
+# (including test_cv2_import_blocker_console_script.py's) has a chance
+# to evict `cv2` from sys.modules. See the module docstring's last
+# section for why this exists and what it guards against.
+import cv2 as _known_good_cv2  # noqa: F401
 
 
 class _BlockMssImports:
@@ -71,6 +104,15 @@ def _evict_modules(prefixes: Iterable[str]) -> None:
     for name in list(sys.modules):
         if name in prefixes or any(name.startswith(prefix + ".") for prefix in prefixes):
             del sys.modules[name]
+
+
+def _ensure_cv2_pinned() -> None:
+    """Re-pin ``sys.modules["cv2"]`` onto the module object captured at
+    collection time. Call this immediately before evicting/reimporting
+    ``aprilcam.daemon`` -- see the module docstring's last section for
+    why a plain ``import cv2 as cv`` inside the reimported ``daemon/
+    service.py`` is not safe to let resolve to a *fresh* bootstrap."""
+    sys.modules["cv2"] = _known_good_cv2
 
 
 @pytest.fixture()
@@ -106,6 +148,7 @@ def test_daemon_main_module_imports_with_mss_blocked(mss_blocked: None) -> None:
     with ``mss`` genuinely unimportable. This is the module graph a
     real headless Pi boot exercises before ``main()`` ever runs, not
     just ``aprilcam.daemon``'s package ``__init__``."""
+    _ensure_cv2_pinned()
     _evict_modules(
         [
             "aprilcam.daemon",
@@ -132,6 +175,7 @@ def test_mss_not_imported_as_side_effect_of_daemon_main_import(
     that wraps its own ``import mss`` in a broad ``try/except
     ImportError`` would still pass the blocked-import test (the
     exception is swallowed) but would show up here."""
+    _ensure_cv2_pinned()
     _evict_modules(
         [
             "aprilcam.daemon",

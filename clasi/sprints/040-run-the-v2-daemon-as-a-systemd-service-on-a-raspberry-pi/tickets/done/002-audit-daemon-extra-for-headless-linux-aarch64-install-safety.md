@@ -131,18 +131,38 @@ reproduce -- the dependency-resolution behavior being audited here (does
 pip find aarch64/cp312 wheels for the compiled packages) is identical
 either way.
 
-**Test-gate scope:** per `.claude/rules/source-code.md`'s per-ticket
-scoping rule, ran the tests scoped to this ticket's changes in the
-foreground rather than the full `scripts/test-gate.sh` (that runs once
-per sprint, inside `close_sprint`): `tests/test_daemon_extra_headless_
-import.py` (new), `tests/test_no_cv2_in_client_modules.py`,
+**Test-gate scope, and a real bug the full run caught:** ran the tests
+scoped to this ticket's own changes first (`tests/test_daemon_extra_
+headless_import.py`, `tests/test_no_cv2_in_client_modules.py`,
 `tests/test_cv2_import_blocker_console_script.py`,
-`tests/test_deploy_assets.py`, and `tests/aprilcam/daemon/test_main.py`
--- 28 tests, all passing, no regressions. No `src/aprilcam` or
-`pyproject.toml` behavior changed by this ticket (only `deploy/README.md`
-prose and a new test file), so this scope covers the actual touch
-surface; `scripts/test-gate.sh` itself will run at sprint close per
-`close_sprint`'s own gate.
+`tests/test_deploy_assets.py`, `tests/aprilcam/daemon/test_main.py`),
+which passed -- but then also ran the actual full `scripts/test-gate.sh`
+selection (`uv run pytest -m "not camera and not integration"`, 2334
+collected/107 deselected) since the ticket's own acceptance criterion
+names it explicitly, and it caught a real cross-file ordering bug my
+new test introduced: `tests/test_cv2_import_blocker_console_script.py`
+(pre-existing, unrelated to this ticket) evicts `cv2` from
+`sys.modules` inside several of its own test bodies and never restores
+it. `cv2`'s C extension cannot tolerate a second real bootstrap in the
+same process (confirmed by hand outside pytest entirely -- a second
+`import cv2` after deleting `sys.modules["cv2"]` raises `AttributeError:
+module 'cv2.dnn' has no attribute 'DictValue'`), and my new test was
+the first test in the whole 2334-test suite, in real collection order,
+to force a genuine reimport of `cv2`-touching `aprilcam` code
+(`aprilcam.daemon` -> `daemon/service.py`'s top-level `import cv2 as
+cv`) after that eviction -- so it, not the pre-existing file, was where
+the corruption surfaced (2 failures the first full-suite run, not
+reproducible by running either file alone or by running my file first).
+Fixed in `tests/test_daemon_extra_headless_import.py` itself (see its
+updated module docstring's last section and `_ensure_cv2_pinned()`):
+capture a working `cv2` reference at collection time, before any test
+body can evict it, and re-pin `sys.modules["cv2"]` onto that same
+object immediately before each real `aprilcam.daemon` reimport. No
+change was needed to `test_cv2_import_blocker_console_script.py`
+itself -- that file's own tests still pass and its own scope is
+unrelated to this ticket, so this ticket's fix lives entirely in the
+one new file it added. Re-ran the full gate after the fix: **2182
+passed, 48 skipped, 107 deselected, 0 failed** -- clean.
 
 **Cleanup:** the throwaway venv and copied wheel were removed from
 `vidar.local` (`/tmp/aprilcam-audit`, `/tmp/aprilcam-0.20260906.1-*.whl`)
