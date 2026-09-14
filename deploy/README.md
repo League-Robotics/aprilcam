@@ -180,6 +180,26 @@ aprilcam daemon list          # rediscovered with no manual intervention
 
 ## Notes
 
+- **Camera bridge watchdog: what a restart looks like in the logs.**
+  `aprilcam-camera-bridge`'s watchdog judges a stall on two independent
+  signals, checked every ~10s after an 8s startup grace: (1) gst-launch's
+  own fault handler printing `Caught SIGSEGV` (the known libcamerasrc
+  crash-and-spin failure mode this watchdog exists for -- confirmed live
+  on vidar, sprint 040 ticket 006, that this is the only reliable signal
+  for that specific failure: the loopback device itself keeps appearing
+  to deliver *changing* frame content for minutes after the crash, so a
+  frame-arrival check alone misses it); (2) a bounded `v4l2-ctl
+  --stream-mmap` capture returning zero bytes (a producer that never
+  started at all). Either one logs `aprilcam-camera-bridge: <device>'s
+  libcamerasrc crashed (SIGSEGV) -- restarting` or `aprilcam-camera-
+  bridge: <device> stalled (no frame data received) -- restarting` to
+  stderr (visible in `journalctl -u aprilcam-bridge@<position>`), then
+  the script exits 1 so `Restart=always`/`RestartSec=3` relaunches it.
+  Earlier versions of this script judged the first case only by
+  `v4l2-ctl`'s exit status, which is 0 even for a genuinely dead
+  loopback and never fired -- if you see that check's old log line
+  (`stalled (libcamerasrc likely crashed)`) on a host, it is running a
+  stale copy of this script.
 - **The daemon's singleton guard.** v2's one-instance lock is
   `<socket_dir>/daemon.lock` (`/run/aprilcam/daemon.lock` under this
   unit's `RuntimeDirectory=`), acquired inside `daemon/lifecycle.py` --

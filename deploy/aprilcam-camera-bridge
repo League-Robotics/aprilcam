@@ -19,6 +19,57 @@
 # position, as: ExecStart=/usr/local/bin/aprilcam-camera-bridge %i /dev/video7%i
 set -u
 
+# Judge a "device never produced anything" stall on evidence that a
+# frame actually arrived, not on v4l2-ctl's exit status: confirmed live
+# on vidar.local (sprint 040 ticket 003 Finding 4) that `v4l2-ctl
+# --stream-mmap` against a v4l2loopback device with no live producer
+# prints an "unsupported stream type" error to stderr but **exits 0** --
+# so an exit-status-only check never fires. A short, bounded capture
+# piped to `wc -c` sidesteps the exit code entirely: zero bytes means no
+# frame arrived, regardless of what v4l2-ctl itself returned.
+#
+# This alone is NOT sufficient to catch the SIGSEGV-and-spin failure
+# mode this watchdog primarily exists for -- see gst_crashed below and
+# its comment for why. Kept as a second, independent check because it
+# does correctly catch the different "loopback never had a producer at
+# all" case (Finding 4), which gst_crashed cannot see. Factored into a
+# function so it can be sourced and exercised directly by an offline
+# test with a faked v4l2-ctl on PATH.
+frame_arrived() {
+    local dev="$1"
+    local bytes
+    bytes="$(timeout 6 v4l2-ctl -d "$dev" --stream-mmap --stream-count=1 --stream-to=- 2>/dev/null | wc -c)"
+    [ "${bytes:-0}" -gt 0 ]
+}
+
+# Detect the known libcamerasrc SIGSEGV-and-spin failure mode directly
+# from gst-launch's own fault-handler output, instead of inferring it
+# from loopback frame delivery. Confirmed live on vidar.local (sprint
+# 040 ticket 006): after this exact crash, v4l2loopback keeps delivering
+# *changing* frame content -- distinct md5sums on every poll -- for
+# minutes afterward (other libcamera/GStreamer threads keep draining
+# already-in-flight requests independently of the crashed request-
+# completion callback), so frame_arrived never observes a stall for this
+# failure mode and cannot be the sole check. gst-launch's built-in fault
+# handler unconditionally prints "Caught SIGSEGV" to its own output the
+# instant this happens (confirmed live, same second as the signal), so
+# grepping the pipeline's captured output is a direct, reliable signal
+# for the one failure mode named in this script's own header comment.
+gst_crashed() {
+    local log="$1"
+    grep -q "Caught SIGSEGV" "$log" 2>/dev/null
+}
+
+# Allow this script to be sourced (e.g. by tests) without running the
+# pipeline below -- `frame_arrived` is then callable in isolation. The
+# standard `(return 0 2>/dev/null)` idiom detects "am I being sourced"
+# without referencing $0/BASH_SOURCE directly -- those are unset at the
+# top level of a `bash -c '...'` invocation (e.g. a plain `ssh host
+# "source aprilcam-camera-bridge; ..."`) and trip `set -u` there.
+if (return 0 2>/dev/null); then
+    return 0
+fi
+
 POS="${1:?usage: aprilcam-camera-bridge <position> <loopback device>}"
 DEV="${2:?usage: aprilcam-camera-bridge <position> <loopback device>}"
 
@@ -41,25 +92,45 @@ fi
 # for the libcamerasrc "requestCompleted ... assertion failed" SIGSEGV
 # under load (queue max-size-buffers=6 leaky=downstream: matches vidar's
 # proven values exactly).
+#
+# gst-launch's combined stdout+stderr is teed into GST_LOG (in addition
+# to flowing through to this script's own stdout/stderr, e.g. journald
+# under the real unit, exactly as before) so gst_crashed can grep it for
+# the fault handler's "Caught SIGSEGV" line. Using process substitution
+# (`> >(tee ...) 2>&1`), not a trailing `| tee`, so `$!` below still
+# captures gst-launch's own PID, not tee's -- a pipeline's `$!` would be
+# the last command in the pipe.
+GST_LOG="$(mktemp "/tmp/aprilcam-bridge-${POS}.XXXXXX.log")"
 gst-launch-1.0 -q libcamerasrc camera-name="$CID" \
     ! queue max-size-buffers=6 leaky=downstream \
     ! video/x-raw,format=NV12,width=1280,height=720,framerate=30/1 \
-    ! videoconvert ! video/x-raw,format=YUY2 ! v4l2sink device="$DEV" sync=false &
+    ! videoconvert ! video/x-raw,format=YUY2 ! v4l2sink device="$DEV" sync=false \
+    > >(tee "$GST_LOG") 2>&1 &
 GST_PID=$!
-trap 'kill -9 "$GST_PID" 2>/dev/null' EXIT INT TERM
+trap 'kill -9 "$GST_PID" 2>/dev/null; rm -f "$GST_LOG"' EXIT INT TERM
 
 # Watchdog: libcamerasrc can SIGSEGV, after which gst-launch's own fault
 # handler "spins" forever instead of exiting -- so systemd never sees the
-# failure and the loopback silently freezes with no new frames. Give the
-# pipeline 8s to start producing before the first check, then poll the
-# loopback device every ~10s; if a read stalls, kill the pipeline and exit
-# non-zero so Restart=always (StartLimitIntervalSec=0 in the unit)
-# relaunches a fresh one. v4l2loopback fans out to every reader, so this
-# watchdog read never steals a frame from the daemon's own reader.
+# failure and the loopback silently freezes with no new *code* running,
+# even though (see gst_crashed's comment) the loopback device itself can
+# keep appearing to deliver fresh frames for minutes afterward. Give the
+# pipeline 8s to start producing before the first check, then poll every
+# ~10s: gst_crashed first (the reliable, direct signal for the known
+# failure mode), frame_arrived second (catches a producer that never
+# started at all, per ticket 003 Finding 4). Either one firing kills the
+# pipeline and exits non-zero so Restart=always (StartLimitIntervalSec=0
+# in the unit) relaunches a fresh one. v4l2loopback fans out to every
+# reader, so the frame_arrived read never steals a frame from the
+# daemon's own reader.
 sleep 8
 while kill -0 "$GST_PID" 2>/dev/null; do
-    if ! timeout 6 v4l2-ctl -d "$DEV" --stream-mmap --stream-count=1 >/dev/null 2>&1; then
-        echo "aprilcam-camera-bridge: $DEV stalled (libcamerasrc likely crashed) -- restarting" >&2
+    if gst_crashed "$GST_LOG"; then
+        echo "aprilcam-camera-bridge: $DEV's libcamerasrc crashed (SIGSEGV) -- restarting" >&2
+        kill -9 "$GST_PID" 2>/dev/null
+        exit 1
+    fi
+    if ! frame_arrived "$DEV"; then
+        echo "aprilcam-camera-bridge: $DEV stalled (no frame data received) -- restarting" >&2
         kill -9 "$GST_PID" 2>/dev/null
         exit 1
     fi
