@@ -346,7 +346,7 @@ def test_connect_with_explicit_host_never_calls_find_all(directories: Directorie
         discovery.connect("127.0.0.1:1")
 
 
-def test_find_all_with_the_real_browse_default_returns_promptly_when_nothing_answers(
+def test_find_all_with_the_real_browse_returns_promptly_and_well_formed(
     directories: Directories,
 ):
     """AC: the real (default) browse implementation performs an actual
@@ -355,14 +355,32 @@ def test_find_all_with_the_real_browse_default_returns_promptly_when_nothing_ans
     bottom) that deliberately touches a real zeroconf/multicast socket,
     to prove the bound itself. A short injected timeout (well below
     ``_DEFAULT_BROWSE_TIMEOUT``) keeps it fast; ``find_all()`` must
-    still return within a small multiple of that timeout, not hang."""
+    still return within a small multiple of that timeout, not hang.
+
+    040-007 fix-up: this test previously also asserted ``result == ()``,
+    i.e. that nothing answers on this LAN. That assumption held only
+    while no AprilCam daemon was reachable from wherever the offline
+    gate happened to run. Sprint 040 deliberately left a permanent
+    daemon running on ``vidar.local``, which mDNS-advertises on this
+    developer's LAN -- so this machine's offline-gate run now *always*
+    finds at least one real entry, which is correct behaviour, not a
+    bug. This test's job is only to prove the real browse is bounded;
+    it stays in the offline gate (rather than moving to
+    ``@pytest.mark.integration``) because "does a real bounded browse
+    return promptly" is exactly the kind of environment-independent
+    property the offline gate should keep covering, and no fake
+    ``browse=`` can exercise the real ``zeroconf.ServiceBrowser`` path
+    this AC targets. What it must not assume is *what* the LAN
+    contains -- so it now only checks the result's shape and type, not
+    its contents."""
     discovery = Discovery(directories=directories, browse=lambda: _browse_zeroconf(timeout=0.2))
 
     start = time.monotonic()
     result = discovery.find_all()
     elapsed = time.monotonic() - start
 
-    assert result == ()
+    assert isinstance(result, tuple)
+    assert all(isinstance(entry, DaemonInfo) for entry in result)
     assert elapsed < 2.0  # a small multiple of the 0.2s timeout, not "hung"
 
 

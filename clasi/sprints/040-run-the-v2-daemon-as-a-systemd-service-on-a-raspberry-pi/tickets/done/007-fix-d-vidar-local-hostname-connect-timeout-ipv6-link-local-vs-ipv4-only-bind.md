@@ -241,3 +241,55 @@ running; `/tmp/ac040007-*` and the copied wheel removed; `ros-cameras`
 and `camera-watchdog.timer` confirmed `inactive`/`enabled` (untouched,
 left exactly as ticket 003/006 left them for ticket 004). No systemd
 unit installed or enabled by this ticket.
+
+## Fix-up addendum (reopened)
+
+**Problem**: `tests/aprilcam/client/test_discovery.py::test_find_all_with_the_real_browse_default_returns_promptly_when_nothing_answers`
+did a real, bounded zeroconf browse (`timeout=0.2`) and asserted both
+`result == ()` and `elapsed < 2.0`. Sprint 040 deliberately left a
+permanent AprilCam daemon running on `vidar.local`
+(192.168.1.144:5280), which mDNS-advertises on this LAN — so
+`result == ()` now fails on every offline-gate run from a machine on
+that LAN. Ticket 005's findings had recorded this as an "environmental
+flake"; with the daemon left running permanently it is not
+intermittent, it is permanent, and would fail `close_sprint`'s full
+test gate every time.
+
+**Fix**: renamed the test to
+`test_find_all_with_the_real_browse_returns_promptly_and_well_formed`
+and narrowed its assertions to what the AC actually needs — the real
+(default) browse implementation is *bounded*, not that the LAN is
+empty. It now asserts `isinstance(result, tuple)` and
+`all(isinstance(entry, DaemonInfo) for entry in result)` instead of
+`result == ()`, plus the unchanged `elapsed < 2.0` bound check. Kept
+in the offline gate rather than moved to `@pytest.mark.integration`:
+its whole point is proving the real `zeroconf.ServiceBrowser` path
+returns promptly rather than hanging, which is an
+environment-independent property the offline gate should keep
+covering — no fake `browse=` can exercise that real code path, and
+what LAN daemons happen to be reachable is exactly the part that
+should not be asserted. Rationale is recorded in the test's own
+docstring.
+
+**Audit of the rest of the offline suite** (grepped for
+`_browse_zeroconf`, `find_all()`, `ServiceBrowser`, `ServiceBrowser`,
+`zeroconf`, and `Discovery(` real-browse usage across `tests/`):
+every other test that performs a real mDNS browse or connects to two
+real in-process daemons is already marked `@pytest.mark.integration`
+(`test_discovery.py`'s own two-real-daemon test, `test_daemon_cli.py`'s
+`test_daemon_list_reports_two_real_local_daemons_on_alternate_ports`,
+and `test_cli_integration.py`'s two `--all` fan-out tests) or
+`@pytest.mark.camera`, so none of them run under `scripts/test-gate.sh`
+(`-m "not camera and not integration"`) and none needed changes. Every
+other test in `test_discovery.py` goes through the `directories`
+fixture, which blanket-monkeypatches `discovery._browse_zeroconf` to
+`lambda: ()` — those were never at risk. No change to
+`client/discovery.py` was needed or made.
+
+**Verification**:
+- `uv run pytest tests/aprilcam/client/test_discovery.py -m "not camera
+  and not integration" -q` → `33 passed, 1 deselected`.
+- `./scripts/test-gate.sh -q` (full offline gate, run while vidar's
+  daemon was advertising on the LAN, confirmed live in this same
+  session) → `2210 passed, 48 skipped, 107 deselected in 172.32s
+  (0:02:52)`, exit code 0.
