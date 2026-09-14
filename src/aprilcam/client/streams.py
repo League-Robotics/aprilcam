@@ -63,7 +63,7 @@ business logic lives here.
 from __future__ import annotations
 
 import socket
-from typing import Iterator, Optional
+from typing import Iterator, Optional, Tuple
 
 from aprilcam import framing
 from aprilcam.client.models import image_frame_from_proto, tag_frame_from_proto
@@ -82,6 +82,41 @@ def _host_is_local(host: str) -> bool:
     return host in ("", "localhost", "127.0.0.1", "::1")
 
 
+def _resolve_tcp_endpoint(host: str, port: int) -> Tuple[int, str]:
+    """The ``(family, address)`` a raw stream socket should actually
+    dial for (*host*, *port*) -- the same IPv4-preferred resolution
+    ``client/discovery.py``'s gRPC control channel uses (ticket
+    040-007), applied here so this module's own TCP connect does not
+    keep the identical bug: a plain ``socket.socket(AF_INET, ...)``
+    cannot resolve an IPv6-only/``.local`` host at all (family-mismatch
+    ``gaierror``, not the 5s hang the control channel saw, but broken
+    either way).
+
+    Imports ``client.discovery`` lazily, inside this function, rather
+    than at module scope: ``daemon_client.py`` imports *this* module
+    (``streams.py``) for ``SocketImageStream``/``SocketTagStream``, and
+    ``discovery.py`` imports ``daemon_client.py`` for ``GrpcDaemon`` --
+    a top-level ``from aprilcam.client.discovery import ...`` here would
+    close that into an import cycle. Deferring the import to call time
+    (long after both modules have finished loading) avoids it without
+    restructuring either module's existing dependency direction.
+
+    *host* may itself already carry a ``:port`` suffix (it is the same
+    ``target`` string ``GrpcDaemon`` stores for its own error messages,
+    e.g. ``"vidar.local:5280"`` for a non-default control-plane port) --
+    :func:`~aprilcam.client.discovery.split_host_port` strips that
+    before resolution so a literal colon-and-port never reaches
+    ``getaddrinfo`` as part of the hostname.
+    """
+    from aprilcam.client.discovery import resolve_ipv4_preferred, split_host_port
+
+    name, _control_port = split_host_port(host)
+    resolved = resolve_ipv4_preferred(name, port)
+    if resolved is not None:
+        return resolved
+    return socket.AF_INET, name
+
+
 def _connect(endpoint: aprilcam_v2_pb2.StreamEndpoint, *, host: str) -> socket.socket:
     """Open a socket to *endpoint*, unix preferred when *host* is local,
     TCP otherwise (module docstring). Raises ``ValueError`` if
@@ -94,8 +129,9 @@ def _connect(endpoint: aprilcam_v2_pb2.StreamEndpoint, *, host: str) -> socket.s
         sock.connect(endpoint.socket_path)
         return sock
     if endpoint.HasField("tcp_port"):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect((host, endpoint.tcp_port))
+        family, address = _resolve_tcp_endpoint(host, endpoint.tcp_port)
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        sock.connect((address, endpoint.tcp_port))
         return sock
     if endpoint.HasField("socket_path"):
         # A unix path exists but *host* was not recognised as local --

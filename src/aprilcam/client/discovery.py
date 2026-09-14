@@ -81,6 +81,7 @@ document exists yet to read one from.
 from __future__ import annotations
 
 import fcntl
+import ipaddress
 import logging
 import os
 import socket
@@ -107,6 +108,8 @@ __all__ = [
     "Discovery",
     "probe_lock_holder",
     "probe_socket_reachable",
+    "resolve_ipv4_preferred",
+    "split_host_port",
 ]
 
 logger = logging.getLogger(__name__)
@@ -264,6 +267,89 @@ def _probe_remote_reachable(target: str, timeout: float = _DEFAULT_PROBE_TIMEOUT
         return False
     finally:
         channel.close()
+
+
+def split_host_port(host: str) -> Tuple[str, int]:
+    """Split a ``-d``-style *host* value into ``(name_or_literal, port)``,
+    honouring gRPC's own bracketed-IPv6 target syntax (``"[::1]:5280"``,
+    ``"[fe80::1]"``) so a literal IPv6 address's own colons are never
+    mistaken for a ``:port`` separator. Falls back to
+    :data:`DEFAULT_DAEMON_PORT` when *host* carries no port at all --
+    including a bare, unbracketed IPv6 literal (``"fe80::1"``), which is
+    indistinguishable from "no port" by colon-counting alone and was
+    already treated that way by the pre-040-007 ``":" in host`` check
+    this function replaces the reasoning for, not the behaviour of."""
+    if host.startswith("["):
+        end = host.find("]")
+        if end != -1:
+            literal = host[1:end]
+            rest = host[end + 1 :]
+            if rest.startswith(":") and rest[1:].isdigit():
+                return literal, int(rest[1:])
+            return literal, DEFAULT_DAEMON_PORT
+    if host.count(":") == 1:
+        name, _, port_str = host.partition(":")
+        if port_str.isdigit():
+            return name, int(port_str)
+    return host, DEFAULT_DAEMON_PORT
+
+
+def resolve_ipv4_preferred(host: str, port: int) -> Optional[Tuple[int, str]]:
+    """Resolve *host* (a bare hostname -- never a ``host:port`` string;
+    split that with :func:`split_host_port` first), preferring an
+    ``AF_INET`` (IPv4) candidate over any ``AF_INET6`` one -- ticket
+    040-007's fix for the root cause found live against ``vidar.local``:
+    the Mac's resolver lists vidar's IPv6 link-local addresses
+    (``dscacheutil -q host -a name vidar.local``) before its IPv4
+    address, and a raw hostname handed to ``grpc.insecure_channel``
+    lets gRPC's own C-core resolver pick the unreachable link-local
+    candidate and wait out the full connect timeout instead of falling
+    back to IPv4 itself.
+
+    Returns ``(family, address_literal)`` for the chosen candidate, or
+    ``None`` in the two cases where there is nothing useful for a
+    caller to do differently from before this ticket:
+
+    - *host* is already an IP literal (v4 or v6) -- nothing to
+      resolve; a caller should keep using it exactly as typed.
+    - resolution genuinely fails (``socket.gaierror``) or returns no
+      candidates at all -- a caller falls back to its own prior
+      behaviour (handing the raw hostname to gRPC/``socket.connect``,
+      which fails with the same clean, typed error as before this
+      ticket; see ``docs/design`` for why the daemon's own bind is not
+      the thing this ticket changes).
+
+    When *host* resolves to IPv6 addresses only (no ``AF_INET``
+    candidate -- e.g. an AAAA-only hostname), the *first* IPv6
+    candidate the resolver returned is used, preserving whatever
+    ordering/reachability the OS itself already provides for that
+    case -- this ticket only reorders IPv4 ahead of IPv6, it does not
+    re-rank IPv6 candidates against each other.
+
+    Never raises: every failure mode above is a plain ``None`` return,
+    so a caller can use this unconditionally ahead of its existing
+    connect logic without adding a new exception path.
+    """
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        return None  # already a literal -- nothing to resolve
+
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        return None
+    if not infos:
+        return None
+
+    # Stable sort: AF_INET (0) before AF_INET6 (1), otherwise preserving
+    # the resolver's own relative ordering within each family -- e.g.
+    # multiple IPv6 candidates keep the order the OS returned them in.
+    infos = sorted(infos, key=lambda info: 0 if info[0] == socket.AF_INET else 1)
+    family, _socktype, _proto, _canonname, sockaddr = infos[0]
+    return family, sockaddr[0]
 
 
 def _browse_zeroconf(timeout: float = _DEFAULT_BROWSE_TIMEOUT) -> Tuple[_BrowseResult, ...]:
@@ -477,7 +563,7 @@ class Discovery(_DiscoveryBase):
         return GrpcDaemon(aprilcam_v2_pb2_grpc.AprilCamV2Stub(channel), target="localhost")
 
     def _connect_remote(self, host: str) -> Daemon:
-        target = host if ":" in host else f"{host}:{DEFAULT_DAEMON_PORT}"
+        target = self._resolve_grpc_target(host)
         channel = grpc.insecure_channel(target)
         try:
             grpc.channel_ready_future(channel).result(timeout=self._connect_timeout)
@@ -485,3 +571,31 @@ class Discovery(_DiscoveryBase):
             channel.close()
             raise ConnectionFailed(host, reason="no daemon answered") from exc
         return GrpcDaemon(aprilcam_v2_pb2_grpc.AprilCamV2Stub(channel), target=host)
+
+    @staticmethod
+    def _resolve_grpc_target(host: str) -> str:
+        """The literal string actually handed to
+        ``grpc.insecure_channel`` for a remote *host* -- ticket 040-007.
+        *host* itself (the ``-d`` value, or ``DaemonInfo.host`` from a
+        browse/env lookup) is never touched: it stays exactly what the
+        stakeholder typed for :class:`~aprilcam.errors.ConnectionFailed`
+        and ``GrpcDaemon``'s own ``target`` (display, error messages,
+        host-qualified camera codes -- sprint 017) -- only the address
+        gRPC dials is resolved ahead of time here, preferring IPv4.
+
+        A bare hostname resolves via :func:`resolve_ipv4_preferred`; an
+        IP literal (v4 or v6, bracketed or not) or a hostname that
+        cannot be resolved at all falls through to the exact
+        pre-040-007 formatting (``host`` unchanged, default port
+        appended only when *host* carries no colon), so gRPC's own
+        resolver/error path runs unchanged for those cases -- including
+        the unresolvable-hostname case, which still ends up as the same
+        :class:`~aprilcam.errors.ConnectionFailed` this method's caller
+        already raises on a connect timeout.
+        """
+        name, port = split_host_port(host)
+        resolved = resolve_ipv4_preferred(name, port)
+        if resolved is None:
+            return host if ":" in host else f"{host}:{DEFAULT_DAEMON_PORT}"
+        family, address = resolved
+        return f"[{address}]:{port}" if family == socket.AF_INET6 else f"{address}:{port}"
