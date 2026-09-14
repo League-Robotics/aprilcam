@@ -14,15 +14,23 @@ backend cannot read this loopback reliably — every ``read()`` reports a
 backend captures the raw stream with ``v4l2-ctl --stream-to=-`` and
 reshapes each fixed-size frame into a BGR ``ndarray`` itself.
 
-**Not exercised against real frames this ticket** — there is no Linux/
-v4l2loopback hardware on this Mac to validate against, and the ticket's
-"convert, don't rewrite blindly" instruction does not carve out a
-deferral for this module the way it does for ``libcam.py``/
-``screencap.py``. The format-parsing and frame-reshaping logic (the
-parts with no OS/hardware dependency) are unit-tested headlessly
-against a faked subprocess; the actual "does ``v4l2-ctl`` produce
-correct bytes on a real loopback device" question is unverifiable here
-and is carried forward to whichever sprint next brings up Pi hardware.
+**Verified against real frames, sprint 040 (ticket 040-003).** Real Pi 5
+hardware (``vidar.local``, two IMX296 CSI cameras behind v4l2loopback)
+became available and this backend was exercised live for the first
+time: ``open()`` correctly queried the real negotiated format
+(``v4l2-ctl --get-fmt-video`` -> ``1280x720 YUYV``) and ``read()``
+produced real, correctly-colored (not channel-swapped) 1280x720 BGR
+frames at ~30fps with zero duplicate consecutive frames across a
+sampled run — no source defect was found. The degrade-to-defaults path
+in ``_query_format`` (a device with no negotiated format) and the
+fail-fast-not-hang path in ``read()`` (a present-but-not-streaming
+device) were also confirmed against real ``v4l2-ctl`` failure output,
+not just simulated subprocess output. The format-parsing and
+frame-reshaping logic remains unit-tested headlessly against a faked
+subprocess (this Mac still has no v4l2loopback hardware of its own),
+but those tests now also freeze the literal real-hardware output
+captured during that live session — see
+``tests/aprilcam/camera/test_backends.py``.
 """
 
 from __future__ import annotations

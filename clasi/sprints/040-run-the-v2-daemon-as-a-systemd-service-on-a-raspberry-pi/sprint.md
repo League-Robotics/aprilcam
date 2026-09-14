@@ -542,15 +542,47 @@ daemon or affecting the working camera.
 
 ### Open Questions
 
-1. **Does vidar keep running the AprilCam daemon permanently after this
-   sprint, or is this a one-time test window after which ROS camera duty
-   is restored and the v2 aprilcamd/bridge units are disabled again?** The
-   sprint's Success Criteria assume ROS is restored to its original state
-   afterward (the conservative default), but if the stakeholder wants
-   AprilCam to be the permanent camera owner on vidar, that changes what
-   "restore ROS" means at the end of the live-verification ticket and may
-   need a follow-up decision about `camera-watchdog.timer`'s interaction
-   with a permanently-stopped `ros-cameras.service`.
+1. **RESOLVED (ticket 040-005): AprilCam, not ROS, owns vidar's cameras
+   going forward.** The stakeholder decided vidar keeps running the v2
+   AprilCam daemon and bridge units permanently, superseding this
+   question's "conservative default" of restoring ROS at the end of
+   ticket 004's live-verification session (ticket 004's own recorded
+   "End state on vidar.local" — ROS re-enabled+active, AprilCam
+   disabled+inactive — reflected that now-superseded default, not this
+   decision; it is not rewritten, only annotated, per this project's
+   "extend, don't delete" convention for closed history). The team-lead
+   executes the actual switch on vidar directly (out of this ticket's own
+   scope, which is documentation-only):
+   ```bash
+   systemctl disable --now camera-watchdog.timer web-video-server \
+       camera-color-relay ros-cameras
+   systemctl enable --now aprilcam-bridge@0 aprilcam-bridge@1 aprilcamd
+   ```
+   — the same four-unit-disable / three-unit-enable sequence ticket 004's
+   Findings item 9 established as correct (disabling only two of the four
+   ROS units is insufficient to keep ROS down across a reboot, because
+   `camera-color-relay.service`/`web-video-server.service`'s `BindsTo=`
+   pulls `ros-cameras.service` back up at boot otherwise).
+
+   **Risk carried forward, not solved by this decision**: `ros-cameras`
+   and its bound units are Ansible-managed, so a future Ansible run
+   against vidar may re-enable and restart them, since `systemctl
+   enable`/`disable` state is exactly the kind of drift an Ansible
+   playbook is likely to reconcile back to its declared state. This
+   project's switch-over never touches the underlying Ansible-managed
+   unit files, only their enabled/active state, so Ansible has no
+   *declared* conflict to detect — but a playbook that unconditionally
+   re-asserts "these ROS units are enabled+active" would still silently
+   undo the switch. **Recovery**: re-run the AprilCam-enable half of the
+   sequence above — it is idempotent and does not depend on ROS's prior
+   state. If Ansible keeps re-fighting the switch on every run, the
+   durable fix is on the Ansible side (exclude vidar's camera units from
+   that playbook's scope, or make the camera-owner choice itself an
+   Ansible-managed variable) — out of this sprint's ability to fix from
+   `deploy/`, and not attempted here. See
+   `docs/knowledge/raspberry-pi-camera-setup.md`'s "ROS coexistence and
+   switch-over" section for the full procedure and this same risk,
+   written for future operators.
 2. **Is a single shared imx296 sensor ever needed by both ROS and AprilCam
    concurrently?** Out of scope for this sprint (Scope: "no arbitration/
    handoff automation"), but worth stakeholder awareness: a CSI sensor can

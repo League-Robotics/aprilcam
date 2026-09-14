@@ -533,3 +533,22 @@ scp'd unit/script copies used during this session.
 No changes to `camera/backends/*.py` or `camera/identity.py` — ticket
 003 already confirmed those work correctly against real hardware, and
 this ticket's live session did not contradict that.
+
+## Addendum (ticket 040-005): end state above is superseded by a
+## stakeholder decision, not a defect in this ticket
+
+The "End state on vidar.local" section above (ROS re-enabled+active, v2
+AprilCam units disabled+inactive) accurately recorded this ticket's own
+live session and reflected sprint.md's then-default assumption ("restore
+ROS unless the stakeholder decides otherwise" — Open Question 1,
+unresolved when this ticket ran). Ticket 040-005 records that the
+stakeholder has since resolved that question: **AprilCam, not ROS, owns
+vidar's cameras going forward**, permanently. The team-lead executes the
+switch directly (disable all four ROS units, enable the three v2 units,
+per this ticket's own Findings item 9 sequencing) — this addendum does
+not rewrite this ticket's historical record of what was true at the time
+it ran, only notes that the state it left behind is intentionally
+superseded. See sprint.md's Open Questions (item 1, resolved) and
+`docs/knowledge/raspberry-pi-camera-setup.md`'s "ROS coexistence and
+switch-over" section for the current procedure and the Ansible
+re-enable risk this decision carries forward.

@@ -839,23 +839,35 @@ straddling period where both signatures need to work.
 ## 6. Open Questions / Known Limitations
 
 - **The flat-field apply side (§4) shipped out-of-process and went undocumented in this file until sprint 037's planning pass caught the drift.** No functional gap — the code and its own docstrings were always complete — but a reminder that an out-of-process change is still expected to update the owning subsystem's `DESIGN.md`, and this one didn't at the time.
-- **No libcamera capture backend exists yet.** `backends/libcamera.py`
-  and `backends/__init__.py` both say so explicitly: only `/sys`-based
-  enumeration is ported; v1's `cam`-tool/GStreamer "gst mode" and an
-  actual capture backend reading a resolved loopback device are
-  deferred to "whichever sprint next brings up real Pi hardware" —
-  there is no Pi/libcamera device in this dev environment to validate
-  against. Ticket 006/031-006 wires the *branch point*
-  (`resolve_capture_backend`) end to end, but it is exercised only
-  against injected fake device lists in tests, never a real `/sys` tree
-  with a real bridge behind it.
-- **`V4l2LoopbackBackend` is unverified against real frames.** Its own
-  module docstring states this directly: "there is no Linux/
-  v4l2loopback hardware on this Mac to validate against." Only the
-  pure format-parsing/frame-reshaping logic is unit-tested, against a
-  faked subprocess — whether `v4l2-ctl --stream-to=-` actually produces
-  correct bytes on a real loopback device is carried forward
-  unverified.
+- **Resolved, sprint 040: the libcamera enumeration/branch-point path is
+  verified against real Pi hardware.** `backends/libcamera.py`'s
+  `/sys`-based enumeration and `backends/__init__.py`'s
+  `resolve_capture_backend` branch point were exercised live on
+  `vidar.local` (two real IMX296 CSI cameras behind v4l2loopback) for the
+  first time (sprint 040 ticket 003) and found correct on the first try —
+  `list_loopback_cameras()` returned exactly the two real
+  `LibcameraDevice` entries with the correct `device_index`/`camera_id`,
+  and `resolve_capture_backend` correctly resolved each real
+  `hardware_key` to a `V4l2LoopbackBackend` at the right `/dev/videoN`.
+  v1's `cam`-tool/GStreamer "gst mode" enumeration and an actual libcamera
+  *capture* backend remain **not ported** — this is unchanged and
+  intentional (sprint 040's Scope explicitly keeps the out-of-process
+  bridge architecture, reaffirming rather than revisiting v1's proven
+  "never run GStreamer/libcamera inside the daemon" decision), not a gap
+  still awaiting hardware.
+- **Resolved, sprint 040: `V4l2LoopbackBackend` is verified against real
+  frames.** Its own module docstring's "not exercised against real
+  frames" caveat no longer holds: against a real bridge feeding
+  `/dev/video71` on `vidar.local`, `open()` correctly queried the real
+  negotiated format (`v4l2-ctl --get-fmt-video` → `1280x720 YUYV`) and
+  `read()` produced real, correctly-colored (not channel-swapped)
+  1280x720 BGR frames at ~30fps (sprint 040 ticket 003's Findings, sample
+  frames saved for the record). The degrade-to-defaults path
+  (`_query_format` when a device has no negotiated format) and the
+  fail-fast-not-hang path (`read()` on a present-but-not-streaming
+  device) were also confirmed against real failure output, not just
+  simulated subprocess output, and are now frozen as offline regression
+  tests using the literal captured `v4l2-ctl` text.
 - **`resolve_capture_backend`'s fallback-on-miss is not expected to
   actually work.** When a libcamera `hardware_key` has no matching
   enumerated loopback device, the code falls back to
