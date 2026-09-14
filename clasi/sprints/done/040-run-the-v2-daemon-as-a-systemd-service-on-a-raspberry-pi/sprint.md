@@ -1,7 +1,7 @@
 ---
 id: '040'
 title: Run the v2 daemon as a systemd service on a Raspberry Pi
-status: executing
+status: done
 branch: sprint/040-run-the-v2-daemon-as-a-systemd-service-on-a-raspberry-pi
 use-cases: []
 issues:
