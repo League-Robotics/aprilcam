@@ -1,12 +1,14 @@
 ---
 id: '040'
 title: Run the v2 daemon as a systemd service on a Raspberry Pi
-status: ticketing
+status: executing
 branch: sprint/040-run-the-v2-daemon-as-a-systemd-service-on-a-raspberry-pi
 use-cases: []
 issues:
 - plan-daemon-runs-on-a-remote-raspberry-pi-every-client-discovers-it-and-connects-over-tcp.md
 - live-tag-detection-and-systemd-persistence-on-a-pi-with-a-calibrated-playfield.md
+- camera-bridge-watchdog-never-detects-a-stalled-loopback.md
+- remote-daemon-by-mdns-hostname-times-out-ipv6-link-local-vs-ipv4-only-bind.md
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
 
@@ -497,6 +499,47 @@ was available.
   states the order explicitly rather than relying on that graceful
   degradation to mask a misordered install.
 
+## Revision
+
+Ticket 003's live session on vidar surfaced two real defects outside its
+own file scope (`camera/backends/*.py`, `camera/identity.py`), each now
+covered by a new ticket (006, 007) and a linked issue:
+
+1. **`deploy/aprilcam-camera-bridge`'s watchdog never detects a stalled
+   loopback** (Finding 4) — it judges a stall on `v4l2-ctl
+   --stream-mmap`'s exit status, which is 0 even when the loopback has no
+   producer, so a `libcamerasrc` SIGSEGV is never noticed and the unit
+   never restarts. No architectural change: this is a bug fix confined to
+   the `deploy/aprilcam-camera-bridge` artifact already introduced by
+   ticket 001 (Step 3's "Camera bridging" responsibility, unchanged
+   purpose) — ticket 006.
+2. **`-d vidar.local` times out from the Mac** (Finding 7) — the Mac's
+   resolver returns vidar's IPv6 link-local addresses before its IPv4
+   address, and `client/discovery.py` hands the raw hostname to
+   `grpc.insecure_channel`, which picks the unreachable IPv6 candidate
+   and waits out the full connect timeout. **Direction: fix client-side
+   address resolution only** (`client/discovery.py` resolves and prefers
+   an IPv4 candidate before falling back), leaving `daemon/rpc.py`'s
+   `0.0.0.0`-only bind exactly as the 028-003 stakeholder decision
+   recorded it. A dual-stack daemon bind was considered and rejected for
+   this ticket: it would reopen a decision this sprint has no new
+   information to relitigate, when the reported symptom is fully
+   addressed by a narrower, lower-risk change to one already-thin client
+   module — ticket 007.
+
+Neither finding changes this sprint's subsystem boundaries, the
+component diagram, or any Design Rationale entry above; both are
+targeted fixes to code the sprint's plan already anticipated might need
+correction once real hardware and a real network were involved. Ticket
+004's `depends-on` and acceptance criteria are updated accordingly (both
+new tickets must complete first), and its acceptance criteria are further
+revised for a hardware finding unrelated to either defect above: camera
+i2c@88000 has a physical CSI fault (ticket 003 Finding 6, reproduced four
+times, pre-existing under ROS before this sprint touched vidar) — ticket
+004 now requires only camera i2c@80000 end to end, with i2c@88000
+required to be enumerated and reported as unusable without crashing the
+daemon or affecting the working camera.
+
 ### Open Questions
 
 1. **Does vidar keep running the AprilCam daemon permanently after this
@@ -728,9 +771,17 @@ Before tickets can be created, all of the following must be true:
 | 001 | Deploy assets: daemon unit, camera bridge, module config, provision script, runbook | — | plan-daemon-runs-on-a-remote-raspberry-pi |
 | 002 | Audit daemon extra for headless-Linux/aarch64 install safety | — | plan-daemon-runs-on-a-remote-raspberry-pi |
 | 003 | Validate and fix the Pi capture path against real vidar hardware | 001 | live-tag-detection-and-systemd-persistence |
-| 004 | Live install, verification, and v1 retirement on vidar.local | 001, 002, 003 | plan-daemon-runs-on-a-remote-raspberry-pi, live-tag-detection-and-systemd-persistence |
+| 006 | Fix camera bridge watchdog to detect a stalled loopback feed | 001 | camera-bridge-watchdog-never-detects-a-stalled-loopback |
+| 007 | Fix `-d vidar.local` hostname connect timeout (IPv6 link-local vs IPv4-only bind) | — | remote-daemon-by-mdns-hostname-times-out-ipv6-link-local-vs-ipv4-only-bind |
+| 004 | Live install, verification, and v1 retirement on vidar.local | 001, 002, 003, 006, 007 | plan-daemon-runs-on-a-remote-raspberry-pi, live-tag-detection-and-systemd-persistence |
 | 005 | Documentation: Pi camera knowledge doc, wiki systemd section, design-doc gap closure | 004 | plan-daemon-runs-on-a-remote-raspberry-pi, live-tag-detection-and-systemd-persistence |
 
 Tickets execute serially in the order listed. 001 and 002 have no
 dependency between them and could in principle run in either order (or in
 parallel, if the team-lead chooses to), but both must complete before 003.
+006 and 007 were added after 003 found two live defects outside its own
+file scope (watchdog exit-code blindness; hostname connect timeout); they
+do not depend on each other, only 006 depends on 001 (it fixes an
+artifact 001 shipped), and both must complete before 004 since 004's
+acceptance criteria now require the fixed hostname connect and rely on
+the watchdog behaving correctly during its reboot-persistence check.

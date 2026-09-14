@@ -3,7 +3,12 @@ id: '004'
 title: Live install, verification, and v1 retirement on vidar.local
 status: open
 use-cases: []
-depends-on: ['001', '002', '003']
+depends-on:
+- '001'
+- '002'
+- '003'
+- '006'
+- '007'
 github-issue: ''
 issue:
 - plan-daemon-runs-on-a-remote-raspberry-pi-every-client-discovers-it-and-connects-over-tcp.md
@@ -18,10 +23,27 @@ completes_issue: true
 
 This is the sprint's centerpiece: install v2's real deploy assets (ticket
 001, fixed capture path from ticket 003, install-safety findings from
-ticket 002) on `vidar.local` and prove the full acceptance criteria named
-in sprint.md's Success Criteria. **Requires SSH as `ros@vidar.local`**
-(key auth, passwordless sudo). Every state change made to shared/ROS-owned
-services must be recorded exactly (before/after) so it can be restored.
+ticket 002, the fixed watchdog from ticket 006, the fixed `-d
+vidar.local` hostname connect from ticket 007) on `vidar.local` and prove
+the full acceptance criteria named in sprint.md's Success Criteria.
+**Requires SSH as `ros@vidar.local`** (key auth, passwordless sudo).
+Every state change made to shared/ROS-owned services must be recorded
+exactly (before/after) so it can be restored.
+
+**Hardware update from ticket 003 (Finding 6):** camera i2c@88000
+(`/dev/video70`, ROS `camera0`) has a physical fault — `libcamerasrc`
+reproducibly SIGSEGVs with `Camera frontend has timed out! Please check
+that your camera sensor connector is attached securely.`, reproduced four
+times including directly with the `cam` tool (bypassing GStreamer/the
+bridge/AprilCam entirely). This was **already broken under ROS before
+this sprint touched vidar**, not something this sprint's work caused: ROS's
+own `camera0` node ran at 0.2% CPU (vs. `camera1`'s 4%) and ROS's own
+watchdog logged `camera0`'s stream repeatedly serving 22 bytes. This
+ticket's acceptance criteria below are adjusted accordingly — see the
+per-criterion notes. If the stakeholder reseats the CSI ribbon cable (or
+swaps the sensor) before this ticket runs, verify both cameras end to end
+as originally scoped and note in this ticket that the hardware issue was
+resolved.
 
 **Exact state changes allowed on vidar, and what must be recorded:**
 
@@ -63,16 +85,37 @@ services must be recorded exactly (before/after) so it can be restored.
       `deploy/aprilcam-bridge@71.service` or equivalent instance names)
       via the ticket-001 provision script + runbook, using a wheel built
       on the Mac and pinned (`aprilcam[daemon]==<version>`).
-- [ ] `aprilcam camera list -d vidar.local` (run from the Mac) shows both
-      imx296 cameras `present`/`usable`.
-- [ ] `aprilcam camera image -d vidar.local` returns a real frame for each
-      camera (saved/inspected, not just "no error").
-- [ ] Tag detection attempted per sprint.md SUC-006: if a playfield/tags
-      are in view, real detections recorded (tag id, pixel position, yaw
-      quoted in this ticket); if not, this ticket says so explicitly
-      rather than omitting the criterion.
+- [ ] `aprilcam camera list -d vidar.local` (run from the Mac) shows
+      camera i2c@80000 (`/dev/video71`) `present`/`usable` end to end,
+      including a real captured frame (see next criterion). This is the
+      required, must-pass criterion for this ticket.
+- [ ] Camera i2c@88000 (`/dev/video70`) is reported honestly rather than
+      required to work: it is enumerated by `camera list`
+      (`present`), and the daemon reports it `unusable`/failing cleanly
+      (no crash, no effect on camera i2c@80000's operation) given its
+      known physical fault (ticket 003 Finding 6). Quote the actual
+      `camera list`/`camera probe` output for it in this ticket. If the
+      stakeholder has reseated the CSI cable before this ticket runs,
+      verify it end to end instead and note that the hardware issue was
+      resolved — do not assume the fault is unfixable.
+- [ ] `aprilcam camera image -d vidar.local` returns a real frame for
+      camera i2c@80000 (saved/inspected, not just "no error"). Attempted
+      for camera i2c@88000 too, with the actual failure behavior
+      (error message, timeout, etc.) recorded rather than skipped.
+- [ ] Tag detection attempted per sprint.md SUC-006, against camera
+      i2c@80000 (the working camera): if a playfield/tags are in view,
+      real detections recorded (tag id, pixel position, yaw quoted in
+      this ticket); if not, this ticket says so explicitly rather than
+      omitting the criterion.
 - [ ] `aprilcam daemon list` (or mDNS browsing) from the Mac discovers
       vidar's daemon by name with no `-d` flag.
+- [ ] The `-d vidar.local` form used throughout this ticket's criteria
+      depends on ticket 007's fix landing first (this ticket's
+      `depends-on` includes 007) — this ticket does not work around the
+      hostname-connect timeout by falling back to `-d <ip>:5280` for its
+      recorded verification. If 007 is not yet done when this ticket
+      would otherwise start, wait for it rather than substituting the IP
+      form.
 - [ ] `journalctl -u aprilcamd` on vidar shows a clean start: `Directories`
       resolution log line (`source=default` for config/state/socket, since
       systemd provisions them accessible to the `aprilcam` user already),
