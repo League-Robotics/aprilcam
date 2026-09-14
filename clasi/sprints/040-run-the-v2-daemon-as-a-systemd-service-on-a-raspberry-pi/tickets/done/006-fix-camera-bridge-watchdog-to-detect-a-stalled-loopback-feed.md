@@ -1,7 +1,7 @@
 ---
 id: '006'
 title: Fix camera bridge watchdog to detect a stalled loopback feed
-status: in-progress
+status: done
 use-cases: []
 depends-on:
 - '001'
@@ -56,16 +56,31 @@ daemon's own self-heal logic (already proven correct in ticket 003).
       own captured output for its fault handler's `Caught SIGSEGV` line —
       the signal actually proven live to detect the SIGSEGV-and-spin
       case. Both are factored into standalone, sourceable functions.
-- [ ] Verified live on `vidar.local`: kill or SIGSEGV the `gst-launch-1.0`
+- [x] Verified live on `vidar.local`: kill or SIGSEGV the `gst-launch-1.0`
       pipeline under a running bridge unit and confirm the watchdog detects
       the stall and the unit restarts within `RestartSec`, quoted in this
-      ticket (timestamps/log lines). **Partially verified, honestly
-      incomplete — see Findings items 1-4 for what *was* proven live
-      (the crash signature, the byte-count blind spot, and the exact
-      original bug reproduced with real output), and the "Live session
-      cut short" note for why the final detect→kill→restart timing
-      could not be captured this session.** No fabricated timing is
-      recorded here in its place.
+      ticket (timestamps/log lines). **Done, after a power cycle — see
+      Findings item 7.** vidar.local wedged (SSH accepting TCP but hanging
+      forever at public-key auth) after this ticket's earlier crash tests
+      and needed a physical power cycle; once it came back, exactly **one**
+      further crash cycle was run (deliberately minimal, per the
+      stakeholder's explicit instruction after the earlier wedge) against
+      the combined `gst_crashed`+`frame_arrived` watchdog under a transient
+      `systemd-run` unit (`Restart=always`, `RestartSec=3`,
+      `StartLimitIntervalSec=0`) on camera i2c@80000 (`/dev/video71`).
+      Real quoted timestamps: SIGSEGV sent 02:09:39.986 UTC → `Caught
+      SIGSEGV` logged 02:09:39.990150 UTC (4ms later) → watchdog's own
+      `.../aprilcam-camera-bridge: /dev/video71's libcamerasrc crashed
+      (SIGSEGV) -- restarting` logged 02:09:40.254230 UTC (268ms after the
+      signal — this poll happened to land right at a scheduled check, so
+      detection was near-instant rather than the up-to-~10s worst case) →
+      unit's new `ActiveEnterTimestamp` 02:09:43 UTC (restart landed
+      within the unit's `RestartSec=3`, i.e. well under 4s after
+      detection) → fresh `gst-launch`/libcamera startup visible in the
+      journal from 02:09:47 UTC → `v4l2-ctl -d /dev/video71 --get-fmt-video`
+      confirmed 1280x720 YUYV flowing again on the recovered pipeline.
+      `systemctl show aprilcam-crash-test -p NRestarts --value` read `1`
+      after the cycle, matching exactly one crash and one restart.
 - [x] An offline regression guard exists where practical — a `bash`-level
       test (or a small pytest wrapper, consistent with this sprint's
       "shell scripts get `bash -n`/shellcheck, not a pytest harness built
@@ -299,31 +314,80 @@ the remainder of the session — recorded honestly below, not fabricated.**
      three transient unit names and `/tmp/aprilcam-camera-bridge`) also
      hit the same SSH hang and could not be confirmed to have run.
 
-## State left on vidar.local (honest, as of end of this session)
+7. **Recovery required a physical power cycle; a follow-up live session
+   completed the crash→restart proof with exactly one further crash,
+   as directed.** vidar.local's SSH remained wedged (TCP/keys fine,
+   hung forever at public-key auth reply) until the stakeholder power-
+   cycled the host. The team-lead confirmed post-reboot state at 02:05
+   UTC (up 4 min): ROS (`ros-cameras`, `camera-color-relay`,
+   `web-video-server`, `camera-watchdog.timer`) all back
+   enabled+active (the reboot restarted them — Ansible-managed, not
+   this project's to have prevented), the transient
+   `aprilcam-test-bridge2`/`aprilcam-test-bridge3` units gone (they
+   were never persisted as unit files, so a reboot cannot leave them
+   behind either way), `/tmp` clean of aprilcam files, v1 `aprilcamd`
+   still disabled/inactive, and both loopback devices present. This
+   session then, in one held-open `ssh -o ServerAliveInterval=5
+   -o ControlMaster=yes -o ControlPersist=yes` connection (reused for
+   every subsequent command via `-o ControlPath=...`, specifically to
+   avoid the repeated-fresh-auth pattern that preceded the earlier
+   wedge):
+   - Stopped (not disabled) `camera-watchdog.timer` and `ros-cameras`
+     as instructed. `ros-cameras` needed a second `stop` call (the
+     first returned "Job ... canceled" for unclear reasons — a systemd
+     job-queuing quirk, not investigated further since the retry
+     worked cleanly); `camera-color-relay` went `failed` via its
+     `BindsTo=` on `ros-cameras` stopping, exactly matching ticket
+     003's precedent, left un-reset for ticket 004.
+   - Copied the final `deploy/aprilcam-camera-bridge` (with
+     `gst_crashed`) to `/tmp`, confirmed `bash -n` clean, and ran it
+     under one transient `systemd-run --unit=aprilcam-crash-test
+     --property=Restart=always --property=RestartSec=3
+     --property=StartLimitIntervalSec=0` against camera i2c@80000
+     (`/dev/video71`, the working camera).
+   - Ran **exactly one** `kill -SEGV` cycle (see the checked acceptance
+     criterion above for the full quoted timing chain) — deliberately
+     not repeated, per the stakeholder's explicit "keep crash testing
+     minimal" instruction after the prior wedge.
+   - Confirmed full recovery (`v4l2-ctl --get-fmt-video` showed
+     1280x720 YUYV flowing again) before stopping the test unit.
+   - **Knowledge-doc note for ticket 005**: a `libcamerasrc` SIGSEGV on
+     this Pi 5 can, at least once, leave the host's `sshd` accepting
+     TCP connections and completing key exchange but never replying to
+     public-key authentication — indistinguishable from the outside from
+     a merely slow/loaded host, confirmed instead via `ssh -vvv` showing
+     the hang landing exactly at `we sent a publickey packet, wait for
+     reply`, with `ping`/`nc -z` to the same host succeeding throughout.
+     Recovery this time required a physical power cycle; a plain
+     `systemctl restart sshd` was never reachable to try, since the
+     failure is in `sshd`'s own responsiveness. Unknown whether this is
+     caused by the crash itself, cumulative resource exhaustion from
+     repeated crash-testing in one session, or something else — flagged
+     as an open question for ticket 005's knowledge doc, not something
+     this ticket's scope (`deploy/aprilcam-camera-bridge`) can fix.
 
-- **Confirmed** (before the connectivity loss): `aprilcam-test-bridge`
-  (the first transient unit, used for the accidental i2c@88000 test) was
-  stopped (`inactive`/`failed`); no `gst-launch-1.0` or
-  `aprilcam-camera-bridge` process was running at that checkpoint; ROS
-  (`ros-cameras.service`, `camera-watchdog.timer`) remained stopped with
-  enabled-state untouched, matching ticket 003's documented starting
-  state — this session never touched ROS.
-- **Not confirmed** (SSH became unresponsive before verification
-  completed): whether `aprilcam-test-bridge2` and/or
-  `aprilcam-test-bridge3` (transient `systemd-run` units, never
-  persistently installed — no unit *files* were written, so they cannot
-  survive a reboot and `systemctl daemon-reload` would not resurrect
-  them) are still active on vidar, and whether
-  `/tmp/aprilcam-camera-bridge` was removed. **Follow-up needed**: once
-  vidar.local is reachable again, run `systemctl list-units
-  'aprilcam-test-bridge*' --all`, stop/reset-failed anything found, kill
-  any stray `gst-launch-1.0`/`aprilcam-camera-bridge` process, and
-  remove `/tmp/aprilcam-camera-bridge` and any `/tmp/aprilcam-bridge-*.log`
-  files. None of this touches ROS or the real `aprilcam-bridge@.service`
-  units, so it is low-risk cleanup whenever the connection recovers —
-  flagged to the team-lead as a follow-up rather than left silent.
+## State left on vidar.local (final, confirmed after the post-reboot session)
+
+- `aprilcam-crash-test` (this session's transient unit): stopped,
+  `reset-failed`; no `gst-launch-1.0` or `aprilcam-camera-bridge`
+  process remains running (confirmed via `pgrep`); `/tmp/aprilcam-
+  camera-bridge` and any `/tmp/aprilcam-bridge-*.log` removed —
+  `systemctl list-units 'aprilcam*' --all` returns nothing.
+- `ros-cameras.service`: **stopped**, `enabled` state untouched (was
+  re-enabled+active after the reboot; this session stopped it per the
+  coordinator's instruction, leaving it for ticket 004 to pick up from,
+  matching ticket 003's precedent exactly).
+- `camera-color-relay.service`: `failed` (went down via `BindsTo=` when
+  `ros-cameras` stopped), not `reset-failed`, left for ticket 004.
+- `web-video-server.service`: `inactive`.
+- `camera-watchdog.timer`: **stopped**, `enabled` state untouched.
+- v1 `aprilcamd.service`: unchanged, `inactive`/disabled throughout —
+  this session never touched it.
 - The real fix in `deploy/aprilcam-camera-bridge` was never installed as
-  the persistent `aprilcam-bridge@.service` unit during this session —
+  the persistent `aprilcam-bridge@.service` unit during this ticket —
   only ad hoc `/tmp` copies and transient `systemd-run` units were used,
   per this ticket's own constraints. Ticket 004 installs the persistent
   units.
+- The held-open observation SSH connection (`ControlMaster`) used for
+  this session's verification was cleanly closed (`ssh -O exit`) at the
+  end; no lingering multiplexed session was left open.
