@@ -118,7 +118,16 @@ do_provision() {
         /etc/modprobe.d/aprilcam.conf
     install_conf_if_changed 'v4l2loopback' /etc/modules-load.d/aprilcam.conf
 
-    if [ "$CONF_CHANGED" -eq 1 ] || ! lsmod | grep -q '^v4l2loopback'; then
+    # Check /sys/module directly rather than `lsmod | grep -q` -- under
+    # `set -o pipefail`, `grep -q` closing its stdin as soon as it finds a
+    # match sends SIGPIPE to `lsmod`, which then exits 141 (not 0); with
+    # `pipefail` that 141 becomes the pipeline's exit status, so `!
+    # lsmod | grep -q ...` reported "not loaded" on *every* run even when
+    # the module already was, and this reloaded a live v4l2loopback module
+    # (with a bridge or daemon holding it open) on every re-provision --
+    # confirmed live on vidar.local, sprint 040 ticket 004. Checking sysfs
+    # avoids the pipe entirely and needs no lsmod output parsing.
+    if [ "$CONF_CHANGED" -eq 1 ] || [ ! -d /sys/module/v4l2loopback ]; then
         echo "reloading v4l2loopback (config changed or module not loaded)"
         modprobe -r v4l2loopback 2>/dev/null || true
         modprobe v4l2loopback

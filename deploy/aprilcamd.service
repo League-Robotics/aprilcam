@@ -14,7 +14,7 @@ Description=AprilCam tag-detection daemon
 # dependency on them (it only ever sees /dev/video70/71 once they exist),
 # but starting after them means a fresh boot's first enumeration is more
 # likely to already see live loopback devices instead of empty ones.
-After=network-online.target aprilcam-bridge@70.service aprilcam-bridge@71.service
+After=network-online.target aprilcam-bridge@0.service aprilcam-bridge@1.service
 Wants=network-online.target
 
 [Service]

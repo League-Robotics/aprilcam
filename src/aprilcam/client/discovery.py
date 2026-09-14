@@ -349,7 +349,12 @@ def resolve_ipv4_preferred(host: str, port: int) -> Optional[Tuple[int, str]]:
     # multiple IPv6 candidates keep the order the OS returned them in.
     infos = sorted(infos, key=lambda info: 0 if info[0] == socket.AF_INET else 1)
     family, _socktype, _proto, _canonname, sockaddr = infos[0]
-    return family, sockaddr[0]
+    # sockaddr's typeshed type is a union of the AF_INET (2-tuple) and
+    # AF_INET6 (4-tuple) shapes, so mypy widens sockaddr[0] to `str | int`
+    # even though the first element is always the address string for
+    # both -- an explicit str() satisfies the declared `Tuple[int, str]`
+    # return type without changing the runtime value.
+    return int(family), str(sockaddr[0])
 
 
 def _browse_zeroconf(timeout: float = _DEFAULT_BROWSE_TIMEOUT) -> Tuple[_BrowseResult, ...]:
