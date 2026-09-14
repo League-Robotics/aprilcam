@@ -313,11 +313,25 @@ Each is also recorded in its owning subsystem's own `DESIGN.md` under
    `tags/DESIGN.md` §1/§4/§6 for that reversal of sprint 028's original
    "permanent base dependency" decision). A base-only install now
    genuinely cannot import `cv2` anywhere in its reachable module graph.
-2. **No libcamera capture backend exists yet** — only `/sys`-based
-   enumeration (`camera/backends/libcamera.py`) and the backend-selection
-   *branch point* (`camera/backends/resolve_capture_backend`, sprint
-   031) are built. There is no v4l2loopback/Pi hardware in this
-   development environment to validate a real capture path against.
+2. **Resolved, sprint 040: the Pi capture path is verified against real
+   hardware.** Real Pi 5 hardware (`vidar.local`, two IMX296 CSI cameras
+   behind v4l2loopback) became available and every piece named by the
+   original gap — `/sys`-based enumeration (`camera/backends/libcamera.py`),
+   the backend-selection branch point
+   (`camera/backends/resolve_capture_backend`, sprint 031), and
+   `V4l2LoopbackBackend`'s `v4l2-ctl`-subprocess frame reader — was
+   exercised live and found correct on the first try, with **no source
+   defect in any of the three** (sprint 040 ticket 003's Findings). This
+   remains "the architecture v1 already proved out": v2 still does not run
+   GStreamer/libcamera in-process (a separate out-of-process bridge feeds
+   the loopback device, per sprint 040's own Design Rationale, reaffirming
+   rather than revisiting that decision) and there is still no actual
+   libcamera *capture* backend inside `src/aprilcam/` — only the
+   already-existing enumeration/branch-point/loopback-reader path, now
+   proven against real frames instead of only faked ones. Deploy assets
+   (`deploy/`, sprint 040 ticket 001) and the live-verification runbook are
+   documented in `docs/knowledge/raspberry-pi-camera-setup.md` and
+   `deploy/README.md`.
 3. **`protocol_version` (§5) is not yet consumed for a *responding*
    mismatched daemon.** The version-mismatch detection sprint 031 added
    covers a v1 daemon that fails a v2 client's first RPC outright; it

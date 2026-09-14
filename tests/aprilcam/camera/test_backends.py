@@ -6,6 +6,20 @@ docstrings ("unit-tested headlessly against a faked subprocess" /
 can be at all, only through ``OpenCVBackend`` on real hardware
 (``test_camera.py``'s ``@pytest.mark.camera`` tests) -- neither
 ``v4l2-ctl`` nor a ``/sys/class/video4linux`` tree exist on this Mac.
+
+**Ticket 040-003 real-hardware validation.** Every function in this file
+was additionally exercised live against ``vidar.local`` (two imx296 CSI
+cameras behind v4l2loopback ``/dev/video70``/``/dev/video71``, card
+labels ``aprilcam-imx296-88000``/``aprilcam-imx296-80000``) -- see that
+ticket's file for the full session record. The real hardware confirmed
+every function in this module already behaved correctly: no source
+change was needed in ``libcamera.py``, ``v4l2_loopback.py``, or
+``__init__.py``. The tests below marked "040-003" freeze that
+now-*proven* (not merely assumed) behaviour with literal captured
+evidence (the real ``v4l2-ctl --get-fmt-video`` output, the real
+"format not negotiated" error text, the real zero-byte "unsupported
+stream type" stream failure) so a future change cannot silently regress
+a real-hardware-verified path back to only-ever-tested-against-a-guess.
 """
 
 from __future__ import annotations
@@ -410,3 +424,171 @@ def test_default_capture_backend_factory_unrecognised_env_value_falls_back_and_w
 
     assert isinstance(backend, OpenCVBackend)
     assert any("unrecognised" in rec.message for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# 040-003 real-hardware evidence -- literal captures from vidar.local,
+# frozen as offline fixtures so the now-verified-correct behaviour cannot
+# silently regress. See this module's docstring and ticket 040-003's file
+# for the live session that produced these exact byte strings.
+# ---------------------------------------------------------------------------
+
+
+def test_query_format_parses_the_real_vidar_get_fmt_video_output(monkeypatch):
+    """The literal ``v4l2-ctl -d /dev/video71 --get-fmt-video`` stdout
+    captured live from vidar's working camera (i2c@80000, card label
+    ``aprilcam-imx296-80000``) -- richer than the hand-written two-line
+    fixture above (real ``Field``/``Bytes per Line``/``Colorspace``/etc.
+    lines interleaved), confirming the parser's line-prefix matching
+    still finds the two lines it wants and ignores the rest."""
+    real_output = (
+        "Format Video Capture:\n"
+        "\tWidth/Height      : 1280/720\n"
+        "\tPixel Format      : 'YUYV' (YUYV 4:2:2)\n"
+        "\tField             : None\n"
+        "\tBytes per Line    : 2560\n"
+        "\tSize Image        : 1843200\n"
+        "\tColorspace        : sRGB\n"
+        "\tTransfer Function : sRGB\n"
+        "\tYCbCr/HSV Encoding: ITU-R 601\n"
+        "\tQuantization      : Limited Range\n"
+        "\tFlags             : \n"
+    )
+    monkeypatch.setattr(
+        v4l2_loopback.subprocess, "run", lambda *a, **k: _FakeCompletedProcess(real_output)
+    )
+    assert v4l2_loopback._query_format("/dev/video71") == (1280, 720, "YUYV")
+
+
+def test_query_format_degrades_when_device_has_no_negotiated_format(monkeypatch):
+    """Real finding: vidar's *other* loopback (video70, camera i2c@88000)
+    has a genuine hardware fault (confirmed independently with the
+    ``cam`` tool directly, bypassing AprilCam entirely -- "Camera
+    frontend has timed out") and so never has a bridge-negotiated
+    format. ``v4l2-ctl --get-fmt-video`` against it does not raise or
+    time out -- it runs, exits non-zero, and prints this exact one-line
+    error to stdout. ``_query_format`` has no exception to catch here
+    (``subprocess.run`` succeeded), so it falls through its line-prefix
+    scan, matches neither "Width/Height" nor "Pixel Format", and
+    degrades to the module defaults -- exactly as the docstring's
+    "any subprocess failure or unparseable output" promises, verified
+    against the literal real error text rather than a guessed one."""
+    monkeypatch.setattr(
+        v4l2_loopback.subprocess,
+        "run",
+        lambda *a, **k: _FakeCompletedProcess("VIDIOC_G_FMT: failed: Invalid argument\n"),
+    )
+    width, height, pixfmt = v4l2_loopback._query_format("/dev/video70")
+    assert (width, height, pixfmt) == (
+        v4l2_loopback._DEFAULT_WIDTH,
+        v4l2_loopback._DEFAULT_HEIGHT,
+        v4l2_loopback._DEFAULT_PIXFMT,
+    )
+
+
+def test_read_returns_none_when_stream_is_zero_bytes(monkeypatch):
+    """Real finding: ``v4l2-ctl --stream-mmap`` against a loopback device
+    with no negotiated format (no bridge writer attached) prints
+    "unsupported stream type" to stderr, writes **zero bytes** to
+    stdout, and exits **0** -- not a non-zero exit, and not a hang. A
+    watchdog that only checks the exit code (as
+    ``deploy/aprilcam-camera-bridge``'s does -- out of this ticket's
+    file scope, flagged separately) would misread this as success, but
+    ``V4l2LoopbackBackend`` never looks at the exit code: it only reads
+    bytes from stdout, so the first ``read()`` on an empty pipe returns
+    ``b""`` (EOF) immediately and ``read()`` correctly reports failure
+    (``None``) rather than hanging -- confirmed live against vidar's
+    video70 (0.05 ms per the live session log, not a multi-second
+    stall)."""
+    _patch_query_format(monkeypatch, width=2, height=2, pixfmt="YUYV")
+    monkeypatch.setattr(
+        v4l2_loopback.subprocess, "Popen", lambda *a, **k: _FakePopen([b""])
+    )
+    backend = v4l2_loopback.V4l2LoopbackBackend("/dev/video70")
+    backend.open()
+    assert backend.read() is None
+
+
+def test_reopen_after_stream_failure_recovers_once_the_writer_returns(monkeypatch):
+    """Real finding (self-heal, AC5): once a bridge dies mid-stream, the
+    live ``v4l2-ctl`` subprocess a ``V4l2LoopbackBackend`` is already
+    holding open never recovers on its own -- ``read()`` keeps
+    returning ``None`` forever (confirmed live: 400 consecutive
+    ``None`` reads over 40s while vidar's bridge was down). Recovery is
+    a fresh ``close()``/``open()`` cycle, exactly what
+    ``camera.camera.Camera._attempt_self_heal`` performs after
+    ``FAILURE_THRESHOLD`` consecutive failures -- confirmed live end to
+    end through the real daemon (``imx296-2: read failing, reopen
+    attempt 1/10`` while the bridge was still down, then ``attempt
+    2/10`` succeeding once it was back, with frame capture resuming
+    immediately). This test freezes the backend-level half of that:
+    a backend whose subprocess has already gone quiet produces a fresh,
+    working stream after ``close()`` + ``open()``, without needing a
+    new ``V4l2LoopbackBackend`` instance."""
+    _patch_query_format(monkeypatch, width=2, height=2, pixfmt="YUYV")
+    frame_bytes = 2 * 2 * 2
+    dead_proc = _FakePopen([b""])  # writer gone: immediate EOF, like the real stall
+    live_proc = _FakePopen([bytes(range(frame_bytes))])  # writer back: real frame
+
+    procs = [dead_proc, live_proc]
+    monkeypatch.setattr(v4l2_loopback.subprocess, "Popen", lambda *a, **k: procs.pop(0))
+
+    backend = v4l2_loopback.V4l2LoopbackBackend("/dev/video71")
+    backend.open()
+    assert backend.read() is None  # bridge still down
+
+    backend.close()
+    backend.open()  # the self-heal reopen Camera._attempt_self_heal performs
+    frame = backend.read()
+    assert isinstance(frame, np.ndarray)
+    assert frame.shape == (2, 2, 3)
+
+
+def test_list_loopback_cameras_matches_vidars_exact_real_card_labels(tmp_path):
+    """AC1, literal: the exact two real ``/sys`` card labels vidar's
+    v4l2loopback module was loaded with (``video_nr=70,71
+    card_label=aprilcam-imx296-88000,aprilcam-imx296-80000``, confirmed
+    live via ``cat /sys/module/v4l2loopback/parameters/*`` and
+    ``/sys/class/video4linux/video7{0,1}/name``), enumerated together in
+    one pass -- not the look-alike synthetic labels the earlier tests in
+    this file use."""
+    _write_sys_video_name(tmp_path, 70, "aprilcam-imx296-88000")
+    _write_sys_video_name(tmp_path, 71, "aprilcam-imx296-80000")
+
+    devices = libcamera.list_loopback_cameras(sys_glob=str(tmp_path / "video*" / "name"))
+
+    assert [(d.device_index, d.camera_id) for d in devices] == [
+        (70, "aprilcam-imx296-88000"),
+        (71, "aprilcam-imx296-80000"),
+    ]
+    assert [d.position for d in devices] == [0, 1]
+
+
+def test_resolve_capture_backend_matches_vidars_exact_real_hardware_keys():
+    """AC2, literal: ``resolve_capture_backend`` given each real
+    ``hardware_key`` observed live on vidar
+    (``libcamera:aprilcam-imx296-88000`` /
+    ``libcamera:aprilcam-imx296-80000``) constructs a
+    ``V4l2LoopbackBackend`` at the matching real ``/dev/videoN`` --
+    confirmed live via a throwaway venv's
+    ``resolve_capture_backend("libcamera:aprilcam-imx296-88000", 0,
+    backend_factory=...)`` returning ``V4l2LoopbackBackend(/dev/video70)``
+    (and the ``-80000``/``video71`` pair symmetrically), reproduced here
+    offline."""
+    devices = [
+        _loopback_device(position=0, device_index=70, camera_id="aprilcam-imx296-88000"),
+        _loopback_device(position=1, device_index=71, camera_id="aprilcam-imx296-80000"),
+    ]
+
+    for hardware_key, expected_device in (
+        ("libcamera:aprilcam-imx296-88000", "/dev/video70"),
+        ("libcamera:aprilcam-imx296-80000", "/dev/video71"),
+    ):
+        backend = resolve_capture_backend(
+            hardware_key,
+            0,
+            backend_factory=lambda index: _FakeOpenCVBackend(index),
+            list_loopback_cameras=lambda: devices,
+        )
+        assert isinstance(backend, V4l2LoopbackBackend)
+        assert backend._device == expected_device

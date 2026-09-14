@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 sprint: '040'
 tickets:
 - 040-001
@@ -9,6 +9,62 @@ tickets:
 ---
 
 # Plan: Daemon runs on a remote Raspberry Pi; every client discovers it and connects over TCP
+
+## Resolution (sprint 040 ticket 005)
+
+This issue was written against v1 file paths (`grpc_server.py`,
+`mcp_server.py`) that no longer exist in v2. By the time sprint 040 started,
+most of what it describes had already been built as part of v2's own
+architecture — this sprint closed only the one workstream that genuinely
+required real hardware.
+
+**Already covered by v2, before this sprint (no sprint-040 work needed):**
+
+- **Workstream 1 — sole camera owner.** The daemon's `Camera`/camera
+  discovery layer is v2's only camera opener; every CLI command and the MCP
+  server are pure gRPC clients. Nothing resembling the `cam_<index>`
+  in-process-capture branches this issue names still exists.
+- **Workstream 2 — client-side discovery, auto-select, env
+  disambiguation, runtime switch.** `client/discovery.py`'s `Discovery`
+  class implements exactly this: mDNS browse via `_aprilcam._tcp`,
+  `-d`/`--daemon`/`APRILCAM_DAEMON_HOST` resolution precedence, and
+  `aprilcam daemon list` fan-out. No client auto-spawns a daemon.
+- **Workstream 3 — TCP streaming.** The daemon binds TCP `0.0.0.0:5280`
+  unconditionally (`daemon/rpc.py`); stream sockets and consumers are
+  host-aware.
+- **Workstream 4 — gRPC file-proxy RPCs.** Calibration, camera config, and
+  playfield definitions are served and written entirely through the
+  daemon's own gRPC service; no client touches the daemon host's disk
+  directly.
+
+**Closed by this sprint (040):**
+
+- **Workstream 5 — Raspberry Pi deployment.** This was the only workstream
+  still undone, and is exactly what sprint 040 built and verified:
+  - Ticket 001 shipped the real `deploy/` assets (daemon unit, camera
+    bridge script + templated unit, v4l2loopback module config, idempotent
+    provision script, runbook) — previously nonexistent in v2.
+  - Ticket 002 audited and confirmed the `daemon` extra's headless-Linux/
+    aarch64 install safety (the `mss` headless-import and
+    `opencv-contrib-python` wheel-availability risks this issue named
+    explicitly) — both confirmed safe, no source fix needed beyond a
+    mechanical regression-guard test.
+  - Ticket 003 validated the Pi capture path (`camera/backends/libcamera.py`,
+    `v4l2_loopback.py`, `resolve_capture_backend`) against real vidar
+    hardware for the first time — no source defect found.
+  - Ticket 004 performed the actual live install, verification (camera
+    list/image, mDNS discovery, `journalctl`, reboot persistence), and v1
+    unit retirement on `vidar.local`.
+  - Tickets 006/007 fixed two real defects ticket 003's live session
+    surfaced outside its own file scope (the camera bridge watchdog's
+    exit-code blindness; the `-d vidar.local` IPv6-link-local connect
+    timeout).
+  - This issue's own "deployment risks to verify first" (the `mss`/
+    `opencv-contrib` risks, the `vidar` SSH-key concern, `[[project_
+    aprilcam_dual_install]]`-style redeploy hygiene) were all directly
+    addressed by tickets 001/002/004 above, not carried forward unresolved.
+
+No part of this issue remains open after sprint 040.
 
 ## Context
 

@@ -2,7 +2,7 @@
 id: '001'
 title: 'Deploy assets: daemon unit, camera bridge, module config, provision script,
   runbook'
-status: open
+status: done
 use-cases: []
 depends-on: []
 github-issue: ''
@@ -70,40 +70,40 @@ adapted to v2's much simpler process model:
 
 ## Acceptance Criteria
 
-- [ ] `deploy/aprilcamd.service` exists: `User=aprilcam`,
+- [x] `deploy/aprilcamd.service` exists: `User=aprilcam`,
       `SupplementaryGroups=video`, `ConfigurationDirectory=aprilcam`,
       `StateDirectory=aprilcam`, `RuntimeDirectory=aprilcam`,
       `ExecStart=<venv-or-pipx-path>/python -m aprilcam.daemon`
       (foreground, no flags), `Restart=on-failure`, output to journal.
-- [ ] `deploy/aprilcam-camera-bridge` (script) and
+- [x] `deploy/aprilcam-camera-bridge` (script) and
       `deploy/aprilcam-bridge@.service` (template unit) exist, carry
       forward the stagger/queue/watchdog design from
       `archive/scripts/setup-vidar-cameras.sh`, and are parameterized by
       camera position + loopback device path (not hardcoded to `70`/`71`
       alone — vidar's are 70/71, but the template should read
       `%i`/an argument, matching v1's `%i` convention).
-- [ ] v4l2loopback module config file(s) under `deploy/` reproduce vidar's
+- [x] v4l2loopback module config file(s) under `deploy/` reproduce vidar's
       current `/etc/modprobe.d/aprilcam.conf` /
       `/etc/modules-load.d/aprilcam.conf` content exactly.
-- [ ] `deploy/provision-pi.sh` installs required apt packages (`v4l-utils`,
+- [x] `deploy/provision-pi.sh` installs required apt packages (`v4l-utils`,
       `gstreamer1.0-tools` and libcamera GStreamer plugin package(s) if not
       already present, `pipx` if absent), creates the `aprilcam` system
       user and adds it (and itself, idempotently) to `video`, installs the
       module config, and is safe to run twice with no duplicate
       users/errors on the second run.
-- [ ] `deploy/README.md` documents the full ordered runbook: build wheel
+- [x] `deploy/README.md` documents the full ordered runbook: build wheel
       (Mac) → provision Pi → copy + pipx install wheel → install module
       config → install/enable bridge units → install/enable daemon unit →
       verify. States the required order explicitly (module config before
       bridge before daemon) per sprint.md's Migration Concerns.
-- [ ] Every unit file's `ExecStart=`/`ExecStartPre=` references an entry
+- [x] Every unit file's `ExecStart=`/`ExecStartPre=` references an entry
       point or script path that actually exists in v2 (verified by
       grepping `pyproject.toml`'s `[project.scripts]` and this repo's
       actual module paths — no v1-only flags, no `aprilcam.daemon`
       arguments that don't exist).
-- [ ] `bash -n` (and `shellcheck`, if available on this machine) passes
+- [x] `bash -n` (and `shellcheck`, if available on this machine) passes
       clean on `provision-pi.sh` and `aprilcam-camera-bridge`.
-- [ ] Any small offline test that adds value (e.g. a test asserting the
+- [x] Any small offline test that adds value (e.g. a test asserting the
       unit file's `ExecStart` line matches a real importable module) is
       added under the existing test tree; this is inspection-based
       validation, not a new testing framework.

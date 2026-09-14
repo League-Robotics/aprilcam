@@ -43,7 +43,13 @@ import grpc
 import pytest
 
 from aprilcam.client.daemon_client import GrpcDaemon
-from aprilcam.client.discovery import Discovery, _BrowseResult, _browse_zeroconf
+from aprilcam.client.discovery import (
+    Discovery,
+    _BrowseResult,
+    _browse_zeroconf,
+    resolve_ipv4_preferred,
+    split_host_port,
+)
 from aprilcam.client.interfaces import DaemonInfo
 from aprilcam.config.directories import Directories
 from aprilcam.daemon import __main__ as daemon_main
@@ -340,7 +346,7 @@ def test_connect_with_explicit_host_never_calls_find_all(directories: Directorie
         discovery.connect("127.0.0.1:1")
 
 
-def test_find_all_with_the_real_browse_default_returns_promptly_when_nothing_answers(
+def test_find_all_with_the_real_browse_returns_promptly_and_well_formed(
     directories: Directories,
 ):
     """AC: the real (default) browse implementation performs an actual
@@ -349,14 +355,32 @@ def test_find_all_with_the_real_browse_default_returns_promptly_when_nothing_ans
     bottom) that deliberately touches a real zeroconf/multicast socket,
     to prove the bound itself. A short injected timeout (well below
     ``_DEFAULT_BROWSE_TIMEOUT``) keeps it fast; ``find_all()`` must
-    still return within a small multiple of that timeout, not hang."""
+    still return within a small multiple of that timeout, not hang.
+
+    040-007 fix-up: this test previously also asserted ``result == ()``,
+    i.e. that nothing answers on this LAN. That assumption held only
+    while no AprilCam daemon was reachable from wherever the offline
+    gate happened to run. Sprint 040 deliberately left a permanent
+    daemon running on ``vidar.local``, which mDNS-advertises on this
+    developer's LAN -- so this machine's offline-gate run now *always*
+    finds at least one real entry, which is correct behaviour, not a
+    bug. This test's job is only to prove the real browse is bounded;
+    it stays in the offline gate (rather than moving to
+    ``@pytest.mark.integration``) because "does a real bounded browse
+    return promptly" is exactly the kind of environment-independent
+    property the offline gate should keep covering, and no fake
+    ``browse=`` can exercise the real ``zeroconf.ServiceBrowser`` path
+    this AC targets. What it must not assume is *what* the LAN
+    contains -- so it now only checks the result's shape and type, not
+    its contents."""
     discovery = Discovery(directories=directories, browse=lambda: _browse_zeroconf(timeout=0.2))
 
     start = time.monotonic()
     result = discovery.find_all()
     elapsed = time.monotonic() - start
 
-    assert result == ()
+    assert isinstance(result, tuple)
+    assert all(isinstance(entry, DaemonInfo) for entry in result)
     assert elapsed < 2.0  # a small multiple of the 0.2s timeout, not "hung"
 
 
@@ -418,6 +442,198 @@ def test_connect_falls_back_to_env_var_when_host_is_none(directories: Directorie
         discovery.connect(None)
 
     assert excinfo.value.host == "127.0.0.1:1"
+
+
+# ---------------------------------------------------------------------------
+# ticket 040-007: IPv4-preferred hostname resolution
+#
+# Root cause reproduced offline: the Mac's resolver lists a ``.local``
+# host's IPv6 link-local addresses (``dscacheutil -q host -a name
+# vidar.local``) ahead of its IPv4 address, and a raw hostname handed to
+# ``grpc.insecure_channel`` lets gRPC's own resolver pick the
+# unreachable link-local candidate and wait out the full connect
+# timeout. Every test below fakes ``socket.getaddrinfo`` -- no real DNS
+# or network resolution -- either unit-testing ``split_host_port``/
+# ``resolve_ipv4_preferred`` directly, or driving ``Discovery.connect``
+# end to end to prove gRPC itself never even dials the (fake,
+# unreachable) IPv6 candidate once an IPv4 one is available.
+# ---------------------------------------------------------------------------
+
+def test_split_host_port_bare_hostname_gets_default_port():
+    assert split_host_port("vidar.local") == ("vidar.local", 5280)
+
+
+def test_split_host_port_hostname_with_explicit_port():
+    assert split_host_port("vidar.local:1234") == ("vidar.local", 1234)
+
+
+def test_split_host_port_ipv4_literal_with_explicit_port():
+    assert split_host_port("192.168.1.144:5280") == ("192.168.1.144", 5280)
+
+
+def test_split_host_port_bracketed_ipv6_literal_with_port():
+    assert split_host_port("[fe80::1]:5280") == ("fe80::1", 5280)
+
+
+def test_split_host_port_bracketed_ipv6_literal_without_port():
+    assert split_host_port("[fe80::1]") == ("fe80::1", 5280)
+
+
+def test_split_host_port_bare_unbracketed_ipv6_literal_has_no_port_to_find():
+    """A bare IPv6 literal's own colons are indistinguishable from a
+    ``:port`` separator by counting alone -- this matches the
+    pre-040-007 ``":" in host`` behaviour exactly (module docstring),
+    not a new limitation this ticket introduces."""
+    assert split_host_port("fe80::1") == ("fe80::1", 5280)
+
+
+def test_resolve_ipv4_preferred_returns_none_for_an_ipv4_literal():
+    assert resolve_ipv4_preferred("192.168.1.144", 5280) is None
+
+
+def test_resolve_ipv4_preferred_returns_none_for_an_ipv6_literal():
+    assert resolve_ipv4_preferred("fe80::1", 5280) is None
+
+
+def test_resolve_ipv4_preferred_picks_ipv4_when_resolver_lists_ipv6_link_local_first(monkeypatch):
+    """The exact ``dscacheutil`` ordering ticket 003 observed against
+    ``vidar.local``: link-local IPv6 candidates before the IPv4 one."""
+
+    def _fake_getaddrinfo(host, port, proto=0):
+        assert host == "vidar.local"
+        return [
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("fe80::7ca:35b0:f731:6b4a", port, 0, 6)),
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("fe80::c:abcd:ef01:2345", port, 0, 12)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.144", port)),
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+
+    result = resolve_ipv4_preferred("vidar.local", 5280)
+
+    assert result == (socket.AF_INET, "192.168.1.144")
+
+
+def test_resolve_ipv4_preferred_ipv4_only_host(monkeypatch):
+    def _fake_getaddrinfo(host, port, proto=0):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.144", port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+
+    result = resolve_ipv4_preferred("v4-only.local", 5280)
+
+    assert result == (socket.AF_INET, "192.168.1.144")
+
+
+def test_resolve_ipv4_preferred_falls_back_to_ipv6_when_no_ipv4_candidate(monkeypatch):
+    """AC: a hostname with only AAAA records must still work -- there is
+    nothing to prefer IPv4 *over*, so the (only) IPv6 candidate is
+    returned rather than ``None``, letting the caller dial it."""
+
+    def _fake_getaddrinfo(host, port, proto=0):
+        return [
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2001:db8::1", port, 0, 0)),
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+
+    result = resolve_ipv4_preferred("v6-only.example", 5280)
+
+    assert result == (socket.AF_INET6, "2001:db8::1")
+
+
+def test_resolve_ipv4_preferred_returns_none_on_resolution_failure(monkeypatch):
+    def _fake_getaddrinfo(host, port, proto=0):
+        raise socket.gaierror("nodename nor servname provided, or not known")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+
+    assert resolve_ipv4_preferred("no-such-host.invalid", 5280) is None
+
+
+def test_resolve_ipv4_preferred_returns_none_when_getaddrinfo_returns_nothing(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, port, proto=0: [])
+
+    assert resolve_ipv4_preferred("empty.example", 5280) is None
+
+
+def test_connect_remote_dials_the_resolved_ipv4_address_not_the_fake_ipv6_one(
+    directories: Directories, monkeypatch
+):
+    """End-to-end proof of the fix: a fake ``getaddrinfo`` returns the
+    real ``dscacheutil`` ordering (IPv6 link-local first, IPv4 second)
+    for a made-up hostname. The IPv6 candidate is a syntactically valid
+    but entirely undialed address -- if ``Discovery.connect`` still
+    handed the raw hostname to gRPC (pre-040-007 behaviour), gRPC's own
+    resolver could pick it and this test would hang for the full
+    ``connect_timeout`` instead of succeeding immediately against the
+    real server bound below."""
+    remote_server, remote_port = _bind_bare_tcp_server()
+    try:
+
+        def _fake_getaddrinfo(host, port, proto=0):
+            assert host == "fake-vidar.local"
+            return [
+                (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("fe80::dead:beef", port, 0, 9)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port)),
+            ]
+
+        monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+        discovery = Discovery(directories=directories, connect_timeout=5.0)
+
+        start = time.monotonic()
+        daemon = discovery.connect(f"fake-vidar.local:{remote_port}")
+        elapsed = time.monotonic() - start
+
+        assert isinstance(daemon, GrpcDaemon)
+        # Well under the 5s connect_timeout -- proves IPv4 was dialed
+        # directly rather than gRPC waiting out an unreachable IPv6
+        # candidate first.
+        assert elapsed < 2.0
+    finally:
+        remote_server.stop(None)
+
+
+def test_connect_remote_preserves_the_typed_host_for_identity_after_resolution(
+    directories: Directories, monkeypatch
+):
+    """Resolution must never leak into the identity a caller sees:
+    ``ConnectionFailed.host``/``GrpcDaemon``'s ``target`` stay exactly
+    what was typed (display, error messages, host-qualified camera
+    codes -- sprint 017), never the resolved IP literal."""
+
+    def _fake_getaddrinfo(host, port, proto=0):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+    discovery = Discovery(directories=directories, connect_timeout=0.5)
+
+    with pytest.raises(ConnectionFailed) as excinfo:
+        discovery.connect("fake-vidar.local:1")  # port 1: nothing listens, refused fast
+
+    assert excinfo.value.host == "fake-vidar.local:1"
+
+
+def test_connect_remote_resolution_failure_still_raises_connection_failed_cleanly(
+    directories: Directories, monkeypatch
+):
+    """AC: resolution failure gives a clean typed error, not an
+    unhandled ``socket.gaierror`` -- ``resolve_ipv4_preferred`` swallows
+    the failure and the pre-040-007 fallback path (raw hostname to
+    gRPC) still produces the same ``ConnectionFailed`` a bad host
+    already raised before this ticket."""
+
+    def _fake_getaddrinfo(host, port, proto=0):
+        raise socket.gaierror("nodename nor servname provided, or not known")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+    discovery = Discovery(directories=directories, connect_timeout=0.5)
+
+    with pytest.raises(ConnectionFailed) as excinfo:
+        discovery.connect("no-such-host.invalid")
+
+    assert excinfo.value.host == "no-such-host.invalid"
+    assert excinfo.value.reason is not None
 
 
 # ---------------------------------------------------------------------------

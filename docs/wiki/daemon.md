@@ -218,20 +218,44 @@ APRILCAM_LOG_LEVEL=DEBUG python -m aprilcam.daemon
 
 ## systemd
 
-The repo ships no unit files yet, but the daemon is designed to run as a
-system service: as root, the cascade resolves the FHS roots
-(`/etc/aprilcam`, `/var/lib/aprilcam`, `/run/aprilcam`) automatically, and
-logs land in journald. A minimal unit is just:
+The repo ships real, verified deploy assets under
+[`deploy/`](https://github.com/League-Robotics/aprilcam/blob/master/deploy/README.md)
+— proven end to end on a Raspberry Pi 5 with CSI cameras (sprint 040):
 
-```ini
-[Service]
-ExecStart=/path/to/venv/bin/python -m aprilcam.daemon
-Restart=on-failure
-```
+- `deploy/aprilcamd.service` — supervises `python -m aprilcam.daemon` in the
+  foreground under a dedicated `aprilcam` system user, with
+  `ConfigurationDirectory=`/`StateDirectory=`/`RuntimeDirectory=` doing the
+  FHS-root provisioning: as a non-root service user, systemd creates and
+  chowns `/etc/aprilcam`, `/var/lib/aprilcam`, `/run/aprilcam` before
+  `ExecStart` runs, which is all the `Directories` cascade
+  (`os.access`-based, not `euid == 0`) needs to resolve every root at the
+  "default" tier automatically — **no `APRILCAM_SYSTEM` or any other env-var
+  gate exists or is needed.**
+- `deploy/aprilcam-camera-bridge` + `deploy/aprilcam-bridge@.service` — a
+  per-camera `libcamerasrc → v4l2loopback` bridge (only relevant on a host
+  with CSI cameras behind v4l2loopback; a host with only USB/UVC cameras
+  doesn't need it). Runs as a separate unit family with no code or process
+  dependency on the daemon — they communicate only through the kernel device
+  node the daemon then reads via `V4l2LoopbackBackend`.
+- `deploy/modprobe.d/aprilcam.conf` + `deploy/modules-load.d/aprilcam.conf` —
+  the v4l2loopback module configuration (device numbers, card labels, buffer
+  count) the bridge units depend on.
+- `deploy/provision-pi.sh` — idempotent host setup (system user + group,
+  apt packages, module config) for a fresh Pi.
 
-where the venv has the `daemon` extra installed. Do not wrap
-`aprilcam daemon start` in a unit — that command backgrounds a child and
-returns, which is the opposite of what systemd wants.
+Install order matters — module config, then bridge units, then the daemon
+unit — and the full step-by-step runbook, including wheel build and pipx
+install, lives in
+[`deploy/README.md`](https://github.com/League-Robotics/aprilcam/blob/master/deploy/README.md).
+For CSI-camera-specific bring-up lessons (the v4l2loopback `max_buffers`
+gotcha, ROS coexistence/switch-over on a shared Pi, watchdog behavior,
+telling a dead sensor from a software bug), see
+[`docs/knowledge/raspberry-pi-camera-setup.md`](https://github.com/League-Robotics/aprilcam/blob/master/docs/knowledge/raspberry-pi-camera-setup.md).
+
+Do not wrap `aprilcam daemon start` in a unit — that command backgrounds a
+child and returns, which is the opposite of what systemd wants; the unit's
+`ExecStart=` runs `python -m aprilcam.daemon` (or the extensionless pipx
+entry point) directly, in the foreground.
 
 ## Troubleshooting
 

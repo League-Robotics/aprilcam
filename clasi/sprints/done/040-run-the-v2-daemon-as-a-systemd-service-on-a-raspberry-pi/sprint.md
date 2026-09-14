@@ -1,12 +1,14 @@
 ---
 id: '040'
 title: Run the v2 daemon as a systemd service on a Raspberry Pi
-status: ticketing
+status: done
 branch: sprint/040-run-the-v2-daemon-as-a-systemd-service-on-a-raspberry-pi
 use-cases: []
 issues:
 - plan-daemon-runs-on-a-remote-raspberry-pi-every-client-discovers-it-and-connects-over-tcp.md
 - live-tag-detection-and-systemd-persistence-on-a-pi-with-a-calibrated-playfield.md
+- camera-bridge-watchdog-never-detects-a-stalled-loopback.md
+- remote-daemon-by-mdns-hostname-times-out-ipv6-link-local-vs-ipv4-only-bind.md
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
 
@@ -497,17 +499,90 @@ was available.
   states the order explicitly rather than relying on that graceful
   degradation to mask a misordered install.
 
+## Revision
+
+Ticket 003's live session on vidar surfaced two real defects outside its
+own file scope (`camera/backends/*.py`, `camera/identity.py`), each now
+covered by a new ticket (006, 007) and a linked issue:
+
+1. **`deploy/aprilcam-camera-bridge`'s watchdog never detects a stalled
+   loopback** (Finding 4) — it judges a stall on `v4l2-ctl
+   --stream-mmap`'s exit status, which is 0 even when the loopback has no
+   producer, so a `libcamerasrc` SIGSEGV is never noticed and the unit
+   never restarts. No architectural change: this is a bug fix confined to
+   the `deploy/aprilcam-camera-bridge` artifact already introduced by
+   ticket 001 (Step 3's "Camera bridging" responsibility, unchanged
+   purpose) — ticket 006.
+2. **`-d vidar.local` times out from the Mac** (Finding 7) — the Mac's
+   resolver returns vidar's IPv6 link-local addresses before its IPv4
+   address, and `client/discovery.py` hands the raw hostname to
+   `grpc.insecure_channel`, which picks the unreachable IPv6 candidate
+   and waits out the full connect timeout. **Direction: fix client-side
+   address resolution only** (`client/discovery.py` resolves and prefers
+   an IPv4 candidate before falling back), leaving `daemon/rpc.py`'s
+   `0.0.0.0`-only bind exactly as the 028-003 stakeholder decision
+   recorded it. A dual-stack daemon bind was considered and rejected for
+   this ticket: it would reopen a decision this sprint has no new
+   information to relitigate, when the reported symptom is fully
+   addressed by a narrower, lower-risk change to one already-thin client
+   module — ticket 007.
+
+Neither finding changes this sprint's subsystem boundaries, the
+component diagram, or any Design Rationale entry above; both are
+targeted fixes to code the sprint's plan already anticipated might need
+correction once real hardware and a real network were involved. Ticket
+004's `depends-on` and acceptance criteria are updated accordingly (both
+new tickets must complete first), and its acceptance criteria are further
+revised for a hardware finding unrelated to either defect above: camera
+i2c@88000 has a physical CSI fault (ticket 003 Finding 6, reproduced four
+times, pre-existing under ROS before this sprint touched vidar) — ticket
+004 now requires only camera i2c@80000 end to end, with i2c@88000
+required to be enumerated and reported as unusable without crashing the
+daemon or affecting the working camera.
+
 ### Open Questions
 
-1. **Does vidar keep running the AprilCam daemon permanently after this
-   sprint, or is this a one-time test window after which ROS camera duty
-   is restored and the v2 aprilcamd/bridge units are disabled again?** The
-   sprint's Success Criteria assume ROS is restored to its original state
-   afterward (the conservative default), but if the stakeholder wants
-   AprilCam to be the permanent camera owner on vidar, that changes what
-   "restore ROS" means at the end of the live-verification ticket and may
-   need a follow-up decision about `camera-watchdog.timer`'s interaction
-   with a permanently-stopped `ros-cameras.service`.
+1. **RESOLVED (ticket 040-005): AprilCam, not ROS, owns vidar's cameras
+   going forward.** The stakeholder decided vidar keeps running the v2
+   AprilCam daemon and bridge units permanently, superseding this
+   question's "conservative default" of restoring ROS at the end of
+   ticket 004's live-verification session (ticket 004's own recorded
+   "End state on vidar.local" — ROS re-enabled+active, AprilCam
+   disabled+inactive — reflected that now-superseded default, not this
+   decision; it is not rewritten, only annotated, per this project's
+   "extend, don't delete" convention for closed history). The team-lead
+   executes the actual switch on vidar directly (out of this ticket's own
+   scope, which is documentation-only):
+   ```bash
+   systemctl disable --now camera-watchdog.timer web-video-server \
+       camera-color-relay ros-cameras
+   systemctl enable --now aprilcam-bridge@0 aprilcam-bridge@1 aprilcamd
+   ```
+   — the same four-unit-disable / three-unit-enable sequence ticket 004's
+   Findings item 9 established as correct (disabling only two of the four
+   ROS units is insufficient to keep ROS down across a reboot, because
+   `camera-color-relay.service`/`web-video-server.service`'s `BindsTo=`
+   pulls `ros-cameras.service` back up at boot otherwise).
+
+   **Risk carried forward, not solved by this decision**: `ros-cameras`
+   and its bound units are Ansible-managed, so a future Ansible run
+   against vidar may re-enable and restart them, since `systemctl
+   enable`/`disable` state is exactly the kind of drift an Ansible
+   playbook is likely to reconcile back to its declared state. This
+   project's switch-over never touches the underlying Ansible-managed
+   unit files, only their enabled/active state, so Ansible has no
+   *declared* conflict to detect — but a playbook that unconditionally
+   re-asserts "these ROS units are enabled+active" would still silently
+   undo the switch. **Recovery**: re-run the AprilCam-enable half of the
+   sequence above — it is idempotent and does not depend on ROS's prior
+   state. If Ansible keeps re-fighting the switch on every run, the
+   durable fix is on the Ansible side (exclude vidar's camera units from
+   that playbook's scope, or make the camera-owner choice itself an
+   Ansible-managed variable) — out of this sprint's ability to fix from
+   `deploy/`, and not attempted here. See
+   `docs/knowledge/raspberry-pi-camera-setup.md`'s "ROS coexistence and
+   switch-over" section for the full procedure and this same risk,
+   written for future operators.
 2. **Is a single shared imx296 sensor ever needed by both ROS and AprilCam
    concurrently?** Out of scope for this sprint (Scope: "no arbitration/
    handoff automation"), but worth stakeholder awareness: a CSI sensor can
@@ -728,9 +803,17 @@ Before tickets can be created, all of the following must be true:
 | 001 | Deploy assets: daemon unit, camera bridge, module config, provision script, runbook | — | plan-daemon-runs-on-a-remote-raspberry-pi |
 | 002 | Audit daemon extra for headless-Linux/aarch64 install safety | — | plan-daemon-runs-on-a-remote-raspberry-pi |
 | 003 | Validate and fix the Pi capture path against real vidar hardware | 001 | live-tag-detection-and-systemd-persistence |
-| 004 | Live install, verification, and v1 retirement on vidar.local | 001, 002, 003 | plan-daemon-runs-on-a-remote-raspberry-pi, live-tag-detection-and-systemd-persistence |
+| 006 | Fix camera bridge watchdog to detect a stalled loopback feed | 001 | camera-bridge-watchdog-never-detects-a-stalled-loopback |
+| 007 | Fix `-d vidar.local` hostname connect timeout (IPv6 link-local vs IPv4-only bind) | — | remote-daemon-by-mdns-hostname-times-out-ipv6-link-local-vs-ipv4-only-bind |
+| 004 | Live install, verification, and v1 retirement on vidar.local | 001, 002, 003, 006, 007 | plan-daemon-runs-on-a-remote-raspberry-pi, live-tag-detection-and-systemd-persistence |
 | 005 | Documentation: Pi camera knowledge doc, wiki systemd section, design-doc gap closure | 004 | plan-daemon-runs-on-a-remote-raspberry-pi, live-tag-detection-and-systemd-persistence |
 
 Tickets execute serially in the order listed. 001 and 002 have no
 dependency between them and could in principle run in either order (or in
 parallel, if the team-lead chooses to), but both must complete before 003.
+006 and 007 were added after 003 found two live defects outside its own
+file scope (watchdog exit-code blindness; hostname connect timeout); they
+do not depend on each other, only 006 depends on 001 (it fixes an
+artifact 001 shipped), and both must complete before 004 since 004's
+acceptance criteria now require the fixed hostname connect and rely on
+the watchdog behaving correctly during its reboot-persistence check.

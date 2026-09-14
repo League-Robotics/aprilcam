@@ -1,0 +1,73 @@
+# AprilCam daemon -- systemd unit (sprint 040 ticket 001).
+#
+# Install:
+#   sudo cp deploy/aprilcamd.service /etc/systemd/system/aprilcamd.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now aprilcamd
+#
+# See deploy/README.md for the full ordered runbook (module config before
+# bridge units before this unit).
+
+[Unit]
+Description=AprilCam tag-detection daemon
+# The bridge units own the CSI cameras; the daemon has no process
+# dependency on them (it only ever sees /dev/video70/71 once they exist),
+# but starting after them means a fresh boot's first enumeration is more
+# likely to already see live loopback devices instead of empty ones.
+After=network-online.target aprilcam-bridge@0.service aprilcam-bridge@1.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aprilcam
+SupplementaryGroups=video
+
+# systemd creates and chowns these to User= before ExecStart runs. v2's
+# Directories() (src/aprilcam/config/directories.py) resolves its FHS
+# roots via os.access, not euid == 0 -- so a non-root User=aprilcam with
+# these systemd-provisioned, self-owned directories resolves the same
+# "default" tier root would, with no APRILCAM_SYSTEM=1 or other env-var
+# gate needed (v1 required one; v2 does not -- see sprint.md Design
+# Rationale, "dedicated system user" decision).
+#   ConfigurationDirectory -> /etc/aprilcam   (human/scp-owned config)
+#   StateDirectory         -> /var/lib/aprilcam (daemon-owned state; also
+#                              this unit's $HOME for the pipx venv below)
+#   RuntimeDirectory       -> /run/aprilcam   (control socket, daemon.lock)
+ConfigurationDirectory=aprilcam
+StateDirectory=aprilcam
+RuntimeDirectory=aprilcam
+
+# Historical v1 lesson (archive/docs/knowledge/raspberry-pi-camera-setup.md,
+# "Running GStreamer+libcamera inside the gRPC daemon segfaults"): forking a
+# subprocess from a process with an active gRPC server can crash under
+# gRPC's fork handlers. v2's daemon never runs libcamera/GStreamer itself,
+# but camera/backends/v4l2_loopback.py does subprocess.run/Popen a
+# v4l2-ctl reader from inside this same process to pull frames off the
+# bridge's loopback devices -- the same subprocess-from-a-grpc-process
+# shape that caused the original crash, so this is carried forward as a
+# precaution. Remove it if ticket 003/004's live verification proves it
+# unnecessary against real hardware.
+Environment=GRPC_ENABLE_FORK_SUPPORT=0
+
+# Run the daemon in the foreground -- python -m aprilcam.daemon is exactly
+# daemon/__main__.py:main(), which takes no flags (no --tcp/--unix/--force;
+# those are v1-only). It binds the unix control socket AND TCP 0.0.0.0:5280
+# unconditionally, and starts mDNS advertising, all with no arguments.
+# Never wrap `aprilcam daemon start` here -- that command backgrounds a
+# child and returns immediately, which is the opposite of what systemd
+# wants (docs/wiki/daemon.md's systemd section).
+#
+# This path assumes `pipx install "aprilcam[daemon]==<version>"` was run
+# as the aprilcam user with HOME=/var/lib/aprilcam (see deploy/README.md
+# step 4) -- pipx's default layout then places the venv here. Adjust if a
+# different pipx --venv-args python/install strategy was used.
+ExecStart=/var/lib/aprilcam/.local/share/pipx/venvs/aprilcam/bin/python -m aprilcam.daemon
+
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

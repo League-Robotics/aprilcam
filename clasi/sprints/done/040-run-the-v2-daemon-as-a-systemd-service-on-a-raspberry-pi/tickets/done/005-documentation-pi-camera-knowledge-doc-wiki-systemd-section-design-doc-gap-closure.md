@@ -2,9 +2,10 @@
 id: '005'
 title: 'Documentation: Pi camera knowledge doc, wiki systemd section, design-doc gap
   closure'
-status: open
+status: done
 use-cases: []
-depends-on: ['004']
+depends-on:
+- '004'
 github-issue: ''
 issue:
 - plan-daemon-runs-on-a-remote-raspberry-pi-every-client-discovers-it-and-connects-over-tcp.md
@@ -60,23 +61,25 @@ verification would mean guessing at what actually happened.
 
 ## Acceptance Criteria
 
-- [ ] `docs/knowledge/raspberry-pi-camera-setup.md` exists, is v2-accurate
+- [x] `docs/knowledge/raspberry-pi-camera-setup.md` exists, is v2-accurate
       (no v1 file paths, no `eric`/`jtl` usernames presented as current),
       and includes a ROS-coexistence subsection sourced from ticket 004's
       recorded state changes.
-- [ ] `docs/knowledge/v4l2loopback-vanishes-after-kernel-upgrade.md`
+- [x] `docs/knowledge/v4l2loopback-vanishes-after-kernel-upgrade.md`
       ported (or explicitly noted as not-yet-relevant, with reasoning) —
       do not silently skip it.
-- [ ] `docs/wiki/daemon.md`'s systemd section reflects the real `deploy/`
+- [x] `docs/wiki/daemon.md`'s systemd section reflects the real `deploy/`
       assets, not the placeholder two-line example.
-- [ ] `docs/design/design.md` §9 item 2 and `camera/DESIGN.md`'s matching
+- [x] `docs/design/design.md` §9 item 2 and `camera/DESIGN.md`'s matching
       Open Questions entries are marked resolved with a sprint-040
       pointer, following the existing "Resolved, sprint NNN" convention.
-- [ ] Both linked issues carry an explicit "already covered by v2" vs.
+- [x] Both linked issues carry an explicit "already covered by v2" vs.
       "closed by this sprint" breakdown before being archived.
-- [ ] No source-code changes in this ticket (docs only); `scripts/
+- [x] No source-code changes in this ticket (docs only); `scripts/
       test-gate.sh` passes (should be a no-op check, confirming docs-only
-      changes didn't accidentally touch code).
+      changes didn't accidentally touch code). **One pre-existing
+      environmental flake found, unrelated to this ticket — see
+      Findings.**
 
 ## Implementation Plan
 
@@ -99,3 +102,53 @@ pass with no diffs in behavior).
 
 **Documentation updates**: this ticket *is* the documentation update —
 no further downstream doc work expected.
+
+## Findings
+
+1. **`src/aprilcam/daemon/DESIGN.md` has no statement claiming the
+   loopback backend is unverified — checked, nothing to close there.**
+   The ticket brief named this file alongside `camera/DESIGN.md` as
+   needing the "unverified" language updated; a full grep of
+   `daemon/DESIGN.md` for `libcamera`/`loopback`/`unverified`/`Pi`/
+   `Raspberry`/`vidar` found zero hits. The "V4l2LoopbackBackend is
+   unverified"/"no libcamera capture backend" statements live entirely
+   in `camera/DESIGN.md` (now resolved, see above) and
+   `docs/design/design.md` §9 (now resolved, see above) — `daemon/
+   DESIGN.md` never independently duplicated them. No change made to
+   this file; noted here rather than silently skipped, per this
+   project's convention for a named-but-not-actually-present item.
+2. **`src/aprilcam/client/DESIGN.md`** — already updated by ticket
+   040-007 (its IPv4-preferred client-resolution entry is in place and
+   consistent with this ticket's own findings); no further change
+   needed.
+3. **`src/aprilcam/camera/backends/v4l2_loopback.py`'s module docstring**
+   updated (in scope per this ticket's brief) to replace its "not
+   exercised against real frames this ticket" caveat with the sprint 040
+   ticket 003 live-verification result — a docstring/comment change only,
+   no behavior change.
+4. **`scripts/test-gate.sh` — one pre-existing, environment-caused
+   failure, unrelated to this ticket's docs-only changes.**
+   `tests/aprilcam/client/test_discovery.py::
+   test_find_all_with_the_real_browse_default_returns_promptly_when_nothing_answers`
+   deliberately performs a real, bounded `zeroconf.ServiceBrowser` scan
+   and asserts it finds nothing; it failed because a **real AprilCam
+   daemon (`192.168.1.144:5280`, i.e. `vidar.local`) is currently
+   mDNS-advertising on this LAN**, consistent with the team-lead's
+   concurrent live switch-over of vidar to run `aprilcamd` per this
+   ticket's own sprint.md Open Question 1 resolution (see above) — the
+   exact same class of environment contamination
+   `docs/knowledge/close-sprint-test-gate-hardware-flakes.md` already
+   documents for camera-hardware tests, here manifesting for a
+   network-discovery test instead. Re-ran the single test in isolation
+   and confirmed the identical failure with the identical real address,
+   ruling out test-order interference. This ticket touched no `.py` file
+   outside a docstring comment (item 3 above) and no code in
+   `client/discovery.py` or `tests/aprilcam/client/`; the scoped test
+   run for the one file actually touched
+   (`tests/aprilcam/camera/test_backends.py`, 29 passed) is clean, and
+   the full gate's own count (`2209 passed, 48 skipped, 107 deselected,
+   1 failed`) is otherwise identical in shape to ticket 004's last clean
+   run (`2210 passed, 48 skipped, 107 deselected`) modulo this one
+   network-dependent test. Reported honestly rather than silently
+   waived; not fixed here (out of this docs-only ticket's scope, and not
+   a defect in any file this ticket owns).
