@@ -296,12 +296,15 @@ def resolve_capture_backend(
     ``OpenCVBackend(index)``) -- no behaviour change for any non-libcamera
     camera.
 
-    For a libcamera-sourced *hardware_key*, *index* is the enumeration
-    "position" ``camera/identity.py``'s ``resolve_all``/``_probe_libcamera``
-    assign (0-based enumeration order -- see ``LibcameraDevice.position``'s
-    own docstring) -- **not** a ``/dev/videoN`` device index, so it is
-    never handed to *backend_factory* in this branch. Instead this
-    re-enumerates ``camera/backends/libcamera.py``'s
+    For a libcamera-sourced *hardware_key*, *index* is the
+    ``device_index`` ``camera/identity.py``'s
+    ``resolve_all``/``_probe_libcamera`` key their dicts by (ticket
+    042-001; the real ``/dev/videoN`` number, not
+    ``LibcameraDevice.position``'s 0-based enumeration order) -- but it
+    is still never handed to *backend_factory* in this branch, since
+    that constructor expects a plain cv2 index and a
+    ``V4l2LoopbackBackend`` needs the loopback device's own path.
+    Instead this re-enumerates ``camera/backends/libcamera.py``'s
     ``list_loopback_cameras()`` (the same, unmodified function
     ``_probe_libcamera`` already consumes) and matches on ``camera_id`` --
     the raw ``/sys`` card label embedded after the ``"libcamera:"``

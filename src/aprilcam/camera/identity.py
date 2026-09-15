@@ -155,6 +155,39 @@ module-private) specifically so ``camera/discovery.py`` (ticket
 041-002) can reuse the same classifier, by device name alone, to
 purge already-registered junk rows for nodes no longer proposed by
 this fixed enumeration.
+
+Merging libcamera and cv2 enumeration on one index domain (ticket 042-001)
+----------------------------------------------------------------------------
+:func:`resolve_all` used to be an either/or gate: whenever
+``_probe_libcamera()`` found any loopback device, it returned *only*
+the libcamera-resolved identities and never looked at
+``_enumerate_cv2()`` at all, so a Linux host with both a working CSI
+loopback and a USB/UVC camera silently lost the USB camera from every
+probe. The fix is a re-keying, not a merge algorithm:
+``_probe_libcamera()`` now keys its dict by each device's
+``LibcameraDevice.device_index`` (the real ``/dev/videoN`` number)
+instead of its enumeration-order ``position``. On Linux that is the
+*same* index domain ``_enumerate_cv2()`` already uses (confirmed by
+ticket 041-001's backend-offset stripping — ``aprilcam-imx296-88000``
+enumerates as cv2 index ``70``, matching ``/dev/video70``), so the same
+physical loopback shows up under the same integer key from both
+sources, and two genuinely different cameras can never collide (two
+live V4L2 devices can't share one ``/dev/videoN``). With both sources
+sharing one domain, :func:`resolve_all`'s either/or return becomes a
+plain union of both sources' keys, and :func:`resolve_identity`'s
+existing "check ``libcamera_entries`` first" priority order dedups a
+loopback that appears in both sources for free — no second dedup pass
+was added. This re-keying also closes a latent, previously-unexploited
+collision: ``OpenCVBackend.open()`` and ``WorkerBackend`` both call
+``resolve_identity(index)`` directly with a real cv2 index for a
+post-open anti-substitution check; before this fix, that call's
+internal ``_probe_libcamera()`` lookup could in principle match an
+unrelated loopback whose *position* happened to equal the caller's cv2
+index. Once both sources share the device-index domain, a real
+camera's index can only match a libcamera entry when it genuinely *is*
+that loopback device. ``LibcameraDevice.position`` itself is untouched
+— it remains available as the enumeration-order field it always was —
+only which field this module uses as its internal dict key changed.
 """
 
 from __future__ import annotations
@@ -553,7 +586,8 @@ class _LibcameraEntry:
 
 
 def _probe_libcamera() -> Dict[int, _LibcameraEntry]:
-    """Enumerate libcamera devices, keyed by position/index.
+    """Enumerate libcamera devices, keyed by ``device_index`` (ticket
+    042-001).
 
     Ticket 020-003 wired this to
     ``camera.backends.libcamera.list_loopback_cameras()`` — the
@@ -568,6 +602,21 @@ def _probe_libcamera() -> Dict[int, _LibcameraEntry]:
     replaced. Never raises: any unexpected failure degrades to empty,
     matching this module's "every source function degrades on failure"
     rule.
+
+    Keyed by each device's real ``/dev/video<device_index>`` number,
+    **not** ``LibcameraDevice.position`` (its 0-based enumeration
+    order). ``position`` and cv2's index domain are two independently
+    counted small-integer sequences that can collide by pure
+    coincidence (e.g. both landing on ``0``); ``device_index`` is the
+    same physical-device index domain :func:`_enumerate_cv2` already
+    uses on Linux (confirmed by ticket 041-001's backend-offset
+    stripping work), so re-keying here is what lets :func:`resolve_all`
+    merge both sources by a simple key union instead of choosing one
+    source over the other (see that function's docstring and
+    ``clasi/sprints/042-.../sprint.md``'s Architecture section for the
+    full rationale). ``position`` itself is untouched on
+    ``LibcameraDevice`` — it remains available for callers that want
+    enumeration order — only the key this internal dict uses changes.
     """
     try:
         from aprilcam.camera.backends.libcamera import list_loopback_cameras  # noqa: PLC0415
@@ -578,7 +627,7 @@ def _probe_libcamera() -> Dict[int, _LibcameraEntry]:
     except Exception:
         return {}
     return {
-        d.position: _LibcameraEntry(camera_id=d.camera_id, name=d.model)
+        d.device_index: _LibcameraEntry(camera_id=d.camera_id, name=d.model)
         for d in devices
     }
 
@@ -603,7 +652,10 @@ def resolve_identity(
     Parameters
     ----------
     index:
-        The OpenCV camera index (or libcamera position).
+        The real device index — the OpenCV/cv2 index, which on Linux
+        is also the libcamera loopback's ``device_index`` (ticket
+        042-001; both sources share this domain, so the same index
+        looks up the same physical device in either dict).
     name:
         OS-reported device name, if already known. When omitted, the
         name from ``cv2-enumerate-cameras`` is used.
@@ -723,26 +775,43 @@ def resolve_all(
     Gathers each source table *once* and resolves every known index,
     avoiding a per-camera ``system_profiler`` shell-out. Returns
     ``{index: CameraIdentity}``.
+
+    Merges rather than chooses (ticket 042-001): the result is the
+    **union** of both sources' keys — every libcamera loopback *and*
+    every cv2-enumerated USB/UVC camera on the same Linux host, each
+    resolved exactly once. This is only correct because
+    :func:`_probe_libcamera` keys its dict by ``device_index`` (the
+    real ``/dev/videoN`` number), the same index domain
+    :func:`_enumerate_cv2` uses on Linux — so an index present in both
+    sources names the *same physical device*, never two unrelated
+    cameras that happen to share a small integer. For that shared
+    index, :func:`resolve_identity`'s existing "check
+    ``libcamera_entries`` first, else fall through to the cv2/profiler
+    chain" priority order resolves it once, under its libcamera
+    identity — no separate dedup pass is needed here.
+
+    A loopback-only host (no cv2 entries reach this dict — not the
+    real-world case today, since libcamera and cv2 both currently see
+    the loopback, but the degenerate case still holds) or a cv2-only
+    host (macOS, or Linux with no ``v4l2loopback`` bridge —
+    :func:`_probe_libcamera` returns ``{}``) each degenerate to
+    exactly one source, unchanged from before this fix.
     """
     if libcamera_entries is None:
         libcamera_entries = _probe_libcamera()
-    if libcamera_entries:
-        return {
-            idx: resolve_identity(idx, libcamera_entries=libcamera_entries)
-            for idx in libcamera_entries
-        }
-
     if enum_entries is None:
         enum_entries = _enumerate_cv2()
     if profiler_entries is None:
         profiler_entries = _macos_camera_profiles()
+
+    indices = set(libcamera_entries) | set(enum_entries)
     return {
         idx: resolve_identity(
             idx,
-            name=entry.name,
+            name=enum_entries[idx].name if idx in enum_entries else None,
             enum_entries=enum_entries,
             profiler_entries=profiler_entries,
-            libcamera_entries={},
+            libcamera_entries=libcamera_entries,
         )
-        for idx, entry in enum_entries.items()
+        for idx in indices
     }

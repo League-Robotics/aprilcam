@@ -16,6 +16,7 @@ import types
 import pytest
 
 from aprilcam.camera import identity
+from aprilcam.camera.backends.libcamera import LibcameraDevice
 from aprilcam.camera.identity import (
     CameraIdentity,
     _EnumEntry,
@@ -207,11 +208,14 @@ def test_darwin_location_shortcut_does_not_apply_on_other_platforms(monkeypatch)
 
 
 def test_resolve_all_resolves_every_index():
+    """A cv2-only host (no libcamera loopbacks) resolves exactly as it
+    did before ticket 042-001's merge fix -- the union's other
+    degenerate case."""
     enum = {
         0: _EnumEntry(index=0, name="Cam A", vid=1, pid=2, path="0x01"),
         2: _EnumEntry(index=2, name="Cam B", vid=3, pid=4, path="0x02"),
     }
-    out = resolve_all(enum_entries=enum, profiler_entries={})
+    out = resolve_all(enum_entries=enum, profiler_entries={}, libcamera_entries={})
     assert set(out.keys()) == {0, 2}
     assert all(isinstance(v, CameraIdentity) for v in out.values())
     assert out[0].hardware_key != out[2].hardware_key
@@ -380,9 +384,14 @@ def test_libcamera_entry_wins_when_present():
     assert r.slug == "imx219"
 
 
-def test_resolve_all_prefers_libcamera_when_present():
+def test_resolve_all_loopback_only_host_unchanged():
+    """A loopback-only host (no cv2 entries) resolves exactly as it did
+    before ticket 042-001's merge fix -- the degenerate case of the
+    union over one empty source. ``enum_entries``/``profiler_entries``
+    are passed explicitly (rather than left to default) so this test
+    does not depend on this machine's real cv2 enumeration."""
     lc = {0: _LibcameraEntry(camera_id="/base/cam0", name="Cam0")}
-    out = resolve_all(libcamera_entries=lc)
+    out = resolve_all(libcamera_entries=lc, enum_entries={}, profiler_entries={})
     assert set(out.keys()) == {0}
     assert out[0].source == "libcamera_id"
 
@@ -609,3 +618,151 @@ class TestEnumerateCv2LinuxFiltering:
 
         assert set(out.keys()) == {5}
         assert out[5].name == "Real USB Camera"
+
+
+# ---------------------------------------------------------------------------
+# Ticket 042-001: merge libcamera and cv2 enumeration on one index domain
+# ---------------------------------------------------------------------------
+
+
+def _libcamera_device(
+    *, position: int = 0, device_index: int = 70, camera_id: str = "aprilcam-imx296-88000"
+) -> LibcameraDevice:
+    return LibcameraDevice(
+        position=position,
+        slug="imx296-88000",
+        model="imx296",
+        device_index=device_index,
+        camera_id=camera_id,
+    )
+
+
+class TestProbeLibcameraKeying:
+    """``_probe_libcamera()`` keys its dict by ``device_index`` (the real
+    ``/dev/videoN`` number), not ``LibcameraDevice.position`` (its
+    0-based enumeration order) -- the two can differ, exactly as they
+    do live on vidar.local (``aprilcam-imx296-88000`` is enumeration
+    position 0 but device index 70)."""
+
+    def test_keys_by_device_index_not_position(self, monkeypatch):
+        device = _libcamera_device(position=0, device_index=70)
+        monkeypatch.setattr(
+            "aprilcam.camera.backends.libcamera.list_loopback_cameras",
+            lambda: [device],
+        )
+        out = identity._probe_libcamera()
+        assert set(out.keys()) == {70}
+        assert out[70].camera_id == "aprilcam-imx296-88000"
+
+    def test_two_loopbacks_key_by_their_own_device_index(self, monkeypatch):
+        """The two real vidar.local loopbacks: imx296-88000 at position
+        0/device_index 70, imx296-80000 at position 1/device_index 71."""
+        devices = [
+            _libcamera_device(position=0, device_index=70, camera_id="aprilcam-imx296-88000"),
+            _libcamera_device(position=1, device_index=71, camera_id="aprilcam-imx296-80000"),
+        ]
+        monkeypatch.setattr(
+            "aprilcam.camera.backends.libcamera.list_loopback_cameras",
+            lambda: devices,
+        )
+        out = identity._probe_libcamera()
+        assert set(out.keys()) == {70, 71}
+        assert out[70].camera_id == "aprilcam-imx296-88000"
+        assert out[71].camera_id == "aprilcam-imx296-80000"
+
+
+class TestResolveAllMerge:
+    """``resolve_all()`` merges both enumeration sources by taking the
+    union of their keys, instead of returning only the libcamera-
+    resolved identities whenever any loopback is present."""
+
+    def test_mixed_host_resolves_both_sources_each_once(self):
+        """The vidar.local shape: a USB camera at cv2 index 0 alongside
+        a working CSI loopback at device index 70 -- both must be
+        resolved, each exactly once."""
+        enum = {
+            0: _EnumEntry(
+                index=0, name="Streaming Camera", vid=0x3141, pid=0x6363, path="/dev/video0"
+            ),
+        }
+        lc = {70: _LibcameraEntry(camera_id="aprilcam-imx296-88000", name="imx296")}
+
+        out = resolve_all(enum_entries=enum, profiler_entries={}, libcamera_entries=lc)
+
+        assert set(out.keys()) == {0, 70}
+        assert out[70].hardware_key == "libcamera:aprilcam-imx296-88000"
+        assert out[70].source == "libcamera_id"
+        assert out[0].source != "libcamera_id"
+        assert out[0].device_name == "Streaming Camera"
+
+    def test_loopback_present_in_both_sources_resolves_once_under_libcamera_identity(
+        self,
+    ):
+        """A loopback device also enumerated by cv2 under the *same*
+        ``/dev/videoN`` (exactly what vidar.local shows -- cv2 sees the
+        v4l2loopback node too) must resolve exactly once, as its
+        libcamera identity -- never a second ``loc:``/``vidpid:``
+        record for the same physical device."""
+        enum = {
+            70: _EnumEntry(index=70, name="aprilcam-imx296-88000", path="/dev/video70"),
+        }
+        lc = {70: _LibcameraEntry(camera_id="aprilcam-imx296-88000", name="imx296")}
+
+        out = resolve_all(enum_entries=enum, profiler_entries={}, libcamera_entries=lc)
+
+        assert set(out.keys()) == {70}
+        assert out[70].hardware_key == "libcamera:aprilcam-imx296-88000"
+        assert out[70].source == "libcamera_id"
+
+    def test_macos_cv2_only_host_unchanged(self, monkeypatch):
+        """macOS has no libcamera loopbacks at all -- the union
+        degenerates to the cv2 source alone, unchanged from before this
+        fix."""
+        monkeypatch.setattr(sys, "platform", "darwin")
+        enum = {
+            0: _EnumEntry(index=0, name="Brio 501", vid=1133, pid=2374, path="0xabc"),
+        }
+        out = resolve_all(enum_entries=enum, profiler_entries={}, libcamera_entries={})
+        assert set(out.keys()) == {0}
+        assert out[0].source != "libcamera_id"
+
+    def test_position_device_index_collision_no_longer_misidentifies(self, monkeypatch):
+        """Regression for the latent collision ticket 042-001 fixes: a
+        loopback's enumeration *position* (0) numerically coincides
+        with an unrelated USB camera's real cv2 index (0), while the
+        loopback's actual device is ``/dev/video70``. Before the
+        re-keying fix, ``_probe_libcamera()`` keyed its dict by
+        position, so ``resolve_identity(0, ...)`` -- exactly what
+        ``OpenCVBackend``/``WorkerBackend`` call as their post-open
+        anti-substitution check -- would have wrongly returned the
+        loopback's identity for the USB camera's index. After keying by
+        ``device_index``, indices 0 and 70 no longer share a key."""
+        monkeypatch.setattr(sys, "platform", "linux")
+        device = _libcamera_device(position=0, device_index=70)
+        monkeypatch.setattr(
+            "aprilcam.camera.backends.libcamera.list_loopback_cameras",
+            lambda: [device],
+        )
+        libcamera_entries = identity._probe_libcamera()
+        assert set(libcamera_entries.keys()) == {70}  # not {0}
+
+        enum = {
+            0: _EnumEntry(
+                index=0, name="Streaming Camera", vid=0x3141, pid=0x6363, path="/dev/video0"
+            ),
+        }
+
+        # The exact call OpenCVBackend.open()/WorkerBackend make post-open.
+        observed = resolve_identity(
+            0, enum_entries=enum, profiler_entries={}, libcamera_entries=libcamera_entries
+        )
+        assert observed.source != "libcamera_id"
+        assert observed.hardware_key != "libcamera:aprilcam-imx296-88000"
+        assert observed.device_name == "Streaming Camera"
+
+        out = resolve_all(
+            enum_entries=enum, profiler_entries={}, libcamera_entries=libcamera_entries
+        )
+        assert set(out.keys()) == {0, 70}
+        assert out[0].source != "libcamera_id"
+        assert out[70].source == "libcamera_id"
