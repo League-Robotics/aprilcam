@@ -1,7 +1,7 @@
 ---
 id: '002'
 title: Update camera/DESIGN.md and knowledge doc for mixed-source resolution
-status: open
+status: done
 use-cases:
 - SUC-001
 depends-on:
@@ -52,14 +52,14 @@ document aspirational behavior.
 
 ## Acceptance Criteria
 
-- [ ] `src/aprilcam/camera/DESIGN.md`'s description of
+- [x] `src/aprilcam/camera/DESIGN.md`'s description of
       `resolve_identity`/`resolve_all` accurately reflects the merged,
       device-index-keyed behavior shipped in ticket 001 (no remaining
       text describing the old either/or early-return shape).
-- [ ] `docs/knowledge/raspberry-pi-camera-setup.md` has a new entry (or
+- [x] `docs/knowledge/raspberry-pi-camera-setup.md` has a new entry (or
       addition to an existing entry) stating that USB and CSI cameras
       coexist on the same host and are both registered.
-- [ ] Both docs are internally consistent with each other and with the
+- [x] Both docs are internally consistent with each other and with the
       actual code in `camera/identity.py` as of ticket 001.
 
 ## Testing
