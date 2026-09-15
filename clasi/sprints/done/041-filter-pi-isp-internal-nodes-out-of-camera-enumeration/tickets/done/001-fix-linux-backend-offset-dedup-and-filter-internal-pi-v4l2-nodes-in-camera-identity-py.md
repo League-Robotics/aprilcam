@@ -1,8 +1,9 @@
 ---
 id: '001'
 title: Fix Linux backend-offset dedup and filter internal Pi V4L2 nodes in camera/identity.py
-status: open
-use-cases: [SUC-001]
+status: done
+use-cases:
+- SUC-001
 depends-on: []
 github-issue: ''
 issue: linux-enumeration-lists-pi-isp-nodes-as-cameras-with-duplicate-rows.md
@@ -44,33 +45,33 @@ same physical Linux device twice.
 
 ## Acceptance Criteria
 
-- [ ] `_enumerate_cv2()` recovers the correct real device index for
+- [x] `_enumerate_cv2()` recovers the correct real device index for
       both `CAP_V4L2`- and `CAP_GSTREAMER`-tagged entries on Linux
       (not just `CAP_AVFOUNDATION` on macOS), so a physical device
       enumerated under both backends collapses to one dict entry keyed
       by its real index.
-- [ ] A new Linux-only node classifier excludes candidates whose V4L2
+- [x] A new Linux-only node classifier excludes candidates whose V4L2
       driver (read via `/sys/class/video4linux/videoN/device/driver`)
       is a known Pi media-pipeline-internal driver (`rp1-cfe`,
       `pispbe`, `rpivid`, `bcm2835-codec`); a narrow, documented
       name-prefix backstop (`rp1-cfe-`, `pispbe-`) applies when the
       driver symlink cannot be read.
-- [ ] The classifier fails open: an unreadable driver symlink or an
+- [x] The classifier fails open: an unreadable driver symlink or an
       unrecognized driver name keeps the candidate rather than
       excluding it. A real USB/UVC camera (`uvcvideo` driver) is never
       excluded.
-- [ ] Excluded candidates never appear in `_enumerate_cv2()`'s output
+- [x] Excluded candidates never appear in `_enumerate_cv2()`'s output
       dict, so no downstream code (`resolve_all`, `CameraDiscovery`)
       ever sees, resolves, opens, or registers an identity for them.
-- [ ] macOS behavior (`_macos_camera_profiles`, the `CAP_AVFOUNDATION`
+- [x] macOS behavior (`_macos_camera_profiles`, the `CAP_AVFOUNDATION`
       offset path) is unchanged — no new code path runs on `sys.platform
       == "darwin"`.
-- [ ] The sprint-040 libcamera loopback path is unaffected:
+- [x] The sprint-040 libcamera loopback path is unaffected:
       `resolve_all()`'s early return when `_probe_libcamera()` yields
       entries means `_enumerate_cv2()` is not called at all in that
       case, and no test in this ticket should need to touch
       `backends/libcamera.py`.
-- [ ] All new logic is covered by injected-fixture unit tests (fake
+- [x] All new logic is covered by injected-fixture unit tests (fake
       `/sys/class/video4linux` trees and fake `cv2_enumerate_cameras`-
       shaped `CameraInfo` lists via the existing `enum_entries`
       injection point) — no real hardware, no real `cv2_enumerate_cameras`
@@ -153,3 +154,30 @@ section — no data-model or cross-module change).
 - **Verification command**: `uv run pytest tests/camera/test_identity.py -m "not camera and not integration"`
   (adjust the path once the actual test file is located; do not run
   the full suite for this ticket — see `.claude/rules/source-code.md`).
+
+## Fix-up Addendum
+
+`close_sprint`'s test gate failed on `tests/test_typing.py::
+test_mypy_passes_over_src_aprilcam`:
+
+```
+src/aprilcam/camera/identity.py:394: error: Item "None" of "str | None"
+has no attribute "startswith"  [union-attr]
+```
+
+`is_pi_internal_node`'s backstop line, `bool(name) and
+name.startswith(_PI_INTERNAL_NAME_PREFIXES)`, doesn't let mypy narrow
+`Optional[str]` through `bool()`. Changed to `name is not None and
+name.startswith(_PI_INTERNAL_NAME_PREFIXES)`, which narrows correctly
+and is behaviorally identical (`""` is also falsy under `bool()` and
+also matches no prefix under `startswith`, so both forms return
+`False` for `""`). Added
+`test_unreadable_driver_and_empty_name_kept_fail_open` to
+`TestPiInternalNodeFilter` to cover the `""` case explicitly, since
+the existing tests only covered `None`.
+
+Verified: `uv run mypy` clean; `uv run pytest tests/test_typing.py
+tests/aprilcam/camera/test_identity.py
+tests/aprilcam/camera/test_discovery.py -m "not camera and not
+integration"` — 70 passed, 2 deselected. No redeploy to vidar needed
+(typing-only change, no behavior change).

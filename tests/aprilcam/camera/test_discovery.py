@@ -358,6 +358,147 @@ def test_probe_skip_reason_distinguishes_healthy_from_stalled_active_cameras(reg
 
 
 # ---------------------------------------------------------------------------
+# probe() -- purging stale internal-node registry rows (sprint 041 ticket 002)
+#
+# Fixture shapes below mirror vidar.local's real registry.json (read
+# read-only via ssh during this ticket's implementation, ticket 003's
+# deploy target): ten ``loc:dev-videoN`` junk records with underscore-form
+# ``device_name`` values (``rp1-cfe-csi2_ch0``, ``rp1-cfe-fe_image1``, ...)
+# alongside two real ``libcamera:`` records (``imx296``/``imx296-2``,
+# numbers 1/2). ``device_name`` -- not ``slug`` -- is what
+# ``is_pi_internal_node``'s name-prefix backstop matches against; the
+# stored slugs are already hyphen-slugified (``rp1-cfe-csi2-ch0``) but the
+# raw ``device_name`` still carries the ``rp1-cfe-`` prefix the backstop
+# looks for.
+# ---------------------------------------------------------------------------
+
+
+_VIDAR_JUNK_DEVICE_NAMES = (
+    "rp1-cfe-csi2_ch0",
+    "rp1-cfe-csi2_ch2",
+    "rp1-cfe-csi2_ch3",
+    "rp1-cfe-fe_image0",
+    "rp1-cfe-fe_image1",
+)
+
+
+def _seed_vidar_shaped_registry(registry: CameraRegistry) -> Dict[str, CameraIdentity]:
+    """Seed *registry* with vidar's real junk + real record shape.
+
+    Returns the two real (``libcamera:``) identities keyed by slug, so a
+    test can hand them back through ``identity_source`` to simulate "only
+    the real cameras are enumerated this pass".
+    """
+    # Junk rows: two loc:dev-videoN records per internal node name (as on
+    # vidar, where the backend-offset dedup bug once minted two entries
+    # per physical node before ticket 041-001's fix).
+    junk_index = 0
+    for name in _VIDAR_JUNK_DEVICE_NAMES:
+        for _ in range(2):
+            registry.resolve(
+                _identity(f"loc:dev-video{junk_index}", name, source="usb_location_path", is_fallback=True)
+            )
+            junk_index += 1
+
+    # Real cameras: imx296 (hardware-faulty but still registered) and
+    # imx296-2, exactly as vidar's registry.json has them.
+    real_1 = _identity("libcamera:aprilcam-imx296-88000", "imx296", source="libcamera_id")
+    real_2 = _identity("libcamera:aprilcam-imx296-80000", "imx296", source="libcamera_id")
+    slug_1 = registry.resolve(real_1)
+    slug_2 = registry.resolve(real_2)
+    return {slug_1: real_1, slug_2: real_2}
+
+
+def test_probe_purges_stale_internal_node_registry_records(registry):
+    reals = _seed_vidar_shaped_registry(registry)
+    real_numbers_before = {slug: registry.get(slug).number for slug in reals}
+    junk_slugs_before = {
+        r.slug for r in registry.records() if r.slug not in reals
+    }
+    assert len(junk_slugs_before) == 10  # sanity: the vidar-shaped fixture seeded 10 junk rows
+
+    # This probe pass enumerates only the two real cameras -- exactly
+    # what a fixed ticket-041-001 enumeration reports on vidar today.
+    discovery = CameraDiscovery(
+        registry,
+        identity_source=lambda: dict(enumerate(reals.values())),
+        backend_factory=lambda index: _FakeBackend(),
+    )
+    report = discovery.probe()
+
+    reported_slugs = {c.name for c in report.cameras}
+    assert reported_slugs == set(reals)  # no junk slug appears, not even present=False
+    assert junk_slugs_before.isdisjoint(reported_slugs)
+
+    remaining_slugs = {r.slug for r in registry.records()}
+    assert remaining_slugs == set(reals)  # junk rows are gone from the registry outright
+
+    for slug, number in real_numbers_before.items():
+        assert registry.get(slug).number == number  # purging junk never renumbers survivors
+
+
+def test_probe_keeps_a_genuinely_absent_real_camera_not_matching_the_classifier(registry):
+    """Regression guard against over-purging (verification note 2): a
+    real camera that is merely unplugged -- libcamera loopback or UVC --
+    must still be reported present=False and stay in the registry,
+    exactly as before this ticket."""
+    loopback_identity = _identity("libcamera:aprilcam-imx296-88000", "imx296", source="libcamera_id")
+    uvc_identity = _identity("hw:arducam", "Arducam OV9782 USB Camera", source="vid_pid_location")
+    loopback_slug = registry.resolve(loopback_identity)
+    uvc_slug = registry.resolve(uvc_identity)
+
+    discovery = CameraDiscovery(
+        registry,
+        identity_source=lambda: {},  # nothing attached this pass
+        backend_factory=lambda index: _FakeBackend(),
+    )
+    report = discovery.probe()
+
+    reported = _names(report)
+    assert set(reported) == {loopback_slug, uvc_slug}
+    assert all(not c.present and not c.usable for c in reported.values())
+    assert {r.slug for r in registry.records()} == {loopback_slug, uvc_slug}
+
+
+def test_probe_purge_of_internal_node_records_is_idempotent(registry):
+    reals = _seed_vidar_shaped_registry(registry)
+
+    discovery = CameraDiscovery(
+        registry,
+        identity_source=lambda: dict(enumerate(reals.values())),
+        backend_factory=lambda index: _FakeBackend(),
+    )
+    first = discovery.probe()
+    second = discovery.probe()
+
+    assert {c.name for c in first.cameras} == {c.name for c in second.cameras} == set(reals)
+    assert {r.slug for r in registry.records()} == set(reals)
+
+
+def test_probe_leaves_macos_shaped_absent_records_untouched(registry):
+    """macOS records are never internal-node shaped -- an absent avf:
+    camera with an ordinary device name must be reported present=False,
+    never forgotten, regardless of platform (the classifier itself is
+    what protects it, not a platform gate)."""
+    macos_identity = _identity(
+        "avf:0x1234567890abcdef", "FaceTime HD Camera", source="avfoundation_unique_id"
+    )
+    slug = registry.resolve(macos_identity)
+
+    discovery = CameraDiscovery(
+        registry,
+        identity_source=lambda: {},
+        backend_factory=lambda index: _FakeBackend(),
+    )
+    report = discovery.probe()
+
+    assert len(report.cameras) == 1
+    assert report.cameras[0].name == slug
+    assert report.cameras[0].present is False
+    assert registry.get(slug) is not None  # never forgotten
+
+
+# ---------------------------------------------------------------------------
 # watch() -- passive hotplug (AC5 mechanism; headless, fully automated)
 # ---------------------------------------------------------------------------
 

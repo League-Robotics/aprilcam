@@ -1,9 +1,11 @@
 ---
 id: '041'
 title: Filter Pi ISP internal nodes out of camera enumeration
-status: ticketing
+status: done
 branch: sprint/041-filter-pi-isp-internal-nodes-out-of-camera-enumeration
-use-cases: [SUC-001, SUC-002]
+use-cases:
+- SUC-001
+- SUC-002
 issues:
 - linux-enumeration-lists-pi-isp-nodes-as-cameras-with-duplicate-rows.md
 ---

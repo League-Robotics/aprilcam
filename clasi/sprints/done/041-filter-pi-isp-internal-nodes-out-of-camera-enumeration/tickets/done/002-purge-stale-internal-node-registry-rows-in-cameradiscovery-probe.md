@@ -1,9 +1,11 @@
 ---
 id: '002'
 title: Purge stale internal-node registry rows in CameraDiscovery.probe()
-status: open
-use-cases: [SUC-002]
-depends-on: ['001']
+status: done
+use-cases:
+- SUC-002
+depends-on:
+- '001'
 github-issue: ''
 issue: linux-enumeration-lists-pi-isp-nodes-as-cameras-with-duplicate-rows.md
 completes_issue: true
@@ -34,25 +36,25 @@ reporting the record as an absent camera.
 
 ## Acceptance Criteria
 
-- [ ] `CameraDiscovery.probe()`'s loop over `self._registry.records()`
+- [x] `CameraDiscovery.probe()`'s loop over `self._registry.records()`
       (the branch handling a record whose hardware key was not seen in
       the current enumeration pass) checks the record's `device_name`
       against ticket 001's node classifier (imported from
       `camera/identity.py`) before deciding what to do with it.
-- [ ] A record that matches the classifier is forgotten via
+- [x] A record that matches the classifier is forgotten via
       `self._registry.forget(record.slug)` and is **not** added to the
       `ProbeReport`'s `cameras` tuple at all (not even as
       `present=False`).
-- [ ] A record that does not match the classifier keeps today's exact
+- [x] A record that does not match the classifier keeps today's exact
       behavior: reported `present=False`, `usable=False`, not forgotten.
-- [ ] Forgetting a junk record never changes another record's `number`
+- [x] Forgetting a junk record never changes another record's `number`
       (relies on `CameraRegistry.forget`'s existing "gaps are
       structural" contract — no change to `registry.py` itself).
-- [ ] No new import cycle or new module-level dependency is introduced
+- [x] No new import cycle or new module-level dependency is introduced
       — `discovery.py` already imports from both `identity.py` and
       `registry.py`; this ticket only adds a name to an existing import
       line.
-- [ ] Covered by an offline unit test that seeds a fake
+- [x] Covered by an offline unit test that seeds a fake
       `CameraRegistry` (temp-dir `registry.json`) with a mix of
       classifier-matching junk records and real-camera records, runs
       `probe()` with an `identity_source` fixture that reports only the

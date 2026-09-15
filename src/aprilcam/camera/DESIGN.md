@@ -58,7 +58,14 @@ daemon holds the device (design.md §8).
   `cv2-enumerate-cameras`, macOS `system_profiler SPCameraDataType`, and
   a libcamera enumeration hook. Never imports `cv2` at module top level
   (only lazily inside `_enumerate_cv2`) and never raises — worst case is
-  a name+resolution slug.
+  a name+resolution slug. On Linux, `_enumerate_cv2()` also (sprint 041
+  ticket 001) collapses the `CAP_V4L2`/`CAP_GSTREAMER` backend-duplicated
+  entries `cv2-enumerate-cameras` yields per physical `/dev/videoN` back
+  into one, and excludes Raspberry Pi RP1/PiSP media-pipeline-internal
+  nodes (`rp1-cfe-*`, `pispbe-*`, `rpivid`, `bcm2835-codec`) via the
+  exported `is_pi_internal_node()` classifier, which `discovery.py`
+  reuses to purge stale registry rows for the same nodes (sprint 041
+  ticket 002).
 - **`registry.py`** — `CameraRegistry`: the persistent identity -> slug +
   enumeration-number mapping, stored atomically at
   `state_dir/cameras/registry.json`. Owns first-sight slug assignment
@@ -70,7 +77,13 @@ daemon holds the device (design.md §8).
   `watch()` (passive polling loop, since no portable OS hotplug event
   source exists). Delegates backend construction to
   `backends.resolve_capture_backend` when it briefly opens a camera to
-  test usability.
+  test usability. `probe()`'s "registry record not seen this pass"
+  branch (sprint 041 ticket 002) also checks the stored record's
+  `device_name` against `identity.is_pi_internal_node(None, name)`
+  before reporting it absent — a match is forgotten from the registry
+  outright (`self._registry.forget(record.slug)`) instead of being
+  reported `present=False` forever, self-healing junk rows written
+  before ticket 001's enumeration fix shipped.
 - **`camera.py`** — `Camera`: the runtime object the daemon holds
   one-of-per-camera. Composes a primary `CaptureBackend` (pixels) with
   an optional `ControlBackend` (settings), and owns self-heal reopen,
@@ -839,6 +852,59 @@ straddling period where both signatures need to work.
 ## 6. Open Questions / Known Limitations
 
 - **The flat-field apply side (§4) shipped out-of-process and went undocumented in this file until sprint 037's planning pass caught the drift.** No functional gap — the code and its own docstrings were always complete — but a reminder that an out-of-process change is still expected to update the owning subsystem's `DESIGN.md`, and this one didn't at the time.
+- **Resolved, sprint 041 ticket 001: Linux `cv2-enumerate-cameras`
+  enumeration duplicated every device and admitted Pi-internal V4L2
+  nodes.** Confirmed by reading the vendored library's source directly:
+  `enumerate_cameras()` (called with the default `CAP_ANY`) iterates
+  `linux_backend.supported_backends = (CAP_GSTREAMER, CAP_V4L2)` and
+  yields one `CameraInfo` per backend per device, so every physical
+  `/dev/videoN` appeared twice, at two combined indices neither of which
+  the old AVFoundation-only offset-stripping logic recovered correctly.
+  Separately, the library's own `V4L2_CAP_VIDEO_CAPTURE` admission check
+  cannot distinguish a Raspberry Pi RP1/PiSP-internal node (a real
+  capture-capable device from the kernel's point of view, but one a
+  libcamera-owned media pipeline owns and no code should open directly)
+  from a real standalone camera. `_enumerate_cv2()` now generalizes the
+  offset-recovery to whichever backend(s) the platform combines
+  (`_combined_index_offsets()`/`_strip_backend_offset()`) and applies a
+  Linux-only classifier, `is_pi_internal_node()`, before a candidate
+  becomes an enumeration entry at all: driver name (via the
+  `/sys/class/video4linux/videoN/device/driver` symlink, mirroring v1's
+  `camutil.py::_list_v4l2_usb_cameras`) against a known-internal set
+  (`rp1-cfe`, `pispbe`, `rpivid`, `bcm2835-codec`), with a narrow
+  name-prefix backstop (`rp1-cfe-`, `pispbe-`) for when the symlink
+  cannot be read, failing open on anything it cannot positively confirm.
+  Verified live (read-only) against `vidar.local`: every RP1/PiSP node
+  resolves its documented driver name via the symlink, and an
+  `aprilcam-*` v4l2loopback bridge device (sprint 040) has no `device/`
+  subdirectory at all, so it always falls through to "unknown, keep" —
+  the loopback path is unaffected by construction, not just by test
+  coverage. `is_pi_internal_node()` is exported (not module-private)
+  specifically so `discovery.py` can reuse it by device name alone to
+  purge already-registered junk rows — implemented immediately after
+  by sprint 041 ticket 002, below.
+- **Resolved, sprint 041 ticket 002: stale internal-node registry rows
+  now self-purge on the next `probe()`.** `CameraDiscovery.probe()`'s
+  existing "registry record not seen in this enumeration pass" branch
+  now calls `is_pi_internal_node(None, record.device_name)` before
+  reporting a record absent; a match is forgotten via
+  `self._registry.forget(record.slug)` and never added to the
+  `ProbeReport` at all, instead of being reported `present=False`
+  forever. Verified against vidar's real (read-only) `registry.json`:
+  its ten `loc:dev-videoN` junk rows store `device_name` in the raw,
+  underscore-separated OS form (`rp1-cfe-csi2_ch0`, `rp1-cfe-fe_image1`,
+  ...) rather than the hyphen-slugified `slug` field — the name-prefix
+  backstop matches against exactly this raw field, which is why
+  `discovery.py` passes `record.device_name`, not `record.slug`. The
+  two real `libcamera:` records (`imx296` #1, `imx296-2` #2) have
+  `device_name="imx296"`, which the classifier's driver=None backstop
+  correctly does not match, so they are never at risk of purge by
+  construction, not merely by test coverage. No platform gate was added
+  around this check (unlike `_enumerate_cv2`'s Linux-only filter) — the
+  name-prefix backstop itself (`rp1-cfe-`, `pispbe-`) is specific
+  enough that no real camera's `device_name` on any platform is
+  expected to collide with it, which the macOS-shaped regression test
+  (`test_probe_leaves_macos_shaped_absent_records_untouched`) confirms.
 - **Resolved, sprint 040: the libcamera enumeration/branch-point path is
   verified against real Pi hardware.** `backends/libcamera.py`'s
   `/sys`-based enumeration and `backends/__init__.py`'s
