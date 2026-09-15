@@ -55,7 +55,7 @@ from aprilcam.camera.backends import (
 )
 from aprilcam.camera.backends.libcamera import LibcameraDevice
 from aprilcam.camera.camera import Camera
-from aprilcam.camera.identity import CameraIdentity, resolve_all
+from aprilcam.camera.identity import CameraIdentity, is_pi_internal_node, resolve_all
 from aprilcam.camera.interfaces import CameraDiscovery as _CameraDiscoveryBase
 from aprilcam.camera.registry import CameraRegistry
 from aprilcam.types import CameraState, ProbeReport, ProbeSkip
@@ -214,9 +214,15 @@ class CameraDiscovery(_CameraDiscoveryBase):
         distinguishes a healthy held-open camera from a stalled one
         (sprint 039 ticket 004: a held-open camera used to always probe
         ``usable=True`` even after its self-heal budget was exhausted).
-        Registry records not seen in this enumeration pass are reported
-        ``present=False`` (a config outliving its hardware --
-        ``types.CameraState``'s own docstring -- not an error).
+        Registry records not seen in this enumeration pass have one of
+        two outcomes (sprint 041 ticket 002): a record whose stored
+        ``device_name`` matches ``identity.is_pi_internal_node`` (a
+        Pi-internal V4L2 node registered before ticket 001's enumeration
+        fix shipped) is forgotten outright via ``self._registry.forget``
+        and never added to the report at all; every other absent record
+        is reported ``present=False`` (a config outliving its hardware --
+        ``types.CameraState``'s own docstring -- not an error), unchanged
+        from before this ticket.
         """
         identities = self._safe_identities()
 
@@ -263,6 +269,20 @@ class CameraDiscovery(_CameraDiscoveryBase):
 
         for record in self._registry.records():
             if record.slug in seen_hardware_keys.values():
+                continue
+            if is_pi_internal_node(None, record.device_name):
+                # A Pi-internal V4L2 node registered before ticket
+                # 041-001's enumeration fix shipped -- enumeration will
+                # never propose it again, so it is stale junk, not an
+                # absent camera. Purge it outright rather than reporting
+                # present=False forever (sprint 041 ticket 002).
+                logger.info(
+                    "probe: purging stale internal-node registry record "
+                    "slug=%s device_name=%s (matches is_pi_internal_node)",
+                    record.slug,
+                    record.device_name,
+                )
+                self._registry.forget(record.slug)
                 continue
             cameras.append(
                 CameraState(

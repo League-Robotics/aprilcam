@@ -77,7 +77,13 @@ daemon holds the device (design.md §8).
   `watch()` (passive polling loop, since no portable OS hotplug event
   source exists). Delegates backend construction to
   `backends.resolve_capture_backend` when it briefly opens a camera to
-  test usability.
+  test usability. `probe()`'s "registry record not seen this pass"
+  branch (sprint 041 ticket 002) also checks the stored record's
+  `device_name` against `identity.is_pi_internal_node(None, name)`
+  before reporting it absent — a match is forgotten from the registry
+  outright (`self._registry.forget(record.slug)`) instead of being
+  reported `present=False` forever, self-healing junk rows written
+  before ticket 001's enumeration fix shipped.
 - **`camera.py`** — `Camera`: the runtime object the daemon holds
   one-of-per-camera. Composes a primary `CaptureBackend` (pixels) with
   an optional `ControlBackend` (settings), and owns self-heal reopen,
@@ -875,8 +881,30 @@ straddling period where both signatures need to work.
   the loopback path is unaffected by construction, not just by test
   coverage. `is_pi_internal_node()` is exported (not module-private)
   specifically so `discovery.py` can reuse it by device name alone to
-  purge already-registered junk rows (sprint 041 ticket 002, not yet
-  implemented as of this ticket).
+  purge already-registered junk rows — implemented immediately after
+  by sprint 041 ticket 002, below.
+- **Resolved, sprint 041 ticket 002: stale internal-node registry rows
+  now self-purge on the next `probe()`.** `CameraDiscovery.probe()`'s
+  existing "registry record not seen in this enumeration pass" branch
+  now calls `is_pi_internal_node(None, record.device_name)` before
+  reporting a record absent; a match is forgotten via
+  `self._registry.forget(record.slug)` and never added to the
+  `ProbeReport` at all, instead of being reported `present=False`
+  forever. Verified against vidar's real (read-only) `registry.json`:
+  its ten `loc:dev-videoN` junk rows store `device_name` in the raw,
+  underscore-separated OS form (`rp1-cfe-csi2_ch0`, `rp1-cfe-fe_image1`,
+  ...) rather than the hyphen-slugified `slug` field — the name-prefix
+  backstop matches against exactly this raw field, which is why
+  `discovery.py` passes `record.device_name`, not `record.slug`. The
+  two real `libcamera:` records (`imx296` #1, `imx296-2` #2) have
+  `device_name="imx296"`, which the classifier's driver=None backstop
+  correctly does not match, so they are never at risk of purge by
+  construction, not merely by test coverage. No platform gate was added
+  around this check (unlike `_enumerate_cv2`'s Linux-only filter) — the
+  name-prefix backstop itself (`rp1-cfe-`, `pispbe-`) is specific
+  enough that no real camera's `device_name` on any platform is
+  expected to collide with it, which the macOS-shaped regression test
+  (`test_probe_leaves_macos_shaped_absent_records_untouched`) confirms.
 - **Resolved, sprint 040: the libcamera enumeration/branch-point path is
   verified against real Pi hardware.** `backends/libcamera.py`'s
   `/sys`-based enumeration and `backends/__init__.py`'s
