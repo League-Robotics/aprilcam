@@ -1,8 +1,9 @@
 ---
 id: '001'
 title: Fix Linux backend-offset dedup and filter internal Pi V4L2 nodes in camera/identity.py
-status: open
-use-cases: [SUC-001]
+status: done
+use-cases:
+- SUC-001
 depends-on: []
 github-issue: ''
 issue: linux-enumeration-lists-pi-isp-nodes-as-cameras-with-duplicate-rows.md
@@ -44,33 +45,33 @@ same physical Linux device twice.
 
 ## Acceptance Criteria
 
-- [ ] `_enumerate_cv2()` recovers the correct real device index for
+- [x] `_enumerate_cv2()` recovers the correct real device index for
       both `CAP_V4L2`- and `CAP_GSTREAMER`-tagged entries on Linux
       (not just `CAP_AVFOUNDATION` on macOS), so a physical device
       enumerated under both backends collapses to one dict entry keyed
       by its real index.
-- [ ] A new Linux-only node classifier excludes candidates whose V4L2
+- [x] A new Linux-only node classifier excludes candidates whose V4L2
       driver (read via `/sys/class/video4linux/videoN/device/driver`)
       is a known Pi media-pipeline-internal driver (`rp1-cfe`,
       `pispbe`, `rpivid`, `bcm2835-codec`); a narrow, documented
       name-prefix backstop (`rp1-cfe-`, `pispbe-`) applies when the
       driver symlink cannot be read.
-- [ ] The classifier fails open: an unreadable driver symlink or an
+- [x] The classifier fails open: an unreadable driver symlink or an
       unrecognized driver name keeps the candidate rather than
       excluding it. A real USB/UVC camera (`uvcvideo` driver) is never
       excluded.
-- [ ] Excluded candidates never appear in `_enumerate_cv2()`'s output
+- [x] Excluded candidates never appear in `_enumerate_cv2()`'s output
       dict, so no downstream code (`resolve_all`, `CameraDiscovery`)
       ever sees, resolves, opens, or registers an identity for them.
-- [ ] macOS behavior (`_macos_camera_profiles`, the `CAP_AVFOUNDATION`
+- [x] macOS behavior (`_macos_camera_profiles`, the `CAP_AVFOUNDATION`
       offset path) is unchanged — no new code path runs on `sys.platform
       == "darwin"`.
-- [ ] The sprint-040 libcamera loopback path is unaffected:
+- [x] The sprint-040 libcamera loopback path is unaffected:
       `resolve_all()`'s early return when `_probe_libcamera()` yields
       entries means `_enumerate_cv2()` is not called at all in that
       case, and no test in this ticket should need to touch
       `backends/libcamera.py`.
-- [ ] All new logic is covered by injected-fixture unit tests (fake
+- [x] All new logic is covered by injected-fixture unit tests (fake
       `/sys/class/video4linux` trees and fake `cv2_enumerate_cameras`-
       shaped `CameraInfo` lists via the existing `enum_entries`
       injection point) — no real hardware, no real `cv2_enumerate_cameras`

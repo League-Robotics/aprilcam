@@ -97,15 +97,74 @@ does not un-duplicate a registry.json that already has both records.
 
 This module must not import OpenCV at module top level (only inside
 ``_enumerate_cv2``, lazily) and returns plain dataclasses only.
+
+Linux backend-offset dedup and internal-node filter (ticket 041-001)
+----------------------------------------------------------------------
+Confirmed by reading the vendored ``cv2_enumerate_cameras`` source
+directly (``cv2_enumerate_cameras/__init__.py``,
+``linux_backend.py``): calling ``enumerate_cameras()`` with the
+default ``apiPreference=CAP_ANY`` (exactly how :func:`_enumerate_cv2`
+calls it) iterates every backend in the platform's ``supported_backends``
+tuple and yields one ``CameraInfo`` per backend per device, combining
+``index = real_index + backend_id``. On macOS ``supported_backends =
+(CAP_AVFOUNDATION,)`` — one backend, so the old ``idx = raw -
+avf_offset if raw >= avf_offset else raw`` logic was already correct.
+On Linux, ``supported_backends = (CAP_GSTREAMER=1800, CAP_V4L2=200)``
+— **two** backends over the identical ``/dev/video*`` glob, so every
+physical device was yielded twice, at two different combined indices,
+and the AVFoundation-only stripping logic mis-handled or ignored both
+(a raw ``CAP_GSTREAMER``-tagged index happened to exceed the
+AVFoundation offset too, so it was *wrongly* stripped against the
+wrong constant, landing on neither the real index nor a stable
+duplicate key). :func:`_combined_index_offsets` /
+:func:`_strip_backend_offset` generalize the stripping to whichever
+offset(s) apply on the current platform, so both backend-tagged
+entries for one physical ``/dev/videoN`` now collapse to the same
+dict key — fixing the "every row printed twice" bug for every Linux
+camera, not just Pi-internal nodes.
+
+Separately, ``cv2_enumerate_cameras``'s own admission test
+(``device_can_capture_video``, a ``VIDIOC_QUERYCAP``
+``V4L2_CAP_VIDEO_CAPTURE`` check) cannot distinguish a Raspberry Pi
+RP1/PiSP-internal V4L2 node (``rp1-cfe-*``, ``pispbe-*``, ``rpivid``,
+``bcm2835-codec`` — media-controller nodes a libcamera pipeline owns,
+never meant to be opened directly) from a real standalone camera:
+both genuinely report that capability bit. v1
+(``archive/src/aprilcam/camera/camutil.py::_list_v4l2_usb_cameras``)
+already solved this by reading the node's V4L2 driver name via the
+``/sys/class/video4linux/videoN/device/driver`` symlink and keeping
+only real capture-source drivers. :func:`is_pi_internal_node` inverts
+that (excludes known-internal drivers rather than allow-listing
+``uvcvideo`` alone), read by :func:`_read_v4l2_driver` (no subprocess,
+mirroring ``backends/libcamera.py::list_loopback_cameras``'s ``/sys``
+style), with a narrow name-prefix backstop (``rp1-cfe-``,
+``pispbe-``) for when the symlink cannot be read at all (verified live
+against ``vidar.local``: a v4l2loopback bridge device such as
+``aprilcam-imx296-88000`` has no ``device/`` subdirectory at all — it
+is a virtual node with no backing hardware — so its driver reads as
+unreadable and it falls through to the name check, which does not
+match either prefix, so it is kept). The predicate **fails open**:
+anything it cannot positively confirm as a known-internal node keeps
+the candidate, on the documented asymmetry that a false negative
+merely reproduces today's bug while a false positive would silently
+break discovery for a real, unrecognized camera. This filter only
+ever runs on ``sys.platform.startswith("linux")``; it is a no-op
+everywhere else, including macOS, so the AVFoundation path above is
+untouched. ``is_pi_internal_node`` is exported (not left
+module-private) specifically so ``camera/discovery.py`` (ticket
+041-002) can reuse the same classifier, by device name alone, to
+purge already-registered junk rows for nodes no longer proposed by
+this fixed enumeration.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from aprilcam.camera.interfaces import CameraIdentity
 
@@ -113,6 +172,7 @@ __all__ = [
     "CameraIdentity",
     "device_name_slug",
     "name_resolution_slug",
+    "is_pi_internal_node",
     "resolve_identity",
     "resolve_all",
 ]
@@ -197,34 +257,185 @@ class _EnumEntry:
     path: Optional[str] = None
 
 
+def _combined_index_offsets() -> Tuple[int, ...]:
+    """Backend-id offset(s) ``enumerate_cameras(CAP_ANY)`` may add to a
+    device's real index on the current platform, largest first.
+
+    Mirrors ``cv2_enumerate_cameras``'s own combination
+    (``index = i.index + i.backend`` over its ``supported_backends``
+    tuple for the running platform — see the module docstring's
+    "Linux backend-offset dedup" section for the full trace). Darwin
+    has one backend (``CAP_AVFOUNDATION``); Linux has two
+    (``CAP_GSTREAMER``, ``CAP_V4L2``). Falls back to the same hardcoded
+    constants ``cv2_enumerate_cameras`` itself falls back to when
+    ``cv2`` cannot be imported. Returns ``()`` on any other platform
+    (Windows is out of this project's target platforms — see
+    ``linux_backend``/``macos_backend`` vs. ``windows_backend`` in the
+    vendored package) — :func:`_strip_backend_offset` leaves an index
+    unchanged when no offset applies.
+    """
+    try:
+        import cv2 as cv  # noqa: PLC0415
+
+        avf = getattr(cv, "CAP_AVFOUNDATION", 1200)
+        gst = getattr(cv, "CAP_GSTREAMER", 1800)
+        v4l2 = getattr(cv, "CAP_V4L2", 200)
+    except Exception:
+        avf, gst, v4l2 = 1200, 1800, 200
+
+    if sys.platform == "darwin":
+        return (avf,)
+    if sys.platform.startswith("linux"):
+        return tuple(sorted({gst, v4l2}, reverse=True))
+    return ()
+
+
+def _strip_backend_offset(raw: int, offsets: Tuple[int, ...]) -> int:
+    """Recover a real device index from a combined ``index +
+    backend_offset`` value.
+
+    ``offsets`` must be sorted largest-first (as
+    :func:`_combined_index_offsets` returns them) so a raw index that
+    exceeds more than one offset matches the correct (largest
+    applicable) one rather than the first offset that happens to fit.
+    Two backend-tagged entries for the same physical device (e.g.
+    ``205`` under ``CAP_V4L2`` and ``1805`` under ``CAP_GSTREAMER`` for
+    real index ``5``) both recover to the same real index, which is
+    exactly what collapses them back into one ``_enumerate_cv2()`` dict
+    entry. Returns ``raw`` unchanged when no offset applies.
+    """
+    for offset in offsets:
+        if raw >= offset:
+            return raw - offset
+    return raw
+
+
+# ---------------------------------------------------------------------------
+# Linux-only: exclude Raspberry Pi RP1/PiSP media-pipeline-internal nodes
+# ---------------------------------------------------------------------------
+
+_SYS_V4L_ROOT = "/sys/class/video4linux"
+
+# Known V4L2 driver names for nodes that belong to a libcamera-owned
+# media pipeline, never a standalone capture camera. Not exhaustive by
+# design -- an unrecognized driver keeps the candidate (fail open).
+_PI_INTERNAL_DRIVERS = frozenset({"rp1-cfe", "pispbe", "rpivid", "bcm2835-codec"})
+
+# Narrow backstop for when the driver symlink cannot be read at all.
+# Deliberately does not cover every internal driver above (e.g.
+# "rpivid" has no dash-suffixed name convention on the device it
+# names) -- only the two families that consistently name their nodes
+# with these prefixes.
+_PI_INTERNAL_NAME_PREFIXES = ("rp1-cfe-", "pispbe-")
+
+_VIDEO_NODE_RE = re.compile(r"video(\d+)$")
+
+
+def _video_node_index(path: Optional[str]) -> Optional[int]:
+    """Extract ``N`` from a ``/dev/videoN``-shaped path; ``None`` if
+    ``path`` is missing or does not look like a video node."""
+    if not path:
+        return None
+    m = _VIDEO_NODE_RE.search(path)
+    return int(m.group(1)) if m else None
+
+
+def _read_v4l2_driver(video_index: int, *, sys_root: str = _SYS_V4L_ROOT) -> Optional[str]:
+    """Read the V4L2 driver bound to ``/dev/video<video_index>``.
+
+    Resolves ``<sys_root>/video<N>/device/driver`` (a symlink to
+    ``.../drivers/<driver-name>``, e.g. ``rp1-cfe``) and returns its
+    basename. No subprocess -- mirrors
+    ``backends/libcamera.py::list_loopback_cameras``'s ``/sys``
+    handling. Returns ``None`` (unknown, never "no driver") when the
+    symlink is missing or unreadable, which is also the real shape of
+    a v4l2loopback device: verified live on ``vidar.local`` that an
+    ``aprilcam-*`` loopback node has no ``device/`` subdirectory at
+    all (it is virtual, with no backing hardware), so it always reads
+    as unknown here and must fail open through :func:`is_pi_internal_node`.
+
+    ``sys_root`` is overridable so tests can point this at a temporary
+    directory standing in for ``/sys``, matching
+    ``list_loopback_cameras``'s ``sys_glob`` convention.
+    """
+    link = os.path.join(sys_root, f"video{video_index}", "device", "driver")
+    try:
+        # Real /sys always exposes ``device/driver`` as a symlink; a
+        # v4l2loopback node has no ``device/`` subdirectory at all (it
+        # is virtual), so ``islink`` alone -- not ``exists``, which
+        # would follow the link and wrongly report "missing" for a
+        # symlink whose target a test fixture did not also create --
+        # correctly separates "no such node" from "node exists".
+        if not os.path.islink(link):
+            return None
+        target = os.path.realpath(link)
+    except OSError:
+        return None
+    return os.path.basename(target) or None
+
+
+def is_pi_internal_node(driver: Optional[str], name: Optional[str] = None) -> bool:
+    """True if a V4L2 node is a Raspberry Pi RP1/PiSP media-pipeline-
+    internal node and should never be proposed as a camera.
+
+    Principled test first: ``driver`` (from :func:`_read_v4l2_driver`)
+    against the known-internal driver set. When ``driver`` is ``None``
+    (the symlink could not be read), falls back to a narrow name-prefix
+    backstop against ``name``. **Fails open** in every other case --
+    an unrecognized driver, or a missing/non-matching name when the
+    driver is unknown -- so a real USB/UVC camera (``uvcvideo``) or a
+    not-yet-seen future driver is never excluded, and callers with only
+    a device name (e.g. ``camera/discovery.py``'s registry-purge check,
+    which has no live ``/sys`` node to read a driver from) can call
+    this with ``driver=None`` and rely on the same backstop.
+    """
+    if driver is not None:
+        return driver in _PI_INTERNAL_DRIVERS
+    return bool(name) and name.startswith(_PI_INTERNAL_NAME_PREFIXES)
+
+
 def _enumerate_cv2() -> Dict[int, _EnumEntry]:
     """Map OpenCV index -> enumeration entry from ``cv2-enumerate-cameras``.
 
     Empty dict if the library is unavailable or errors. Imports are
-    local so this module never pulls OpenCV at import time.
+    local so this module never pulls OpenCV at import time. On Linux,
+    collapses the ``CAP_V4L2``/``CAP_GSTREAMER`` backend-duplicated
+    entries for each physical device into one, and excludes Pi
+    RP1/PiSP-internal nodes before they ever become an ``_EnumEntry`` --
+    see the module docstring's "Linux backend-offset dedup and
+    internal-node filter" section.
     """
     out: Dict[int, _EnumEntry] = {}
     try:
         from cv2_enumerate_cameras import enumerate_cameras  # noqa: PLC0415
 
-        try:
-            import cv2 as cv  # noqa: PLC0415
-
-            avf_offset = getattr(cv, "CAP_AVFOUNDATION", 1200)
-        except Exception:
-            avf_offset = 1200
+        offsets = _combined_index_offsets()
+        on_linux = sys.platform.startswith("linux")
 
         for cam in enumerate_cameras():
             raw = getattr(cam, "index", None)
             if raw is None:
                 continue
-            idx = raw - avf_offset if raw >= avf_offset else raw
+            idx = _strip_backend_offset(raw, offsets)
+            name = getattr(cam, "name", None) or None
+            path = getattr(cam, "path", None) or None
+
+            if on_linux:
+                video_idx = _video_node_index(path)
+                driver = (
+                    _read_v4l2_driver(video_idx, sys_root=_SYS_V4L_ROOT)
+                    if video_idx is not None
+                    else None
+                )
+                if is_pi_internal_node(driver, name):
+                    continue
+
             out[idx] = _EnumEntry(
                 index=idx,
-                name=getattr(cam, "name", None) or None,
+                name=name,
                 vid=getattr(cam, "vid", None) or None,
                 pid=getattr(cam, "pid", None) or None,
-                path=getattr(cam, "path", None) or None,
+                path=path,
             )
     except ImportError:
         pass

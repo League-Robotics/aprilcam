@@ -58,7 +58,14 @@ daemon holds the device (design.md §8).
   `cv2-enumerate-cameras`, macOS `system_profiler SPCameraDataType`, and
   a libcamera enumeration hook. Never imports `cv2` at module top level
   (only lazily inside `_enumerate_cv2`) and never raises — worst case is
-  a name+resolution slug.
+  a name+resolution slug. On Linux, `_enumerate_cv2()` also (sprint 041
+  ticket 001) collapses the `CAP_V4L2`/`CAP_GSTREAMER` backend-duplicated
+  entries `cv2-enumerate-cameras` yields per physical `/dev/videoN` back
+  into one, and excludes Raspberry Pi RP1/PiSP media-pipeline-internal
+  nodes (`rp1-cfe-*`, `pispbe-*`, `rpivid`, `bcm2835-codec`) via the
+  exported `is_pi_internal_node()` classifier, which `discovery.py`
+  reuses to purge stale registry rows for the same nodes (sprint 041
+  ticket 002).
 - **`registry.py`** — `CameraRegistry`: the persistent identity -> slug +
   enumeration-number mapping, stored atomically at
   `state_dir/cameras/registry.json`. Owns first-sight slug assignment
@@ -839,6 +846,37 @@ straddling period where both signatures need to work.
 ## 6. Open Questions / Known Limitations
 
 - **The flat-field apply side (§4) shipped out-of-process and went undocumented in this file until sprint 037's planning pass caught the drift.** No functional gap — the code and its own docstrings were always complete — but a reminder that an out-of-process change is still expected to update the owning subsystem's `DESIGN.md`, and this one didn't at the time.
+- **Resolved, sprint 041 ticket 001: Linux `cv2-enumerate-cameras`
+  enumeration duplicated every device and admitted Pi-internal V4L2
+  nodes.** Confirmed by reading the vendored library's source directly:
+  `enumerate_cameras()` (called with the default `CAP_ANY`) iterates
+  `linux_backend.supported_backends = (CAP_GSTREAMER, CAP_V4L2)` and
+  yields one `CameraInfo` per backend per device, so every physical
+  `/dev/videoN` appeared twice, at two combined indices neither of which
+  the old AVFoundation-only offset-stripping logic recovered correctly.
+  Separately, the library's own `V4L2_CAP_VIDEO_CAPTURE` admission check
+  cannot distinguish a Raspberry Pi RP1/PiSP-internal node (a real
+  capture-capable device from the kernel's point of view, but one a
+  libcamera-owned media pipeline owns and no code should open directly)
+  from a real standalone camera. `_enumerate_cv2()` now generalizes the
+  offset-recovery to whichever backend(s) the platform combines
+  (`_combined_index_offsets()`/`_strip_backend_offset()`) and applies a
+  Linux-only classifier, `is_pi_internal_node()`, before a candidate
+  becomes an enumeration entry at all: driver name (via the
+  `/sys/class/video4linux/videoN/device/driver` symlink, mirroring v1's
+  `camutil.py::_list_v4l2_usb_cameras`) against a known-internal set
+  (`rp1-cfe`, `pispbe`, `rpivid`, `bcm2835-codec`), with a narrow
+  name-prefix backstop (`rp1-cfe-`, `pispbe-`) for when the symlink
+  cannot be read, failing open on anything it cannot positively confirm.
+  Verified live (read-only) against `vidar.local`: every RP1/PiSP node
+  resolves its documented driver name via the symlink, and an
+  `aprilcam-*` v4l2loopback bridge device (sprint 040) has no `device/`
+  subdirectory at all, so it always falls through to "unknown, keep" —
+  the loopback path is unaffected by construction, not just by test
+  coverage. `is_pi_internal_node()` is exported (not module-private)
+  specifically so `discovery.py` can reuse it by device name alone to
+  purge already-registered junk rows (sprint 041 ticket 002, not yet
+  implemented as of this ticket).
 - **Resolved, sprint 040: the libcamera enumeration/branch-point path is
   verified against real Pi hardware.** `backends/libcamera.py`'s
   `/sys`-based enumeration and `backends/__init__.py`'s

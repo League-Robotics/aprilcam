@@ -9,7 +9,9 @@ real hardware or a real subprocess call.
 
 from __future__ import annotations
 
+import os
 import sys
+import types
 
 import pytest
 
@@ -20,6 +22,7 @@ from aprilcam.camera.identity import (
     _LibcameraEntry,
     _ProfilerEntry,
     device_name_slug,
+    is_pi_internal_node,
     name_resolution_slug,
     resolve_all,
     resolve_identity,
@@ -382,3 +385,224 @@ def test_resolve_all_prefers_libcamera_when_present():
     out = resolve_all(libcamera_entries=lc)
     assert set(out.keys()) == {0}
     assert out[0].source == "libcamera_id"
+
+
+# ---------------------------------------------------------------------------
+# Ticket 041-001: Linux backend-offset dedup + Pi-internal-node filter
+# ---------------------------------------------------------------------------
+
+
+def _fake_cam(index, name, vid=None, pid=None, path=None):
+    """A stand-in for ``cv2_enumerate_cameras.camera_info.CameraInfo`` --
+    ``_enumerate_cv2`` only ever reads these five attributes via
+    ``getattr``, so a plain namespace is enough."""
+    return types.SimpleNamespace(index=index, name=name, vid=vid, pid=pid, path=path)
+
+
+def _write_driver_symlink(sys_root, video_index: int, driver: str) -> None:
+    """Fake the real ``/sys/class/video4linux/videoN/device/driver``
+    shape: a symlink whose basename is the driver name. The link
+    target need not exist on disk -- ``os.path.realpath`` resolves the
+    symlink text itself, exactly as it does for the real (also often
+    dangling-until-resolved) ``/sys`` symlink."""
+    device_dir = sys_root / f"video{video_index}" / "device"
+    device_dir.mkdir(parents=True, exist_ok=True)
+    os.symlink(f"../../../bus/platform/drivers/{driver}", device_dir / "driver")
+
+
+def _patch_enumerate_cameras(monkeypatch, cams):
+    """Patch the vendored ``cv2_enumerate_cameras.enumerate_cameras``
+    itself (not a local alias) -- ``_enumerate_cv2``'s ``from
+    cv2_enumerate_cameras import enumerate_cameras`` is a *local*
+    import executed at call time, so patching the module attribute
+    beforehand is picked up exactly like patching any other module
+    attribute a function reads through ``import`` at call time."""
+    import cv2_enumerate_cameras
+
+    monkeypatch.setattr(cv2_enumerate_cameras, "enumerate_cameras", lambda: cams)
+
+
+class TestLinuxBackendOffsetDedup:
+    def test_v4l2_and_gstreamer_entries_for_one_device_collapse_to_one(
+        self, monkeypatch
+    ):
+        """Root-cause regression: on Linux, ``enumerate_cameras()``
+        (called with the default ``CAP_ANY``) yields one ``CameraInfo``
+        per backend in ``linux_backend.supported_backends =
+        (CAP_GSTREAMER=1800, CAP_V4L2=200)`` for the same physical
+        ``/dev/video5`` -- combined indices 205 and 1805. Both must
+        recover to real index 5 and collapse to a single dict entry."""
+        monkeypatch.setattr(sys, "platform", "linux")
+        cams = [
+            _fake_cam(205, "USB Camera", vid=0x0C45, pid=0x6366, path="/dev/video5"),
+            _fake_cam(1805, "USB Camera", vid=0x0C45, pid=0x6366, path="/dev/video5"),
+        ]
+        _patch_enumerate_cameras(monkeypatch, cams)
+
+        out = identity._enumerate_cv2()
+
+        assert set(out.keys()) == {5}
+        assert out[5].name == "USB Camera"
+        assert out[5].path == "/dev/video5"
+
+    def test_macos_single_backend_offset_path_unchanged(self, monkeypatch):
+        """macOS has exactly one backend (``CAP_AVFOUNDATION``), so the
+        pre-existing offset-stripping behaviour must be unaffected by
+        the generalization to multiple offsets, and the Linux-only
+        driver filter must never run here."""
+        monkeypatch.setattr(sys, "platform", "darwin")
+        cams = [_fake_cam(1200, "Brio 501", vid=1133, pid=2374, path="0xabc")]
+        _patch_enumerate_cameras(monkeypatch, cams)
+
+        def _boom(*_a, **_k):
+            raise AssertionError("driver /sys read must not happen on darwin")
+
+        monkeypatch.setattr(identity, "_read_v4l2_driver", _boom)
+
+        out = identity._enumerate_cv2()
+
+        assert set(out.keys()) == {0}
+        assert out[0].name == "Brio 501"
+
+    def test_no_offset_applies_index_passes_through_unchanged(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "linux")
+        cams = [_fake_cam(3, "USB Camera", path="/dev/video3")]
+        _patch_enumerate_cameras(monkeypatch, cams)
+
+        out = identity._enumerate_cv2()
+
+        assert set(out.keys()) == {3}
+
+
+class TestPiInternalNodeFilter:
+    """Pure predicate tests -- no ``/sys`` I/O, per the classifier's
+    documented fail-open contract."""
+
+    @pytest.mark.parametrize(
+        "driver", ["rp1-cfe", "pispbe", "rpivid", "bcm2835-codec"]
+    )
+    def test_known_internal_driver_excluded(self, driver):
+        assert is_pi_internal_node(driver, "irrelevant-name") is True
+
+    def test_uvcvideo_driver_never_excluded(self):
+        assert is_pi_internal_node("uvcvideo", "USB Camera") is False
+
+    def test_unknown_driver_kept_fail_open(self):
+        assert is_pi_internal_node("some-future-driver", "rp1-cfe-fe_image0") is False
+
+    def test_unreadable_driver_backstop_matches_rp1_cfe_prefix(self):
+        assert is_pi_internal_node(None, "rp1-cfe-csi2-ch0") is True
+
+    def test_unreadable_driver_backstop_matches_pispbe_prefix(self):
+        assert is_pi_internal_node(None, "pispbe-input") is True
+
+    def test_unreadable_driver_and_unmatched_name_kept_fail_open(self):
+        assert is_pi_internal_node(None, "aprilcam-imx296-88000") is False
+
+    def test_unreadable_driver_and_no_name_kept_fail_open(self):
+        assert is_pi_internal_node(None, None) is False
+
+
+class TestReadV4l2Driver:
+    """``/sys`` reading -- fake trees only, per ``list_loopback_cameras``'s
+    established ``tmp_path`` convention (``test_backends.py``)."""
+
+    def test_reads_driver_basename_from_symlink(self, tmp_path):
+        _write_driver_symlink(tmp_path, 0, "rp1-cfe")
+        assert identity._read_v4l2_driver(0, sys_root=str(tmp_path)) == "rp1-cfe"
+
+    def test_missing_device_directory_reads_as_unknown(self, tmp_path):
+        """The real shape of a v4l2loopback node, verified live on
+        vidar.local: no ``device/`` subdirectory at all (it is a
+        virtual node with no backing hardware)."""
+        (tmp_path / "video70").mkdir(parents=True)
+        assert identity._read_v4l2_driver(70, sys_root=str(tmp_path)) is None
+
+    def test_missing_video_node_entirely_reads_as_unknown(self, tmp_path):
+        assert identity._read_v4l2_driver(99, sys_root=str(tmp_path)) is None
+
+
+class TestEnumerateCv2LinuxFiltering:
+    """End-to-end through ``_enumerate_cv2()`` with a faked ``/sys``
+    tree and faked ``cv2_enumerate_cameras`` results -- no real
+    hardware, no real vendored-library call."""
+
+    def _run(self, monkeypatch, tmp_path, cams):
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(identity, "_SYS_V4L_ROOT", str(tmp_path))
+        _patch_enumerate_cameras(monkeypatch, cams)
+        return identity._enumerate_cv2()
+
+    def test_rp1_cfe_and_pispbe_and_rpivid_nodes_excluded(self, monkeypatch, tmp_path):
+        _write_driver_symlink(tmp_path, 0, "rp1-cfe")
+        _write_driver_symlink(tmp_path, 20, "pispbe")
+        _write_driver_symlink(tmp_path, 19, "rpivid")
+        cams = [
+            _fake_cam(0, "rp1-cfe-csi2_ch0", path="/dev/video0"),
+            _fake_cam(20, "pispbe-input", path="/dev/video20"),
+            _fake_cam(19, "rpivid", path="/dev/video19"),
+        ]
+
+        out = self._run(monkeypatch, tmp_path, cams)
+
+        assert out == {}
+
+    def test_real_uvc_camera_kept(self, monkeypatch, tmp_path):
+        _write_driver_symlink(tmp_path, 5, "uvcvideo")
+        cams = [_fake_cam(5, "Logitech Webcam", path="/dev/video5")]
+
+        out = self._run(monkeypatch, tmp_path, cams)
+
+        assert set(out.keys()) == {5}
+        assert out[5].name == "Logitech Webcam"
+
+    def test_unrecognized_driver_kept_fail_open(self, monkeypatch, tmp_path):
+        _write_driver_symlink(tmp_path, 7, "some-future-sensor-driver")
+        cams = [_fake_cam(7, "Future Camera", path="/dev/video7")]
+
+        out = self._run(monkeypatch, tmp_path, cams)
+
+        assert set(out.keys()) == {7}
+
+    def test_unreadable_driver_symlink_falls_back_to_name_prefix(
+        self, monkeypatch, tmp_path
+    ):
+        """No ``/sys`` fixture written at all for this node -- the
+        driver symlink is unreadable, so the name-prefix backstop
+        alone must exclude it."""
+        cams = [_fake_cam(1, "rp1-cfe-csi2-ch0", path="/dev/video1")]
+
+        out = self._run(monkeypatch, tmp_path, cams)
+
+        assert out == {}
+
+    def test_loopback_nodes_kept(self, monkeypatch, tmp_path):
+        """Real vidar.local evidence: ``aprilcam-*`` v4l2loopback nodes
+        have no ``device/`` subdirectory at all, so the driver reads as
+        unknown and the name does not match the backstop prefixes --
+        the loopback path (sprint 040) must survive this filter."""
+        cams = [
+            _fake_cam(70, "aprilcam-imx296-88000", path="/dev/video70"),
+            _fake_cam(71, "aprilcam-imx296-80000", path="/dev/video71"),
+        ]
+
+        out = self._run(monkeypatch, tmp_path, cams)
+
+        assert set(out.keys()) == {70, 71}
+
+    def test_dedup_and_filter_together(self, monkeypatch, tmp_path):
+        """The full vidar.local shape in one pass: a real camera
+        enumerated under both Linux backends (dedup) alongside an
+        internal node that must never survive (filter)."""
+        _write_driver_symlink(tmp_path, 5, "uvcvideo")
+        _write_driver_symlink(tmp_path, 0, "rp1-cfe")
+        cams = [
+            _fake_cam(205, "Real USB Camera", path="/dev/video5"),
+            _fake_cam(1805, "Real USB Camera", path="/dev/video5"),
+            _fake_cam(1800, "rp1-cfe-csi2_ch0", path="/dev/video0"),
+        ]
+
+        out = self._run(monkeypatch, tmp_path, cams)
+
+        assert set(out.keys()) == {5}
+        assert out[5].name == "Real USB Camera"
