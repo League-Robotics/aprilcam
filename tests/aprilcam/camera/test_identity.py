@@ -502,6 +502,9 @@ class TestPiInternalNodeFilter:
     def test_unreadable_driver_and_no_name_kept_fail_open(self):
         assert is_pi_internal_node(None, None) is False
 
+    def test_unreadable_driver_and_empty_name_kept_fail_open(self):
+        assert is_pi_internal_node(None, "") is False
+
 
 class TestReadV4l2Driver:
     """``/sys`` reading -- fake trees only, per ``list_loopback_cameras``'s

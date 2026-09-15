@@ -154,3 +154,30 @@ section — no data-model or cross-module change).
 - **Verification command**: `uv run pytest tests/camera/test_identity.py -m "not camera and not integration"`
   (adjust the path once the actual test file is located; do not run
   the full suite for this ticket — see `.claude/rules/source-code.md`).
+
+## Fix-up Addendum
+
+`close_sprint`'s test gate failed on `tests/test_typing.py::
+test_mypy_passes_over_src_aprilcam`:
+
+```
+src/aprilcam/camera/identity.py:394: error: Item "None" of "str | None"
+has no attribute "startswith"  [union-attr]
+```
+
+`is_pi_internal_node`'s backstop line, `bool(name) and
+name.startswith(_PI_INTERNAL_NAME_PREFIXES)`, doesn't let mypy narrow
+`Optional[str]` through `bool()`. Changed to `name is not None and
+name.startswith(_PI_INTERNAL_NAME_PREFIXES)`, which narrows correctly
+and is behaviorally identical (`""` is also falsy under `bool()` and
+also matches no prefix under `startswith`, so both forms return
+`False` for `""`). Added
+`test_unreadable_driver_and_empty_name_kept_fail_open` to
+`TestPiInternalNodeFilter` to cover the `""` case explicitly, since
+the existing tests only covered `None`.
+
+Verified: `uv run mypy` clean; `uv run pytest tests/test_typing.py
+tests/aprilcam/camera/test_identity.py
+tests/aprilcam/camera/test_discovery.py -m "not camera and not
+integration"` — 70 passed, 2 deselected. No redeploy to vidar needed
+(typing-only change, no behavior change).

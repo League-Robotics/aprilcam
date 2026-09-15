@@ -391,7 +391,7 @@ def is_pi_internal_node(driver: Optional[str], name: Optional[str] = None) -> bo
     """
     if driver is not None:
         return driver in _PI_INTERNAL_DRIVERS
-    return bool(name) and name.startswith(_PI_INTERNAL_NAME_PREFIXES)
+    return name is not None and name.startswith(_PI_INTERNAL_NAME_PREFIXES)
 
 
 def _enumerate_cv2() -> Dict[int, _EnumEntry]:
