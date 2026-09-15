@@ -364,6 +364,46 @@ aprilcam camera list -d vidar.local           # both CSI cameras, live probe: `c
 aprilcam camera image -d vidar.local <slug> -o /tmp/check.jpg
 ```
 
+## USB/UVC cameras coexist with CSI (libcamera loopback) cameras
+
+A Pi can have a USB/UVC camera and one or more CSI cameras (bridged via
+`v4l2loopback`, see above) attached and registered **at the same time** —
+this is the expected "going forward" setup per the stakeholder, not an edge
+case (sprint 042). Each resolves through its own chain and gets its own
+`hardware_key`:
+
+- **CSI cameras** resolve through the libcamera path: `_probe_libcamera()`
+  reads `/sys/class/video4linux/video*/name` for the labelled loopback
+  device and stamps `hardware_key=f"libcamera:{camera_id}"` (e.g.
+  `libcamera:aprilcam-imx296-88000`) — never a fallback tier.
+- **USB/UVC cameras** resolve through the normal cv2-enumeration chain
+  (vid:pid+location, then location-only, then name+resolution), unchanged
+  by this sprint.
+
+**Symptom (pre sprint 042): a Pi with any working CSI camera silently
+ignored every USB camera.** `aprilcam camera probe -d <host>` (or `camera
+list`) would show only the CSI camera(s), with a plugged-in, working
+UVC camera (confirmed present via `lsusb`/`v4l2-ctl` on the Pi itself)
+never appearing at all — not as unusable, just absent. **Cause**:
+`camera/identity.py`'s `resolve_all()` was an either/or gate — as soon as
+`_probe_libcamera()` found any loopback device, it returned only the
+libcamera-resolved identities and never looked at the cv2-enumerated
+table at all. **Fix (sprint 042 ticket 001)**: both enumeration sources
+share one `/dev/videoN` device-index domain on Linux, so `resolve_all()`
+now merges them (a union of both sources' keys) instead of choosing one
+over the other; a loopback device that happens to also show up in the
+cv2 table still resolves exactly once, under its `libcamera:` identity.
+See `src/aprilcam/camera/DESIGN.md` §4 "Identity resolution algorithm"
+and §6's sprint 042 entry for the full mechanism.
+
+**How to check**: `aprilcam camera probe -d <host>` forces a live
+re-enumeration (unlike `camera list`'s cached view — see "Telling a dead
+sensor from a software bug" above) and should list every attached CSI
+*and* USB camera, each exactly once. Live numbers/slugs for a specific
+mixed-hardware host (e.g. vidar's CSI cameras plus a USB camera) are
+recorded by sprint 042 ticket 003's live-verification pass, not
+duplicated here.
+
 ## Related
 
 - [`v4l2loopback-vanishes-after-kernel-upgrade.md`](v4l2loopback-vanishes-after-kernel-upgrade.md)

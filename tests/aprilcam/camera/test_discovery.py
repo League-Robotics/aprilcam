@@ -499,6 +499,52 @@ def test_probe_leaves_macos_shaped_absent_records_untouched(registry):
 
 
 # ---------------------------------------------------------------------------
+# probe() -- registry numbering stability on a mixed host (ticket 042-001)
+# ---------------------------------------------------------------------------
+
+
+def test_probe_registry_numbering_stable_when_usb_camera_joins_libcamera_host(registry):
+    """A registry that already numbers two libcamera cameras (``imx296``
+    #1, ``imx296-2`` #2 -- vidar.local's real shape) must keep those
+    numbers once identity_source (standing in for the fixed
+    ``resolve_all()``) also reports a USB camera on the same probe pass
+    -- the new camera gets the next number, never a renumbering of the
+    already-known ones."""
+    imx1 = _identity("libcamera:aprilcam-imx296-88000", "imx296", source="libcamera_id")
+    imx2 = _identity("libcamera:aprilcam-imx296-80000", "imx296", source="libcamera_id")
+    slug_1 = registry.resolve(imx1)
+    slug_2 = registry.resolve(imx2)
+    assert registry.get(slug_1).number == 1
+    assert registry.get(slug_2).number == 2
+
+    usb = _identity("vidpid:3141:6363@dev-video0", "Streaming Camera")
+    # The merged resolve_all() shape on a mixed host: both loopbacks
+    # keyed by their real /dev/videoN device index (70, 71) alongside
+    # the USB camera's cv2 index (0).
+    identities = {70: imx1, 71: imx2, 0: usb}
+
+    discovery = CameraDiscovery(
+        registry,
+        identity_source=lambda: identities,
+        backend_factory=lambda index: _FakeBackend(),
+    )
+    report = discovery.probe()
+
+    assert registry.get(slug_1).number == 1
+    assert registry.get(slug_2).number == 2
+    usb_slug = registry.resolve(usb)  # same slug probe() resolved to internally
+    usb_record = registry.get(usb_slug)
+    assert usb_record is not None
+    assert usb_record.number == 3
+
+    reported = _names(report)
+    assert reported[slug_1].number == 1
+    assert reported[slug_2].number == 2
+    assert reported[usb_slug].number == 3
+    assert all(c.present and c.usable for c in report.cameras)
+
+
+# ---------------------------------------------------------------------------
 # watch() -- passive hotplug (AC5 mechanism; headless, fully automated)
 # ---------------------------------------------------------------------------
 

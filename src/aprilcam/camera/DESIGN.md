@@ -58,7 +58,13 @@ daemon holds the device (design.md §8).
   `cv2-enumerate-cameras`, macOS `system_profiler SPCameraDataType`, and
   a libcamera enumeration hook. Never imports `cv2` at module top level
   (only lazily inside `_enumerate_cv2`) and never raises — worst case is
-  a name+resolution slug. On Linux, `_enumerate_cv2()` also (sprint 041
+  a name+resolution slug. On Linux, both the libcamera and cv2
+  enumeration sources share one `/dev/videoN` device-index domain, and
+  `resolve_all()` (sprint 042 ticket 001) merges rather than chooses
+  between them — every libcamera loopback and every cv2-enumerated
+  USB/UVC camera on the same host resolves, with a loopback seen in
+  both sources deduped to its single `libcamera:` identity (see §4's
+  "Identity resolution algorithm"). `_enumerate_cv2()` also (sprint 041
   ticket 001) collapses the `CAP_V4L2`/`CAP_GSTREAMER` backend-duplicated
   entries `cv2-enumerate-cameras` yields per physical `/dev/videoN` back
   into one, and excludes Raspberry Pi RP1/PiSP media-pipeline-internal
@@ -342,10 +348,41 @@ ticket 021-007 — removing the dependency on `system_profiler`'s
 name-match succeeding); (3) `vid:pid@location`; (4) `location` alone,
 marked fallback; (5) `name+resolution`, last resort, marked fallback.
 `resolve_all()` gathers each enumeration source table once (avoiding a
-per-camera `system_profiler` shell-out) and resolves every currently
-enumerated index. Every source function degrades to an empty result on
-any failure — the module never raises for an unsupported platform or a
-missing tool.
+per-camera `system_profiler` shell-out) and resolves the **union** of
+both sources' keys (sprint 042 ticket 001) — every currently-enumerated
+libcamera loopback *and* every cv2-enumerated USB/UVC camera on the same
+Linux host, each resolved exactly once. This is only correct because
+`_probe_libcamera()` keys its dict by each device's real `/dev/videoN`
+`device_index`, the same index domain `_enumerate_cv2()` already uses on
+Linux (confirmed by sprint 041 ticket 001's backend-offset stripping) —
+not `LibcameraDevice.position`'s 0-based enumeration order, a separately
+counted small-integer sequence that could otherwise collide with a cv2
+index by pure coincidence. A `/dev/videoN` index present in both sources
+therefore always names the *same physical device*, so
+`resolve_identity()`'s existing "check `libcamera_entries` first, else
+fall through to the cv2/profiler chain" priority order dedups it for
+free: the loopback resolves once, under its `libcamera:` identity, never
+a second time as a generic `loc:`/USB record — no separate dedup pass
+was added.
+
+Before this fix, `resolve_all()` was an either/or gate: as soon as
+`_probe_libcamera()` found any loopback device at all, it returned
+*only* the libcamera-resolved identities and never looked at
+`_enumerate_cv2()`, so a Linux host with both a working CSI loopback and
+a USB/UVC camera silently lost the USB camera from every probe (the
+sprint 042 issue this ticket closes). The fix is the re-keying above,
+not a new merge algorithm. The same re-keying also closed a latent,
+previously-unexploited collision: `OpenCVBackend.open()` and
+`WorkerBackend` both call `resolve_identity(index)` directly with a real
+cv2 index for the sprint 039 post-open anti-substitution check; before
+this fix, that lookup's internal `_probe_libcamera()` call could in
+principle match an unrelated loopback whose *position* happened to
+equal the caller's cv2 index. Once both sources share the device-index
+domain, a real camera's index can only match a libcamera entry when it
+genuinely *is* that loopback device.
+
+Every source function degrades to an empty result on any failure — the
+module never raises for an unsupported platform or a missing tool.
 
 ### Registry: slug assignment, disambiguation, and self-healing
 
@@ -442,11 +479,17 @@ branch point** both `discovery.py`'s `_probe_openable` and
 decision lives in exactly one place. For every non-libcamera
 `hardware_key` it is a pass-through to `backend_factory(index)`
 (`OpenCVBackend(index)` by default) — unchanged behavior. For a
-libcamera-sourced `hardware_key`, `index` is the enumeration *position*
-(0-based, not a `/dev/videoN` node), so this function re-enumerates
-`list_loopback_cameras()`, matches on `camera_id` (the raw `/sys` card
-label), and constructs `V4l2LoopbackBackend(f"/dev/video{device.device_index}")`
-using the resolved real device index. If no enumerated device matches
+libcamera-sourced `hardware_key`, `index` is the device's real
+`device_index` (the `/dev/videoN` number — sprint 042 ticket 001 re-keyed
+`camera/identity.py`'s dicts to this domain; previously it was
+`LibcameraDevice.position`'s 0-based enumeration order, a separately
+counted sequence). `index` is still never handed to `backend_factory` in
+this branch, since that constructor expects a plain cv2 index and a
+`V4l2LoopbackBackend` needs the loopback device's own path — instead
+this function re-enumerates `list_loopback_cameras()`, matches on
+`camera_id` (the raw `/sys` card label), and constructs
+`V4l2LoopbackBackend(f"/dev/video{device.device_index}")` using the
+resolved real device index. If no enumerated device matches
 (a stale registry entry, or a race), it logs a warning and falls back
 to `backend_factory(index)` rather than raising — consistent with every
 other function in this identity/discovery family degrading instead of
@@ -905,6 +948,36 @@ straddling period where both signatures need to work.
   enough that no real camera's `device_name` on any platform is
   expected to collide with it, which the macOS-shaped regression test
   (`test_probe_leaves_macos_shaped_absent_records_untouched`) confirms.
+- **Resolved, sprint 042 ticket 001: USB/UVC cameras were silently
+  dropped on any Linux host that also had a libcamera loopback.**
+  `resolve_all()` used to be an either/or gate: whenever
+  `_probe_libcamera()` found any loopback device, it returned *only*
+  the libcamera-resolved identities and never consulted
+  `_enumerate_cv2()` at all — a real-world regression, filed after the
+  stakeholder plugged a USB camera into `vidar.local` alongside its
+  already-working CSI camera and `camera probe` never listed it (this
+  sprint's filed issue,
+  `usb-cameras-ignored-on-a-linux-host-that-also-has-libcamera-loopbacks.md`).
+  The fix re-keys `_probe_libcamera()`'s dict by each device's
+  `LibcameraDevice.device_index` (the real `/dev/videoN` number) instead
+  of its enumeration-order `position`, putting it in the same index
+  domain `_enumerate_cv2()` already uses on Linux (confirmed by sprint
+  041 ticket 001's backend-offset stripping). With both sources sharing
+  one domain, `resolve_all()`'s either/or return becomes a plain union
+  of both sources' keys, and `resolve_identity()`'s existing "check
+  `libcamera_entries` first" priority order dedups a loopback that
+  appears in both sources for free — a shared `/dev/videoN` index
+  resolves exactly once, under its `libcamera:` identity, never a second
+  time as a generic USB record. The same re-keying also closed a latent,
+  previously-unexploited collision: `OpenCVBackend.open()` and
+  `WorkerBackend` both call `resolve_identity(index)` directly with a
+  real cv2 index for the sprint 039 post-open anti-substitution check;
+  before this fix, that lookup could in principle match an unrelated
+  loopback whose *position* happened to equal the caller's cv2 index.
+  See §4's "Identity resolution algorithm" for the merge/dedup
+  description and `identity.py`'s own module docstring for the full
+  rationale; live verification against vidar's real mixed hardware is
+  sprint 042 ticket 003's job, not yet reflected here.
 - **Resolved, sprint 040: the libcamera enumeration/branch-point path is
   verified against real Pi hardware.** `backends/libcamera.py`'s
   `/sys`-based enumeration and `backends/__init__.py`'s

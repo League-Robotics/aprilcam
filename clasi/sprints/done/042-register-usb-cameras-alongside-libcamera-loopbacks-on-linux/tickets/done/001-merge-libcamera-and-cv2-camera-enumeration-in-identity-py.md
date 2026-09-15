@@ -1,7 +1,7 @@
 ---
 id: '001'
 title: Merge libcamera and cv2 camera enumeration in identity.py
-status: open
+status: done
 use-cases:
 - SUC-001
 depends-on: []
@@ -85,35 +85,35 @@ is unaffected).
 
 ## Acceptance Criteria
 
-- [ ] `_probe_libcamera()` keys its dict by `LibcameraDevice.device_index`.
-- [ ] `resolve_all()` merges both enumeration sources on a mixed host;
+- [x] `_probe_libcamera()` keys its dict by `LibcameraDevice.device_index`.
+- [x] `resolve_all()` merges both enumeration sources on a mixed host;
       no early return that drops one source.
-- [ ] A mixed-host fixture (one loopback + one UVC camera, injected via
+- [x] A mixed-host fixture (one loopback + one UVC camera, injected via
       `enum_entries`/`libcamera_entries`) resolves both, each exactly
       once — the loopback under `libcamera:...`, the UVC camera under
       its normal fallback-chain identity.
-- [ ] A loopback device present in *both* injected sources under the
+- [x] A loopback device present in *both* injected sources under the
       same `/dev/videoN` resolves once, under its libcamera identity —
       never a second `loc:`/`vidpid:` record for the same device.
-- [ ] A loopback-only fixture and a UVC-only fixture each resolve
+- [x] A loopback-only fixture and a UVC-only fixture each resolve
       exactly as they did before this change (regression check against
       existing test expectations, updated only for the position→
       device_index key change in fixtures).
-- [ ] Registry numbering is stable: a registry pre-populated with
+- [x] Registry numbering is stable: a registry pre-populated with
       libcamera cameras already numbered (e.g. `imx296` #1, `imx296-2`
       #2) keeps those numbers when `resolve_all()`'s output gains a USB
       camera entry.
-- [ ] `OpenCVBackend`/`WorkerBackend`'s post-open `resolve_identity(index)`
+- [x] `OpenCVBackend`/`WorkerBackend`'s post-open `resolve_identity(index)`
       call no longer risks matching an unrelated loopback merely because
       of numeric coincidence — add or extend a test that constructs a
       libcamera fixture and a cv2 fixture whose indices would have
       collided under the old `position`-keyed scheme, and asserts the
       cv2 index resolves to the cv2 identity.
-  - Old `position`-based fixtures updated to `device_index`, or
+  - [x] Old `position`-based fixtures updated to `device_index`, or
     removed, throughout.
-  - `_probe_libcamera`, `resolve_all`, and `backends/__init__.py`
+  - [x] `_probe_libcamera`, `resolve_all`, and `backends/__init__.py`
     docstrings updated to describe the merge behavior accurately.
-- [ ] `uv run mypy` over `src/aprilcam` passes with no new errors
+- [x] `uv run mypy` over `src/aprilcam` passes with no new errors
       (sprint 041's close failed on an `Optional`-narrowing mypy error —
       this ticket runs mypy itself rather than deferring to
       `close_sprint`).
