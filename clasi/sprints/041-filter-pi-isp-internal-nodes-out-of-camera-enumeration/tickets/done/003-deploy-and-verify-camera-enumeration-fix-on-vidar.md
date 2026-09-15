@@ -1,9 +1,13 @@
 ---
 id: '003'
 title: Deploy and verify camera enumeration fix on vidar
-status: open
-use-cases: [SUC-001, SUC-002]
-depends-on: ['001', '002']
+status: done
+use-cases:
+- SUC-001
+- SUC-002
+depends-on:
+- '001'
+- '002'
 github-issue: ''
 issue: linux-enumeration-lists-pi-isp-nodes-as-cameras-with-duplicate-rows.md
 completes_issue: true
@@ -61,36 +65,121 @@ vidar.** Everything else is local build/packaging work on the Mac.
 
 ## Acceptance Criteria
 
-- [ ] A wheel built from this sprint's merged code (tickets 001+002) is
+- [x] A wheel built from this sprint's merged code (tickets 001+002) is
       installed on vidar via `pipx` as the `aprilcam` user, per
       `deploy/README.md`.
-- [ ] `aprilcamd` (and any dependent bridge units) is restarted and
+- [x] `aprilcamd` (and any dependent bridge units) is restarted and
       reports active/running afterward.
-- [ ] `aprilcam camera probe -d vidar.local` lists exactly two cameras,
+- [x] `aprilcam camera probe -d vidar.local` lists exactly two cameras,
       `imx296` and `imx296-2`, each exactly once — no `rp1-cfe-*`,
       `pispbe-*`, or other internal-node rows, no duplicate rows.
-- [ ] `imx296` (i2c@88000, known hardware-faulty — "Camera frontend has
+- [x] `imx296` (i2c@88000, known hardware-faulty — "Camera frontend has
       timed out") appears present but `usable=False`; `imx296-2`
       appears present and `usable=True`.
-- [ ] `imx296` and `imx296-2` retain registry numbers 1 and 2
+- [x] `imx296` and `imx296-2` retain registry numbers 1 and 2
       respectively (unchanged from before this deploy) — confirmed by
       reading (not editing) the registry state.
-- [ ] The previously-registered junk rows (vidar's `[3]..[12]`,
+- [x] The previously-registered junk rows (vidar's `[3]..[12]`,
       `rp1-cfe-*`) are gone from the registry after the restart, with
       no manual file edit.
-- [ ] A frame can still be captured from `imx296-2` (e.g.
+- [x] A frame can still be captured from `imx296-2` (e.g.
       `aprilcam camera image -d vidar.local imx296-2` or equivalent, per
       whatever the CLI exposes — confirm the exact command from
       `aprilcam camera --help` rather than assuming one).
-- [ ] `dmesg` on vidar, sampled after the restart and a short
+- [x] `dmesg` on vidar, sampled after the restart and a short
       observation window, no longer accumulates new `node link is not
       enabled` lines for either CSI controller (some pre-existing lines
       from before the restart are expected and fine — only new
       accumulation after the fix is deployed matters).
-- [ ] vidar's final state matches sprint 040's baseline: all four ROS
+- [x] vidar's final state matches sprint 040's baseline: all four ROS
       units disabled, `aprilcamd` and bridge units enabled and active.
-- [ ] No manual registry edits, no destructive commands against
+- [x] No manual registry edits, no destructive commands against
       `imx296`, no ROS re-enablement occurred during this ticket.
+
+## Verification Evidence (recorded during execution)
+
+**Pre-deploy state on vidar** (`ssh ros@vidar.local`):
+- `registry.json` backed up to `/tmp/registry.json.pre041` (removed
+  after all checks passed).
+- Registry held 12 records: `imx296` (#1), `imx296-2` (#2), plus 10
+  junk `rp1-cfe-*` rows numbered 3-12 (`rp1-cfe-fe-image1`,
+  `rp1-cfe-fe-image0`, `rp1-cfe-csi2-ch3`, `rp1-cfe-csi2-ch2`,
+  `rp1-cfe-csi2-ch0`, and the `-2` backend-duplicate variants of each),
+  `next_number: 13`.
+- Baseline `dmesg | grep -c "node link is not enabled"` = 30.
+- AprilCam units enabled/active; all four ROS units disabled/inactive
+  (unchanged throughout).
+- Installed pipx package was actually `aprilcam 0.20260906.1` (not
+  `0.20260914.1` as assumed when the ticket was written) — irrelevant
+  to the deploy since the install used `--force`.
+
+**Deploy**: `uv build --wheel` on the Mac produced
+`dist/aprilcam-0.20260914.1-py3-none-any.whl`; grepped for
+`is_pi_internal_node` inside the wheel to confirm tickets 001/002's
+code was present before shipping it. Copied to vidar via `scp`,
+installed with `sudo -u aprilcam -H pipx install --force
+'/tmp/aprilcam-0.20260914.1-py3-none-any.whl[daemon]'`. Before
+restarting, grepped the installed venv's
+`.../site-packages/aprilcam/camera/{identity,discovery}.py` and
+confirmed `is_pi_internal_node` present in both.
+
+**Restart**: `sudo systemctl restart aprilcamd` — came up
+`active (running)` immediately, no crash-loop.
+
+**Journal** (`sudo journalctl -u aprilcamd --since <restart time>`):
+exactly 10 `probe: purging stale internal-node registry record
+slug=... device_name=... (matches is_pi_internal_node)` INFO lines
+(one per junk row), e.g.:
+```
+probe: purging stale internal-node registry record slug=rp1-cfe-fe-image1 device_name=rp1-cfe-fe_image1 (matches is_pi_internal_node)
+```
+No traceback/exception/error/critical lines in the post-restart log.
+
+**Registry after restart**: exactly two entries left —
+`imx296` (`libcamera:aprilcam-imx296-88000`, number 1) and
+`imx296-2` (`libcamera:aprilcam-imx296-80000`, number 2);
+`next_number` still 13 (not reissued, per `forget()`'s documented
+contract).
+
+**From the Mac** (`uv run aprilcam camera probe -d vidar.local` /
+`camera list -d vidar.local`, repo env, not the stale Mac pipx
+install):
+```
+[1]    imx296        present  unusable  ...
+[2]    imx296-2      present  usable    ...
+```
+Each camera appears exactly once in both `probe` and `list`; no
+`rp1-cfe-*`/`pispbe-*` rows, no duplicates.
+
+**Frame capture**: `uv run aprilcam camera image -d vidar.local
+imx296-2 -o vidar-041.jpg` wrote a 250675-byte, 1280x720 baseline
+JPEG; visually inspected — a real workshop-interior frame, confirming
+the capture path works end-to-end post-fix.
+
+**dmesg accumulation check**: sampled `dmesg | grep -c "node link is
+not enabled"` immediately post-restart (30, matching the pre-restart
+baseline — no growth from the restart itself), ran a second `camera
+probe -d vidar.local` in between (which surfaced one incidental
+"imx296-2: in use by a live subscriber" skip note, unrelated to this
+fix), then sampled again about a minute later: still 30. No new
+accumulation from either the restart or the intervening probe.
+
+**Final state confirmed**: `aprilcamd`, `aprilcam-bridge@0`,
+`aprilcam-bridge@1` all `enabled`+`active`; `ros-cameras`,
+`camera-watchdog.timer`, `camera-color-relay`, `web-video-server` all
+`disabled`+`inactive` — unchanged from sprint 040's baseline
+throughout this ticket.
+
+**No violations**: no manual `registry.json` edits (only `sudo cat`
+reads and the pre-restart backup/post-verification delete); no
+destructive commands against `imx296` beyond what `camera probe`
+itself issues; no ROS unit re-enablement.
+
+No defects found in tickets 001/002's code — no fix-up needed, no new
+offline tests added by this ticket (as scoped). No new
+`docs/knowledge/` entry — the deploy/README.md runbook worked exactly
+as written, with no non-obvious gotcha surfaced beyond the harmless
+installed-version assumption noted above.
 
 ## Implementation Plan
 
