@@ -1,7 +1,7 @@
 ---
 id: '041'
 title: Filter Pi ISP internal nodes out of camera enumeration
-status: executing
+status: done
 branch: sprint/041-filter-pi-isp-internal-nodes-out-of-camera-enumeration
 use-cases:
 - SUC-001
