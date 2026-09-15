@@ -1,7 +1,7 @@
 ---
 id: '042'
 title: Register USB cameras alongside libcamera loopbacks on Linux
-status: executing
+status: done
 branch: sprint/042-register-usb-cameras-alongside-libcamera-loopbacks-on-linux
 use-cases:
 - UC-25
