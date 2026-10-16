@@ -216,6 +216,14 @@ class DetectorConfig:
             AprilTag quad detector. Earned constant, same caveat.
         april_max_line_fit_mse: Maximum line-fit mean-squared error for the
             AprilTag quad detector. Earned constant, same caveat.
+        detect_inverted: Also detect inverted (light-on-dark) markers. On by
+            default (an earned constant for the live detection path), but
+            with it on OpenCV reports a marker's corners biased inward by
+            roughly 0.4 of a marker cell and without subpixel refinement
+            (measured on synthetic high-contrast markers, sprint 045 ticket
+            003: ~8 px error on a 120 px marker versus ~0.06 px with it
+            off). Centres are barely affected; corner-consuming callers
+            (the calibration pose solve) must set this to False.
     """
 
     quad_decimate: float = 1.0
@@ -224,6 +232,7 @@ class DetectorConfig:
     april_min_wb_diff: float = 3.0
     april_min_cluster_pixels: int = 5
     april_max_line_fit_mse: float = 20.0
+    detect_inverted: bool = True
 
 
 class TagDetector:
@@ -318,6 +327,9 @@ class TagDetector:
             params.aprilTagMaxLineFitMse = float(max(1.0, cfg.april_max_line_fit_mse))
         # Earned constant, unconditionally on (not a config toggle -- see
         # the module and DetectorConfig docstrings).
-        params.detectInvertedMarker = True
+        # Default on (see DetectorConfig.detect_inverted); calibration turns
+        # it off because inverted detection reports corners biased ~0.4 cell
+        # inward and unrefined.
+        params.detectInvertedMarker = bool(cfg.detect_inverted)
 
         return make_aruco_detector(dictionary, params)

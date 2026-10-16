@@ -138,6 +138,7 @@ from aprilcam.calibration import distortion, geometry
 from aprilcam.calibration.interfaces import Calibration as _CalibrationBase
 from aprilcam.calibration.interfaces import CalibrationResult
 from aprilcam.calibration.interfaces import Calibrator as _CalibratorBase
+from aprilcam.calibration.interfaces import MarkerObservation
 from aprilcam.calibration.lens import (
     LENS_SOURCE_ESTIMATED,
     LENS_SOURCE_LEGACY,
@@ -150,7 +151,7 @@ from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitio
 from aprilcam.config.loader import PlayfieldDefinition as _ConcretePlayfieldDefinition
 from aprilcam.errors import NoPlayfieldLinked
 from aprilcam.types import PixelPoint, TagFamily, WorldPoint
-from aprilcam.vision.detector import TagDetector
+from aprilcam.vision.detector import DetectorConfig, TagDetector
 from aprilcam.vision.pipeline import PipelineConfig, run_pipeline
 
 __all__ = ["Calibration", "Calibrator"]
@@ -338,7 +339,16 @@ LensWarningLookup = Callable[[str, Tuple[int, int]], Optional[str]]
 
 
 def _default_detector_factory() -> TagDetector:
-    return TagDetector()
+    # Subpixel corner refinement is pinned explicitly (it is also the
+    # DetectorConfig default): the pose solve (sprint 045) consumes marker
+    # corners, whose accuracy is what refinement buys, so a future change to
+    # the detector's default must not silently degrade calibration bursts.
+    #
+    # Inverted-marker detection is turned OFF for the same reason: with it
+    # on, OpenCV reports corners ~0.4 cell inward of the true marker corners
+    # and skips refinement (see DetectorConfig.detect_inverted). Calibration
+    # markers are ordinary dark-on-light prints.
+    return TagDetector(DetectorConfig(corner_refine="subpix", detect_inverted=False))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1569,7 +1579,7 @@ class Calibrator(_CalibratorBase):
     def _detect_averaged(
         self, frames: Sequence[np.ndarray]
     ) -> Dict[TagFamily, Dict[int, PixelPoint]]:
-        """Multi-frame averaged corner detection, **both** fiducial
+        """Multi-frame averaged centre detection, **both** fiducial
         families: run every frame through the same preprocess-then-detect
         pipeline ``daemon/detection.py`` uses, and average each
         ``(family, id)``'s detected pixel centre across every frame it
@@ -1592,22 +1602,70 @@ class Calibrator(_CalibratorBase):
         ``detected[TagFamily.ARUCO]``); a family with zero detections
         this burst is simply absent from the outer dict, not present
         with an empty inner one -- callers use ``.get(family, {})``.
+
+        Since sprint 045 this is a thin derivation from
+        :meth:`_detect_markers` (it returns each observation's
+        ``centre``), so the centre-point path and the corner-preserving
+        path can never disagree about what was detected.
         """
-        accum: Dict[TagFamily, Dict[int, List[Tuple[float, float]]]] = {}
+        return {
+            family: {tag_id: obs.centre for tag_id, obs in by_id.items()}
+            for family, by_id in self._detect_markers(frames).items()
+        }
+
+    def _detect_markers(
+        self, frames: Sequence[np.ndarray]
+    ) -> Dict[TagFamily, Dict[int, MarkerObservation]]:
+        """Multi-frame averaged marker observations, corners preserved.
+
+        Every frame goes through the same preprocess-then-detect pipeline
+        as :meth:`_detect_averaged` (``run_pipeline`` then
+        ``TagDetector.detect(scale=rescale.scale)``, so corners come back
+        in the original frame's pixels). For each ``(family, id)`` the four
+        corners are averaged **per corner index** across the frames the
+        marker appeared in -- a marker seen in only a subset of frames
+        averages over those (``frames`` records how many). The corner order
+        is the detector's own (ArUco TL, TR, BR, BL of the marker's own
+        frame) and is never re-sorted, even for a marker rendered rotated or
+        upside down: the pose solve (sprint 045 ticket 004) reads the
+        marker's orientation from that order. ``corner_spread_px`` is the
+        largest per-corner across-frame standard deviation, a cheap noise
+        measure (0.0 for a single frame). A family with no detections is
+        absent from the outer dict.
+        """
+        accum: Dict[TagFamily, Dict[int, List[Tuple[np.ndarray, Tuple[float, float]]]]] = {}
         for frame in frames:
             gray, rescale = run_pipeline(frame, self._pipeline_config)
             for detection in self._detector.detect(gray, scale=rescale.scale):
-                family_accum = accum.setdefault(detection.family, {})
-                family_accum.setdefault(detection.number, []).append(
-                    (detection.center.x, detection.center.y)
+                accum.setdefault(detection.family, {}).setdefault(
+                    detection.number, []
+                ).append(
+                    (
+                        np.asarray(detection.corners, dtype=np.float64).reshape(4, 2),
+                        (detection.center.x, detection.center.y),
+                    )
                 )
-        return {
-            family: {
-                tag_id: PixelPoint(
-                    x=float(np.mean([p[0] for p in pts])),
-                    y=float(np.mean([p[1] for p in pts])),
+        result: Dict[TagFamily, Dict[int, MarkerObservation]] = {}
+        for family, by_id in accum.items():
+            observations: Dict[int, MarkerObservation] = {}
+            for tag_id, stack in by_id.items():
+                arr = np.stack([c for c, _ in stack])  # (n, 4, 2)
+                centres = [ctr for _, ctr in stack]
+                mean = arr.mean(axis=0)  # (4, 2)
+                # Per-corner scalar stddev: sqrt(var_x + var_y).
+                spread = float(np.sqrt(arr.var(axis=0).sum(axis=1)).max())
+                corners = tuple(PixelPoint(x=float(c[0]), y=float(c[1])) for c in mean)
+                observations[tag_id] = MarkerObservation(
+                    tag_id=tag_id,
+                    # Mean of the detector's own per-frame centres (the exact
+                    # arithmetic the centre-only path always used).
+                    centre=PixelPoint(
+                        x=float(np.mean([p[0] for p in centres])),
+                        y=float(np.mean([p[1] for p in centres])),
+                    ),
+                    corners=(corners[0], corners[1], corners[2], corners[3]),
+                    frames=len(stack),
+                    corner_spread_px=spread,
                 )
-                for tag_id, pts in by_id.items()
-            }
-            for family, by_id in accum.items()
-        }
+            result[family] = observations
+        return result

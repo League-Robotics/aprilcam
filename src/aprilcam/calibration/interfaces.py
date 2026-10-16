@@ -42,6 +42,33 @@ from aprilcam.types import PixelPoint, WorldPoint
 
 
 @dataclass(frozen=True, kw_only=True)
+class MarkerObservation:
+    """One fiducial marker as observed over a calibration burst (sprint 045).
+
+    Unlike the bare centre ``PixelPoint`` the centre-point path keeps, this
+    retains the marker's four corners, each averaged across the burst's
+    frames, so the pose solve (which needs the marker's apparent size and
+    orientation, not just its centre) has its input. cv2-free: plain
+    ``PixelPoint`` values and floats only.
+    """
+
+    tag_id: int
+    centre: PixelPoint
+    """Mean of the per-frame detected centres, in the original frame's pixels."""
+    corners: tuple[PixelPoint, PixelPoint, PixelPoint, PixelPoint]
+    """Per-corner mean in ArUco order (TL, TR, BR, BL) **of the marker's own
+    frame**, exactly as the detector reports it: a marker printed rotated or
+    upside down keeps its own corner numbering (never renumbered by image
+    position), because the pose solve reads orientation from this order."""
+    frames: int
+    """How many frames of the burst this marker appeared in."""
+    corner_spread_px: float
+    """Max over the four corners of the across-frame standard deviation
+    (root of x-variance plus y-variance), in pixels -- a cheap noise measure;
+    0.0 for a single-frame observation."""
+
+
+@dataclass(frozen=True, kw_only=True)
 class CalibrationResult:
     """The outcome of a calibration attempt — explicitly good or bad.
 
