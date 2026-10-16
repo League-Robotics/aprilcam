@@ -1,9 +1,12 @@
 ---
 id: '002'
 title: ChArUco board spec and multi-board detector (clustering, upscale, layout auto-detect)
-status: open
-use-cases: [SUC-001, SUC-003]
-depends-on: ["001"]
+status: done
+use-cases:
+- SUC-001
+- SUC-003
+depends-on:
+- '001'
 github-issue: ''
 issue: charuco-board-intrinsics-calibration-as-a-daemon-workflow.md
 completes_issue: true
@@ -18,11 +21,11 @@ Create the `intrinsics` package's detection layer: `BoardSpec` parsing/validatio
 
 ## Acceptance Criteria
 
-- [ ] `BoardSpec.parse('5x7:37:28:DICT_5X5_100')` yields cols, rows, square_mm, marker_mm, dict_name; malformed specs raise a clear `ValueError`; default constant is `5x7:37:28:DICT_5X5_100`; resolution order request > env `APRILCAM_CHARUCO_BOARD` > default is implemented in one helper.
-- [ ] `BoardDetector.detect(gray)` returns one record per board cluster (charuco corners, ids, marker count, layout); markers detected on a 2x upscale with the tuned parameters, corners interpolated on the native image so coordinates stay native.
-- [ ] Marker clustering (single-linkage, 2.5x marker side, no duplicate ids per cluster, >= 4 markers) isolates the board from playfield markers sharing its dictionary and separates two boards in view.
-- [ ] Current vs legacy layout is auto-detected the first time markers are seen but no corners interpolate, then locked for that detector instance; the lock is exposed for status.
-- [ ] `interfaces.py` imports no cv2; the detector module is daemon-only.
+- [x] `BoardSpec.parse('5x7:37:28:DICT_5X5_100')` yields cols, rows, square_mm, marker_mm, dict_name; malformed specs raise a clear `ValueError`; default constant is `5x7:37:28:DICT_5X5_100`; resolution order request > env `APRILCAM_CHARUCO_BOARD` > default is implemented in one helper.
+- [x] `BoardDetector.detect(gray)` returns one record per board cluster (charuco corners, ids, marker count, layout); markers detected on a 2x upscale with the tuned parameters, corners interpolated on the native image so coordinates stay native.
+- [x] Marker clustering (single-linkage, 2.5x marker side, no duplicate ids per cluster, >= 4 markers) isolates the board from playfield markers sharing its dictionary and separates two boards in view.
+- [x] Current vs legacy layout is auto-detected the first time markers are seen but no corners interpolate, then locked for that detector instance; the lock is exposed for status.
+- [x] `interfaces.py` imports no cv2; the detector module is daemon-only.
 
 ## Implementation Plan
 
