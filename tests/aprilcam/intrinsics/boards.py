@@ -60,3 +60,27 @@ def detect(gray):
     if _DET is None:
         _DET = BoardDetector(SPEC)
     return _DET.detect(gray)
+
+
+def pose_spread(n: int, seed: int = 7, dist_range=(0.5, 0.6), x_range=(320, 960),
+                y_range=(260, 460)):
+    """Deterministic spread of (centre, dist_m, tilt, az) board poses."""
+    rng = np.random.default_rng(seed)
+    return [((float(rng.uniform(*x_range)), float(rng.uniform(*y_range))),
+             float(rng.uniform(*dist_range)), float(rng.uniform(18, 45)),
+             float(rng.uniform(0, 360))) for _ in range(n)]
+
+
+def spread_frames(n: int, seed: int = 7, repeat: int = 2, crop=None, **kw):
+    """Rendered frames for *n* poses, each repeated so the motion gate passes.
+
+    *crop* is an optional ``(x0, y0, w, h)`` window (geometry-preserving).
+    """
+    frames = []
+    for centre, dist, tilt, az in pose_spread(n, seed, **kw):
+        img = render(centre, dist, tilt, az)
+        if crop is not None:
+            x0, y0, w, h = crop
+            img = img[y0:y0 + h, x0:x0 + w].copy()
+        frames.extend([img] * repeat)
+    return frames

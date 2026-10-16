@@ -130,6 +130,8 @@ from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
 from aprilcam.daemon.broadcast import Broadcaster
 from aprilcam.daemon.detection import DetectionEngine
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus, ImageStream, MountRegistration, TagStream
+from aprilcam.intrinsics.interfaces import IntrinsicsFinishResult, IntrinsicsStatus
+from aprilcam.intrinsics.manager import IntrinsicsManager
 from aprilcam.daemon.streaming import (
     BroadcasterImageStream,
     BroadcasterTagStream,
@@ -693,6 +695,14 @@ class DaemonService(Daemon):
             # the prior calibration's embedded lens. Read-only here --
             # nothing in calibrate()/set_playfield() ever writes it.
             get_lens_model=self._lens_store.get_lens_model,
+        )
+        # Sprint 044: live ChArUco intrinsics sessions. Thin wiring only --
+        # frames come from the held-open Camera.read(), and an installed
+        # model goes into the same LensStore the Calibrator reads, so the
+        # next calibrate() picks it up with no restart.
+        self._intrinsics = IntrinsicsManager(
+            frame_source_for=lambda slug: self._camera_for(slug).read,
+            install=self._lens_store.put,
         )
         self._calibrations: Dict[str, Calibration] = {}
         self._load_calibrations()
@@ -2297,6 +2307,31 @@ class DaemonService(Daemon):
                 continue
             self._calibrations[entry.name] = calibration
 
+    # -- ChArUco intrinsics (sprint 044) ---------------------------------------
+    #
+    # Orchestration only: session lifecycle lives in
+    # ``intrinsics.manager.IntrinsicsManager`` and all ChArUco math in the
+    # ``intrinsics`` package.
+
+    def start_intrinsics(self, camera: str, board: Optional[str] = None) -> IntrinsicsStatus:
+        """See ``daemon.interfaces.Daemon.start_intrinsics``."""
+        cam = self._camera_for(camera)  # opens on demand; UnknownCamera etc. propagate
+        return self._intrinsics.start(cam.slug, board)
+
+    def get_intrinsics_status(self, camera: str) -> IntrinsicsStatus:
+        """See ``daemon.interfaces.Daemon.get_intrinsics_status``."""
+        return self._intrinsics.status(self._resolve_slug_if_known(camera))
+
+    def finish_intrinsics(
+        self, camera: str, install: bool, force: bool = False
+    ) -> IntrinsicsFinishResult:
+        """See ``daemon.interfaces.Daemon.finish_intrinsics``."""
+        return self._intrinsics.finish(self._resolve_slug_if_known(camera), install, force)
+
+    def abort_intrinsics(self, camera: str) -> IntrinsicsStatus:
+        """See ``daemon.interfaces.Daemon.abort_intrinsics``."""
+        return self._intrinsics.abort(self._resolve_slug_if_known(camera))
+
     # -- flat-field gain map (sprint 037) ------------------------------------
     #
     # ``capture_flat_field``/``get_flatfield``/``clear_flat_field`` are the
@@ -2695,6 +2730,7 @@ class DaemonService(Daemon):
         first.
         """
         self.stop_control_watchdog()
+        self._intrinsics.abort_all()
         with self._lock:
             tag_producers = list(self._tag_stream_producers.values())
             self._tag_stream_producers.clear()

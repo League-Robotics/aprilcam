@@ -2,9 +2,15 @@
 id: '005'
 title: Intrinsics session, manager, and DaemonService integration (install without
   restart)
-status: open
-use-cases: [SUC-001, SUC-003, SUC-004, SUC-006]
-depends-on: ["001", "004"]
+status: done
+use-cases:
+- SUC-001
+- SUC-003
+- SUC-004
+- SUC-006
+depends-on:
+- '001'
+- '004'
 github-issue: ''
 issue: charuco-board-intrinsics-calibration-as-a-daemon-workflow.md
 completes_issue: true
@@ -19,13 +25,13 @@ Wire detector, collector and solver into running sessions inside the daemon and 
 
 ## Acceptance Criteria
 
-- [ ] `DaemonService` implements `start_intrinsics(camera, board=None)`, `get_intrinsics_status(camera)`, `finish_intrinsics(camera, install, force=False)`, `abort_intrinsics(camera)` and the `Daemon` base class declares them (NotImplementedError defaults, docstrings per the sprint 037 pattern). Camera tokens resolve like `calibrate` (number or slug).
-- [ ] Frame source is the resolved camera's `Camera.read()` at a capped rate (~8 fps); capture and solver run on separate threads; the status snapshot is swapped under a lock so polling never blocks on a solve.
-- [ ] Starting a session on a camera with an active session raises an explicit error; after finish or abort a new start begins at zero views (fresh-session semantics).
-- [ ] `finish(install=True)` refuses a not-good or plausibility-failing result unless `force`, runs a final full solve over all views, writes `intrinsics.json` atomically with provenance (board spec, views, rms, residual, correction, timestamp, source 'measured'), and reports 'run calibrate to apply'.
-- [ ] A mid-session resolution change sets an error in status and blocks install; an unreadable camera sets an error rather than hanging.
-- [ ] No status polling for 120 s aborts the session and releases the camera; `DaemonService.close()` aborts all sessions.
-- [ ] An immediate `DaemonService.calibrate` after an install uses the new lens model without constructing a new service.
+- [x] `DaemonService` implements `start_intrinsics(camera, board=None)`, `get_intrinsics_status(camera)`, `finish_intrinsics(camera, install, force=False)`, `abort_intrinsics(camera)` and the `Daemon` base class declares them (NotImplementedError defaults, docstrings per the sprint 037 pattern). Camera tokens resolve like `calibrate` (number or slug).
+- [x] Frame source is the resolved camera's `Camera.read()` at a capped rate (~8 fps); capture and solver run on separate threads; the status snapshot is swapped under a lock so polling never blocks on a solve.
+- [x] Starting a session on a camera with an active session raises an explicit error; after finish or abort a new start begins at zero views (fresh-session semantics).
+- [x] `finish(install=True)` refuses a not-good or plausibility-failing result unless `force`, runs a final full solve over all views, writes `intrinsics.json` atomically with provenance (board spec, views, rms, residual, correction, timestamp, source 'measured'), and reports 'run calibrate to apply'.
+- [x] A mid-session resolution change sets an error in status and blocks install; an unreadable camera sets an error rather than hanging.
+- [x] No status polling for 120 s aborts the session and releases the camera; `DaemonService.close()` aborts all sessions.
+- [x] An immediate `DaemonService.calibrate` after an install uses the new lens model without constructing a new service.
 
 ## Implementation Plan
 

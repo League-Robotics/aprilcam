@@ -11,6 +11,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Optional
 
+from aprilcam.errors import AprilCamError
+
 #: Environment variable that overrides the default board spec.
 BOARD_ENV_VAR = "APRILCAM_CHARUCO_BOARD"
 
@@ -237,3 +239,28 @@ class IntrinsicsFinishResult:
     status: IntrinsicsStatus
     #: Summary of the solved lens (matrix, distortion, fx, hfov, rms...), if any.
     lens: Optional[dict] = None
+
+
+# ---- session errors ---------------------------------------------------------
+
+
+class IntrinsicsError(AprilCamError):
+    """Base class for intrinsics-session failures."""
+
+
+class IntrinsicsSessionActive(IntrinsicsError):
+    """A session is already running on this camera; finish or abort it first."""
+
+    def __init__(self, camera: str) -> None:
+        self.camera = camera
+        super().__init__(
+            f"an intrinsics session is already active on camera {camera!r}; "
+            "finish or abort it before starting another")
+
+
+class NoIntrinsicsSession(IntrinsicsError):
+    """No session (active or recently ended) exists for this camera."""
+
+    def __init__(self, camera: str) -> None:
+        self.camera = camera
+        super().__init__(f"no intrinsics session for camera {camera!r}")

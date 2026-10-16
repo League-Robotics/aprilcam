@@ -95,6 +95,7 @@ from typing import Iterator, Optional
 
 from aprilcam.calibration.interfaces import Calibration, CalibrationResult, FlatFieldInfo, FlatFieldResult
 from aprilcam.config.interfaces import CameraConfig, Feature, PlayfieldDefinition
+from aprilcam.intrinsics.interfaces import IntrinsicsFinishResult, IntrinsicsStatus
 from aprilcam.playfield.interfaces import Playfield
 from aprilcam.types import (
     Annotation,
@@ -354,6 +355,46 @@ class Daemon:
         no-op-on-already-clear convention.
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.clear_flat_field")
+
+    # -- ChArUco intrinsics calibration (sprint 044) ---------------------
+
+    def start_intrinsics(self, camera: str, board: Optional[str] = None) -> IntrinsicsStatus:
+        """Begin a live ChArUco-board intrinsics session on *camera*.
+
+        *camera* is a persistent number or a slug, like :meth:`calibrate`.
+        *board* is an optional ``COLSxROWS:SQUARE_MM:MARKER_MM:DICT`` spec;
+        omitted, the ``APRILCAM_CHARUCO_BOARD`` environment variable and then
+        the built-in default are used. A fresh session always begins at zero
+        views. Raises ``IntrinsicsSessionActive`` if one is already running
+        on that camera (finish or abort it first).
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.start_intrinsics")
+
+    def get_intrinsics_status(self, camera: str) -> IntrinsicsStatus:
+        """The latest status snapshot of *camera*'s intrinsics session.
+
+        Polling keeps the session alive: a session nobody polls for 120 s is
+        aborted. After a session ends, its final status is returned until a
+        new one starts. Raises ``NoIntrinsicsSession`` if none ever ran.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.get_intrinsics_status")
+
+    def finish_intrinsics(
+        self, camera: str, install: bool, force: bool = False
+    ) -> IntrinsicsFinishResult:
+        """Stop collecting, run a final full solve, and optionally install.
+
+        With ``install=True`` the lens model is written to the per-camera
+        store only when the result is good and plausible (or *force*); a
+        refusal leaves the session running. An installed model is used by
+        the next :meth:`calibrate` -- no daemon restart; the result says to
+        run calibrate to apply it.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.finish_intrinsics")
+
+    def abort_intrinsics(self, camera: str) -> IntrinsicsStatus:
+        """End *camera*'s intrinsics session, installing nothing."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.abort_intrinsics")
 
     # -- perception ------------------------------------------------------
 
