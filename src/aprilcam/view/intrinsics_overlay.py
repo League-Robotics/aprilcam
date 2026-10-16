@@ -74,7 +74,8 @@ def compose_camera_image(
         overlays = cell_overlays(camera_model.cells)
         for rect, ov in zip(rects, overlays):
             if ov.tint:
-                r, g, b = ImageColor.getrgb(ov.tint)
+                # getrgb may return RGB or RGBA; keep only the colour channels.
+                r, g, b = ImageColor.getrgb(ov.tint)[:3]
                 tdraw.rectangle(rect, fill=(r, g, b, TINT_ALPHA))
         img = Image.alpha_composite(base, tint)
 
