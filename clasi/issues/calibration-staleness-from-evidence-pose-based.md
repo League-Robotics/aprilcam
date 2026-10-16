@@ -42,3 +42,26 @@ matching `compute_drift_cm`'s `None`).
 See sprint 045's `sprint.md` (Decision 5 and the dropped ticket 014) and
 `docs/knowledge/2026-10-16-pose-based-field-calibration.md` for the pose
 conventions this builds on.
+
+## Stakeholder direction, 2026-10-16: a survey marker and cheap bump detection
+
+Several of these playfields get bumped and must not be trusted afterwards.
+A bump is almost never a pure rotation; it is a translation. So:
+
+- **Survey marker.** One marker per field is a fixed, known reference that
+  calibration never solves for: on the main playfield it is **AprilTag 1 at
+  (0, 0)**, always. The definition should declare it as the survey marker
+  (not just another feature), calibration records where it was seen, and
+  every later check compares against that.
+- **Cheap check.** At low rate, re-detect the survey marker (and any other
+  visible known marker) and compare its world position through the stored
+  calibration with its declared position. If the survey marker is no longer
+  at (0, 0) beyond tolerance, the field has been bumped: flag
+  `calibration_stale` with the measured offset, and prefer **compensating
+  the translation** (shift the stored mapping by the measured delta, note
+  it as a compensation with the residual) over demanding a recalibration,
+  which stays the fallback when the residual after compensation is too
+  large (a rotation or a camera move).
+- The existing `compute_drift_cm` hook and the pose-based reprojection
+  check above are the places this lives; this item defines what "bumped"
+  means and which marker is the authority.
