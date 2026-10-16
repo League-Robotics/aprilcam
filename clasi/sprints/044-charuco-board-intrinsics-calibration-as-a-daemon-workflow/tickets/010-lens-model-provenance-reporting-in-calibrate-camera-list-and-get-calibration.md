@@ -1,9 +1,13 @@
 ---
 id: '010'
 title: Lens-model provenance reporting in calibrate, camera list, and get_calibration
-status: open
-use-cases: [SUC-004, SUC-005]
-depends-on: ["001", "006"]
+status: done
+use-cases:
+- SUC-004
+- SUC-005
+depends-on:
+- '001'
+- '006'
 github-issue: ''
 issue: charuco-board-intrinsics-calibration-as-a-daemon-workflow.md
 completes_issue: true
@@ -18,11 +22,11 @@ Report lens-model provenance everywhere an operator looks. The wire `Calibration
 
 ## Acceptance Criteria
 
-- [ ] `CameraState` gains `lens_model` ('measured'|'estimated'|'legacy'|'absent') and `lens_pending` (store model differs from the one embedded in the current calibration); proto and converters updated (rerun `scripts/compile_proto.py`).
-- [ ] `camera list` rows show `lens=measured|estimated|legacy|absent` and a `lens-pending` flag; row prefix unchanged.
-- [ ] `Calibration` interface/proto gain `lens_source` (and a small provenance summary for measured); MCP `get_calibration` exposes it; `get_calibration` for a never-calibrated camera that has a stored lens still reports None (lens status is on `CameraState`).
-- [ ] `aprilcam camera calibrate` output states which lens model it carried forward (measured / estimated / legacy / none), including the resolution-mismatch warning, and reports the refusal of `--with-intrinsics` over a measured model; `--with-intrinsics` help text documents it as the no-board fallback.
-- [ ] The six-point `_estimate_intrinsics` crash becomes a clean `intrinsics estimation rejected` result with a reason; no traceback.
+- [x] `CameraState` gains `lens_model` ('measured'|'estimated'|'legacy'|'absent') and `lens_pending` (store model differs from the one embedded in the current calibration); proto and converters updated (rerun `scripts/compile_proto.py`).
+- [x] `camera list` rows show `lens=measured|estimated|legacy|absent` and a `lens-pending` flag; row prefix unchanged.
+- [x] `Calibration` interface/proto gain `lens_source` (and a small provenance summary for measured); MCP `get_calibration` exposes it; `get_calibration` for a never-calibrated camera that has a stored lens still reports None (lens status is on `CameraState`).
+- [x] `aprilcam camera calibrate` output states which lens model it carried forward (measured / estimated / legacy / none), including the resolution-mismatch warning, and reports the refusal of `--with-intrinsics` over a measured model; `--with-intrinsics` help text documents it as the no-board fallback.
+- [x] The six-point `_estimate_intrinsics` crash becomes a clean `intrinsics estimation rejected` result with a reason; no traceback.
 
 ## Implementation Plan
 

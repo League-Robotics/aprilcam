@@ -331,6 +331,11 @@ CalibrationLookup = Callable[[str], Optional["Calibration"]]
 #: lens store's size-matched lookup (sprint 044); see ``calibration.lens``.
 LensLookup = Callable[[str, Tuple[int, int]], Optional[LensModel]]
 
+#: ``(camera_slug, (width, height)) -> str | None`` -- why the lens store
+#: would ignore its model at that frame size (resolution mismatch), or
+#: ``None``; surfaces as ``CalibrationResult.lens_warning`` (sprint 044).
+LensWarningLookup = Callable[[str, Tuple[int, int]], Optional[str]]
+
 
 def _default_detector_factory() -> TagDetector:
     return TagDetector()
@@ -853,6 +858,54 @@ def _estimate_intrinsics(
     elevated_feature_count: int,
     z_spread_cm: float,
 ) -> _IntrinsicsFit:
+    """:func:`_fit_intrinsics` with OpenCV's own refusals turned into a
+    rejected :class:`_IntrinsicsFit` (sprint 044 ticket 010).
+
+    ``cv2.calibrateCamera`` raises ``cv2.error`` when the fit subset has
+    no more residuals than free parameters -- exactly what the held-out
+    split produces at the six-point floor (4 fit points = 8 residuals vs
+    8 variables in the elevated model). That is an under-determined
+    input, not a bug: it must surface as a ``succeeded=False`` result
+    with a reason, never a traceback through the RPC.
+    """
+    try:
+        return _fit_intrinsics(
+            object_points,
+            image_points,
+            image_size,
+            elevated_feature_count=elevated_feature_count,
+            z_spread_cm=z_spread_cm,
+        )
+    except cv.error as exc:
+        n = len(object_points)
+        elevated_mode = (
+            elevated_feature_count >= MIN_ELEVATED_FEATURES_FOR_ELEVATED_MODE
+            and z_spread_cm >= MIN_ELEVATED_Z_SPREAD_CM
+        )
+        return _IntrinsicsFit(
+            accepted=False,
+            reason=(
+                f"too few ground-truth points to fit a lens model ({n} detected; "
+                f"part of them are held out for validation) -- survey and detect "
+                f"more ArUco/AprilTag points on the playfield (nine or more is "
+                f"comfortable). OpenCV said: {str(exc).splitlines()[0][:200]}"
+            ),
+            camera_matrix=None,
+            dist_coeffs=None,
+            mode="elevated" if elevated_mode else "coplanar-constrained",
+            elevated_feature_count=elevated_feature_count,
+            held_out_rms_px=None,
+        )
+
+
+def _fit_intrinsics(
+    object_points: np.ndarray,
+    image_points: np.ndarray,
+    image_size: Tuple[int, int],
+    *,
+    elevated_feature_count: int,
+    z_spread_cm: float,
+) -> _IntrinsicsFit:
     """Fit one camera's intrinsics/distortion from a single view's
     surveyed-and-detected points (module docstring). *object_points* is
     ``(N, 3)`` -- ``(x, y, height_cm)`` in cm -- and *image_points* is
@@ -1109,8 +1162,10 @@ class Calibrator(_CalibratorBase):
         max_reprojection_error_cm: float = MAX_REPROJECTION_ERROR_CM,
         get_prior_calibration: Optional[CalibrationLookup] = None,
         get_lens_model: Optional[LensLookup] = None,
+        get_lens_warning: Optional[LensWarningLookup] = None,
     ) -> None:
         self._get_lens_model = get_lens_model
+        self._get_lens_warning = get_lens_warning
         self._get_camera_config = get_camera_config
         self._get_playfield = get_playfield
         self._capture_frames = capture_frames
@@ -1226,6 +1281,11 @@ class Calibrator(_CalibratorBase):
             if self._get_lens_model is not None
             else None
         )
+        lens_warning = (
+            self._get_lens_warning(camera_slug, image_size)
+            if self._get_lens_warning is not None and stored_lens is None
+            else None
+        )
         if estimate_intrinsics and stored_lens is not None:
             return CalibrationResult(
                 succeeded=False,
@@ -1262,7 +1322,10 @@ class Calibrator(_CalibratorBase):
 
         if missing_ids:
             return CalibrationResult(
-                succeeded=False, matched_ids=matched_ids, missing_ids=missing_ids
+                succeeded=False,
+                matched_ids=matched_ids,
+                missing_ids=missing_ids,
+                lens_warning=lens_warning,
             )
 
         aruco_by_id = {entry.tag_id: entry for entry in definition.aruco_tags}
@@ -1336,6 +1399,7 @@ class Calibrator(_CalibratorBase):
                     intrinsics_mode=fit.mode,
                     elevated_features_used=fit.elevated_feature_count,
                     reason=f"intrinsics estimation rejected: {fit.reason}",
+                    lens_warning=lens_warning,
                 )
             camera_matrix = fit.camera_matrix
             dist_coeffs = fit.dist_coeffs
@@ -1421,6 +1485,7 @@ class Calibrator(_CalibratorBase):
                 reason=degenerate,
                 intrinsics_estimated=intrinsics_estimated,
                 lens_model_source=lens_model_source,
+                lens_warning=lens_warning,
                 intrinsics_mode=intrinsics_mode,
                 elevated_features_used=elevated_features_used,
             )
@@ -1434,6 +1499,7 @@ class Calibrator(_CalibratorBase):
                 reason="homography solve failed: singular or ill-conditioned matrix",
                 intrinsics_estimated=intrinsics_estimated,
                 lens_model_source=lens_model_source,
+                lens_warning=lens_warning,
                 intrinsics_mode=intrinsics_mode,
                 elevated_features_used=elevated_features_used,
             )
@@ -1460,6 +1526,7 @@ class Calibrator(_CalibratorBase):
                 ),
                 intrinsics_estimated=intrinsics_estimated,
                 lens_model_source=lens_model_source,
+                lens_warning=lens_warning,
                 intrinsics_mode=intrinsics_mode,
                 elevated_features_used=elevated_features_used,
             )
@@ -1485,6 +1552,7 @@ class Calibrator(_CalibratorBase):
             reprojection_error_cm=rms,
             intrinsics_estimated=intrinsics_estimated,
                 lens_model_source=lens_model_source,
+                lens_warning=lens_warning,
             intrinsics_mode=intrinsics_mode,
             elevated_features_used=elevated_features_used,
         )

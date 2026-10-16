@@ -221,6 +221,8 @@ def _camera_state_to_proto(state: CameraState) -> aprilcam_v2_pb2.CameraState:
         # same as calibrated/calibration_stale above.
         flatfield_present=state.flatfield_present,
         flatfield_stale=state.flatfield_stale,
+        lens_model=state.lens_model,
+        lens_pending=state.lens_pending,
     )
     # optional fields: only set when not None, so HasField() on the wire
     # matches Optional[...] being None on this side (design.md §6).
@@ -618,6 +620,10 @@ def _calibration_result_to_proto(result: CalibrationResult) -> aprilcam_v2_pb2.C
         msg.intrinsics_mode = result.intrinsics_mode
     if result.elevated_features_used is not None:
         msg.elevated_features_used = result.elevated_features_used
+    if result.lens_model_source is not None:
+        msg.lens_model_source = result.lens_model_source
+    if result.lens_warning is not None:
+        msg.lens_warning = result.lens_warning
     return msg
 
 
@@ -642,6 +648,17 @@ def _calibration_to_proto(calibration: Calibration) -> aprilcam_v2_pb2.Calibrati
         msg.camera_matrix.extend(v for row in calibration.camera_matrix for v in row)
     if calibration.dist_coeffs is not None:
         msg.dist_coeffs.extend(calibration.dist_coeffs)
+    # Sprint 044 ticket 010: provenance (HasField-guarded; None stays absent).
+    if calibration.lens_source is not None:
+        msg.lens_source = calibration.lens_source
+    if calibration.lens_views is not None:
+        msg.lens_views = calibration.lens_views
+    if calibration.lens_rms_px is not None:
+        msg.lens_rms_px = calibration.lens_rms_px
+    if calibration.lens_residual_px is not None:
+        msg.lens_residual_px = calibration.lens_residual_px
+    if calibration.lens_installed_at is not None:
+        msg.lens_installed_at = calibration.lens_installed_at
     return msg
 
 

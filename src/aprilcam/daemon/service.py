@@ -97,7 +97,7 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2 as cv
 import numpy as np
@@ -450,6 +450,15 @@ def _flatfield_info_from_dict(data: object) -> FlatFieldInfo:
     )
 
 
+def _same_lens(calibration: Calibration, stored: Any) -> bool:
+    """Whether *calibration* embeds exactly *stored*'s lens model."""
+    if calibration.camera_matrix is None or calibration.dist_coeffs is None:
+        return False
+    return tuple(map(tuple, calibration.camera_matrix)) == tuple(
+        map(tuple, stored.camera_matrix)
+    ) and tuple(calibration.dist_coeffs) == tuple(stored.dist_coeffs)
+
+
 class DaemonService(Daemon):
     """Concrete ``daemon.interfaces.Daemon`` (this sprint's slice only).
 
@@ -695,6 +704,9 @@ class DaemonService(Daemon):
             # the prior calibration's embedded lens. Read-only here --
             # nothing in calibrate()/set_playfield() ever writes it.
             get_lens_model=self._lens_store.get_lens_model,
+            # Sprint 044 ticket 010: why the store was ignored (resolution
+            # mismatch), reported on the CalibrationResult.
+            get_lens_warning=lambda slug, size: self._lens_store.get(slug, size)[1],
         )
         # Sprint 044: live ChArUco intrinsics sessions. Thin wiring only --
         # frames come from the held-open Camera.read(), and an installed
@@ -783,6 +795,7 @@ class DaemonService(Daemon):
         for record in self._registry.records():
             playfield = self._playfield_link(record.slug)
             calibrated, calibration_stale = self._calibration_flags(record.slug)
+            lens_model, lens_pending = self._lens_flags(record.slug)
             flatfield_present, flatfield_stale = self._flatfield_flags(record.slug)
             held = self._cameras.get(record.slug)
             if held is not None:
@@ -794,6 +807,8 @@ class DaemonService(Daemon):
                         calibration_stale=calibration_stale,
                         flatfield_present=flatfield_present,
                         flatfield_stale=flatfield_stale,
+                        lens_model=lens_model,
+                        lens_pending=lens_pending,
                     )
                 )
                 continue
@@ -808,6 +823,8 @@ class DaemonService(Daemon):
                     calibration_stale=calibration_stale,
                     flatfield_present=flatfield_present,
                     flatfield_stale=flatfield_stale,
+                    lens_model=lens_model,
+                    lens_pending=lens_pending,
                     number=record.number,
                 )
             )
@@ -824,6 +841,36 @@ class DaemonService(Daemon):
         if calibration is None:
             return False, False
         return True, calibration.stale
+
+    def _lens_flags(self, slug: str) -> Tuple[str, bool]:
+        """``(lens_model, lens_pending)`` for *slug* (sprint 044 ticket
+        010). ``lens_model`` is the lens-store model's source when one is
+        stored (it is what the next :meth:`calibrate` applies), else the
+        provenance of the lens embedded in the current calibration
+        (``legacy`` for a pre-044 file), else ``"absent"``.
+        ``lens_pending`` is true only when a calibration *and* a stored
+        model both exist and the stored model differs from the embedded
+        one -- a stored calibration keeps the lens it was solved with
+        until ``calibrate`` runs again (sprint.md Decision 2)."""
+        stored = self._lens_store.load(slug)
+        calibration = self.get_calibration(slug)
+        embedded = (
+            calibration.lens_source
+            if calibration is not None and calibration.camera_matrix is not None
+            else None
+        )
+        if stored is not None:
+            lens_model = stored.source
+        elif embedded is not None:
+            lens_model = embedded
+        else:
+            lens_model = "absent"
+        pending = (
+            stored is not None
+            and calibration is not None
+            and not _same_lens(calibration, stored)
+        )
+        return lens_model, pending
 
     def _flatfield_flags(self, slug: str) -> Tuple[bool, bool]:
         """``(flatfield_present, flatfield_stale)`` for *slug*, from
@@ -2141,7 +2188,23 @@ class DaemonService(Daemon):
         """
         slug = self._resolve_slug_if_known(camera)
         with self._lock:
-            return self._calibrations.get(slug)
+            calibration = self._calibrations.get(slug)
+        if calibration is None or calibration.lens_source != "measured":
+            return calibration
+        # Sprint 044 ticket 010: summarise a measured lens (views/rms/...)
+        # from the store, but only while the store still holds the very
+        # model this calibration embedded -- otherwise the numbers would
+        # describe a different lens.
+        stored = self._lens_store.load(slug)
+        if stored is None or not _same_lens(calibration, stored):
+            return calibration
+        return replace(
+            calibration,
+            lens_views=stored.views,
+            lens_rms_px=stored.rms_px,
+            lens_residual_px=stored.residual_px,
+            lens_installed_at=stored.installed_at or None,
+        )
 
     def _mark_stale(self, slug: str) -> None:
         """Flip *slug*'s currently-held calibration's ``stale`` bit, if

@@ -499,6 +499,14 @@ message CameraState {
   // `types.CameraState.flatfield_present`/`.flatfield_stale`.
   bool flatfield_present = 9;
   bool flatfield_stale = 10;
+  // Sprint 044 ticket 010: lens-model provenance. `lens_model` is
+  // "measured" | "estimated" | "legacy" | "absent" (empty string from an
+  // older daemon reads as "absent"); `lens_pending` is true when the
+  // per-camera lens store holds a model that differs from the one
+  // embedded in the current calibration ("run calibrate to apply").
+  // Mirrors types.CameraState.lens_model / .lens_pending.
+  string lens_model = 11;
+  bool lens_pending = 12;
 }
 
 // One backend a probe could not interrogate, and why (UC-25.S-7).
@@ -887,6 +895,14 @@ message CalibrationResult {
   // absent under the same condition as intrinsics_mode. Mirrors
   // CalibrationResult.elevated_features_used.
   optional int32 elevated_features_used = 8;
+  // Sprint 044: which lens model this call applied -- "measured" |
+  // "estimated" | "legacy" | "none"; absent when the attempt failed
+  // before the lens decision. Mirrors CalibrationResult.lens_model_source.
+  optional string lens_model_source = 9;
+  // Sprint 044 ticket 010: a non-fatal lens warning, e.g. the stored
+  // lens model was measured at a different resolution and was ignored.
+  // Mirrors CalibrationResult.lens_warning.
+  optional string lens_warning = 10;
 }
 
 // A camera's established pixel<->world mapping. Mirrors
@@ -916,6 +932,16 @@ message Calibration {
   // This camera's distortion coefficients, if known -- empty means
   // "no lens model", same discipline as `camera_matrix` above.
   repeated double dist_coeffs = 8;
+  // Sprint 044 ticket 010: provenance of the embedded lens
+  // ("measured" | "estimated" | "legacy"), absent when no lens is
+  // embedded -- this, not camera_matrix, is what clients read. The four
+  // fields after it summarise a *measured* lens (views, rms, held-out
+  // residual, install time); absent otherwise.
+  optional string lens_source = 9;
+  optional int32 lens_views = 10;
+  optional double lens_rms_px = 11;
+  optional double lens_residual_px = 12;
+  optional double lens_installed_at = 13;
 }
 
 message CalibrateRequest {

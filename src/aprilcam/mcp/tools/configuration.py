@@ -283,6 +283,13 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         deliberately never returned here, mirroring
         ``get_calibration``'s existing "reports what the interface
         promises, never the internal homography matrix" precedent.
+
+        ``lens_model_source`` (sprint 044) reports which lens model this
+        call applied -- ``"measured"`` (the per-camera ChArUco lens
+        store), ``"estimated"``, ``"legacy"`` or ``"none"``; a measured
+        model makes ``estimate_intrinsics=True`` refuse (``succeeded``
+        false, ``reason`` says so). ``lens_warning`` is set when a stored
+        lens model was ignored for a resolution mismatch.
         """
         return connection.call(
             lambda d: d.calibrate(camera, estimate_intrinsics=estimate_intrinsics), host=daemon
@@ -298,6 +305,14 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         may have moved since calibrating; a stale calibration is still
         returned, not hidden, so a caller can decide what to do with it
         (UC-11.S-3).
+
+        ``lens_source`` (sprint 044) says which lens model this
+        calibration was solved with -- ``"measured"``, ``"estimated"``,
+        ``"legacy"`` or ``None`` (no lens); for a measured lens,
+        ``lens_views``/``lens_rms_px``/``lens_residual_px``/
+        ``lens_installed_at`` summarise the measurement. A camera with a
+        stored lens but no calibration still returns ``None`` here; its
+        lens status is ``list_cameras``' ``lens_model``/``lens_pending``.
         """
         return connection.call(lambda d: d.get_calibration(camera), host=daemon)
 

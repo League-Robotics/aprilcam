@@ -113,6 +113,9 @@ def camera_state_from_proto(msg: aprilcam_v2_pb2.CameraState) -> CameraState:
         # as calibrated/calibration_stale above).
         flatfield_present=msg.flatfield_present,
         flatfield_stale=msg.flatfield_stale,
+        # Sprint 044 ticket 010: "" (an older daemon) reads as "absent".
+        lens_model=msg.lens_model or "absent",
+        lens_pending=msg.lens_pending,
         number=msg.number if msg.HasField("number") else None,
     )
 
@@ -458,6 +461,10 @@ def calibration_result_from_proto(msg: aprilcam_v2_pb2.CalibrationResult) -> Cal
         elevated_features_used=(
             msg.elevated_features_used if msg.HasField("elevated_features_used") else None
         ),
+        lens_model_source=(
+            msg.lens_model_source if msg.HasField("lens_model_source") else None
+        ),
+        lens_warning=msg.lens_warning if msg.HasField("lens_warning") else None,
     )
 
 
@@ -484,7 +491,21 @@ def calibration_from_proto(msg: aprilcam_v2_pb2.Calibration) -> Calibration:
     not). See ``tests/aprilcam/mcp/test_integration.py``'s no-cv2 sweep
     for the mechanical check this fixes.
     """
-    return Calibration(stale=msg.stale, calibrated_at=msg.calibrated_at, playfield=msg.playfield)
+    def _opt(name: str):
+        return getattr(msg, name) if msg.HasField(name) else None
+
+    # Sprint 044 ticket 010: only the lens *provenance* crosses to clients
+    # (never camera_matrix/dist_coeffs).
+    return Calibration(
+        stale=msg.stale,
+        calibrated_at=msg.calibrated_at,
+        playfield=msg.playfield,
+        lens_source=_opt("lens_source"),
+        lens_views=_opt("lens_views"),
+        lens_rms_px=_opt("lens_rms_px"),
+        lens_residual_px=_opt("lens_residual_px"),
+        lens_installed_at=_opt("lens_installed_at"),
+    )
 
 
 def flatfield_result_from_proto(msg: aprilcam_v2_pb2.FlatFieldResult) -> FlatFieldResult:

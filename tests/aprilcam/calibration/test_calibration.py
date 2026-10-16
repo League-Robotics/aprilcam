@@ -1968,3 +1968,26 @@ def test_failed_calibrate_leaves_the_store_intact(tmp_path):
 
     assert result.succeeded is False
     assert store.path("test-camera").read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# Six-point crash regression (sprint 044 ticket 010; clasi issue
+# estimate-intrinsics-crashes-with-exactly-six-ground-truth-points)
+# ---------------------------------------------------------------------------
+
+
+def test_estimate_intrinsics_with_exactly_six_points_is_a_clean_rejection_not_a_crash():
+    object_points = np.array(
+        [[0, 0, 0], [100, 0, 0], [100, 60, 0], [0, 60, 0], [50, 0, 0], [50, 60, 0]], dtype=float
+    )
+    image_points = np.array(
+        [[100, 400], [500, 410], [490, 100], [110, 90], [300, 395], [300, 95]], dtype=float
+    )
+
+    fit = _estimate_intrinsics(
+        object_points, image_points, (640, 480), elevated_feature_count=0, z_spread_cm=0.0
+    )
+
+    assert fit.accepted is False
+    assert fit.camera_matrix is None and fit.dist_coeffs is None
+    assert "too few ground-truth points" in fit.reason

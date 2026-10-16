@@ -34,6 +34,8 @@ def _result(
     intrinsics_estimated: Optional[bool] = None,
     intrinsics_mode: Optional[str] = None,
     elevated_features_used: Optional[int] = None,
+    lens_model_source: Optional[str] = None,
+    lens_warning: Optional[str] = None,
 ) -> CalibrationResult:
     return CalibrationResult(
         succeeded=succeeded,
@@ -44,6 +46,8 @@ def _result(
         intrinsics_estimated=intrinsics_estimated,
         intrinsics_mode=intrinsics_mode,
         elevated_features_used=elevated_features_used,
+        lens_model_source=lens_model_source,
+        lens_warning=lens_warning,
     )
 
 
@@ -372,3 +376,73 @@ def test_calibrate_h_prints_help_not_a_missing_hostname_error():
     with pytest.raises(SystemExit) as excinfo:
         parser.parse_args(["camera", "calibrate", "some-camera", "-h"])
     assert excinfo.value.code == 0
+
+
+# ---------------------------------------------------------------------------
+# Lens provenance (sprint 044 ticket 010)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        ("measured", "lens model: measured"),
+        ("estimated", "lens model: estimated"),
+        ("legacy", "lens model: legacy"),
+        ("none", "lens model: none"),
+    ],
+)
+def test_calibrate_success_states_which_lens_model_was_carried_forward(capsys, source, expected):
+    discovery = _FakeDiscovery(
+        daemon=_FakeDaemon(result=_result(intrinsics_estimated=False, lens_model_source=source))
+    )
+
+    code = calibrate_cli.cmd_calibrate(_args(), discovery_factory=lambda: discovery)
+
+    assert code == 0
+    assert expected in capsys.readouterr().out
+
+
+def test_calibrate_prints_the_resolution_mismatch_warning(capsys):
+    warning = "stored lens model for 'cam' was measured at 1280x720 but frames are 640x480"
+    discovery = _FakeDiscovery(
+        daemon=_FakeDaemon(
+            result=_result(intrinsics_estimated=False, lens_model_source="none", lens_warning=warning)
+        )
+    )
+
+    calibrate_cli.cmd_calibrate(_args(), discovery_factory=lambda: discovery)
+
+    assert warning in capsys.readouterr().err
+
+
+def test_calibrate_reports_the_refusal_of_with_intrinsics_over_a_measured_model(capsys):
+    discovery = _FakeDiscovery(
+        daemon=_FakeDaemon(
+            result=_result(
+                succeeded=False,
+                matched_ids=(),
+                reprojection_error_cm=None,
+                reason="estimate_intrinsics refused: camera has a measured lens model installed",
+                intrinsics_estimated=False,
+                lens_model_source="measured",
+            )
+        )
+    )
+
+    code = calibrate_cli.cmd_calibrate(
+        _args(with_intrinsics=True), discovery_factory=lambda: discovery
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "estimate_intrinsics refused" in err
+    assert "--with-intrinsics refused" in err
+
+
+def test_with_intrinsics_help_documents_the_no_board_fallback():
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers()
+    calibrate_cli.add_subparser(sub)
+    help_text = sub.choices["calibrate"].format_help()
+    assert "no-board fallback" in help_text

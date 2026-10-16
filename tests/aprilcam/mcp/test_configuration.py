@@ -515,6 +515,44 @@ async def test_get_calibration_returns_the_calibration(tmp_path):
     assert structured["playfield"] == "main-playfield"
 
 
+async def test_get_calibration_exposes_the_lens_provenance(tmp_path):
+    calibration = Calibration(
+        stale=False,
+        calibrated_at=1.0,
+        playfield="main-playfield",
+        lens_source="measured",
+        lens_views=14,
+        lens_rms_px=0.4,
+        lens_residual_px=0.6,
+        lens_installed_at=99.0,
+    )
+    server, _ = _build(_FakeDaemon(calibration=calibration), tmp_path)
+
+    result = await _call(server, "get_calibration", {"camera": "c"})
+
+    structured = result.root.structuredContent["result"]
+    assert structured["lens_source"] == "measured"
+    assert structured["lens_views"] == 14
+    assert structured["lens_residual_px"] == 0.6
+
+
+async def test_calibrate_exposes_lens_model_source_and_warning(tmp_path):
+    outcome = CalibrationResult(
+        succeeded=True,
+        matched_ids=(1, 2, 3, 4),
+        missing_ids=(),
+        lens_model_source="measured",
+        lens_warning=None,
+    )
+    server, _ = _build(_FakeDaemon(calibration_result=outcome), tmp_path)
+
+    result = await _call(server, "calibrate", {"camera": "c"})
+
+    structured = result.root.structuredContent
+    assert structured["lens_model_source"] == "measured"
+    assert structured["lens_warning"] is None
+
+
 # ---------------------------------------------------------------------------
 # daemon parameter -- AC: late-binding, per-call override of the session default
 # ---------------------------------------------------------------------------

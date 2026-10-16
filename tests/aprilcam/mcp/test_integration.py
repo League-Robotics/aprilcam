@@ -261,7 +261,11 @@ async def test_golden_path_against_a_fake_daemon(tmp_path):
             ),
         ),
         calibration_result=CalibrationResult(
-            succeeded=True, matched_ids=tuple(range(1, 11)), missing_ids=(), reprojection_error_cm=0.18
+            succeeded=True,
+            matched_ids=tuple(range(1, 11)),
+            missing_ids=(),
+            reprojection_error_cm=0.18,
+            lens_model_source="none",
         ),
     )
     server = build_server(
@@ -311,6 +315,9 @@ async def test_golden_path_against_a_fake_daemon(tmp_path):
             "intrinsics_estimated": None,
             "intrinsics_mode": None,
             "elevated_features_used": None,
+            # sprint 044: which lens model the call applied.
+            "lens_model_source": "none",
+            "lens_warning": None,
         }
 
         # -- perceive again: tags, then a deskewed frame --

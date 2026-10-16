@@ -20,6 +20,8 @@ def _state(
     frame_dark: bool = False,
     flatfield_present: bool = False,
     flatfield_stale: bool = False,
+    lens_model: str = "absent",
+    lens_pending: bool = False,
 ) -> CameraState:
     return CameraState(
         name="arducam-ov9782-usb-camera",
@@ -31,6 +33,8 @@ def _state(
         frame_dark=frame_dark,
         flatfield_present=flatfield_present,
         flatfield_stale=flatfield_stale,
+        lens_model=lens_model,
+        lens_pending=lens_pending,
         number=3,
     )
 
@@ -97,3 +101,26 @@ def test_format_camera_row_reports_calibration_stale_and_flatfield_stale_togethe
     )
 
     assert "(stale, flatfield-stale)" in row
+
+
+# ---------------------------------------------------------------------------
+# Lens provenance (sprint 044 ticket 010)
+# ---------------------------------------------------------------------------
+
+
+def test_format_camera_row_shows_the_lens_word_and_keeps_the_prefix():
+    plain = format_camera_row(_state())
+    for model in ("measured", "estimated", "legacy", "absent"):
+        row = format_camera_row(_state(lens_model=model))
+        assert f"lens={model}" in row
+        assert "lens-pending" not in row
+        # Everything up to the flat-field word is unchanged.
+        assert row.split("flatfield=")[0] == plain.split("flatfield=")[0]
+        # The lens word sits before the trailing flags.
+        assert row.index(f"lens={model}") > row.index("flatfield=")
+
+
+def test_format_camera_row_flags_lens_pending_in_the_trailing_flags():
+    row = format_camera_row(_state(lens_model="measured", lens_pending=True, calibration_stale=True))
+    assert row.endswith("(stale, lens-pending)")
+    assert row.index("lens=measured") < row.index("(stale")
