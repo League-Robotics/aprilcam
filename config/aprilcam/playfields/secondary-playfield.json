@@ -2,46 +2,86 @@
   "name": "secondary-playfield",
   "display_name": "Secondary Playfield",
   "playfield": {
-    "width_cm": 108.5,
-    "height_cm": 70.8,
+    "width_cm": 110.2,
+    "height_cm": 73.4,
     "origin": "field-center",
-    "description": "White welding-table field. Origin at the geometric center of the four corner ArUco markers (no center AprilTag on this field). X increases east, Y increases north; north is the far edge as seen by hd-usb-camera.",
+    "description": "White welding-table field, eight ArUco 4x4_50 markers (46 mm). Origin at the geometric centre of the four corner markers, x east along the corner midpoints, y north; north is the far edge as seen by hd-usb-camera. Positions self-surveyed on 2026-10-16 from camera 3 (measured lens, pose solve over all marker corners, re-anchored on the corners; docs/knowledge/assets/field-check/self_survey.py): corner-centre rectangle 108.5 x 70.5 cm; width/height here are the outer marker extent the loader validates against. Ids 6 (east) and 7 (west) are outside camera 3's view, keep their nominal positions and are helpful, not required.",
     "display_name": "Secondary Playfield",
     "marker_size_mm": 46
   },
   "april_tags": [],
   "aruco_tags": [
     {
-      "slug": "aruco-northwest-u4",
-      "type": "aruco_tag",
-      "id": 4,
-      "cardinal": "northwest",
-      "x": -54.25,
-      "y": 35.4
-    },
-    {
-      "slug": "aruco-northeast-u1",
-      "type": "aruco_tag",
-      "id": 1,
-      "cardinal": "northeast",
-      "x": 54.25,
-      "y": 35.4
-    },
-    {
-      "slug": "aruco-southeast-u2",
+      "slug": "aruco-northwest-u2",
       "type": "aruco_tag",
       "id": 2,
-      "cardinal": "southeast",
-      "x": 54.25,
-      "y": -35.4
+      "cardinal": "northwest",
+      "x": -53.6,
+      "y": 35.0,
+      "policy": "required"
+    },
+    {
+      "slug": "aruco-northeast-u0",
+      "type": "aruco_tag",
+      "id": 0,
+      "cardinal": "northeast",
+      "x": 54.8,
+      "y": 35.5,
+      "policy": "required"
     },
     {
       "slug": "aruco-southwest-u3",
       "type": "aruco_tag",
       "id": 3,
       "cardinal": "southwest",
-      "x": -54.25,
-      "y": -35.4
+      "x": -54.9,
+      "y": -35.0,
+      "policy": "required"
+    },
+    {
+      "slug": "aruco-southeast-u1",
+      "type": "aruco_tag",
+      "id": 1,
+      "cardinal": "southeast",
+      "x": 53.6,
+      "y": -35.5,
+      "policy": "required"
+    },
+    {
+      "slug": "aruco-north-u4",
+      "type": "aruco_tag",
+      "id": 4,
+      "cardinal": "north",
+      "x": 0.9,
+      "y": 36.6,
+      "policy": "required"
+    },
+    {
+      "slug": "aruco-south-u5",
+      "type": "aruco_tag",
+      "id": 5,
+      "cardinal": "south",
+      "x": -0.4,
+      "y": -35.0,
+      "policy": "required"
+    },
+    {
+      "slug": "aruco-east-u6",
+      "type": "aruco_tag",
+      "id": 6,
+      "cardinal": "east",
+      "x": 55.0,
+      "y": 0,
+      "policy": "helpful"
+    },
+    {
+      "slug": "aruco-west-u7",
+      "type": "aruco_tag",
+      "id": 7,
+      "cardinal": "west",
+      "x": -55.0,
+      "y": 0,
+      "policy": "helpful"
     }
   ],
   "rectangles": [],
