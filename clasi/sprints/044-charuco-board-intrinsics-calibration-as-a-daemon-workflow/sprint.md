@@ -1,7 +1,7 @@
 ---
 id: '044'
 title: ChArUco-board intrinsics calibration as a daemon workflow
-status: ticketing
+status: executing
 branch: sprint/044-charuco-board-intrinsics-calibration-as-a-daemon-workflow
 use-cases:
 - SUC-001
