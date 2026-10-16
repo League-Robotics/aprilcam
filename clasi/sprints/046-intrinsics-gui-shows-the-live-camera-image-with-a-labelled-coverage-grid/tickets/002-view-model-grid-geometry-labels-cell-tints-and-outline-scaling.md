@@ -1,9 +1,11 @@
 ---
 id: '002'
 title: 'View model: grid geometry, labels, cell tints and outline scaling'
-status: open
-use-cases: [SUC-002]
-depends-on: ['001']
+status: done
+use-cases:
+- SUC-002
+depends-on:
+- '001'
 github-issue: ''
 issue: intrinsics-gui-shows-the-live-camera-image-with-a-labelled-coverage-grid.md
 completes_issue: true
@@ -41,16 +43,16 @@ Files: `src/aprilcam/view/intrinsics_model.py`, `tests/aprilcam/view/test_intrin
 
 ## Acceptance Criteria
 
-- [ ] `grid_rects` for several sizes (including odd and non-16:9) tiles the
+- [x] `grid_rects` for several sizes (including odd and non-16:9) tiles the
       image exactly, with 40/20/40 splits and NW..SE order.
-- [ ] A parity test (test code may import the cv2-bearing collector) asserts
+- [x] A parity test (test code may import the cv2-bearing collector) asserts
       the display fraction equals `collector.EDGE_FRACTION` and that a point in
       each rect maps to the same index via `collector._region_index`.
-- [ ] Cell tint is green exactly when the tile level is `good` (count >= 2),
+- [x] Cell tint is green exactly when the tile level is `good` (count >= 2),
       amber for `some`, none for `none`; tested against `build_camera_model`.
-- [ ] `scale_polygons` and `fit_rect` tested for letterbox, scale up/down,
+- [x] `scale_polygons` and `fit_rect` tested for letterbox, scale up/down,
       `None`, empty and degenerate inputs.
-- [ ] `tests/test_no_cv2_in_client_modules.py` passes.
+- [x] `tests/test_no_cv2_in_client_modules.py` passes.
 
 ## Testing
 
