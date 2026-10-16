@@ -46,6 +46,20 @@ to bound the wait for a first frame rather than hanging forever when a
 pipeline produces nothing) -- propagates uncaught: it is a real failure,
 not "the stream ended".
 
+**A failed subscribe arrives as an error frame, not a silent end of
+stream (sprint 043 ticket 003).** When the daemon cannot satisfy the
+subscribe (uncalibrated deskewed request, unknown/absent camera) it
+sends one *error frame* then closes. The frame is told apart from data
+frames by its first payload byte: ``framing.ERROR_FRAME_MARKER``
+(``0x00``), which can never start a valid protobuf message, followed by
+a serialized ``StreamError`` (kind, message, subject, available).
+Both ``__iter__`` methods check every payload with
+``framing.is_error_payload`` and raise the matching
+``aprilcam.errors`` class -- ``NotCalibrated``, ``UnknownCamera``,
+``CameraNotPresent``, else a generic ``AprilCamError`` carrying the
+daemon's message -- instead of ending iteration cleanly. A close with no
+error frame is still a clean end of stream.
+
 **Closing unsubscribes -- daemon-side, not by an RPC.** ``.close()``
 closes the client-side socket only. Per ``daemon/interfaces.py``'s
 ``ImageStream``/``TagStream`` docstrings, unsubscription is a
@@ -68,10 +82,29 @@ from typing import Iterator, Optional, Tuple
 from aprilcam import framing
 from aprilcam.client.models import image_frame_from_proto, tag_frame_from_proto
 from aprilcam.daemon.interfaces import ImageStream, TagStream
+from aprilcam.errors import (
+    AprilCamError,
+    CameraNotPresent,
+    NotCalibrated,
+    UnknownCamera,
+)
 from aprilcam.proto import aprilcam_v2_pb2
 from aprilcam.types import ImageFrame, TagFrame
 
 __all__ = ["SocketImageStream", "SocketTagStream"]
+
+
+def _error_from_payload(payload: bytes) -> AprilCamError:
+    """Decode an error frame's payload (``ERROR_FRAME_MARKER`` +
+    serialized ``StreamError``) into the matching typed error."""
+    msg = aprilcam_v2_pb2.StreamError.FromString(payload[len(framing.ERROR_FRAME_MARKER):])
+    if msg.kind == "NotCalibrated":
+        return NotCalibrated(msg.message)
+    if msg.kind == "UnknownCamera":
+        return UnknownCamera(msg.subject, tuple(msg.available))
+    if msg.kind == "CameraNotPresent":
+        return CameraNotPresent(msg.subject)
+    return AprilCamError(msg.message or msg.kind or "stream failed")
 
 
 def _host_is_local(host: str) -> bool:
@@ -194,6 +227,8 @@ class SocketImageStream(ImageStream):
                     payload = framing.read_frame(sock)
                 except EOFError:
                     return
+                if framing.is_error_payload(payload):
+                    raise _error_from_payload(payload)
                 msg = aprilcam_v2_pb2.GetFrameResponse.FromString(payload)
                 yield image_frame_from_proto(msg)
         finally:
@@ -236,6 +271,8 @@ class SocketTagStream(TagStream):
                     payload = framing.read_frame(sock)
                 except EOFError:
                     return
+                if framing.is_error_payload(payload):
+                    raise _error_from_payload(payload)
                 msg = aprilcam_v2_pb2.TagFrame.FromString(payload)
                 yield tag_frame_from_proto(msg)
         finally:

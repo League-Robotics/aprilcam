@@ -1475,6 +1475,23 @@ def build_server(
     return _GrpcListener(server, tcp_port=bound_tcp_port)
 
 
+def _stream_error_bytes(exc: Exception) -> bytes:
+    """Serialize a failed stream subscribe's exception as a
+    ``StreamError`` (the body of an error frame, sprint 043 ticket 003;
+    ``stream_transport.py`` prepends ``framing.ERROR_FRAME_MARKER``).
+    ``kind`` is the exception class name; ``subject``/``available``
+    carry the structured fields ``UnknownCamera``/``CameraNotPresent``
+    need to be rebuilt client-side."""
+    msg = aprilcam_v2_pb2.StreamError(kind=type(exc).__name__, message=str(exc))
+    subject = getattr(exc, "requested", None) or getattr(exc, "slug", None)
+    if isinstance(subject, str):
+        msg.subject = subject
+    available = getattr(exc, "available", None)
+    if isinstance(available, (tuple, list)):
+        msg.available.extend(str(a) for a in available)
+    return msg.SerializeToString()
+
+
 def build_stream_transport(
     service: Daemon,
     socket_dir: Path,
@@ -1501,6 +1518,7 @@ def build_stream_transport(
         socket_dir,
         image_encoder=_image_frame_bytes_for_stream,
         tag_encoder=_tag_frame_bytes_for_stream,
+        error_encoder=_stream_error_bytes,
         enable_unix=enable_unix,
         enable_tcp=enable_tcp,
     )

@@ -16,6 +16,20 @@ constructing proto messages itself. ``daemon/rpc.py``'s
 :func:`~aprilcam.daemon.rpc.build_stream_transport` is what wires those
 callables in for a real daemon.
 
+**Subscribe errors are sent, not swallowed (sprint 043 ticket 003).**
+Preconditions (``UnknownCamera``, ``CameraNotPresent``, ``NotCalibrated``)
+surface inside the sender thread's ``subscribe`` call. When it raises, the
+exception is still logged, then -- best effort, send failures ignored --
+the connection receives exactly one *error frame* before it closes. An
+error frame is an ordinary length-prefixed frame whose payload is
+``framing.ERROR_FRAME_MARKER`` (the single byte ``0x00``) followed by a
+serialized ``StreamError`` (kind + message, built by the injected
+*error_encoder*). ``0x00`` cannot begin a valid protobuf message, so it is
+unambiguous against ``GetFrameResponse``/``TagFrame`` data frames (even an
+empty all-defaults ``TagFrame``), and successful streams never carry it --
+they stay byte-identical. ``client/streams.py`` decodes it and raises the
+matching typed error.
+
 **Endpoint reuse, not one-shot allocation** (sprint.md Open Question
 3's recommended default). :meth:`StreamTransportManager.
 get_or_create_image_endpoint`/:meth:`get_or_create_tag_endpoint` bind a
@@ -267,9 +281,11 @@ class _Listener:
         subscribe: Callable[[], _Subscription],
         enable_unix: bool,
         enable_tcp: bool,
+        error_encoder: Optional[Callable[[Exception], bytes]] = None,
     ) -> None:
         self._name = name
         self._subscribe = subscribe
+        self._error_encoder = error_encoder
         self._stop_event = threading.Event()
         self._threads: List[threading.Thread] = []
 
@@ -339,8 +355,9 @@ class _Listener:
     def _sender_loop(self, conn: socket.socket) -> None:
         try:
             frames, close = self._subscribe()
-        except Exception:  # noqa: BLE001 - boundary: a bad subscribe must not kill this thread
+        except Exception as exc:  # noqa: BLE001 - boundary: a bad subscribe must not kill this thread
             logger.exception("stream_transport(%s): subscribe failed -- closing connection", self._name)
+            self._send_error_frame(conn, exc)
             self._drop(conn)
             return
 
@@ -365,6 +382,22 @@ class _Listener:
         finally:
             close()
             self._drop(conn)
+
+    def _send_error_frame(self, conn: socket.socket, exc: Exception) -> None:
+        """Best effort: tell the client *why* the subscribe failed, as
+        one error frame -- ``framing.ERROR_FRAME_MARKER`` + the
+        serialized ``StreamError`` the injected *error_encoder* builds
+        (module docstring, "Subscribe errors are sent, not swallowed").
+        Any failure here (no encoder wired, encoder bug, client already
+        gone) is ignored: the connection is closing either way."""
+        encoder = self._error_encoder
+        if encoder is None:
+            return
+        try:
+            payload = framing.ERROR_FRAME_MARKER + encoder(exc)
+            conn.sendall(framing.pack_frame(payload))
+        except Exception:  # noqa: BLE001 - best effort, never mask the close
+            logger.debug("stream_transport(%s): could not send error frame", self._name, exc_info=True)
 
     def _drop(self, conn: socket.socket) -> None:
         with self._lock:
@@ -433,6 +466,7 @@ class StreamTransportManager:
         *,
         image_encoder: Callable[[ImageFrame], bytes],
         tag_encoder: Callable[[TagFrame], bytes],
+        error_encoder: Optional[Callable[[Exception], bytes]] = None,
         enable_unix: bool = True,
         enable_tcp: bool = True,
     ) -> None:
@@ -455,6 +489,10 @@ class StreamTransportManager:
                 sends -- supplied by ``daemon/rpc.py``'s
                 :func:`~aprilcam.daemon.rpc.build_stream_transport` so
                 this module never imports ``aprilcam.proto`` itself.
+            error_encoder: Serialize a failed subscribe's exception into
+                a ``StreamError``'s bytes (``daemon/rpc.py`` supplies
+                it). Optional -- ``None`` keeps the old behavior of
+                closing silently.
             enable_unix / enable_tcp: Which transport(s) each listener
                 offers. Both default ``True`` (mirrors v1); a test may
                 disable one to keep assertions to a single transport.
@@ -463,6 +501,7 @@ class StreamTransportManager:
         self._socket_dir = socket_dir
         self._image_encoder = image_encoder
         self._tag_encoder = tag_encoder
+        self._error_encoder = error_encoder
         self._enable_unix = enable_unix
         self._enable_tcp = enable_tcp
 
@@ -489,6 +528,7 @@ class StreamTransportManager:
                     subscribe=lambda: self._subscribe_images(camera, deskewed),
                     enable_unix=self._enable_unix,
                     enable_tcp=self._enable_tcp,
+                    error_encoder=self._error_encoder,
                 )
                 self._image_listeners[key] = listener
         return listener.endpoint
@@ -505,6 +545,7 @@ class StreamTransportManager:
                     subscribe=lambda: self._subscribe_tags(camera),
                     enable_unix=self._enable_unix,
                     enable_tcp=self._enable_tcp,
+                    error_encoder=self._error_encoder,
                 )
                 self._tag_listeners[camera] = listener
         return listener.endpoint

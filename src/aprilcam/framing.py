@@ -41,6 +41,23 @@ from __future__ import annotations
 import socket
 import struct
 
+#: First byte of a stream *error frame*'s payload (sprint 043 ticket 003).
+#: ``0x00`` can never begin a valid protobuf message (it would decode as
+#: field number 0, which protobuf rejects), so a payload starting with it
+#: is unambiguously not a ``GetFrameResponse``/``TagFrame`` data frame --
+#: and, unlike checking for a magic field, it also cannot collide with an
+#: all-defaults ``TagFrame``, which serializes to zero bytes. The rest of
+#: the payload is a serialized ``StreamError``. Successful streams never
+#: carry the marker, so they are byte-identical to before.
+ERROR_FRAME_MARKER = b"\x00"
+
+
+def is_error_payload(payload: bytes) -> bool:
+    """True when *payload* is a stream error frame (see
+    :data:`ERROR_FRAME_MARKER`)."""
+    return payload[:1] == ERROR_FRAME_MARKER
+
+
 #: 4-byte big-endian unsigned int -- the length prefix's own wire shape.
 _LENGTH_STRUCT = struct.Struct(">I")
 

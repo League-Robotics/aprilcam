@@ -379,25 +379,22 @@ def test_grpc_daemon_stream_images_second_call_shares_one_daemon_side_producer(
             stream2.close()
 
 
-def test_grpc_daemon_stream_tags_unknown_camera_connects_then_closes_with_no_frame(
+def test_grpc_daemon_stream_tags_unknown_camera_connects_then_raises_unknown_camera(
     directories, registry, short_socket_dir
 ):
     """Endpoint allocation never validates the camera (ticket 005's own
-    contract: ``StreamTransportManager.get_or_create_*`` does no eager
-    validation) -- an unknown camera's socket still connects, and only
-    the daemon's sender thread's ``subscribe()`` call raises
-    ``UnknownCamera``, closing the connection without ever sending a
-    byte. This ticket surfaces that the same way any clean end-of-
-    stream is surfaced: an empty iteration (``EOFError`` ->
-    ``StopIteration``), per this ticket's Definition of Done -- not a
-    raised exception. Distinguishing "zero frames because of an
-    upstream failure" from "zero frames because the stream legitimately
-    ended immediately" is explicitly out of this ticket's scope."""
+    contract) -- an unknown camera's socket still connects, and the
+    sender thread's ``subscribe()`` raises ``UnknownCamera``. Sprint 043
+    ticket 003: that failure now reaches the client as a typed error
+    frame, so iteration raises ``UnknownCamera`` rather than ending
+    cleanly with no frames."""
+    from aprilcam.errors import UnknownCamera
+
     service, _slug = _looping_service(directories, registry)
     with _bind_stream_client(service, short_socket_dir) as (client, _transport):
         stream = client.stream_tags("no-such-camera")
         try:
-            frames = list(stream)
-            assert frames == []
+            with pytest.raises(UnknownCamera):
+                list(stream)
         finally:
             stream.close()

@@ -1,8 +1,9 @@
 ---
 id: '003'
 title: Propagate stream subscribe errors to the client
-status: open
-use-cases: [SUC-004]
+status: done
+use-cases:
+- SUC-004
 depends-on: []
 github-issue: ''
 issue: stream-subscribe-errors-are-lost-so-playfield-view-reports-no-frame-instead-of-not-calibrated.md
@@ -39,16 +40,16 @@ first-frame timeout path, and that `cli/camera.py` behaves likewise.
 
 ## Acceptance Criteria
 
-- [ ] A failing subscribe makes the transport send a typed error frame,
+- [x] A failing subscribe makes the transport send a typed error frame,
       then close; the exception is still logged.
-- [ ] Iterating a client stream that receives an error frame raises the
+- [x] Iterating a client stream that receives an error frame raises the
       matching typed `AprilCamError`, not a clean end of stream.
-- [ ] Successful streams are byte-identical to today (existing stream
+- [x] Successful streams are byte-identical to today (existing stream
       tests pass unchanged).
-- [ ] `aprilcam playfield view` against a camera whose stream raises
+- [x] `aprilcam playfield view` against a camera whose stream raises
       `NotCalibrated` prints the "not calibrated" message and not the
       "no frame received" text; non-zero exit.
-- [ ] Transport and streams docstrings and the relevant DESIGN notes
+- [x] Transport and streams docstrings and the relevant DESIGN notes
       record the error-frame encoding.
 
 ## Implementation Plan
