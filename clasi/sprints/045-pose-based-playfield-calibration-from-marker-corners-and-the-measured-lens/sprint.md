@@ -1,7 +1,7 @@
 ---
 id: '045'
 title: Pose-based playfield calibration from marker corners and the measured lens
-status: ticketing
+status: executing
 branch: sprint/045-pose-based-playfield-calibration-from-marker-corners-and-the-measured-lens
 use-cases:
 - SUC-001

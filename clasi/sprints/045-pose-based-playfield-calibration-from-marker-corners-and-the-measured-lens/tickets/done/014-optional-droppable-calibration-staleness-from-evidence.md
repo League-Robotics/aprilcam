@@ -4,7 +4,9 @@ title: 'Optional (droppable): calibration staleness from evidence'
 status: done
 use-cases:
 - SUC-008
-depends-on: ['006', '009']
+depends-on:
+- '006'
+- 009
 github-issue: ''
 issue: pose-based-playfield-calibration-with-marker-corners-and-measured-lens.md
 completes_issue: false
