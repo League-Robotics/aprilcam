@@ -1,7 +1,7 @@
 ---
 id: '046'
 title: Intrinsics GUI shows the live camera image with a labelled coverage grid
-status: ticketing
+status: executing
 branch: sprint/046-intrinsics-gui-shows-the-live-camera-image-with-a-labelled-coverage-grid
 use-cases:
 - SUC-001
