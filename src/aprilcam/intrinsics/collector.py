@@ -222,7 +222,12 @@ class ViewCollector:
         return object_points(self._spec, ids)
 
     def _pose(self, board: BoardDetection, w: int, h: int):
-        """``(tilt_deg, azimuth_deg, confident)`` from IPPE with a guessed K."""
+        """``(tilt_deg, azimuth_deg, confident)`` from IPPE with a guessed K.
+
+        Cross-reference: ``calibration/pose.py`` ``solve_planar_pose`` is the
+        metric counterpart (measured K, distortion, LM refinement). Kept
+        separate on purpose (sprint 045 Decision 1); keep IPPE handling in sync.
+        """
         obj = self._object_points(board.ids)
         img = np.array(board.corners, dtype=np.float64).reshape(-1, 2)
         if len(obj) < 6:

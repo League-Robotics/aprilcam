@@ -1,12 +1,14 @@
 ---
 id: '004'
 title: 'Planar pose solve and gates: calibration/pose.py and gates.py'
-status: open
+status: done
 use-cases:
 - SUC-001
 - SUC-003
 - SUC-005
-depends-on: ['001', '003']
+depends-on:
+- '001'
+- '003'
 github-issue: ''
 issue: pose-based-playfield-calibration-with-marker-corners-and-measured-lens.md
 completes_issue: true
@@ -67,37 +69,37 @@ both places pointing at each other.
 
 ## Acceptance Criteria
 
-- [ ] Synthetic ground truth: a camera at 144 cm over nadir (3.47, -2.85)
+- [x] Synthetic ground truth: a camera at 144 cm over nadir (3.47, -2.85)
       (the camera-2 numbers), tilt a few degrees, looking at four corner
       markers of the secondary field, with a realistic distortion; the solve
       recovers height within 1 cm and nadir within 1 cm without noise, and
       within 2 cm with 0.3 px corner noise.
-- [ ] Derived homography reproduces the true pixel -> world mapping for
+- [x] Derived homography reproduces the true pixel -> world mapping for
       arbitrary points (north-up, no mirror; east = +x), checked at points
       off the markers.
-- [ ] 16 corners from four markers; two-marker diagonal (8) and one-marker
+- [x] 16 corners from four markers; two-marker diagonal (8) and one-marker
       (4) solves still return a pose (flagged by ambiguity ratio where
       applicable).
-- [ ] Orientation detection: a synthetic scene with markers at all four
+- [x] Orientation detection: a synthetic scene with markers at all four
       rotations (0, +90, 180 i.e. upside down, -90) solves to the same pose
       (height, nadir, homography) as the same scene with every marker
       upright, within noise tolerance; the detected quarter-turn of each
       marker equals the one used to render it. A mixed layout matching the
       main field (1, 2, 3 upright, 4 +90, 8 -90, 5, 6, 7, 9, 10 upside down)
       is one of the cases.
-- [ ] Quarter-turn convention pinned: with the wrong rotation forced, the
+- [x] Quarter-turn convention pinned: with the wrong rotation forced, the
       residual is large (so the detector's choice is meaningful), and the
       winner/runner-up ratio is reported.
-- [ ] Leave-one-out residual: for each marker, fit the pose to the others and
+- [x] Leave-one-out residual: for each marker, fit the pose to the others and
       report that marker's centre error in cm; synthetic test displaces one
       marker's surveyed position (the swapped-9/10 case: two markers
       exchanged) and the worst id is named correctly; clean data stays below
       the threshold. Worked reference: 0.75 cm worst on the corrected main
       field, 30 cm rms before the 9/10 correction.
-- [ ] Gate functions unit-tested for every branch of the degradation ladder
+- [x] Gate functions unit-tested for every branch of the degradation ladder
       and for threshold edges; threshold defaults justified by a noise sweep
       recorded in the ticket's implementation notes.
-- [ ] `gates.py` imports no cv2 (`tests/test_no_cv2_in_client_modules.py`
+- [x] `gates.py` imports no cv2 (`tests/test_no_cv2_in_client_modules.py`
       extended or a dedicated import test if that guards only client
       packages).
 
@@ -121,3 +123,48 @@ explicit arrays in/out; no logging of secrets, no state.
 ## Documentation Updates
 
 Module docstrings carry the conventions; DESIGN.md in ticket 012.
+
+## Implementation Notes
+
+**Conventions pinned (tests in `tests/aprilcam/calibration/test_pose.py`).**
+Field frame x east, y north, z up; looking-down camera is `diag(1,-1,-1)`
+(no mirror). Marker corners TL,TR,BR,BL; upright TL = centre + (-s/2, +s/2).
+`quarter_turns` = counter-clockwise seen from above: one turn puts TL at the
+south-west and the top edge faces west. `homography_from_pose` = inverse of
+`K [r1 r2 t]`, undistorted pixel -> field cm (what `Calibration.to_world`
+applies after `undistort_point`).
+
+**Design points.** Orientation: >= 4 markers seed a centre homography, score
+each marker's 4 quarter turns by corner residual in cm, refit the pose and
+rescore (up to 2 passes); < 4 markers enumerate all 4^n turn combinations by
+pose rms (one marker is inherently ambiguous, ratio ~1). The ambiguity ratio
+is IPPE's runner-up/best error (LM refinement drags the runner-up onto the
+same minimum and would erase it). Leave-one-out and the scale distances are
+computed in `pose.py` (`leave_one_out_residuals`, `marker_distances`) and
+decided in `gates.py`. `TargetObserver` is `Callable[[ndarray, Any],
+Sequence[FieldCorner]]`; `FieldCorner` is a placeholder for ticket 011.
+
+**Noise sweep** (camera 144 cm up, tilt 4 deg, 1280x720, fx 1000, k1 -0.25,
+46 mm markers, worst of 40 seeds). Corner noise 0.1/0.3/0.6/1.0 px, 10-marker
+main layout: rms px 0.16/0.49/0.98/1.64; rms cm 0.03/0.08/0.15/0.26;
+leave-one-out worst 0.07/0.20/0.39/0.65 cm; scale |ratio-1| 0.003/0.007/0.016/0.030;
+nadir error 0.08/0.23/0.46/0.77 cm; height error <= 0.12 cm; min rotation
+ratio 122/41/21/12. Four corner markers at 0.3 px: nadir <= 0.36 cm, height <=
+0.07 cm. Markers printed 3 % / 10 % larger than defined: scale 0.037 / 0.098,
+rms 0.84 / 2.2 px. A marker displaced d cm: leave-one-out reads d cm, named
+correctly (6 cm swap case in tests). Lone marker: angular spread 2.5 deg, IPPE
+ratio median 1.5 (min 1.0) -- so the ambiguity ratio alone does NOT reliably
+flag it; the count rule does.
+
+**Finding added to the plan: layout-extent gate.** Two diagonal markers, or
+three in a row, are fine on rms and ambiguity ratio yet roll about the
+baseline is unconstrained: nadir error up to 30 cm (diag-2) / 81 cm (line-3)
+at 0.3 px noise. Added `gates.layout_extent_ratio` (min/max singular value of
+centred centres) with `MIN_LAYOUT_EXTENT_RATIO = 0.2` (L-shaped 3 markers
+0.48, near-lines 0.05-0.11) and a `classify` cap at `low`. Ticket 006 should
+feed `layout_extent_ratio` into `GateMetrics`. A tight cluster (20 cm across)
+is caught by the angular-spread gate instead.
+
+**Classification choices for 006:** rms (px or cm), scale and leave-one-out
+failures return `fail` with a reason; weak geometry (angular spread, IPPE
+ratio, collinear layout, ambiguous rotation) caps at `low` with notes.
