@@ -93,6 +93,7 @@ from aprilcam.cli._common import (
 )
 from aprilcam.cli import calibrate as calibrate_cli
 from aprilcam.cli import flatfield as flatfield_cli
+from aprilcam.cli import intrinsics as intrinsics_cli
 from aprilcam.cli import locate as locate_cli
 from aprilcam.client.discovery import Discovery
 from aprilcam.config.interfaces import ConfigLoader
@@ -700,6 +701,7 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     # 037 ticket 004) but is grouped under this ``camera`` subparser
     # tree -- see that module's docstring for why.
     flatfield_cli.add_subparser(sub)
+    intrinsics_cli.add_subparser(sub)
 
     # ``locate`` lives in its own module (cli/locate.py, sprint 029
     # ticket 003) but is grouped under this ``camera`` subparser tree --
