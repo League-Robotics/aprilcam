@@ -1,5 +1,6 @@
 ---
 status: pending
+sprint: '043'
 ---
 
 # Stream subscribe errors are dropped by the transport, so `playfield view` says "no frame received" instead of "not calibrated"
