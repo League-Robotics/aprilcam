@@ -1270,12 +1270,53 @@ a race bug.
 
 ---
 
+### UC-31 — Run a lens-intrinsics session on a camera
+
+**Job:** JTBD-06 · **Primary actor:** A-03 · **Also serves:** A-02
+**Status:** draft
+**Interfaces:** CLI, Python, MCP
+
+**Goal.** A client starts a lens-intrinsics session on a camera the daemon owns, polls its progress, and finishes or aborts it, with all vision done in the daemon and the result installed without a restart.
+
+**Preconditions.** The camera is open in the daemon. No session is already running on it.
+
+**Main success path.**
+1. `start_intrinsics(camera, board?)` — board resolves request > `APRILCAM_CHARUCO_BOARD` > default. A session begins reading the camera at about 8 fps.
+2. The client polls `get_intrinsics_status` (about once per second). Each snapshot reports kept views, coverage, residual, `good_enough`, a banner, and a `next_hint`.
+3. `finish_intrinsics(install=True)` runs a final full solve; if good (or `force`), the lens is installed through the lens store, takes effect in memory at once, and is marked pending until the next calibrate.
+
+**Postconditions.** Camera has `intrinsics.json` with source `measured`; no frames were retained; the session is gone.
+
+**Failure modes.**
+- Unknown camera / bad board spec / second start on the same camera → typed error.
+- Finish when not good and not `force` → nothing installed, session stays running.
+- No status poll for 120 s → session auto-aborts; daemon shutdown aborts all sessions.
+- Camera read failures beyond the cap → session ends with an error banner.
+
+**Open questions.** None.
+
+#### Scenarios
+
+**UC-31.S-1 — Agent drives a session over MCP** · _happy path_
+`start_intrinsics`, poll following `next_hint`, `finish_intrinsics(install=True)` once `good_enough`; the result reports the installed lens and says to run calibrate.
+
+**UC-31.S-2 — Abandoned session** · _failure path_
+A client disappears after start; 120 s later the session aborts and nothing is installed.
+
+**UC-31.S-3 — Finish too early** · _failure path_
+`finish_intrinsics` before the lens is good returns not-installed with the residual; `force=True` installs anyway.
+
+**UC-31.S-4 — Calibrate carries the lens forward** · _happy path_
+After install, `calibrate` uses the size-matched store model, reports `lens_model_source`, and clears `lens-pending`.
+
+---
+
 ## Traceability
 
 > The coverage check: every use case has at least one happy-path and one
 > failure-path scenario; every scenario eventually names a test.
 
-This file covers 15 use cases and 57 scenarios (including variations).
+This file covers 16 use cases and 61 scenarios (UC-31 added by sprint 044) (including variations).
 Tests are filled for every use case named in sprint 035's Success
 Criteria (01, 03, 04, 06, 09, 10, 11, 12, 26, 28) plus the ones ticket
 008 filled beforehand; UC-02, UC-05, UC-07, UC-08, and UC-27 remain
@@ -1304,6 +1345,7 @@ index rather than this file — so it was not used as the audit).
 | UC-26 Tag history | JTBD-04, 01 | A-02, A-01 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗ | daemon, vision | `tests/image_matrix/test_recall.py::test_recall`, `tests/image_matrix/test_synthetic_degradation.py::test_severe_degradation_documented_boundary`, `tests/aprilcam/daemon/test_streaming_hardware.py::test_two_real_subscribers_on_deskewed_stream_share_one_warp_per_tick`, `tests/aprilcam/daemon/test_streaming_integration.py::test_full_stack_an_unread_client_socket_does_not_stall_an_active_client_real_clock` |
 | UC-27 Packaged instructions | JTBD-01, 02, 03 | A-02, A-01 | S-1 ✓, S-2 ✓, S-3 ✗ | mcp, guides | — |
 | UC-28 Draw on the playfield | JTBD-07 | A-01, A-02, A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✓, S-5 ✗, S-6 ✓ | daemon, client, mcp | `tests/aprilcam/daemon/test_annotations_integration.py::test_put_by_one_client_is_visible_to_a_second_client_and_renders_on_a_real_deskewed_frame`, `tests/aprilcam/daemon/test_annotations_integration.py::test_daemon_restart_wipes_annotations_while_the_disk_backed_playfield_and_a_re_put_survive`, `tests/aprilcam/daemon/test_service.py::test_replace_layer_never_exposes_a_torn_state_to_a_concurrent_reader`, `tests/aprilcam/mcp/test_annotations.py::test_list_annotations_round_trips_exactly_what_was_drawn` |
+| UC-31 Lens-intrinsics session | JTBD-06 | A-03, A-02 | S-1 ✓, S-2 ✗, S-3 ✗, S-4 ✓ | daemon, calibration, client, mcp | `tests/aprilcam/daemon/test_service_intrinsics.py::test_start_poll_abort_installs_nothing`, `tests/aprilcam/daemon/test_service_intrinsics.py::test_double_start_refused_and_number_token_resolves`, `tests/aprilcam/daemon/test_service_intrinsics.py::test_close_aborts_sessions` |
 
 ✓ happy path · ✗ failure path
 

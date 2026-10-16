@@ -18,7 +18,7 @@ design.md` owns that; read it first for the principles below).
 
 ## 2. Orientation
 
-Twelve subsystem directories, each with its own `DESIGN.md`:
+Thirteen subsystem directories, each with its own `DESIGN.md`:
 
 | Subsystem | One line |
 |---|---|
@@ -26,6 +26,7 @@ Twelve subsystem directories, each with its own `DESIGN.md`:
 | `camera/` | Camera identity resolution across re-plugs, the persistent identity→slug registry, and pluggable capture backends. Daemon-only. |
 | `vision/` | Stateless frame vision: preprocessing pipeline and raw AprilTag/ArUco detection — pixels in, raw hits out. Daemon-only. |
 | `calibration/` | Establishes and holds a camera's pixel↔world mapping from a playfield definition; deskew geometry. Daemon-only. |
+| `intrinsics/` | ChArUco-board lens (intrinsics) calibration as a daemon workflow: detector, view collector, solver, sessions. Daemon-only except its cv2-free `interfaces.py`. |
 | `playfield/` | The surveyed playfield as a definition document plus queries against it (not a camera, not a service). |
 | `config/` | FHS/XDG directory resolution and the config-document value types/loader (camera configs, playfield definitions). |
 | `client/` | The one sanctioned way to talk to the daemon: gRPC wrapper, discovery, stream consumers, `from_proto` model boundary, annotation renderer. cv2-free. |

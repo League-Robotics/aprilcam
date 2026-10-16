@@ -23,6 +23,7 @@ aprilcam daemon start|stop|restart|status # lifecycle, local by default
 aprilcam camera list                      # cameras on a daemon
 aprilcam camera probe                     # interrogate hardware, derive names
 aprilcam camera calibrate <camera>        # requires a playfield
+aprilcam camera intrinsics <camera...>    # ChArUco lens calibration (UC-30)
 aprilcam camera view <camera>             # live raw video
 aprilcam camera image <camera>            # one raw frame
 aprilcam camera config <file>             # push a camera config (self-naming)
@@ -213,7 +214,9 @@ remotely, with enough state to know what is usable.
 1. `aprilcam camera list` (local) or `-d pi-field.local` (remote).
 2. Each camera is listed with its stable enumeration number and
    identity, its linked playfield if any, whether it is calibrated, and
-   whether it is currently readable.
+   whether it is currently readable. Each row also shows the lens model
+   (`lens=measured|legacy|estimated`, plus `lens-pending` when a newly
+   installed lens has not yet been applied by a calibrate; see UC-30).
 
 **Postconditions.** None — a read.
 
@@ -277,6 +280,8 @@ anything. This is a precondition failure, not a calibration failure.
 3. Per UC-04, success requires **every ArUco fiducial the playfield
    definition specifies** to be detected. The CLI reports success, or
    failure naming the missing ids.
+
+**Lens.** Calibrate carries forward the camera's measured lens model (UC-30) if one matches the frame size, else a prior calibration's lens, and prints which it used. `--with-intrinsics` (estimate a lens from the field markers) is the documented no-board fallback and is refused while a measured model is installed.
 
 **Postconditions.** On success, the camera has a stored calibration and
 world coordinates become available. On failure, nothing is stored and any
@@ -1336,9 +1341,53 @@ writes, with or without `--force`.
 
 ---
 
+### UC-30 — Measure a camera's lens with a ChArUco board
+
+**Job:** JTBD-06, JTBD-05 · **Primary actor:** A-03
+**Status:** draft
+**Interfaces:** CLI, Python, MCP
+
+**Goal.** The developer measures one or more cameras' lens intrinsics from a printed ChArUco board, watching live progress, and installs the result without restarting the daemon.
+
+**Preconditions.** A daemon is running on the target and owns the camera(s). A ChArUco board is printed (default `5x7:37:28:DICT_5X5_100`, or named by `--board` / `APRILCAM_CHARUCO_BOARD`).
+
+**Main success path.**
+1. `aprilcam camera intrinsics arducam-ov9782-usb-camera hd-usb-camera [--board SPEC] [-d HOST]`.
+2. The CLI starts one daemon-side session per camera (UC-31) and shows a fullscreen window (or, with `--no-gui` or no display, a text status loop): a per-camera view count, coverage grid, residual, and the next hint ("tilt the board, top-left").
+3. The developer moves the board. A camera turns green when the lens is good enough; the window does not close by itself.
+4. The developer presses Enter (or passes `--install` up front): good cameras are finished and installed; Esc aborts.
+
+**Postconditions.** Each installed camera has `intrinsics.json`; `camera list` shows `lens=<source>` and `lens-pending` until the next `camera calibrate` applies it. Exit status 0 only if every camera was installed.
+
+**Failure modes.**
+- Unknown camera, unparseable board spec, or a session already running on the camera → error naming it; nothing started.
+- Camera not yet good enough when Enter is pressed → not installed; the session keeps running.
+- Daemon unreachable → connection error naming the host.
+- `--all` is refused (single-daemon, mutating).
+
+**No board available.** `aprilcam camera calibrate <camera> --with-intrinsics` remains the documented fallback; it estimates a lens from the field markers and is refused while a measured model is installed.
+
+**Open questions.** None.
+
+#### Scenarios
+
+**UC-30.S-1 — Two cameras, GUI** · _happy path_
+Both cameras reach green; Enter installs both; exit 0; `camera list` shows `lens=measured lens-pending` for each.
+
+**UC-30.S-2 — Over SSH, no display** · _happy path_
+`--no-gui --install` prints status lines, installs each camera as it turns good, and exits 0.
+
+**UC-30.S-3 — Quit before green** · _failure path_
+The developer presses Esc; all sessions abort, nothing is installed, exit non-zero.
+
+**UC-30.S-4 — Bad board spec** · _failure path_
+`--board 5x7:28:37:DICT_5X5_100` (marker larger than square) is rejected before any session starts.
+
+---
+
 ## Traceability
 
-This file covers 14 use cases and 55 scenarios (UC-20.S-4 added by
+This file covers 15 use cases and 59 scenarios (UC-30 added by sprint 044) (UC-20.S-4 added by
 sprint 039, ticket 006, documenting the `--follow`/`--json` continuous
 mode -- no existing use case or scenario number was renumbered or
 reused). Tests are filled for
@@ -1372,6 +1421,7 @@ on disk. UC-25.S-1 walks the whole chain end to end.
 | UC-24 Dump config | JTBD-05 | A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗ | yes | — |
 | UC-25 Probe / hotplug | JTBD-05 | A-03 | S-1 ✓, S-2 ✓, S-3 ✓, S-4 ✗, S-5 ✓, S-6 ✓, S-7 ✗ | yes | `tests/aprilcam/camera/test_discovery.py::test_probe_reports_present_usable_cameras_matching_registry_resolution`, `tests/aprilcam/camera/test_discovery.py::test_probe_reports_present_but_unopenable_camera_never_omitted`, `tests/aprilcam/cli/test_camera_cli.py::test_list_all_reports_discovery_failed_distinctly`, `tests/aprilcam/daemon/test_detection_hardware.py::test_camera_tags_by_cli_number_and_slug_agree_on_real_hardware` |
 | UC-29 Locate a camera's position | JTBD-06, 01 | A-03 | S-1 ✓, S-2 ✗, S-3 ✗, S-4 ✗, S-5 ✗ | no | `tests/aprilcam/cli/test_locate_cli.py::test_locate_dry_run_never_writes_even_with_a_poor_fit`, `tests/aprilcam/cli/test_locate_cli.py::test_locate_fail_fast_stops_at_the_first_undetected_reference`, `tests/aprilcam/daemon/test_camera_geometry_hardware.py::test_locate_reports_missing_references_or_reproduces_the_documented_fixture`, `tests/acceptance/test_inventory.py::test_where_surveyed_apriltag` |
+| UC-30 Measure a camera lens (ChArUco) | JTBD-06, 05 | A-03 | S-1 ✓, S-2 ✓, S-3 ✗, S-4 ✗ | no | `tests/aprilcam/cli/test_intrinsics_cli.py::test_enter_installs_when_good_and_does_not_abort`, `tests/aprilcam/cli/test_intrinsics_cli.py::test_never_auto_quits_on_green`, `tests/aprilcam/cli/test_intrinsics_cli.py::test_install_flag_installs_once_when_good`, `tests/aprilcam/cli/test_intrinsics_cli.py::test_abort_on_error` |
 
 ✓ happy path · ✗ failure path
 

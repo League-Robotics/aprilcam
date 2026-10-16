@@ -275,6 +275,10 @@ established for the old `PollLoop`, carried forward unchanged onto
 `StreamLoop` — only the subscription's `deskewed` flag and the
 conversion callable differ between the two views.
 
+### Intrinsics view (sprint 044)
+
+`intrinsics_model.py` is a pure (Tk-free, `cv2`-free) view model turning `IntrinsicsStatus` snapshots into per-camera panel text, coverage grid and banner; `intrinsics_gui.py` is the fullscreen Tk shell around it (poll loop, Enter installs good cameras, Esc aborts, never auto-quits on green). The text mode used by `--no-gui` shares the same model, so the two cannot disagree.
+
 ## 5. Interfaces
 
 ### Exposes
