@@ -197,6 +197,13 @@ MCP tool groups, registered in this order by `server.py`'s
   `estimate_intrinsics` shape), `get_flatfield`, `clear_flatfield`.
   Whole-document push/fetch plus the calibration and flat-field-capture
   triggers.
+- **Intrinsics** (`tools/intrinsics.py`, sprint 044) — `start_intrinsics`
+  (`camera`, optional `board`), `get_intrinsics_status`,
+  `finish_intrinsics` (`install`, `force`), `abort_intrinsics`. Return
+  plain JSON dicts built from the cv2-free `intrinsics.interfaces` types;
+  an agent polls status, relays `next_hint` to the human holding the
+  board, finishes with install at `good_enough`, and always aborts when
+  giving up (the daemon self-aborts after 120 s without polling).
 - **Mobile tags** (`tools/mobile_tags.py`) — `register_tag`,
   `unregister_tag`, `list_tag_parameters`. In-memory mount-parameter
   registrations that do not survive a daemon restart.
