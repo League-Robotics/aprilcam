@@ -37,12 +37,16 @@ POLL_INTERVAL_S = 0.33
 
 
 def run_gui(daemon, cameras: list, *, install: bool) -> Optional[int]:
-    """GUI entry-point seam. Ticket 008 replaces this with the Tk window.
+    """Launch the fullscreen Tk intrinsics window (ticket 044-008).
 
-    Returns an exit code once the GUI has run, or ``None`` meaning "no GUI
-    available, use text mode" -- which is all this stub ever does.
+    Returns the GUI's exit code (0 only when every camera ended installed).
+    Raises ``NoDisplayAvailable`` on a display-less host; ``cmd_intrinsics``
+    catches that and falls back to text mode. The import is deferred so
+    text mode never loads Tk.
     """
-    return None
+    from aprilcam.view.intrinsics_gui import run_intrinsics_gui
+
+    return run_intrinsics_gui(daemon, cameras, install=install)
 
 
 def _stdin_enter_ready(timeout: float) -> bool:

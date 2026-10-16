@@ -176,3 +176,22 @@ def test_registered_under_camera():
     camera_cli.add_subparser(p.add_subparsers())
     ns = p.parse_args(["camera", "intrinsics", "a", "b", "--no-gui", "--install"])
     assert ns.camera == ["a", "b"] and ns.no_gui and ns.install and ns.func is cli.cmd_intrinsics
+
+
+def test_cli_wires_real_gui_entry_point(monkeypatch):
+    from aprilcam.view import intrinsics_gui
+    seen = []
+    monkeypatch.setattr(intrinsics_gui, "run_intrinsics_gui",
+                        lambda daemon, cams, install: seen.append((cams, install)) or 0)
+    assert cli.run_gui(object(), ["a"], install=True) == 0
+    assert seen == [(["a"], True)]
+
+
+def test_real_gui_headless_falls_back_to_text(monkeypatch, capsys):
+    from aprilcam.view import intrinsics_gui
+    monkeypatch.setattr(intrinsics_gui, "_headless_reason", lambda: "forced headless")
+    d = FakeDaemon(good_after={"a": 0})
+    rc = _run(d, _args(no_gui=False), enters={1}, headless_check=lambda: None,
+              run_gui=cli.run_gui)
+    assert rc == 0
+    assert "forced headless" in capsys.readouterr().err

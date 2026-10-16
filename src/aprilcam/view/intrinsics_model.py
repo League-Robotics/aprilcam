@@ -37,6 +37,15 @@ __all__ = [
     "status_text_lines",
     "view_model_text_lines",
     "finish_text_lines",
+    "FontSizes",
+    "EnterDecision",
+    "font_sizes",
+    "colour_for",
+    "tile_colour",
+    "key_action",
+    "decide_enter",
+    "exit_code_for",
+    "connection_banner",
 ]
 
 CELL_ORDER = ("NW", "N", "NE", "W", "C", "E", "SW", "S", "SE")
@@ -235,3 +244,99 @@ def finish_text_lines(result: IntrinsicsFinishResult) -> list[str]:
     if result.reason:
         lines.append(f"  reason: {result.reason}")
     return lines
+
+
+# ---------------------------------------------------------------------------
+# GUI-facing pure helpers (sprint 044 ticket 008): sizes, colours, key rules.
+# ---------------------------------------------------------------------------
+
+#: Concrete colours per class hint (dark background, readable at distance).
+_COLOURS = {
+    "green": "#3ddc84",
+    "yellow": "#ffd23f",
+    "red": "#ff5555",
+    "dim": "#8a8a8a",
+    "plain": "#e8e8e8",
+}
+_TILE_COLOURS = {"none": "#333333", "some": "#b8860b", "good": "#2e9e5b"}
+
+
+def colour_for(cls: str) -> str:
+    """Hex colour for a ``green``/``yellow``/``red``/``dim``/``plain`` class."""
+    return _COLOURS.get(cls, _COLOURS["plain"])
+
+
+def tile_colour(level: str) -> str:
+    """Hex fill for a coverage tile level (``none``/``some``/``good``)."""
+    return _TILE_COLOURS.get(level, _TILE_COLOURS["none"])
+
+
+@dataclass(frozen=True, kw_only=True)
+class FontSizes:
+    """Point sizes (pixels, negative-Tk style handled by the caller) for each text tier."""
+
+    banner: int
+    metric: int
+    body: int
+    tile: int
+    next_line: int
+
+
+def font_sizes(screen_height: int, camera_count: int = 1) -> FontSizes:
+    """Scale every font from the screen height so the display reads from
+    ~10 feet: the banner is about H/9. With several cameras side by side the
+    per-camera tiers shrink a little (columns are narrower) but never below
+    a floor."""
+    h = max(int(screen_height), 200)
+    shrink = 1.0 if camera_count <= 1 else (0.8 if camera_count == 2 else 0.65)
+    return FontSizes(
+        banner=max(h // 9, 20),
+        metric=max(int(h / 14 * shrink), 14),
+        body=max(int(h / 30 * shrink), 10),
+        tile=max(int(h / 34 * shrink), 10),
+        next_line=max(int(h / 22), 12),
+    )
+
+
+@dataclass(frozen=True, kw_only=True)
+class EnterDecision:
+    """What Enter does: ``finish`` the listed cameras, show a ``notice``
+    (nothing good yet), or ``quit`` (nothing left to finish)."""
+
+    action: str  # "finish" | "notice" | "quit"
+    cameras: tuple[str, ...] = ()
+    notice: Optional[str] = None
+
+
+def key_action(keysym: str) -> Optional[str]:
+    """Map a Tk keysym to ``enter``/``escape`` (or ``None``)."""
+    if keysym in ("Return", "KP_Enter"):
+        return "enter"
+    if keysym == "Escape":
+        return "escape"
+    return None
+
+
+def decide_enter(good_by_camera: dict) -> EnterDecision:
+    """Enter, given ``{camera: good}`` for the cameras still owned (not yet
+    installed). Only good cameras are ever finished -- never forced."""
+    if not good_by_camera:
+        return EnterDecision(action="quit")
+    good = tuple(c for c, g in good_by_camera.items() if g)
+    if not good:
+        return EnterDecision(
+            action="notice",
+            notice="not GOOD ENOUGH yet -- keep going (Enter installs only a good result)")
+    return EnterDecision(action="finish", cameras=good)
+
+
+def exit_code_for(installed: Sequence[str], cameras: Sequence[str]) -> int:
+    """0 only when every camera ended installed, else 1 (text-mode parity)."""
+    return 0 if set(installed) == set(cameras) and cameras else 1
+
+
+def connection_banner(error: Optional[str]) -> Optional[str]:
+    """Error banner text for a failed poll, or ``None`` when healthy."""
+    if not error:
+        return None
+    return f"DAEMON CONNECTION LOST -- {error}"
