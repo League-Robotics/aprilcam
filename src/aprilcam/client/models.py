@@ -459,13 +459,6 @@ def calibration_result_from_proto(msg: aprilcam_v2_pb2.CalibrationResult) -> Cal
             msg.reprojection_error_cm if msg.HasField("reprojection_error_cm") else None
         ),
         reason=msg.reason if msg.HasField("reason") else None,
-        intrinsics_estimated=(
-            msg.intrinsics_estimated if msg.HasField("intrinsics_estimated") else None
-        ),
-        intrinsics_mode=msg.intrinsics_mode if msg.HasField("intrinsics_mode") else None,
-        elevated_features_used=(
-            msg.elevated_features_used if msg.HasField("elevated_features_used") else None
-        ),
         lens_model_source=(
             msg.lens_model_source if msg.HasField("lens_model_source") else None
         ),

@@ -49,20 +49,13 @@ __all__ = ["add_subparser", "cmd_calibrate"]
 def cmd_calibrate(
     args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
 ) -> int:
-    """``aprilcam camera calibrate <camera> [-d HOST] [--with-intrinsics]``.
+    """``aprilcam camera calibrate <camera> [-d HOST]``.
 
     ``--all`` is refused up front, before any connection is attempted --
     calibration is single-daemon by the fan-out rule (UC-15.S-4), the
     same "refuse before connecting" shape ``cmd_view`` (``cli/camera.py``,
     ticket 022-002) already established and named this exact refusal as
     a forward pointer to.
-
-    ``--with-intrinsics`` (sprint 030 ticket 002, SUC-002) opts into
-    also estimating this camera's lens model from this call's detection
-    burst. On success, reports whether intrinsics were estimated this
-    call (and which mode/how many elevated features contributed), or
-    that any previously-stored lens model was carried forward unchanged
-    -- true either way, whether or not one actually existed to carry.
     """
     if args.all:
         print(
@@ -75,7 +68,7 @@ def cmd_calibrate(
 
     try:
         daemon = discovery_factory().connect(args.daemon)
-        result = daemon.calibrate(args.camera, estimate_intrinsics=args.with_intrinsics)
+        result = daemon.calibrate(args.camera)
     except AprilCamError as exc:
         return report_error(exc)
 
@@ -95,28 +88,10 @@ def cmd_calibrate(
             f"calibration succeeded for {args.camera!r}: "
             f"{len(result.matched_ids)} ArUco id(s) matched ({matched}){error_note}"
         )
-        if result.intrinsics_estimated is True:
-            mode_note = f"intrinsics estimated this call (mode: {result.intrinsics_mode}"
-            if result.elevated_features_used:
-                mode_note += f", {result.elevated_features_used} elevated feature(s) used"
-            mode_note += ")"
-            print(mode_note)
-        elif result.intrinsics_estimated is False:
-            print(
-                "intrinsics not estimated this call "
-                "(any previously-stored lens model carried forward unchanged)"
-            )
         print(_lens_line(result.lens_model_source))
         _print_pose_report(result, verbose=getattr(args, "verbose", False))
         return EXIT_OK
 
-    if result.lens_model_source == "measured" and result.intrinsics_estimated is False:
-        # --with-intrinsics refused over an installed measured model.
-        print(
-            "lens model: measured (--with-intrinsics refused; measure with "
-            "'aprilcam camera intrinsics', or remove the installed model first)",
-            file=sys.stderr,
-        )
     if result.method == "pose":
         # A pose attempt that failed a gate: show what was measured, so the
         # reason's threshold can be read against the value.
@@ -224,18 +199,6 @@ def add_subparser(sub: "argparse._SubParsersAction") -> None:
         "calibrate", help="calibrate a camera against its linked playfield (UC-04, UC-15)"
     )
     p_calibrate.add_argument("camera", help="camera name (slug or persistent number)")
-    p_calibrate.add_argument(
-        "--with-intrinsics",
-        action="store_true",
-        default=False,
-        help=(
-            "no-board fallback: also estimate this camera's lens model "
-            "(camera_matrix/dist_coeffs) from the field's ground-truth points in this "
-            "call's detection burst. Prefer a ChArUco measurement ('aprilcam camera "
-            "intrinsics'); this is refused while a measured lens model is installed. "
-            "Default is to leave any previously-stored lens model exactly as it was"
-        ),
-    )
     p_calibrate.add_argument(
         "--verbose",
         "-v",

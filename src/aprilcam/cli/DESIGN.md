@@ -183,7 +183,7 @@ shape `playfield.py` uses at the top level.
   the same fields, still going through the same `AprilCamError`
   ->`report_error` handling for a connection failure.
 - **`camera flatfield`'s `--force`/`--dry-run` flags mirror `calibrate.py`'s
-  existing `--with-intrinsics` opt-in-flag shape** (sprint 037): plain
+  opt-in-flag shape** (sprint 037): plain
   `store_true` flags, defaulted off, passed straight through as RPC
   request fields with no client-side interpretation — the daemon alone
   decides what they mean (which quality-gate checks `force` overrides;
@@ -335,7 +335,7 @@ with the deferred spelling and the reasoning recorded directly in
 
 ### `camera intrinsics` (sprint 044)
 
-`aprilcam camera intrinsics <camera...> [--board SPEC] [--install] [--no-gui] [-d HOST]` (`cli/intrinsics.py`). The board spec resolves request (`--board`) > env `APRILCAM_CHARUCO_BOARD` > default `5x7:37:28:DICT_5X5_100`. With a display it opens the fullscreen Tk GUI (`view/intrinsics_gui.py`, driven by the pure `view/intrinsics_model.py`); `--no-gui` (and any session with no display, e.g. over SSH) uses a text-mode status loop. The GUI never auto-quits on green; Enter installs the good cameras, Esc aborts. Exit code 0 only when every camera ended installed. `--install` installs good cameras on finish without the prompt. `camera list` rows gain `lens=<source>` and `lens-pending`; `camera calibrate` prints the lens model it carried forward, and `--with-intrinsics` is the documented fallback when no board is available.
+`aprilcam camera intrinsics <camera...> [--board SPEC] [--install] [--no-gui] [-d HOST]` (`cli/intrinsics.py`). The board spec resolves request (`--board`) > env `APRILCAM_CHARUCO_BOARD` > default `5x7:37:28:DICT_5X5_100`. With a display it opens the fullscreen Tk GUI (`view/intrinsics_gui.py`, driven by the pure `view/intrinsics_model.py`); `--no-gui` (and any session with no display, e.g. over SSH) uses a text-mode status loop. The GUI never auto-quits on green; Enter installs the good cameras, Esc aborts. Exit code 0 only when every camera ended installed. `--install` installs good cameras on finish without the prompt. `camera list` rows gain `lens=<source>` and `lens-pending`; `camera calibrate` prints the lens model it carried forward.
 
 ## 5. Interfaces
 

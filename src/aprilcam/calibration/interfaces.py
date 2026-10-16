@@ -107,37 +107,6 @@ class CalibrationResult:
     homography) must name its problem, not report failure with
     every id present and leave the developer to guess.
     """
-    intrinsics_estimated: Optional[bool] = None
-    """Whether *this call* estimated a lens model (sprint 030 ticket
-    002's ``estimate_intrinsics``) — ``True`` (estimated and stored
-    this call), ``False`` (not estimated this call; any previously
-    stored intrinsics carry forward unchanged, whether or not one
-    existed), or ``None`` (the concept does not apply — the attempt
-    failed before reaching that decision, e.g. a missing required
-    ArUco id). Never the ``camera_matrix``/``dist_coeffs`` values
-    themselves: mirrors ``get_calibration``'s existing "reports what
-    the interface promises, never the internal homography matrix"
-    precedent — an operator gets told *whether* intrinsics changed,
-    not the numbers.
-    """
-    intrinsics_mode: Optional[str] = None
-    """Which intrinsics-estimation model ran this call —
-    ``"coplanar-constrained"`` (fixed principal point/aspect ratio,
-    zero tangential distortion, fixed k3, k1-only) or ``"elevated"``
-    (freed further once the linked playfield's surveyed elevated
-    ground truth clears a documented count-and-z-spread threshold —
-    ``calibration.calibration`` for the exact numbers and the evidence
-    behind them). ``None`` whenever :attr:`intrinsics_estimated` is not
-    ``True`` — a mode only "ran" on a call that actually estimated.
-    """
-    elevated_features_used: Optional[int] = None
-    """How many surveyed-and-detected elevated (``height_cm > 0``)
-    features contributed to this call's intrinsics estimation —
-    reported so an operator who adds an elevated tag and sees no change
-    in :attr:`intrinsics_mode` has been told something concrete rather
-    than left to guess. ``None`` under the same condition as
-    :attr:`intrinsics_mode`.
-    """
     lens_model_source: Optional[str] = None
     """Which lens model this call applied (sprint 044): ``"measured"``
     (per-camera lens store), ``"estimated"``, ``"legacy"`` (embedded in a

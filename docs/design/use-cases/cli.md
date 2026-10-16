@@ -281,7 +281,7 @@ anything. This is a precondition failure, not a calibration failure.
    definition specifies** to be detected. The CLI reports success, or
    failure naming the missing ids.
 
-**Lens.** Calibrate carries forward the camera's measured lens model (UC-30) if one matches the frame size, else a prior calibration's lens, and prints which it used. `--with-intrinsics` (estimate a lens from the field markers) is the documented no-board fallback and is refused while a measured model is installed.
+**Lens.** Calibrate carries forward the camera's measured lens model (UC-30) if one matches the frame size, else a prior calibration's lens, and prints which it used. (The single-view `--with-intrinsics` estimator was removed in sprint 045.)
 
 **Postconditions.** On success, the camera has a stored calibration and
 world coordinates become available. On failure, nothing is stored and any
@@ -1375,7 +1375,7 @@ writes, with or without `--force`.
 - Daemon unreachable → connection error naming the host.
 - `--all` is refused (single-daemon, mutating).
 
-**No board available.** `aprilcam camera calibrate <camera> --with-intrinsics` remains the documented fallback; it estimates a lens from the field markers and is refused while a measured model is installed.
+**No board available.** Calibration runs on the centre-point path without a lens model; the old `--with-intrinsics` estimator was removed in sprint 045.
 
 **Open questions.** None.
 

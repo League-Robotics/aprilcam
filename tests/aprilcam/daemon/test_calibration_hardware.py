@@ -87,7 +87,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 from typing import Dict
 
@@ -110,7 +109,6 @@ from aprilcam.types import TagFamily, TagId
 from aprilcam.vision.detector import TagDetector
 from aprilcam.vision.pipeline import run_pipeline
 from tests.aprilcam.calibration.test_calibration import (
-    MAIN_PLAYFIELD_ARUCO_POSITIONS,
     main_playfield_definition,
 )
 from tests.aprilcam.daemon.conftest import calibration_diagnosis, hardware_test_camera_config
@@ -286,88 +284,6 @@ def test_full_set_calibration_reprojection_error_stays_under_the_new_threshold(d
         "this ticket's own threshold would break the stakeholder's currently-working "
         "calibration, which is the self-inflicted regression it explicitly warns against."
     )
-
-
-# ---------------------------------------------------------------------------
-# AC (sprint 030 ticket 002, SUC-002): --with-intrinsics / estimate_intrinsics
-# against the real arducam/main-playfield -- the coplanar-constrained
-# default path (no elevated features are currently surveyed on
-# main-playfield, sprint.md Open Question 7, so this exercises the
-# default path only; the elevated path is exercised by the synthetic
-# unit tests in tests/aprilcam/calibration/test_calibration.py).
-#
-# **Live-confirmed finding, not a hypothesis (mirrors 029 ticket 004's
-# honesty precedent).** This was actually run against the real arducam
-# in this ticket's own implementation environment, and the coplanar-
-# constrained default was *rejected*: "implausible focal length:
-# fx=310.5px is 0.24x the 1280px image width (expected roughly
-# 0.3x-3.0x)". This is exactly the fx/depth degeneracy this ticket's
-# own synthetic investigation predicted and documented
-# (calibration.calibration's module docstring): a near-exactly-nadir
-# mount makes focal length and camera-to-plane distance trade off with
-# no distortion coefficient involved at all, and no flag choice can fix
-# it -- sprint 029's own text already described camera 3 as mounted at
-# "ground nadir (0,0)", consistent with this result. The sanity bound
-# did its job (refused to store a wild fx), which is a *correct*
-# outcome of this ticket's design, not a bug -- but it also means this
-# specific real camera cannot currently produce a trustworthy
-# coplanar-constrained estimate at all, through no fault of the
-# calibrate call itself. Per sprint.md Open Question 7, the two ways to
-# unblock it (re-mount the camera with genuine tilt, or survey an
-# elevated feature into main-playfield) were both explicitly deferred
-# by the stakeholder this sprint. This test therefore treats that one
-# specific, diagnosable rejection reason as a known, currently-unmet
-# *precondition* and skips cleanly on it -- exactly the "skip on an
-# under-guarded precondition, don't train people to expect a red
-# hardware test" philosophy this same sprint's own ticket 005 applies
-# to its two test-guard fixes. Any *other* failure reason (missing ids,
-# degenerate geometry, an RMS/sanity rejection that does not name an
-# implausible focal length) still fails this test for real, since that
-# would indicate an actual regression.
-# ---------------------------------------------------------------------------
-
-
-def test_with_intrinsics_against_main_playfield_stores_a_lens_model(daemon):
-    _skip_unless_camera_actually_opens(daemon)
-    daemon.set_playfield(main_playfield_definition())
-    daemon.set_camera_config(hardware_test_camera_config(ARDUCAM_SLUG, playfield="main-playfield"))
-
-    result = daemon.calibrate(ARDUCAM_SLUG, estimate_intrinsics=True)
-
-    if result.succeeded is False and "implausible focal length" in (result.reason or ""):
-        pytest.skip(
-            "camera 3's real mount is (as of this ticket's own live-confirmed "
-            f"measurement) too close to exactly nadir for the coplanar-"
-            f"constrained default to produce a trustworthy focal length -- "
-            f"correctly rejected rather than silently stored (reason: "
-            f"{result.reason!r}). Unblocked by either re-mounting with genuine "
-            "tilt or surveying an elevated feature into main-playfield "
-            "(sprint.md Open Question 7); neither was done this sprint."
-        )
-
-    assert result.succeeded is True, (
-        f"--with-intrinsics failed against the real field for a reason other "
-        f"than the known near-nadir degeneracy -- {calibration_diagnosis(result, ARDUCAM_SLUG)}"
-    )
-    assert result.intrinsics_estimated is True
-    assert result.intrinsics_mode == "coplanar-constrained"
-    assert result.elevated_features_used == 0
-
-    stored = daemon.get_calibration(ARDUCAM_SLUG)
-    assert stored is not None
-    # Client-facing Calibration deliberately does not expose
-    # camera_matrix/dist_coeffs (mirrors get_calibration's existing
-    # "reports what the interface promises" precedent) -- the
-    # CalibrationResult assertions above are this test's actual proof
-    # that a lens model was estimated and stored; this call only checks
-    # the calibration itself is still reachable afterward.
-    assert stored.playfield == "main-playfield"
-
-    # A subsequent plain (no-flag) recalibration must carry the just-
-    # estimated intrinsics forward unchanged -- SUC-002's main flow.
-    carried = daemon.calibrate(ARDUCAM_SLUG)
-    assert carried.succeeded is True, carried.reason
-    assert carried.intrinsics_estimated is False
 
 
 # ---------------------------------------------------------------------------

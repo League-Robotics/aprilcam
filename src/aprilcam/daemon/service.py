@@ -2126,13 +2126,12 @@ class DaemonService(Daemon):
 
     # -- calibration (ticket 022-003) --------------------------------------
 
-    def calibrate(self, camera: str, *, estimate_intrinsics: bool = False) -> CalibrationResult:
+    def calibrate(self, camera: str) -> CalibrationResult:
         """See ``daemon.interfaces.Daemon.calibrate``.
 
         A thin wrapper: every vision/geometry decision (multi-frame
         averaging, id matching, all-or-nothing acceptance, homography
-        solve, degenerate-geometry rejection, and -- sprint 030 ticket
-        002 -- intrinsics estimation) lives in
+        solve, degenerate-geometry rejection, pose path) lives in
         ``calibration.calibration.Calibrator``, injected as
         ``self._calibrator`` -- this method's only job is to run it and,
         on success, persist the result. ``NoPlayfieldLinked`` propagates
@@ -2153,12 +2152,6 @@ class DaemonService(Daemon):
         resolution rather than re-implementing it (see
         :meth:`_resolve_slug_if_known`'s docstring).
 
-        *estimate_intrinsics* is passed straight through to
-        ``self._calibrator.calibrate`` -- this method makes no decision
-        of its own about it, matching the "pure carry a bool from
-        caller to Calibrator" framing of this parameter throughout the
-        stack (sprint.md Architecture, responsibility 4).
-
         A failed attempt (``result.succeeded is False``) leaves
         ``calibration.json`` and this service's in-memory
         ``self._calibrations`` entry for *camera* completely untouched
@@ -2168,7 +2161,7 @@ class DaemonService(Daemon):
         guard.
         """
         slug = self._resolve_slug_if_known(camera)
-        result = self._calibrator.calibrate(slug, estimate_intrinsics=estimate_intrinsics)
+        result = self._calibrator.calibrate(slug)
         if result.succeeded:
             calibration = self._calibrator.get_calibration(slug)
             assert calibration is not None, (

@@ -209,8 +209,7 @@
 // the daemon (`aprilcam.calibration.interfaces.FlatFieldCapturer`,
 // ticket 002). `CaptureFlatFieldRequest` carries `camera` plus
 // optional `exposure`/`frames` and plain `force`/`dry_run` (`false`
-// already means "not requested", same as `Calibrate.
-// estimate_intrinsics`). `FlatFieldResult` mirrors
+// already means "not requested"). `FlatFieldResult` mirrors
 // `aprilcam.calibration.interfaces.FlatFieldResult` field for field,
 // **except** `gain` -- the built per-pixel gain map never crosses this
 // wire, mirroring `Calibration`'s own "report what happened, never the
@@ -899,20 +898,11 @@ message CalibrationResult {
   // singular homography) -- absent when `missing_ids` alone explains
   // the failure, or on success.
   optional string reason = 5;
-  // sprint 030 ticket 002: whether *this call* estimated a lens model
-  // -- absent means the concept did not apply (the attempt failed
-  // before reaching that decision). Mirrors
-  // aprilcam.calibration.interfaces.CalibrationResult.intrinsics_estimated.
-  optional bool intrinsics_estimated = 6;
-  // Which intrinsics-estimation model ran this call
-  // ("coplanar-constrained" or "elevated") -- absent whenever
-  // intrinsics_estimated is not true. Mirrors
-  // CalibrationResult.intrinsics_mode.
-  optional string intrinsics_mode = 7;
-  // How many surveyed-and-detected elevated features contributed --
-  // absent under the same condition as intrinsics_mode. Mirrors
-  // CalibrationResult.elevated_features_used.
-  optional int32 elevated_features_used = 8;
+  // Fields 6-8 were `intrinsics_estimated`/`intrinsics_mode`/
+  // `elevated_features_used` (sprint 030 ticket 002), removed in sprint 045
+  // with the single-view intrinsics estimator. Never reuse the numbers.
+  reserved 6, 7, 8;
+  reserved "intrinsics_estimated", "intrinsics_mode", "elevated_features_used";
   // Sprint 044: which lens model this call applied -- "measured" |
   // "estimated" | "legacy" | "none"; absent when the attempt failed
   // before the lens decision. Mirrors CalibrationResult.lens_model_source.
@@ -997,11 +987,11 @@ message Calibration {
 
 message CalibrateRequest {
   string camera = 1;
-  // sprint 030 ticket 002: opt into also estimating this camera's lens
-  // model from this call's detection burst (Daemon.calibrate's
-  // estimate_intrinsics). Plain bool -- false already means "not
-  // requested", matching the Python default.
-  bool estimate_intrinsics = 2;
+  // Field 2 was `bool estimate_intrinsics` (sprint 030), removed in sprint
+  // 045 with the single-view estimator. An older client that still sends it
+  // is ignored harmlessly (unknown field). Never reuse the number.
+  reserved 2;
+  reserved "estimate_intrinsics";
 }
 
 message CalibrateResponse {
@@ -1396,7 +1386,7 @@ message CaptureFlatFieldRequest {
   // Daemon.capture_flat_field(frames: Optional[int] = None).
   optional int32 frames = 3;
   // `false` already means "not requested" -- no presence check needed,
-  // matching `Calibrate.estimate_intrinsics`'s plain-bool convention.
+  // (plain-bool convention).
   bool force = 4;
   bool dry_run = 5;
 }

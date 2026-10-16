@@ -1,5 +1,5 @@
 ---
-status: pending
+status: done
 ---
 
 # `calibrate(estimate_intrinsics=True)` crashes with exactly six ground-truth points instead of refusing cleanly
@@ -50,3 +50,10 @@ blocks it.
 (markers 4 and 5 are on the table but left out of the definition until
 the lens model can be fitted). Adding west-middle, east-middle and a
 centre marker (nine points) is the plan once this is fixed.
+
+## Resolution
+
+Superseded by sprint 045 ticket 008: the single-view intrinsics estimator
+(`estimate_intrinsics`, `_held_out_split`, `_fit_intrinsics`) was deleted,
+so the six-point crash can no longer occur. The measured ChArUco lens
+model (sprint 044) replaces it.

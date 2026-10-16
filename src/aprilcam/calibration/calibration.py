@@ -60,66 +60,9 @@ earned lesson (``archive/.../calibration.py:1342-1346``) is that
 solving the homography from undistorted points while measuring RMS
 against a different (still distorted) set silently reports a healthy
 error for a solve that is not. This ticket lands the storage and
-solve-order mechanics only; *producing* intrinsics in the first place
-(``estimate_intrinsics``) is ticket 002.
-
-**Intrinsics estimation (sprint 030 ticket 002).** ``Calibrator.calibrate``
-gains ``estimate_intrinsics: bool = False``. When ``True``, this reuses
-the exact detection burst ``calibrate`` already performs, over whatever
-ground truth the linked playfield definition surveys (ArUco *and*
-AprilTag entries -- :meth:`_detect_averaged` now keeps both families,
-not ArUco alone), and runs ``cv2.calibrateCamera`` once, over that
-single view's points, via :func:`_estimate_intrinsics`.
-
-*The homography/intrinsics split.* An elevated feature
-(``Feature.height_cm > 0``) does not lie on the field plane, and the
-homography maps the field plane to pixels -- feeding an elevated point
-into the homography solve corrupts it exactly the way unmodelled
-parallax does (the error class sprint 029 exists to correct,
-reintroduced at calibration time). So: the homography solve and
-``reprojection_error_cm`` use **only** the coplanar (``height_cm == 0``)
-*ArUco* subset of ``matched_ids`` (never AprilTags -- those were never
-part of the homography before this ticket either); intrinsics
-estimation uses **every** surveyed-and-detected point, ArUco and
-AprilTag alike, with real 3D object points ``(x, y, height_cm)``.
-
-*Two degeneracies, not one.* v1's own archived
-``calibration/DESIGN.md:191`` names the first: a single coplanar view
-underconstrains a *free* ``cv2.calibrateCamera`` fit (fx, fy, cx, cy,
-k1, k2, k3, p1, p2 all free) -- v1's stored ``dist_coeffs [0.42, -2.43,
-...]`` is the concrete artefact. This ticket's own empirical
-investigation (documented at :func:`_sanity_check_intrinsics`) found a
-**second**, independent one specific to a near-exactly-nadir mount even
-under the *constrained* flag set below: for a camera looking straight
-down at a flat target, a surveyed point's image position depends on
-focal length (``fx``) and camera-to-plane distance (the solved
-extrinsic ``tvec[2]``) only through their *ratio* -- ``x_pixel =
-fx * X / Z + cx`` for fixed, known ``X`` -- so ``fx`` and ``Z`` trade off
-along an exactly flat ridge with **no** distortion coefficient
-involved at all. Synthetic sweeps (mined for this ticket, not shipped as
-a script) showed ``fx`` landing anywhere from ~20x to ~700x the
-camera's true focal length at 0 deg of mount tilt, converging to within
-a few percent of truth once genuine tilt (>= ~5 deg) or genuine
-elevated-feature z-spread (>= ~5 cm, even at *exactly* 0 deg tilt) gives
-the solve real 3D structure to anchor ``fx``/``Z`` against. Neither
-degeneracy is fixable by choosing better flags -- both are structural
-properties of what the single view actually contains -- so both are
-caught by :func:`_sanity_check_intrinsics` rejecting the *fitted
-coefficients themselves* (never a value judgement made before the fit
-runs) rather than assumed away.
-
-*Mode selection is graded, decided from the linked playfield's own
-surveyed features, never a per-call argument*: see
-:data:`MIN_ELEVATED_FEATURES_FOR_ELEVATED_MODE`/
-:data:`MIN_ELEVATED_Z_SPREAD_CM` for the concrete threshold and the
-evidence behind it (Open Question 6). ``k2`` stays fixed in the default
-coplanar-constrained model (Open Question 5) -- held-out validation
-(:func:`_held_out_split`) run during this ticket's own investigation
-showed freeing it made held-out residual *worse* on average (roughly
-4-6x, across 200 synthetic noise trials at a well-conditioned 8 deg
-mount tilt) and was only measurably better in ~1 trial in 5: with a
-single view and this few points, ``k2`` chases noise rather than
-capturing real signal.
+solve-order mechanics only. Sprint 045 deleted the single-view estimator
+that once *produced* intrinsics; a measured lens now comes from the
+per-camera lens store (``calibration.lens``).
 """
 
 from __future__ import annotations
@@ -140,7 +83,6 @@ from aprilcam.calibration.interfaces import CalibrationResult
 from aprilcam.calibration.interfaces import Calibrator as _CalibratorBase
 from aprilcam.calibration.interfaces import MarkerObservation
 from aprilcam.calibration.lens import (
-    LENS_SOURCE_ESTIMATED,
     LENS_SOURCE_LEGACY,
     LENS_SOURCE_MEASURED,
     LENS_SOURCE_NONE,
@@ -234,94 +176,6 @@ _COLLINEARITY_RATIO = 1e-3
 #: as singular/degenerate rather than trusted numerically.
 _MIN_HOMOGRAPHY_DETERMINANT = 1e-12
 
-# ---------------------------------------------------------------------------
-# Intrinsics estimation (sprint 030 ticket 002) -- see the module
-# docstring's "Intrinsics estimation" section for the two degeneracies
-# these constants exist to police, and for the empirical evidence behind
-# each specific number.
-# ---------------------------------------------------------------------------
-
-#: The ``n_pts >= 6`` floor (sprint.md Design Rationale, Decision 2):
-#: fewer than this many ArUco+AprilTag points *surveyed by the playfield
-#: definition itself* (never points merely detected in-frame that the
-#: definition doesn't survey -- archive ``DESIGN.md``'s own warning)
-#: means ``estimate_intrinsics=True`` fails explicitly rather than
-#: attempting an even-more-underdetermined fit. v1's own earned floor
-#: (``calibrate_single``), mined as a starting point.
-MIN_SURVEYED_INTRINSICS_POINTS = 6
-
-#: Open Question 6's answer: the minimum count of surveyed-and-detected
-#: *elevated* (``height_cm > 0``) points below which the coplanar-
-#: constrained model is kept even when some elevation is present, never
-#: freed on the strength of a single elevated tag with a token height.
-#: Three, not one or two: the same "enough points to trust a spread
-#: claim" floor :data:`MIN_DRIFT_CHECK_MARKERS`/:func:`_is_collinear`
-#: already use elsewhere in this module for a 2D spread, extended here
-#: to a 3D one -- a single or a pair of elevated points cannot even be
-#: checked for mutual consistency.
-MIN_ELEVATED_FEATURES_FOR_ELEVATED_MODE = 3
-
-#: Open Question 6's other half: the minimum z-spread (max height_cm -
-#: min height_cm, across every point -- coplanar and elevated alike --
-#: fed to intrinsics estimation) below which the coplanar-constrained
-#: model is kept regardless of how many elevated points exist. Chosen
-#: with real margin above this ticket's own empirical finding: synthetic
-#: trials mixing 3 elevated points into main-playfield's real 11-point
-#: coplanar layout, at a mathematically exact 0 deg mount tilt (the
-#: single hardest case -- see the module docstring), converged to
-#: within a few percent of the true focal length/height at z-spreads as
-#: low as 3 cm; 5 cm keeps a full extra centimetre of headroom above
-#: that observed-good boundary, comfortably above any realistic
-#: surveying/detection noise floor on this project (sub-cm).
-MIN_ELEVATED_Z_SPREAD_CM = 5.0
-
-#: :func:`_estimate_intrinsics`'s fixed decision for Open Question 5:
-#: **not** freed by default. Held-out validation (this ticket's own
-#: investigation, not re-run at import time) fit the coplanar-
-#: constrained model at a well-conditioned 8 deg mount tilt across 200
-#: synthetic noise trials (4 noise levels x 50 seeds): freeing k2 raised
-#: mean held-out reprojection RMS by roughly 4-6x and was only
-#: measurably *better* than k1-only in ~18-28% of trials (worse in the
-#: rest) -- with a single view and this few points, k2 chases noise
-#: rather than capturing real signal. Not a per-instance/per-camera
-#: setting: the evidence is about this project's own point-count regime
-#: (main-playfield's 11 surveyed points, an 8/3ish fit/held-out split),
-#: not a property any one camera could override its way out of.
-_FREE_K2_IN_COPLANAR_DEFAULT = False
-
-#: :func:`_sanity_check_intrinsics`'s bound on ``|k1|`` (and, on the rare
-#: elevated-mode call where k2 is genuinely free, ``|k2|`` too).
-#: Generous relative to a real consumer/webcam lens (typically
-#: ``|k1| < 0.5`` -- this project's own falsifiable-check evidence,
-#: sprint.md's Problem section, describes a "roughly 2%" measured
-#: distortion effect, i.e. a modest lens, not a fisheye), while sitting
-#: comfortably below the wildly-implausible values this ticket's
-#: synthetic degenerate trials produced (k1 magnitudes from single to
-#: multiple thousands) and below v1's own stored k1 of 0.42 doubled
-#: over for margin.
-_MAX_ABS_DISTORTION_COEFF = 1.5
-
-#: :func:`_sanity_check_intrinsics`'s bound on ``|k2/k1|`` when k2 is
-#: free. v1's stored ``dist_coeffs [0.42, -2.43, ...]`` -- this ticket's
-#: own concrete "what the bound exists to reject" example -- has a ratio
-#: of ``abs(-2.43 / 0.42) ~= 5.79``; 3.0 rejects that with real margin
-#: while still tolerating a secondary radial term genuinely up to 3x the
-#: primary one.
-_MAX_K2_OVER_K1_RATIO = 3.0
-
-#: :func:`_sanity_check_intrinsics`'s bound on the fitted focal length
-#: (``camera_matrix[0][0]``) relative to the captured frame's width --
-#: the direct, most robust catch for this ticket's own newly-documented
-#: fx/depth degeneracy (module docstring): ordinary consumer/webcam
-#: lenses span roughly 0.3x (~100 deg+ wide) to 3.0x (narrow/telephoto)
-#: image width; a fit landing outside that band is not a plausible lens,
-#: it is the degenerate ridge. This ticket's synthetic near-nadir trials
-#: produced ratios from ~3x up to several hundred x -- comfortably
-#: outside this band -- while every well-conditioned trial (>= ~5 deg
-#: tilt, or elevated-mode z-spread present) landed inside it.
-_MIN_FX_TO_WIDTH_RATIO = 0.3
-_MAX_FX_TO_WIDTH_RATIO = 3.0
-
 CameraConfigLookup = Callable[[str], Optional[CameraConfig]]
 PlayfieldLookup = Callable[[str], Optional[PlayfieldDefinitionIface]]
 FrameSource = Callable[[str], Sequence[np.ndarray]]
@@ -390,8 +244,8 @@ class Calibration(_CalibrationBase):
     known," today's exact behaviour and every ``calibration.json``
     written before this ticket -- and are carried forward unchanged
     across an ordinary recalibration rather than re-estimated
-    (:meth:`Calibrator.calibrate`); ticket 002 is what lets an operator
-    populate them in the first place via ``estimate_intrinsics``. They
+    (:meth:`Calibrator.calibrate`); the measured lens store populates them
+    (sprint 044). They
     live here, not on ``config.interfaces.CameraConfig``, precisely so
     :meth:`to_world`/:meth:`to_pixel` stay pure methods over this
     dataclass's own fields -- see sprint.md's Design Rationale Decision
@@ -424,7 +278,8 @@ class Calibration(_CalibrationBase):
     docstring."""
     lens_source: Optional[str] = None
     """Provenance of the embedded lens: ``'measured'`` (from the
-    per-camera lens store), ``'estimated'`` (``estimate_intrinsics``) or
+    per-camera lens store), ``'estimated'`` (an old file's
+    single-view fit, no longer produced) or
     ``'legacy'`` (carried from a pre-sprint-044 file). ``None`` when no
     lens is embedded. :meth:`from_dict` infers ``'legacy'`` for an old
     file with a matrix and no ``lens_source``."""
@@ -718,395 +573,6 @@ def compute_drift_cm(
     return max(errors)
 
 
-# ---------------------------------------------------------------------------
-# Intrinsics estimation (sprint 030 ticket 002) -- see the module
-# docstring's "Intrinsics estimation" section for the design rationale and
-# the empirical evidence behind every threshold/bound below.
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class _IntrinsicsFit:
-    """The outcome of one :func:`_estimate_intrinsics` call -- explicitly
-    accepted or rejected, mirroring :class:`CalibrationResult`'s own
-    "no partial success" shape at a smaller scale. ``camera_matrix``/
-    ``dist_coeffs`` are ``None`` on a rejection -- never a value
-    :meth:`Calibrator.calibrate` could mistake for something to store.
-    """
-
-    accepted: bool
-    reason: Optional[str]
-    camera_matrix: Optional[Tuple[_Row3, _Row3, _Row3]]
-    dist_coeffs: Optional[Tuple[float, ...]]
-    mode: str
-    """``"coplanar-constrained"`` or ``"elevated"`` -- which model this
-    call ran, regardless of whether the result was ultimately accepted."""
-    elevated_feature_count: int
-    """How many of the points handed to this call had ``height_cm > 0``
-    -- reported even on rejection, so a caller can still say how many
-    elevated features *contributed to the attempt*."""
-    held_out_rms_px: Optional[float]
-    """The held-out reprojection residual, in pixels (this ticket's own
-    "held-out validation... reported, not silently discarded"
-    acceptance criterion) -- informational, not itself a pass/fail gate
-    (:func:`_sanity_check_intrinsics` is the gate); ``None`` only if the
-    point set was too small to hold anything out at all."""
-
-
-def _held_out_split(n: int) -> Tuple[List[int], List[int]]:
-    """Split *n* points' indices into a fit subset and a held-out
-    subset, deterministically (no shuffling -- reproducible tests) and
-    **evenly spaced**, not a contiguous prefix/suffix block.
-
-    A block split was this function's first draft, on the assumption
-    that this project's playfield entries have no ordering that would
-    bias it -- wrong, caught by this ticket's own test suite:
-    :meth:`Calibrator.calibrate` builds its point list ArUco ids first,
-    then AprilTag ids, and an elevated-mode caller's *elevated* features
-    are conventionally the ones appended last (a playfield's original
-    coplanar corners surveyed first, elevated ground truth added later).
-    A trailing-block holdout could then hold out *every* elevated point
-    at once, leaving the fit subset with none of the very 3D structure
-    elevated mode exists to use. Evenly spaced indices
-    (``numpy.linspace``) make that systematic exclusion structurally
-    impossible regardless of input order, at the cost of no longer being
-    a legible "first N / last M" split -- an acceptable trade since nothing
-    about this split needs to be human-readable, only reproducible.
-
-    Roughly a 70/30 split, floored so the fit subset never drops below 4
-    (the minimum a homography-shaped correspondence problem needs, and
-    in practice always well above what ``cv2.calibrateCamera`` needs
-    once ``CALIB_FIX_PRINCIPAL_POINT``/``CALIB_FIX_ASPECT_RATIO`` cut the
-    coplanar-constrained model down to effectively one or two free
-    intrinsic parameters) and the held-out subset never drops below 2.
-    At the ``MIN_SURVEYED_INTRINSICS_POINTS`` floor (n=6) this yields
-    exactly 4 fit / 2 held-out; at ``main-playfield``'s real 11 points,
-    8 fit / 3 held-out -- both exercised directly by this ticket's own
-    empirical investigation (module docstring).
-    """
-    holdout_n = max(2, round(n * 0.3))
-    holdout_n = min(holdout_n, max(0, n - 4))
-    if holdout_n <= 0:
-        return list(range(n)), []
-    holdout_idx = sorted({int(round(p)) for p in np.linspace(0, n - 1, num=holdout_n)})
-    # Rounding can collide for a small n/holdout_n ratio, leaving fewer
-    # than holdout_n distinct indices -- backfill from whatever is left,
-    # preserving determinism (always the same order: index 0 upward).
-    remaining = [i for i in range(n) if i not in holdout_idx]
-    while len(holdout_idx) < holdout_n and remaining:
-        holdout_idx.append(remaining.pop(0))
-    holdout_idx = sorted(holdout_idx)
-    fit_idx = [i for i in range(n) if i not in holdout_idx]
-    return fit_idx, holdout_idx
-
-
-def _initial_camera_matrix_guess(image_size: Tuple[int, int]) -> np.ndarray:
-    """A generic starting intrinsic matrix for the elevated-mode fit.
-
-    ``cv2.calibrateCamera`` refuses a non-planar point set with no
-    initial ``cameraMatrix`` at all ("For non-planar calibration rigs
-    the initial intrinsic matrix must be specified") -- confirmed
-    directly against this project's own pinned OpenCV version during
-    this ticket's investigation, unlike the coplanar-constrained path
-    below, which OpenCV happily self-initializes (auto-centring the
-    principal point and deriving a starting focal length via its own
-    internal homography-based heuristic) when ``cameraMatrix=None``.
-    This guess is only ever a Levenberg-Marquardt *starting point* --
-    every entry remains free to move (``CALIB_USE_INTRINSIC_GUESS`` seeds
-    the optimizer here, it does not fix anything, unlike the coplanar
-    path's ``CALIB_FIX_*`` flags) -- so its exact values are not
-    load-bearing precision, just a plausible-order-of-magnitude seed:
-    focal length at the larger image dimension (a generic normal-FOV
-    guess), principal point at the image centre.
-    """
-    width, height = image_size
-    focal_guess = float(max(width, height))
-    return np.array(
-        [[focal_guess, 0.0, width / 2.0], [0.0, focal_guess, height / 2.0], [0.0, 0.0, 1.0]],
-        dtype=np.float64,
-    )
-
-
-def _sanity_check_intrinsics(
-    camera_matrix: np.ndarray, dist_coeffs: np.ndarray, image_size: Tuple[int, int], *, k2_free: bool
-) -> Optional[str]:
-    """``None`` if *camera_matrix*/*dist_coeffs* pass this ticket's
-    sanity bound; otherwise a human-readable reason naming which check
-    failed, for :class:`CalibrationResult.reason`.
-
-    Two independent degeneracies, two independent checks (module
-    docstring's "Two degeneracies, not one" section) -- **either** alone
-    is grounds for rejection:
-
-    1. **Implausible focal length** (``fx`` far outside an ordinary
-       consumer/webcam lens's range relative to the image width) -- the
-       direct signature of this ticket's own newly-documented fx/depth
-       ambiguity for a near-exactly-nadir single coplanar view. This is
-       checked *first* and independently of the distortion coefficients,
-       since that degeneracy can occur with an otherwise-small ``k1``
-       (module docstring's empirical evidence).
-    2. **Implausible distortion coefficients** -- v1's own concrete
-       failure mode (stored ``dist_coeffs [0.42, -2.43, ...]``): an
-       absolute bound on ``k1``/``k2`` individually, plus (only when
-       ``k2`` was actually freed) a bound on their ratio, matching v1's
-       own ``k2`` being ~5.79x its ``k1`` in magnitude.
-    """
-    fx = float(camera_matrix[0][0])
-    width = image_size[0]
-    ratio = fx / width if width else float("inf")
-    if not (_MIN_FX_TO_WIDTH_RATIO <= ratio <= _MAX_FX_TO_WIDTH_RATIO):
-        return (
-            f"implausible focal length: fx={fx:.1f}px is {ratio:.2f}x the {width}px image "
-            f"width (expected roughly {_MIN_FX_TO_WIDTH_RATIO}x-{_MAX_FX_TO_WIDTH_RATIO}x for "
-            "an ordinary lens) -- likely an under-constrained single coplanar view "
-            "(see calibration.calibration's module docstring's fx/depth degeneracy note)"
-        )
-
-    k1 = float(dist_coeffs[0])
-    if abs(k1) > _MAX_ABS_DISTORTION_COEFF:
-        return (
-            f"implausible k1={k1:.4f} (|k1| > {_MAX_ABS_DISTORTION_COEFF}) -- see v1's stored "
-            "dist_coeffs [0.42, -2.43, ...] as the concrete example this bound exists to reject"
-        )
-    if k2_free:
-        k2 = float(dist_coeffs[1])
-        if abs(k2) > _MAX_ABS_DISTORTION_COEFF:
-            return (
-                f"implausible k2={k2:.4f} (|k2| > {_MAX_ABS_DISTORTION_COEFF}) -- see v1's "
-                "stored dist_coeffs [0.42, -2.43, ...] as the concrete example this bound "
-                "exists to reject"
-            )
-        if abs(k1) > 1e-9 and abs(k2 / k1) > _MAX_K2_OVER_K1_RATIO:
-            return (
-                f"implausible k2/k1 ratio {k2 / k1:.2f} (> {_MAX_K2_OVER_K1_RATIO}) -- v1's "
-                f"stored dist_coeffs [0.42, -2.43, ...] had a ratio of "
-                f"{-2.43 / 0.42:.2f}, exactly the failure mode this bound rejects"
-            )
-    return None
-
-
-def _estimate_intrinsics(
-    object_points: np.ndarray,
-    image_points: np.ndarray,
-    image_size: Tuple[int, int],
-    *,
-    elevated_feature_count: int,
-    z_spread_cm: float,
-) -> _IntrinsicsFit:
-    """:func:`_fit_intrinsics` with OpenCV's own refusals turned into a
-    rejected :class:`_IntrinsicsFit` (sprint 044 ticket 010).
-
-    ``cv2.calibrateCamera`` raises ``cv2.error`` when the fit subset has
-    no more residuals than free parameters -- exactly what the held-out
-    split produces at the six-point floor (4 fit points = 8 residuals vs
-    8 variables in the elevated model). That is an under-determined
-    input, not a bug: it must surface as a ``succeeded=False`` result
-    with a reason, never a traceback through the RPC.
-    """
-    try:
-        return _fit_intrinsics(
-            object_points,
-            image_points,
-            image_size,
-            elevated_feature_count=elevated_feature_count,
-            z_spread_cm=z_spread_cm,
-        )
-    except cv.error as exc:
-        n = len(object_points)
-        elevated_mode = (
-            elevated_feature_count >= MIN_ELEVATED_FEATURES_FOR_ELEVATED_MODE
-            and z_spread_cm >= MIN_ELEVATED_Z_SPREAD_CM
-        )
-        return _IntrinsicsFit(
-            accepted=False,
-            reason=(
-                f"too few ground-truth points to fit a lens model ({n} detected; "
-                f"part of them are held out for validation) -- survey and detect "
-                f"more ArUco/AprilTag points on the playfield (nine or more is "
-                f"comfortable). OpenCV said: {str(exc).splitlines()[0][:200]}"
-            ),
-            camera_matrix=None,
-            dist_coeffs=None,
-            mode="elevated" if elevated_mode else "coplanar-constrained",
-            elevated_feature_count=elevated_feature_count,
-            held_out_rms_px=None,
-        )
-
-
-def _fit_intrinsics(
-    object_points: np.ndarray,
-    image_points: np.ndarray,
-    image_size: Tuple[int, int],
-    *,
-    elevated_feature_count: int,
-    z_spread_cm: float,
-) -> _IntrinsicsFit:
-    """Fit one camera's intrinsics/distortion from a single view's
-    surveyed-and-detected points (module docstring). *object_points* is
-    ``(N, 3)`` -- ``(x, y, height_cm)`` in cm -- and *image_points* is
-    ``(N, 2)`` -- the matching **raw** (not undistorted -- that would be
-    circular) detected pixel positions, both already aligned by index
-    with *elevated_feature_count*/*z_spread_cm* describing the same set.
-
-    Mode selection (Open Question 6, :data:`MIN_ELEVATED_FEATURES_FOR_ELEVATED_MODE`/
-    :data:`MIN_ELEVATED_Z_SPREAD_CM`) is graded and decided here, from
-    what was actually surveyed and detected this burst -- never a
-    per-call argument (sprint.md Design Rationale Decision 2).
-    """
-    n = len(object_points)
-    elevated_mode = (
-        elevated_feature_count >= MIN_ELEVATED_FEATURES_FOR_ELEVATED_MODE
-        and z_spread_cm >= MIN_ELEVATED_Z_SPREAD_CM
-    )
-    mode = "elevated" if elevated_mode else "coplanar-constrained"
-
-    fit_idx, holdout_idx = _held_out_split(n)
-    obj_fit = object_points[fit_idx].astype(np.float32)
-    img_fit = image_points[fit_idx].astype(np.float32)
-
-    if elevated_mode:
-        # "Freed further" (sprint.md Design Rationale Decision 2): no
-        # CALIB_FIX_* constraint at all -- principal point, aspect
-        # ratio, tangential terms, and k3 are all estimated, since
-        # genuine z-spread resolves the fx/depth degeneracy the
-        # coplanar-constrained flags below exist to defend against
-        # (module docstring's empirical evidence). CALIB_USE_INTRINSIC_GUESS
-        # is required here purely because OpenCV refuses to
-        # self-initialize a non-planar rig's starting camera matrix --
-        # it does not fix anything (see _initial_camera_matrix_guess's
-        # own docstring).
-        flags = cv.CALIB_USE_INTRINSIC_GUESS
-        initial_guess = _initial_camera_matrix_guess(image_size)
-        # mypy/cv2-stubs note: the stubs declare cameraMatrix/distCoeffs as
-        # required, non-Optional arrays; distCoeffs=None here is correct OpenCV
-        # usage (self-initializes the distortion coefficients even with an
-        # explicit cameraMatrix guess) -- the stubs are simply narrower than
-        # the real C++ API.
-        rms, camera_matrix, dist_coeffs, rvecs, tvecs = cv.calibrateCamera(  # type: ignore[call-overload]
-            [obj_fit], [img_fit], image_size, initial_guess, None, flags=flags
-        )
-    else:
-        # The coplanar-constrained default (sprint.md Design Rationale
-        # Decision 2, this ticket's headline acceptance criterion):
-        # fixed principal point, fixed aspect ratio, zero tangential
-        # distortion, fixed k3 -- k1-only unless
-        # _FREE_K2_IN_COPLANAR_DEFAULT says otherwise (Open Question 5,
-        # module docstring: measurably worse on held-out residual, so
-        # it stays False).
-        flags = (
-            cv.CALIB_FIX_PRINCIPAL_POINT
-            | cv.CALIB_FIX_ASPECT_RATIO
-            | cv.CALIB_ZERO_TANGENT_DIST
-            | cv.CALIB_FIX_K3
-        )
-        if not _FREE_K2_IN_COPLANAR_DEFAULT:
-            flags |= cv.CALIB_FIX_K2
-
-        if np.all(obj_fit[:, 2] == 0.0):
-            # No initial cameraMatrix -- OpenCV self-initializes a
-            # planar rig's starting focal length/principal point from
-            # the correspondences themselves via its own internal
-            # homography-based heuristic. Load-bearing, not just an
-            # implementation-detail choice: this is what makes this
-            # ticket's own fx/depth-degeneracy sanity check
-            # (:func:`_sanity_check_intrinsics`) actually fire on a
-            # near-exact-nadir single coplanar view. A run with this
-            # ticket's own investigation found that seeding the
-            # optimizer with an explicit initial guess instead lets a
-            # degenerate fit converge to (or barely move from)
-            # whatever the guess said -- landing inside a "plausible"
-            # focal-length band purely because the guess did, not
-            # because the fit resolved anything -- which would silently
-            # defeat the very check this branch exists to trigger.
-            # Auto-init has no such anchor: it reliably produces wildly
-            # implausible focal lengths (tens to hundreds of times the
-            # true value, confirmed directly) precisely when the
-            # underlying fx/depth ridge is genuinely flat, which is
-            # exactly the signal :func:`_sanity_check_intrinsics` needs.
-            # mypy/cv2-stubs note: the stubs declare cameraMatrix/distCoeffs as
-            # required, non-Optional arrays; passing None for both here is correct
-            # OpenCV usage requesting full self-initialization for a planar rig
-            # (see the comment above) -- the stubs are simply narrower than the
-            # real C++ API.
-            rms, camera_matrix, dist_coeffs, rvecs, tvecs = cv.calibrateCamera(  # type: ignore[call-overload]
-                [obj_fit], [img_fit], image_size, None, None, flags=flags
-            )
-        else:
-            # The graded-threshold edge case (Open Question 6): mode
-            # selection decided elevated_mode=False (not enough elevated
-            # count/z-spread to free the model), but fit_idx still
-            # contains at least one nonzero-height point -- e.g. a
-            # below-threshold elevated feature that this ticket's own
-            # even-spread _held_out_split (see that function's own
-            # docstring) placed in the fit subset rather than the
-            # held-out one. OpenCV's planar-rig auto-initialization
-            # above only fires when every fit_idx point is genuinely
-            # z=0, so this subset needs an explicit initial guess purely
-            # to avoid "For non-planar calibration rigs the initial
-            # intrinsic matrix must be specified" -- confirmed directly
-            # by this ticket's own test suite. Rare in practice (it
-            # requires elevation to exist below the graded threshold at
-            # all), and the sanity-bound weakening the all-coplanar
-            # branch above avoids does not apply here either way: this
-            # branch already has genuine (if sub-threshold) 3D
-            # structure to anchor the fit, unlike the purely-planar case.
-            flags |= cv.CALIB_USE_INTRINSIC_GUESS
-            initial_guess = _initial_camera_matrix_guess(image_size)
-            # mypy/cv2-stubs note: the stubs declare cameraMatrix/distCoeffs as
-            # required, non-Optional arrays; distCoeffs=None here is correct OpenCV
-            # usage (self-initializes the distortion coefficients even with an
-            # explicit cameraMatrix guess, same as the elevated branch above) --
-            # the stubs are simply narrower than the real C++ API.
-            rms, camera_matrix, dist_coeffs, rvecs, tvecs = cv.calibrateCamera(  # type: ignore[call-overload]
-                [obj_fit], [img_fit], image_size, initial_guess, None, flags=flags
-            )
-
-    held_out_rms_px: Optional[float] = None
-    if holdout_idx:
-        # Reuses the SAME extrinsic pose calibrateCamera just solved for
-        # the fit subset -- valid because every point (fit and held-out
-        # alike) is on the same rigid field, observed by the same
-        # camera in the same single frame, so there is exactly one true
-        # pose. No separate solvePnP call: with as few as 2 held-out
-        # points that would not even be possible (solvePnP itself
-        # requires >= 4), confirmed directly during this ticket's own
-        # investigation.
-        obj_hold = object_points[holdout_idx].astype(np.float64)
-        img_hold = image_points[holdout_idx]
-        projected, _ = cv.projectPoints(obj_hold, rvecs[0], tvecs[0], camera_matrix, dist_coeffs)
-        projected = projected.reshape(-1, 2)
-        held_out_rms_px = float(
-            np.sqrt(np.mean(np.sum((projected - img_hold) ** 2, axis=1)))
-        )
-
-    dist_coeffs_flat = dist_coeffs.reshape(-1)
-    reason = _sanity_check_intrinsics(
-        camera_matrix,
-        dist_coeffs_flat,
-        image_size,
-        k2_free=elevated_mode or _FREE_K2_IN_COPLANAR_DEFAULT,
-    )
-    if reason is not None:
-        return _IntrinsicsFit(
-            accepted=False,
-            reason=reason,
-            camera_matrix=None,
-            dist_coeffs=None,
-            mode=mode,
-            elevated_feature_count=elevated_feature_count,
-            held_out_rms_px=held_out_rms_px,
-        )
-
-    return _IntrinsicsFit(
-        accepted=True,
-        reason=None,
-        camera_matrix=_matrix_to_tuple(camera_matrix),
-        dist_coeffs=tuple(float(c) for c in dist_coeffs_flat),
-        mode=mode,
-        elevated_feature_count=elevated_feature_count,
-        held_out_rms_px=held_out_rms_px,
-    )
-
 
 class Calibrator(_CalibratorBase):
     """Concrete ``calibration.interfaces.Calibrator``.
@@ -1150,8 +616,7 @@ class Calibrator(_CalibratorBase):
     get_prior_calibration:
         Resolves a camera slug -> the ``Calibration`` its *most recent
         successful* calibration produced, if any (sprint 030 ticket
-        002) -- what an ordinary (``estimate_intrinsics=False``)
-        :meth:`calibrate` call reads to carry a lens model forward.
+        002) -- what :meth:`calibrate` reads to carry a lens model forward.
         Defaults to :meth:`get_calibration` (this instance's own
         write-only-until-now cache), reproducing ticket 001's exact
         same-process behaviour when a caller does not override it.
@@ -1219,9 +684,7 @@ class Calibrator(_CalibratorBase):
             get_prior_calibration if get_prior_calibration is not None else self.get_calibration
         )
 
-    def calibrate(
-        self, camera_slug: str, *, estimate_intrinsics: bool = False
-    ) -> CalibrationResult:
+    def calibrate(self, camera_slug: str) -> CalibrationResult:
         """See ``calibration.interfaces.Calibrator.calibrate``.
 
         On success, the resulting :class:`Calibration` is stored
@@ -1236,13 +699,7 @@ class Calibrator(_CalibratorBase):
         a filesystem itself (persistence is the daemon's job, sprint
         architecture's module boundary table).
 
-        *estimate_intrinsics* (sprint 030 ticket 002) is the module
-        docstring's "Intrinsics estimation" section, end to end: when
-        ``True``, runs :func:`_estimate_intrinsics` over this burst's
-        surveyed-and-detected ArUco+AprilTag points (all of them,
-        coplanar and elevated alike) and stores the result if -- and
-        only if -- it passes :func:`_sanity_check_intrinsics`; when
-        ``False`` (the default), carries forward whatever lens model
+        An ordinary recalibration carries forward whatever lens model
         *camera_slug*'s prior successful calibration already held, via
         :attr:`_get_prior_calibration` (**not** :meth:`get_calibration`
         directly -- see that attribute's own docstring for the
@@ -1260,8 +717,7 @@ class Calibrator(_CalibratorBase):
         metric on the :class:`CalibrationResult`. Otherwise the unchanged
         **centre-point** path (:meth:`_calibrate_by_centres`) runs and the
         result says ``method='centre-point'`` with a one-line
-        ``method_reason``. ``estimate_intrinsics=True`` always takes the
-        centre-point path. A gate failure stores nothing: the previous
+        ``method_reason``. A gate failure stores nothing: the previous
         calibration survives.
         """
         config = self._get_camera_config(camera_slug)
@@ -1295,29 +751,6 @@ class Calibrator(_CalibratorBase):
                 f"{type(definition).__name__}, not aprilcam.config.loader.PlayfieldDefinition"
             )
 
-        if estimate_intrinsics:
-            # The n_pts >= 6 floor (module docstring, sprint.md Design
-            # Rationale Decision 2) counts what the playfield definition
-            # itself surveys -- never what a burst happens to detect --
-            # and is checked here, before any frame is captured, exactly
-            # like the NoPlayfieldLinked precondition above: cheap, and
-            # there is nothing a frame could tell us that would change
-            # this answer.
-            surveyed_count = len(definition.aruco_tags) + len(definition.april_tags)
-            if surveyed_count < MIN_SURVEYED_INTRINSICS_POINTS:
-                return CalibrationResult(
-                    succeeded=False,
-                    matched_ids=(),
-                    missing_ids=(),
-                    intrinsics_estimated=False,
-                    reason=(
-                        f"estimate_intrinsics requires at least "
-                        f"{MIN_SURVEYED_INTRINSICS_POINTS} ArUco+AprilTag ground-truth "
-                        f"points surveyed on the linked playfield {definition.name!r}; "
-                        f"found {surveyed_count}"
-                    ),
-                )
-
         frames = self._capture_frames(camera_slug)
         if not frames:
             raise RuntimeError(f"no frames available from camera {camera_slug!r}")
@@ -1325,8 +758,7 @@ class Calibrator(_CalibratorBase):
         first_frame = frames[0]
         image_size = (int(first_frame.shape[1]), int(first_frame.shape[0]))
         # The lens store's size-matched model (sprint 044): the first
-        # source in the carry-forward order, and what makes
-        # estimate_intrinsics refuse to silently replace a measured lens.
+        # source in the carry-forward order.
         stored_lens = (
             self._get_lens_model(camera_slug, image_size)
             if self._get_lens_model is not None
@@ -1337,29 +769,9 @@ class Calibrator(_CalibratorBase):
             if self._get_lens_warning is not None and stored_lens is None
             else None
         )
-        if estimate_intrinsics and stored_lens is not None:
-            return CalibrationResult(
-                succeeded=False,
-                matched_ids=(),
-                missing_ids=(),
-                intrinsics_estimated=False,
-                lens_model_source=LENS_SOURCE_MEASURED,
-                reason=(
-                    f"estimate_intrinsics refused: camera {camera_slug!r} has a measured "
-                    f"lens model installed ({stored_lens.image_size[0]}x"
-                    f"{stored_lens.image_size[1]}, {stored_lens.views} views); a ChArUco "
-                    f"measurement is better than a field estimate. Remove or re-measure "
-                    f"the installed lens model instead."
-                ),
-            )
-
         detected_markers = self._detect_markers(frames)
         aruco_markers = detected_markers.get(TagFamily.ARUCO, {})
         aruco_detected = {tag_id: obs.centre for tag_id, obs in aruco_markers.items()}
-        april_detected = {
-            tag_id: obs.centre
-            for tag_id, obs in detected_markers.get(TagFamily.APRILTAG, {}).items()
-        }
 
         # Policy (sprint 045): ``required`` ids must all be seen; ``helpful``
         # ones only sharpen the result. A definition with no policy anywhere
@@ -1391,12 +803,10 @@ class Calibrator(_CalibratorBase):
 
         # Strategy choice: the pose path needs a measured lens at this frame
         # size and at least one matched on-plane marker with a known size.
-        # ``estimate_intrinsics`` keeps the centre-point branch (it replaces
-        # the lens, which the pose path must not).
         aruco_by_id = {entry.tag_id: entry for entry in definition.aruco_tags}
         centre_reason = self._pose_ineligibility(
             camera_slug, definition, aruco_by_id, matched_ids, stored_lens,
-            lens_warning, estimate_intrinsics,
+            lens_warning,
         )
         if centre_reason is None:
             assert stored_lens is not None
@@ -1417,12 +827,10 @@ class Calibrator(_CalibratorBase):
             definition=definition,
             image_size=image_size,
             aruco_detected=aruco_detected,
-            april_detected=april_detected,
             matched_ids=matched_ids,
             helpful_missing=helpful_missing,
             stored_lens=stored_lens,
             lens_warning=lens_warning,
-            estimate_intrinsics=estimate_intrinsics,
             method_reason=centre_reason,
         )
 
@@ -1430,16 +838,13 @@ class Calibrator(_CalibratorBase):
         self,
         camera_slug: str,
         definition: _ConcretePlayfieldDefinition,
-        aruco_by_id: Dict[int, Any],
+        aruco_by_id: Dict[Any, Any],
         matched_ids: Sequence[int],
         stored_lens: Optional[LensModel],
         lens_warning: Optional[str],
-        estimate_intrinsics: bool,
     ) -> Optional[str]:
         """Why the centre-point path must run instead of the pose path, as
         the one-line ``method_reason``; ``None`` when the pose path applies."""
-        if estimate_intrinsics:
-            return "intrinsics estimation requested"
         if stored_lens is None:
             if lens_warning:
                 return "lens measured at a different resolution"
@@ -1504,7 +909,6 @@ class Calibrator(_CalibratorBase):
         common: Dict[str, Any] = dict(
             matched_ids=matched_ids,
             missing_ids=(),
-            intrinsics_estimated=False,
             lens_model_source=LENS_SOURCE_MEASURED,
             lens_warning=lens_warning,
             method="pose",
@@ -1632,18 +1036,15 @@ class Calibrator(_CalibratorBase):
         definition: _ConcretePlayfieldDefinition,
         image_size: Tuple[int, int],
         aruco_detected: Dict[int, PixelPoint],
-        april_detected: Dict[int, PixelPoint],
         matched_ids: Tuple[int, ...],
         helpful_missing: Tuple[int, ...],
         stored_lens: Optional[LensModel],
         lens_warning: Optional[str],
-        estimate_intrinsics: bool,
         method_reason: str,
     ) -> CalibrationResult:
         """The centre-point strategy: homography from marker centres alone
         (DLT over surveyed positions), unchanged by sprint 045 apart from
-        reporting ``method``/``method_reason``. Also the home of the
-        ``estimate_intrinsics`` branch."""
+        reporting ``method``/``method_reason``."""
         extra: Dict[str, Any] = dict(
             method="centre-point",
             method_reason=method_reason,
@@ -1654,112 +1055,36 @@ class Calibrator(_CalibratorBase):
             ),
         )
         aruco_by_id = {entry.tag_id: entry for entry in definition.aruco_tags}
-        april_by_id = {entry.tag_id: entry for entry in definition.april_tags}
 
-        # The homography/intrinsics split (module docstring): the
-        # homography solve and reprojection_error_cm below use *only*
-        # the coplanar (height_cm == 0) subset of the matched ArUco
-        # ids -- never AprilTags (never part of the homography, before
-        # or after this ticket) and never an elevated ArUco entry, if a
-        # playfield definition ever declares one. This keeps
-        # reprojection_error_cm comparable to every calibration recorded
-        # before this sprint, regardless of estimation mode.
+        # Only the coplanar (height_cm == 0) subset of the matched ArUco ids
+        # feeds the homography solve and reprojection_error_cm: an elevated
+        # point is off the field plane and would corrupt the solve the way
+        # unmodelled parallax does.
         homography_ids = tuple(i for i in matched_ids if aruco_by_id[i].height_cm == 0.0)
 
-        intrinsics_estimated: Optional[bool] = None
-        intrinsics_mode: Optional[str] = None
-        elevated_features_used: Optional[int] = None
-
-        if estimate_intrinsics:
-            intrinsics_points: List[Tuple[PixelPoint, float, float, float]] = [
-                (aruco_detected[tag_id], entry.x, entry.y, entry.height_cm)
-                for tag_id, entry in ((i, aruco_by_id[i]) for i in matched_ids)
-            ]
-            intrinsics_points.extend(
-                (april_detected[tag_id], entry.x, entry.y, entry.height_cm)
-                for tag_id, entry in april_by_id.items()
-                if tag_id in april_detected
-            )
-
-            object_points = np.array(
-                [[x, y, h] for (_pixel, x, y, h) in intrinsics_points], dtype=np.float64
-            )
-            image_points = np.array(
-                [[pixel.x, pixel.y] for (pixel, _x, _y, _h) in intrinsics_points], dtype=np.float64
-            )
-            heights = object_points[:, 2]
-            elevated_count = int(np.count_nonzero(heights > 0.0))
-            z_spread_cm = float(heights.max() - heights.min()) if len(heights) else 0.0
-
-            fit = _estimate_intrinsics(
-                object_points,
-                image_points,
-                image_size,
-                elevated_feature_count=elevated_count,
-                z_spread_cm=z_spread_cm,
-            )
-            # Held-out validation, reported -- never silently discarded
-            # (this ticket's own acceptance criterion): logged here
-            # regardless of accept/reject, since _IntrinsicsFit itself
-            # is an internal type CalibrationResult does not carry
-            # held_out_rms_px on (only the accept/reject outcome and
-            # mode/count do -- mirroring "reports what the interface
-            # promises" for the fitted numbers themselves).
-            logger.info(
-                "calibrate(%s): intrinsics fit mode=%s elevated_features=%d "
-                "held_out_rms_px=%s accepted=%s%s",
-                camera_slug,
-                fit.mode,
-                fit.elevated_feature_count,
-                f"{fit.held_out_rms_px:.4f}" if fit.held_out_rms_px is not None else "n/a",
-                fit.accepted,
-                f" reason={fit.reason!r}" if fit.reason else "",
-            )
-            if not fit.accepted:
-                return CalibrationResult(
-            **extra,
-                    succeeded=False,
-                    matched_ids=matched_ids,
-                    missing_ids=(),
-                    intrinsics_estimated=False,
-                    intrinsics_mode=fit.mode,
-                    elevated_features_used=fit.elevated_feature_count,
-                    reason=f"intrinsics estimation rejected: {fit.reason}",
-                    lens_warning=lens_warning,
-                )
-            camera_matrix = fit.camera_matrix
-            dist_coeffs = fit.dist_coeffs
-            intrinsics_estimated = True
-            lens_source: Optional[str] = LENS_SOURCE_ESTIMATED
-            intrinsics_mode = fit.mode
-            elevated_features_used = fit.elevated_feature_count
+        # Lens-model carry-forward (sprint 030 ticket 001, Design Rationale
+        # Decision 3): the measured lens at this frame size wins; else
+        # whatever this camera's *prior* successful calibration held is
+        # carried forward unchanged (a legacy or 'estimated' file keeps its
+        # source); ``None`` reproduces the intrinsics-free behaviour. Reads
+        # ``self._get_prior_calibration``, not ``self.get_calibration``
+        # directly -- see that attribute's docstring (restart carry-forward).
+        camera_matrix: Optional[Tuple[_Row3, _Row3, _Row3]]
+        dist_coeffs: Optional[Tuple[float, ...]]
+        lens_source: Optional[str]
+        if stored_lens is not None:
+            camera_matrix = stored_lens.camera_matrix
+            dist_coeffs = stored_lens.dist_coeffs
+            lens_source = LENS_SOURCE_MEASURED
         else:
-            # Lens-model carry-forward (sprint 030 ticket 001, Design
-            # Rationale Decision 3): an ordinary recalibration (no
-            # intrinsics estimation of its own) neither estimates nor
-            # discards whatever lens model this camera's *prior*
-            # successful calibration already held; it carries it
-            # forward unchanged onto the fresh ``Calibration`` this call
-            # produces. ``None`` (never calibrated before, or
-            # calibrated with no known lens model) reproduces exactly
-            # today's intrinsics-free behaviour. Reads
-            # ``self._get_prior_calibration``, not ``self.
-            # get_calibration`` directly -- see that attribute's
-            # docstring for why (the restart carry-forward bug fix).
-            if stored_lens is not None:
-                camera_matrix = stored_lens.camera_matrix
-                dist_coeffs = stored_lens.dist_coeffs
-                lens_source = LENS_SOURCE_MEASURED
-            else:
-                prior = self._get_prior_calibration(camera_slug)
-                camera_matrix = prior.camera_matrix if prior is not None else None
-                dist_coeffs = prior.dist_coeffs if prior is not None else None
-                lens_source = (
-                    (prior.lens_source or LENS_SOURCE_LEGACY)
-                    if prior is not None and camera_matrix is not None
-                    else None
-                )
-            intrinsics_estimated = False
+            prior = self._get_prior_calibration(camera_slug)
+            camera_matrix = prior.camera_matrix if prior is not None else None
+            dist_coeffs = prior.dist_coeffs if prior is not None else None
+            lens_source = (
+                (prior.lens_source or LENS_SOURCE_LEGACY)
+                if prior is not None and camera_matrix is not None
+                else None
+            )
 
         intrinsics_known = camera_matrix is not None and dist_coeffs is not None
         if not intrinsics_known:
@@ -1806,30 +1131,24 @@ class Calibrator(_CalibratorBase):
         if degenerate is not None:
             return CalibrationResult(
             **extra,
-                succeeded=False,
+            succeeded=False,
                 matched_ids=matched_ids,
                 missing_ids=(),
                 reason=degenerate,
-                intrinsics_estimated=intrinsics_estimated,
                 lens_model_source=lens_model_source,
                 lens_warning=lens_warning,
-                intrinsics_mode=intrinsics_mode,
-                elevated_features_used=elevated_features_used,
             )
 
         homography = _solve_homography(pixel_pts, world_pts)
         if homography is None:
             return CalibrationResult(
             **extra,
-                succeeded=False,
+            succeeded=False,
                 matched_ids=matched_ids,
                 missing_ids=(),
                 reason="homography solve failed: singular or ill-conditioned matrix",
-                intrinsics_estimated=intrinsics_estimated,
                 lens_model_source=lens_model_source,
                 lens_warning=lens_warning,
-                intrinsics_mode=intrinsics_mode,
-                elevated_features_used=elevated_features_used,
             )
 
         rms = _reprojection_error_cm(homography, pixel_pts, world_pts)
@@ -1845,7 +1164,7 @@ class Calibrator(_CalibratorBase):
             # honors.
             return CalibrationResult(
             **extra,
-                succeeded=False,
+            succeeded=False,
                 matched_ids=matched_ids,
                 missing_ids=(),
                 reprojection_error_cm=rms,
@@ -1853,11 +1172,8 @@ class Calibrator(_CalibratorBase):
                     f"reprojection error {rms:.3f} cm exceeds the "
                     f"{self._max_reprojection_error_cm:.3f} cm acceptance threshold"
                 ),
-                intrinsics_estimated=intrinsics_estimated,
                 lens_model_source=lens_model_source,
                 lens_warning=lens_warning,
-                intrinsics_mode=intrinsics_mode,
-                elevated_features_used=elevated_features_used,
             )
 
         calibration = Calibration(
@@ -1880,11 +1196,8 @@ class Calibrator(_CalibratorBase):
             matched_ids=matched_ids,
             missing_ids=(),
             reprojection_error_cm=rms,
-            intrinsics_estimated=intrinsics_estimated,
             lens_model_source=lens_model_source,
             lens_warning=lens_warning,
-            intrinsics_mode=intrinsics_mode,
-            elevated_features_used=elevated_features_used,
         )
 
 
@@ -1900,29 +1213,14 @@ class Calibrator(_CalibratorBase):
     def _detect_averaged(
         self, frames: Sequence[np.ndarray]
     ) -> Dict[TagFamily, Dict[int, PixelPoint]]:
-        """Multi-frame averaged centre detection, **both** fiducial
-        families: run every frame through the same preprocess-then-detect
-        pipeline ``daemon/detection.py`` uses, and average each
-        ``(family, id)``'s detected pixel centre across every frame it
-        appeared in. An id missing from some frames but present in
-        others still averages over however many detections it actually
-        got (mirrors ``archive/.../homography.py``'s
-        ``detect_all_tags``).
-
-        Keyed by family first (sprint 030 ticket 002) -- before this
-        ticket, AprilTag hits were discarded here entirely, since the
-        homography solve only ever matched against ``required_aruco_ids()``
-        (ArUco only, and still true: :meth:`calibrate`'s
-        ``homography_ids`` never includes an AprilTag). AprilTags are
-        kept now because :func:`_estimate_intrinsics` uses **every**
-        surveyed-and-detected point of *either* family as calibration
-        ground truth (module docstring) -- ``main-playfield`` alone adds
-        one (AprilTag 1, field centre) beyond its 10 ArUco corners.
-        ``TagFamily.ARUCO``'s inner dict is exactly what this method
-        returned before this ticket (now reached via
-        ``detected[TagFamily.ARUCO]``); a family with zero detections
-        this burst is simply absent from the outer dict, not present
-        with an empty inner one -- callers use ``.get(family, {})``.
+        """Multi-frame averaged ArUco centre detection: run every frame
+        through the same preprocess-then-detect pipeline
+        ``daemon/detection.py`` uses, and average each id's detected pixel
+        centre across every frame it appeared in. An id missing from some
+        frames but present in others still averages over however many
+        detections it actually got (mirrors ``archive/.../homography.py``'s
+        ``detect_all_tags``). Keyed by family (always just ``ARUCO``); a
+        burst with no detections returns an empty dict.
 
         Since sprint 045 this is a thin derivation from
         :meth:`_detect_markers` (it returns each observation's
@@ -1958,6 +1256,8 @@ class Calibrator(_CalibratorBase):
         for frame in frames:
             gray, rescale = run_pipeline(frame, self._pipeline_config)
             for detection in self._detector.detect(gray, scale=rescale.scale):
+                if detection.family is not TagFamily.ARUCO:
+                    continue  # AprilTags played no part in calibration
                 accum.setdefault(detection.family, {}).setdefault(
                     detection.number, []
                 ).append(

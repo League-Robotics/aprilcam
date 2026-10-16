@@ -61,7 +61,6 @@ class _FakeDaemon:
     pushed_camera_config: Optional[CameraConfig] = None
     requested_playfield_name: Optional[str] = None
     pushed_playfield: Optional[Any] = None
-    requested_estimate_intrinsics: Optional[bool] = None
     requested_flatfield_kwargs: Optional[Dict[str, Any]] = None
     cleared_flatfield_camera: Optional[str] = None
 
@@ -97,9 +96,8 @@ class _FakeDaemon:
     def list_playfields(self) -> Tuple[Playfield, ...]:
         return self.playfields
 
-    def calibrate(self, camera: str, *, estimate_intrinsics: bool = False) -> CalibrationResult:
+    def calibrate(self, camera: str) -> CalibrationResult:
         self.requested_camera = camera
-        self.requested_estimate_intrinsics = estimate_intrinsics
         if self.calibrate_raises is not None:
             raise self.calibrate_raises
         assert self.calibration_result is not None, "test forgot to set _FakeDaemon.calibration_result"
@@ -419,44 +417,16 @@ async def test_calibrate_returns_the_result(tmp_path):
     assert daemon.requested_camera == "arducam-ov9782-usb-camera"
 
 
-async def test_calibrate_estimate_intrinsics_true_reaches_the_daemon_and_reports_mode(tmp_path):
-    """Sprint 030 ticket 002: ``estimate_intrinsics`` threads through to
-    ``Daemon.calibrate``, and the new mode/count fields round-trip in
-    the tool's structured output."""
-    outcome = CalibrationResult(
-        succeeded=True,
-        matched_ids=tuple(range(1, 11)),
-        missing_ids=(),
-        reprojection_error_cm=0.18,
-        intrinsics_estimated=True,
-        intrinsics_mode="coplanar-constrained",
-        elevated_features_used=0,
+async def test_calibrate_tool_has_no_estimator_parameter(tmp_path):
+    daemon = _FakeDaemon(
+        calibration_result=CalibrationResult(succeeded=True, matched_ids=(), missing_ids=())
     )
-    daemon = _FakeDaemon(calibration_result=outcome)
     server, _ = _build(daemon, tmp_path)
 
-    result = await _call(
-        server,
-        "calibrate",
-        {"camera": "arducam-ov9782-usb-camera", "estimate_intrinsics": True},
-    )
-
-    assert result.root.isError is False
-    assert daemon.requested_estimate_intrinsics is True
-    structured = result.root.structuredContent
-    assert structured["intrinsics_estimated"] is True
-    assert structured["intrinsics_mode"] == "coplanar-constrained"
-    assert structured["elevated_features_used"] == 0
-
-
-async def test_calibrate_without_estimate_intrinsics_defaults_to_false(tmp_path):
-    daemon = _FakeDaemon(calibration_result=CalibrationResult(succeeded=True, matched_ids=(), missing_ids=()))
-    server, _ = _build(daemon, tmp_path)
-
-    result = await _call(server, "calibrate", {"camera": "arducam-ov9782-usb-camera"})
-
-    assert result.root.isError is False
-    assert daemon.requested_estimate_intrinsics is False
+    tools = {t.name: t for t in await server.list_tools()}
+    properties = tools["calibrate"].inputSchema["properties"]
+    assert "estimate" + "_intrinsics" not in properties
+    assert set(properties) == {"camera", "daemon"}
 
 
 async def test_calibrate_failure_reports_missing_ids(tmp_path):

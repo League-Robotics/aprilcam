@@ -197,8 +197,7 @@ MCP tool groups, registered in this order by `server.py`'s
   `set_camera_config`, `reset_camera_config`, `get_playfield`,
   `set_playfield`, `list_playfields`, `calibrate`, `get_calibration`,
   and (sprint 037) `capture_flatfield` (`exposure`/`frames`/`force`/
-  `dry_run` optional parameters, mirroring `calibrate`'s
-  `estimate_intrinsics` shape), `get_flatfield`, `clear_flatfield`.
+  `dry_run` optional parameters), `get_flatfield`, `clear_flatfield`.
   Whole-document push/fetch plus the calibration and flat-field-capture
   triggers.
 - **Intrinsics** (`tools/intrinsics.py`, sprint 044) — `start_intrinsics`

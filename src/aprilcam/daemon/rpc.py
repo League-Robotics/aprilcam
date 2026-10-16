@@ -625,12 +625,9 @@ _CALIBRATION_POSE_OPTIONALS = (
 
 def _calibration_result_to_proto(result: CalibrationResult) -> aprilcam_v2_pb2.CalibrationResult:
     """Python -> proto, for a ``Calibrate`` response. ``missing_ids``
-    always carries the exact ids (never a count, UC-04.S-2).
-    ``intrinsics_estimated``/``intrinsics_mode``/``elevated_features_used``
-    (sprint 030 ticket 002) are ``HasField``-guarded exactly like
-    ``reprojection_error_cm``/``reason`` above: ``None`` means "the
-    concept did not apply this call," never a fabricated ``False``/
-    empty-string/``0``."""
+    always carries the exact ids (never a count, UC-04.S-2). Optional
+    fields are ``HasField``-guarded: ``None`` means "the concept did not
+    apply this call," never a fabricated ``False``/empty-string/``0``."""
     msg = aprilcam_v2_pb2.CalibrationResult(
         succeeded=result.succeeded,
         matched_ids=list(result.matched_ids),
@@ -640,12 +637,6 @@ def _calibration_result_to_proto(result: CalibrationResult) -> aprilcam_v2_pb2.C
         msg.reprojection_error_cm = result.reprojection_error_cm
     if result.reason is not None:
         msg.reason = result.reason
-    if result.intrinsics_estimated is not None:
-        msg.intrinsics_estimated = result.intrinsics_estimated
-    if result.intrinsics_mode is not None:
-        msg.intrinsics_mode = result.intrinsics_mode
-    if result.elevated_features_used is not None:
-        msg.elevated_features_used = result.elevated_features_used
     if result.lens_model_source is not None:
         msg.lens_model_source = result.lens_model_source
     if result.lens_warning is not None:
@@ -1118,9 +1109,7 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
 
     def Calibrate(self, request, context):  # noqa: N802
         try:
-            result = self._service.calibrate(
-                request.camera, estimate_intrinsics=request.estimate_intrinsics
-            )
+            result = self._service.calibrate(request.camera)
         except Exception as exc:  # noqa: BLE001
             _abort(context, exc)
             return aprilcam_v2_pb2.CalibrateResponse()

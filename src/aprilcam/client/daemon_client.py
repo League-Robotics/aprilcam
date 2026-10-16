@@ -574,10 +574,8 @@ class GrpcDaemon(Daemon):
         response = self._call(self._stub.GetCameraConfig, request)
         return camera_config_from_proto(response.config)
 
-    def calibrate(self, camera: str, *, estimate_intrinsics: bool = False) -> CalibrationResult:
-        request = aprilcam_v2_pb2.CalibrateRequest(
-            camera=camera, estimate_intrinsics=estimate_intrinsics
-        )
+    def calibrate(self, camera: str) -> CalibrationResult:
+        request = aprilcam_v2_pb2.CalibrateRequest(camera=camera)
         response = self._call(self._stub.Calibrate, request)
         return calibration_result_from_proto(response.result)
 
@@ -608,8 +606,7 @@ class GrpcDaemon(Daemon):
         fields, only set when not ``None``, mirroring
         ``get_tag_history``'s ``frames`` handling above; ``force``/
         ``dry_run`` are plain bools, always set (``false`` already means
-        "not requested," no presence check needed, matching
-        ``Calibrate.estimate_intrinsics``'s convention)."""
+        "not requested," no presence check needed)."""
         request = aprilcam_v2_pb2.CaptureFlatFieldRequest(camera=camera, force=force, dry_run=dry_run)
         if exposure is not None:
             request.exposure = exposure

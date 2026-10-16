@@ -351,13 +351,6 @@ def test_non_measured_lens_falls_back(frame4):
     assert result.method_reason == "lens source is estimated"
 
 
-def test_estimate_intrinsics_never_takes_the_pose_path(frame4):
-    cal = calibrator(definition(LAYOUT4), frame4, lens=None)
-    result = cal.calibrate(CAM, estimate_intrinsics=True)
-    assert result.method in (None, "centre-point")
-    assert result.confidence is None
-
-
 def test_derived_homography_agrees_with_centre_point_without_distortion():
     zero = np.zeros(5)
     layout = {i: (0.8 * x, 0.8 * y) for i, (x, y) in LAYOUT4.items()}  # fits the undistorted view

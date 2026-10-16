@@ -129,8 +129,8 @@ and installs it without a daemon restart. The board spec
 good cameras, Esc aborts); `--no-gui` gives a text mode that works over SSH.
 `aprilcam camera list` shows `lens=<source>` per camera (and `lens-pending`
 until the next `camera calibrate` applies a newly installed lens). With no
-board available, `aprilcam camera calibrate <camera> --with-intrinsics` is the
-documented fallback (refused while a measured lens is installed). MCP tools:
+board available, calibration uses the centre-point path without a lens model
+(the single-view estimator was removed in sprint 045). MCP tools:
 `start_intrinsics`, `get_intrinsics_status`, `finish_intrinsics`,
 `abort_intrinsics`.
 
