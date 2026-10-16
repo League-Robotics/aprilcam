@@ -191,10 +191,51 @@ class PlayfieldDefinition(ConfigDocument):
         incomplete view means the camera cannot see the field it claims
         to observe, and a homography from it would be silently wrong
         somewhere.
+
+        This lists *every* listed id. Since sprint 045 the per-marker
+        ``policy`` (``required`` | ``helpful``, unspecified = required)
+        decides what each calibration path demands: the concrete
+        implementation's ``required_marker_ids()`` /
+        ``helpful_marker_ids()`` give that split, so the strict
+        all-or-nothing gate applies to the *required* subset only.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not implement PlayfieldDefinition.required_aruco_ids"
         )
+
+
+#: ArUco dictionary names a ChArUco calibration target may name. cv2-free
+#: mirror of the ``cv2.aruco`` predefined dictionaries (``config`` must not
+#: import ``intrinsics``, which resolves them for real daemon-side).
+CHARUCO_DICTIONARIES = frozenset(
+    {
+        f"DICT_{n}X{n}_{k}"
+        for n in (4, 5, 6, 7)
+        for k in (50, 100, 250, 1000)
+    }
+    | {"DICT_ARUCO_ORIGINAL", "DICT_APRILTAG_16h5", "DICT_APRILTAG_25h9",
+       "DICT_APRILTAG_36h10", "DICT_APRILTAG_36h11"}
+)
+
+
+@dataclass(frozen=True, kw_only=True)
+class CalibrationTarget:
+    """A ChArUco board laid flat on the field (sprint 045 ticket 010).
+
+    A deliberate, declared *placement* of a calibration target -- unlike
+    markers, which carry no rotation key. ``rotation_deg`` 0 means the board
+    is upright: top edge toward north, lattice rows increasing southward.
+    ``(centre_x_cm, centre_y_cm)`` is the board centre in the field frame
+    (default the field origin).
+    """
+
+    kind: str
+    """Only ``"charuco"`` is defined."""
+    board: str
+    """Sprint 044 spec string ``COLSxROWS:SQUARE_MM:MARKER_MM:DICT``."""
+    centre_x_cm: float = 0.0
+    centre_y_cm: float = 0.0
+    rotation_deg: float = 0.0
 
 
 @dataclass(frozen=True, kw_only=True)

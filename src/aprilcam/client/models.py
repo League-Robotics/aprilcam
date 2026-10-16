@@ -39,7 +39,7 @@ from typing import Dict, Optional, Tuple
 
 from aprilcam.calibration.interfaces import Calibration, CalibrationResult, FlatFieldInfo, FlatFieldResult
 from aprilcam.intrinsics.interfaces import BoardLayout, IntrinsicsFinishResult, IntrinsicsStatus
-from aprilcam.config.interfaces import CameraConfig, CameraPosition, Feature
+from aprilcam.config.interfaces import CalibrationTarget, CameraConfig, CameraPosition, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import DaemonStatus, MountRegistration
 from aprilcam.playfield.playfield import Playfield
@@ -116,6 +116,8 @@ def camera_state_from_proto(msg: aprilcam_v2_pb2.CameraState) -> CameraState:
         # Sprint 044 ticket 010: "" (an older daemon) reads as "absent".
         lens_model=msg.lens_model or "absent",
         lens_pending=msg.lens_pending,
+        calibration_method=msg.calibration_method,
+        calibration_confidence=msg.calibration_confidence,
         number=msg.number if msg.HasField("number") else None,
     )
 
@@ -311,6 +313,18 @@ def _playfield_feature_entry_from_proto(
         tag_id=msg.id if msg.HasField("id") else None,
         colour=msg.colour if msg.HasField("colour") else None,
         height_cm=msg.height_cm,
+        size_mm=msg.size_mm if msg.HasField("size_mm") else None,
+        policy=msg.policy if msg.HasField("policy") else None,
+    )
+
+
+def _calibration_target_from_proto(msg: aprilcam_v2_pb2.PlayfieldDefinition):
+    if not msg.HasField("calibration_target"):
+        return None
+    t = msg.calibration_target
+    return CalibrationTarget(
+        kind=t.kind, board=t.board, centre_x_cm=t.centre_x_cm,
+        centre_y_cm=t.centre_y_cm, rotation_deg=t.rotation_deg,
     )
 
 
@@ -330,6 +344,8 @@ def playfield_definition_from_proto(msg: aprilcam_v2_pb2.PlayfieldDefinition) ->
         aruco_tags=tuple(_playfield_feature_entry_from_proto(e) for e in msg.aruco_tags),
         rectangles=tuple(_playfield_feature_entry_from_proto(e) for e in msg.rectangles),
         dots=tuple(_playfield_feature_entry_from_proto(e) for e in msg.dots),
+        marker_size_mm_default=msg.marker_size_mm if msg.HasField("marker_size_mm") else None,
+        calibration_target=_calibration_target_from_proto(msg),
     )
 
 
@@ -454,17 +470,28 @@ def calibration_result_from_proto(msg: aprilcam_v2_pb2.CalibrationResult) -> Cal
             msg.reprojection_error_cm if msg.HasField("reprojection_error_cm") else None
         ),
         reason=msg.reason if msg.HasField("reason") else None,
-        intrinsics_estimated=(
-            msg.intrinsics_estimated if msg.HasField("intrinsics_estimated") else None
-        ),
-        intrinsics_mode=msg.intrinsics_mode if msg.HasField("intrinsics_mode") else None,
-        elevated_features_used=(
-            msg.elevated_features_used if msg.HasField("elevated_features_used") else None
-        ),
         lens_model_source=(
             msg.lens_model_source if msg.HasField("lens_model_source") else None
         ),
         lens_warning=msg.lens_warning if msg.HasField("lens_warning") else None,
+        # Sprint 045 pose provenance.
+        **{
+            name: getattr(msg, name) if msg.HasField(name) else None
+            for name in (
+                "method", "method_reason", "confidence", "corner_count",
+                "reprojection_error_px", "scale_agreement", "angular_spread_deg",
+                "camera_height_cm", "camera_tilt_deg", "leave_one_out_worst_id",
+                "leave_one_out_worst_cm", "layout_extent_ratio",
+            )
+        },
+        camera_nadir=(
+            WorldPoint(msg.camera_nadir.x, msg.camera_nadir.y)
+            if msg.HasField("camera_nadir")
+            else None
+        ),
+        notes=tuple(msg.notes),
+        helpful_missing_ids=tuple(msg.helpful_missing_ids),
+        leave_one_out_cm=tuple(zip(msg.leave_one_out_ids, msg.leave_one_out_cm)),
     )
 
 
@@ -505,6 +532,15 @@ def calibration_from_proto(msg: aprilcam_v2_pb2.Calibration) -> Calibration:
         lens_rms_px=_opt("lens_rms_px"),
         lens_residual_px=_opt("lens_residual_px"),
         lens_installed_at=_opt("lens_installed_at"),
+        method=_opt("method"),
+        confidence=_opt("confidence"),
+        camera_height_cm=_opt("camera_height_cm"),
+        camera_nadir_x_cm=_opt("camera_nadir_x_cm"),
+        camera_nadir_y_cm=_opt("camera_nadir_y_cm"),
+        camera_tilt_deg=_opt("camera_tilt_deg"),
+        reprojection_error_px=_opt("reprojection_error_px"),
+        corner_count=_opt("corner_count"),
+        scale_agreement=_opt("scale_agreement"),
     )
 
 

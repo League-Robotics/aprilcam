@@ -166,6 +166,10 @@ def _playfield_feature_entry_to_proto(entry) -> aprilcam_v2_pb2.PlayfieldFeature
     )
     if entry.tag_id is not None:
         msg.id = entry.tag_id
+    if entry.size_mm is not None:
+        msg.size_mm = entry.size_mm
+    if entry.policy is not None:
+        msg.policy = entry.policy
     if entry.colour is not None:
         msg.colour = entry.colour
     return msg
@@ -178,7 +182,7 @@ def _playfield_definition_to_proto(definition: PlayfieldDefinition) -> aprilcam_
     module's own established pattern for ``_TAG_FAMILY_TO_PROTO``/
     ``_tag_id_to_proto`` above: each side of the proto boundary owns its
     own small conversion."""
-    return aprilcam_v2_pb2.PlayfieldDefinition(
+    msg = aprilcam_v2_pb2.PlayfieldDefinition(
         name=definition.name,
         width_cm=definition.width_cm,
         height_cm=definition.height_cm,
@@ -187,6 +191,17 @@ def _playfield_definition_to_proto(definition: PlayfieldDefinition) -> aprilcam_
         rectangles=[_playfield_feature_entry_to_proto(e) for e in definition.rectangles],
         dots=[_playfield_feature_entry_to_proto(e) for e in definition.dots],
     )
+    if definition.marker_size_mm_default is not None:
+        msg.marker_size_mm = definition.marker_size_mm_default
+    if definition.calibration_target is not None:
+        t = definition.calibration_target
+        msg.calibration_target.CopyFrom(
+            aprilcam_v2_pb2.CalibrationTarget(
+                kind=t.kind, board=t.board, centre_x_cm=t.centre_x_cm,
+                centre_y_cm=t.centre_y_cm, rotation_deg=t.rotation_deg,
+            )
+        )
+    return msg
 
 
 def _mount_parameters_to_proto(params: MountParameters) -> aprilcam_v2_pb2.MountParameters:
@@ -567,10 +582,8 @@ class GrpcDaemon(Daemon):
         response = self._call(self._stub.GetCameraConfig, request)
         return camera_config_from_proto(response.config)
 
-    def calibrate(self, camera: str, *, estimate_intrinsics: bool = False) -> CalibrationResult:
-        request = aprilcam_v2_pb2.CalibrateRequest(
-            camera=camera, estimate_intrinsics=estimate_intrinsics
-        )
+    def calibrate(self, camera: str) -> CalibrationResult:
+        request = aprilcam_v2_pb2.CalibrateRequest(camera=camera)
         response = self._call(self._stub.Calibrate, request)
         return calibration_result_from_proto(response.result)
 
@@ -601,8 +614,7 @@ class GrpcDaemon(Daemon):
         fields, only set when not ``None``, mirroring
         ``get_tag_history``'s ``frames`` handling above; ``force``/
         ``dry_run`` are plain bools, always set (``false`` already means
-        "not requested," no presence check needed, matching
-        ``Calibrate.estimate_intrinsics``'s convention)."""
+        "not requested," no presence check needed)."""
         request = aprilcam_v2_pb2.CaptureFlatFieldRequest(camera=camera, force=force, dry_run=dry_run)
         if exposure is not None:
             request.exposure = exposure

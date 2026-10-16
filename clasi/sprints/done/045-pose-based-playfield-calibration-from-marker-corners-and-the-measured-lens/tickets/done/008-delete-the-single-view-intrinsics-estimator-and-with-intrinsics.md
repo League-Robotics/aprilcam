@@ -1,10 +1,11 @@
 ---
 id: 008
 title: Delete the single-view intrinsics estimator and --with-intrinsics
-status: open
+status: done
 use-cases:
 - SUC-007
-depends-on: ['007']
+depends-on:
+- '007'
 github-issue: ''
 issue: pose-based-playfield-calibration-with-marker-corners-and-measured-lens.md
 completes_issue: true
@@ -49,15 +50,15 @@ survives. Record the decision either way in the ticket's completion notes.
 
 ## Acceptance Criteria
 
-- [ ] `grep -rn "estimate_intrinsics\|with-intrinsics\|_fit_intrinsics\|_estimate_intrinsics" src/ tests/` is empty (docs/knowledge history excepted).
-- [ ] `calibration.py` shrinks by roughly 400 lines; no dead constants remain.
-- [ ] A `calibration.json` with `lens_source: "estimated"` (and a legacy file
+- [x] `grep -rn "estimate_intrinsics\|with-intrinsics\|_fit_intrinsics\|_estimate_intrinsics" src/ tests/` is empty (docs/knowledge history excepted).
+- [x] `calibration.py` shrinks by roughly 400 lines; no dead constants remain.
+- [x] A `calibration.json` with `lens_source: "estimated"` (and a legacy file
       with a matrix and no source) still loads, reports its source in
       `get_calibration`/`camera list`, and is used by the centre-point path.
-- [ ] `aprilcam camera calibrate --with-intrinsics` exits with the standard
+- [x] `aprilcam camera calibrate --with-intrinsics` exits with the standard
       unknown-argument error; MCP schema lacks the parameter.
-- [ ] Both superseded issues closed (third decided and recorded).
-- [ ] Wire: reserved field numbers present in the proto; older client
+- [x] Both superseded issues closed (third decided and recorded).
+- [x] Wire: reserved field numbers present in the proto; older client
       sending field 2 is ignored harmlessly.
 
 ## Implementation Plan
@@ -81,3 +82,9 @@ estimator (delete those tests; keep any that cover shared helpers).
 Remove estimator mentions from `docs/design/` use cases and knowledge notes
 that describe current behaviour (history entries stay as history); ticket 012
 does the final sweep.
+
+## Completion Notes
+
+- `calibration.py` 1992 -> 1290 lines (702 removed); estimator, constants, docstring section, AprilTag collection in `_detect_markers` (ArUco only now), `estimate_intrinsics` plumbing through service/daemon interface/rpc/client/CLI/MCP all deleted. `CalibrationResult.intrinsics_estimated/intrinsics_mode/elevated_features_used` removed; proto `CalibrateRequest` field 2 and `CalibrationResult` fields 6-8 are `reserved` (numbers and names); pb2 regenerated.
+- Kept: `LENS_SOURCE_ESTIMATED` (in lens.py), reading `lens_source: "estimated"`, legacy matrix-no-source files, carry-forward. New tests: old estimated file loads and feeds the centre-point path; restart carry-forward with an estimated file; stale-client field 2 ignored; reserved fields; CLI unknown-argument error; MCP schema lacks the parameter.
+- Issue decisions: `estimate-intrinsics-crashes-with-exactly-six-ground-truth-points` closed as superseded (move_issue_to_done). `later/coplanar-intrinsics-rejected-...` annotated as superseded but NOT closed: move_issue_to_done cannot find files under `later/`; team-lead must close it. `later/sprint-030-unfinished-verification-distortion-benefit-unproven` left OPEN with a note: Gap 3 and the --with-intrinsics steps are superseded, but the verification question survives (radial-error correlation re-measure; `camera locate` height on camera 3 moving 128.25 -> 127 cm with the measured lens). Ticket 013 (live runbook) should carry that check.

@@ -126,3 +126,15 @@ def test_calibrate_reports_measured_source_and_a_resolution_mismatch_warning(dir
     # The store was ignored; the first calibrate's embedded (measured) lens
     # carries forward, so provenance stays "measured".
     assert result.lens_model_source == "measured"
+
+
+def test_list_cameras_overlays_calibration_method_and_confidence(directories, registry):  # noqa: F811
+    service, slug, _ = _service(directories, registry)
+    state = _state(service, slug)
+    assert (state.calibration_method, state.calibration_confidence) == ("", "")
+    _install_calibration(service, slug)  # old-style: no provenance
+    state = _state(service, slug)
+    assert (state.calibration_method, state.calibration_confidence) == ("", "")
+    _install_calibration(service, slug, method="pose", confidence="reduced")
+    state = _state(service, slug)
+    assert (state.calibration_method, state.calibration_confidence) == ("pose", "reduced")

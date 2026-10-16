@@ -42,6 +42,33 @@ from aprilcam.types import PixelPoint, WorldPoint
 
 
 @dataclass(frozen=True, kw_only=True)
+class MarkerObservation:
+    """One fiducial marker as observed over a calibration burst (sprint 045).
+
+    Unlike the bare centre ``PixelPoint`` the centre-point path keeps, this
+    retains the marker's four corners, each averaged across the burst's
+    frames, so the pose solve (which needs the marker's apparent size and
+    orientation, not just its centre) has its input. cv2-free: plain
+    ``PixelPoint`` values and floats only.
+    """
+
+    tag_id: int
+    centre: PixelPoint
+    """Mean of the per-frame detected centres, in the original frame's pixels."""
+    corners: tuple[PixelPoint, PixelPoint, PixelPoint, PixelPoint]
+    """Per-corner mean in ArUco order (TL, TR, BR, BL) **of the marker's own
+    frame**, exactly as the detector reports it: a marker printed rotated or
+    upside down keeps its own corner numbering (never renumbered by image
+    position), because the pose solve reads orientation from this order."""
+    frames: int
+    """How many frames of the burst this marker appeared in."""
+    corner_spread_px: float
+    """Max over the four corners of the across-frame standard deviation
+    (root of x-variance plus y-variance), in pixels -- a cheap noise measure;
+    0.0 for a single-frame observation."""
+
+
+@dataclass(frozen=True, kw_only=True)
 class CalibrationResult:
     """The outcome of a calibration attempt — explicitly good or bad.
 
@@ -80,37 +107,6 @@ class CalibrationResult:
     homography) must name its problem, not report failure with
     every id present and leave the developer to guess.
     """
-    intrinsics_estimated: Optional[bool] = None
-    """Whether *this call* estimated a lens model (sprint 030 ticket
-    002's ``estimate_intrinsics``) — ``True`` (estimated and stored
-    this call), ``False`` (not estimated this call; any previously
-    stored intrinsics carry forward unchanged, whether or not one
-    existed), or ``None`` (the concept does not apply — the attempt
-    failed before reaching that decision, e.g. a missing required
-    ArUco id). Never the ``camera_matrix``/``dist_coeffs`` values
-    themselves: mirrors ``get_calibration``'s existing "reports what
-    the interface promises, never the internal homography matrix"
-    precedent — an operator gets told *whether* intrinsics changed,
-    not the numbers.
-    """
-    intrinsics_mode: Optional[str] = None
-    """Which intrinsics-estimation model ran this call —
-    ``"coplanar-constrained"`` (fixed principal point/aspect ratio,
-    zero tangential distortion, fixed k3, k1-only) or ``"elevated"``
-    (freed further once the linked playfield's surveyed elevated
-    ground truth clears a documented count-and-z-spread threshold —
-    ``calibration.calibration`` for the exact numbers and the evidence
-    behind them). ``None`` whenever :attr:`intrinsics_estimated` is not
-    ``True`` — a mode only "ran" on a call that actually estimated.
-    """
-    elevated_features_used: Optional[int] = None
-    """How many surveyed-and-detected elevated (``height_cm > 0``)
-    features contributed to this call's intrinsics estimation —
-    reported so an operator who adds an elevated tag and sees no change
-    in :attr:`intrinsics_mode` has been told something concrete rather
-    than left to guess. ``None`` under the same condition as
-    :attr:`intrinsics_mode`.
-    """
     lens_model_source: Optional[str] = None
     """Which lens model this call applied (sprint 044): ``"measured"``
     (per-camera lens store), ``"estimated"``, ``"legacy"`` (embedded in a
@@ -120,6 +116,44 @@ class CalibrationResult:
     """A non-fatal lens note (sprint 044 ticket 010) -- e.g. the stored
     lens model was measured at a different resolution than the frames and
     was ignored. ``None`` when there is nothing to warn about."""
+    # --- Sprint 045: pose provenance. All optional; filled by the Calibrator
+    # (ticket 006), absent (None / empty) on results that predate the pose
+    # solve or failed before it ran.
+    method: Optional[str] = None
+    """How the homography was solved: ``"pose"`` (planar pose from marker
+    corners) or ``"centre-point"`` (the fallback fit to marker centres)."""
+    method_reason: Optional[str] = None
+    """Why ``"centre-point"`` was used instead of the pose solve."""
+    confidence: Optional[str] = None
+    """``"full"`` | ``"reduced"`` | ``"low"`` (``calibration.gates``)."""
+    corner_count: Optional[int] = None
+    """Marker corner points the pose solve used."""
+    reprojection_error_px: Optional[float] = None
+    """RMS corner reprojection error of the pose fit, in pixels."""
+    scale_agreement: Optional[float] = None
+    """Ratio of per-marker implied scales (1.0 = perfect agreement)."""
+    angular_spread_deg: Optional[float] = None
+    """Angular spread of the markers as seen from the camera."""
+    camera_height_cm: Optional[float] = None
+    """Pose-derived camera height above the playfield plane."""
+    camera_nadir: Optional[WorldPoint] = None
+    """Pose-derived point on the playfield directly beneath the camera."""
+    camera_tilt_deg: Optional[float] = None
+    """Pose-derived angle between the optical axis and the plane normal."""
+    notes: Tuple[str, ...] = ()
+    """Human-readable remarks from the solve and its gates."""
+    helpful_missing_ids: Tuple[int, ...] = ()
+    """Helpful (not required) marker ids that were not detected."""
+    leave_one_out_worst_id: Optional[int] = None
+    """Id of the marker the leave-one-out check found worst."""
+    leave_one_out_worst_cm: Optional[float] = None
+    """That marker's leave-one-out residual, in cm."""
+    layout_extent_ratio: Optional[float] = None
+    """Minor/major extent of the marker layout (low = nearly collinear)."""
+    leave_one_out_cm: Tuple[Tuple[int, float], ...] = ()
+    """Per-marker leave-one-out residual as ``((marker_id, cm), ...)`` sorted
+    by id: how far each marker lands from where the pose fit to all the
+    *others* places it. Empty below 3 markers or on a non-pose result."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -165,6 +199,35 @@ class Calibration:
     """Summary of a *measured* lens (board views, solve RMS, held-out
     residual, install time); ``None`` otherwise. Transient: filled in by
     the daemon when reporting, never persisted in ``calibration.json``."""
+    # --- Sprint 045: persisted pose provenance (all None on a pre-045 file).
+    method: Optional[str] = None
+    """``"pose"`` | ``"centre-point"``; ``None`` for a pre-045 file."""
+    confidence: Optional[str] = None
+    """``"full"`` | ``"reduced"`` | ``"low"``."""
+    camera_height_cm: Optional[float] = None
+    camera_nadir_x_cm: Optional[float] = None
+    camera_nadir_y_cm: Optional[float] = None
+    camera_tilt_deg: Optional[float] = None
+    """Pose-derived camera position (height above the plane, nadir point in
+    world cm, tilt). Meaningful only when ``method == "pose"``."""
+    reprojection_error_px: Optional[float] = None
+    corner_count: Optional[int] = None
+    scale_agreement: Optional[float] = None
+
+    def camera_geometry(self) -> Optional[Tuple[WorldPoint, float]]:
+        """The pose-derived camera position as ``(nadir, height_cm)``, or
+        ``None``. Returned only for a *fresh* pose calibration: a
+        centre-point or pre-045 calibration has no measured camera
+        position, and a stale one describes where the camera *was*."""
+        if self.method != "pose" or self.stale:
+            return None
+        if (self.camera_height_cm is None or self.camera_nadir_x_cm is None
+                or self.camera_nadir_y_cm is None):
+            return None
+        return (
+            WorldPoint(self.camera_nadir_x_cm, self.camera_nadir_y_cm),
+            self.camera_height_cm,
+        )
 
     def to_world(self, pixel: PixelPoint) -> WorldPoint:
         """Map a detection to the field, in cm.

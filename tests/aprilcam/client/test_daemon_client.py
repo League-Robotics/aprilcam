@@ -1143,3 +1143,103 @@ def test_cli_no_daemon_path_and_live_daemon_rpc_serve_byte_identical_guide_text(
 
     assert exit_code == 0
     assert cli_text == rpc_text
+
+
+# ---------------------------------------------------------------------------
+# Marker size / policy on the wire (sprint 045 ticket 002).
+# ---------------------------------------------------------------------------
+
+
+def _sized_definition() -> PlayfieldDefinition:
+    return PlayfieldDefinition(
+        name="sized-playfield",
+        width_cm=100.0,
+        height_cm=60.0,
+        marker_size_mm_default=40.0,
+        aruco_tags=(
+            PlayfieldFeatureEntry(slug="a", x=0.0, y=0.0, tag_id=1, size_mm=25.5, policy="helpful"),
+            PlayfieldFeatureEntry(slug="b", x=10.0, y=0.0, tag_id=2),
+        ),
+    )
+
+
+def test_marker_size_and_policy_round_trip_through_set_and_get_playfield(client):
+    client.set_playfield(_sized_definition())
+
+    got = client.get_playfield("sized-playfield").definition
+
+    assert got.marker_size_mm_default == 40.0
+    a, b = got.aruco_tags
+    assert (a.size_mm, a.policy) == (25.5, "helpful")
+    assert (b.size_mm, b.policy) == (None, None)
+    assert got.marker_size_mm(1) == 25.5
+    assert got.marker_size_mm(2) == 40.0
+    assert got.helpful_marker_ids() == (1,)
+    assert got == _sized_definition()
+
+
+def test_definition_without_new_keys_leaves_wire_fields_unset():
+    from aprilcam.client.daemon_client import _playfield_definition_to_proto
+    from aprilcam.client.models import playfield_definition_from_proto
+    from aprilcam.daemon.rpc import _playfield_definition_from_proto
+    from aprilcam.daemon.rpc import _playfield_definition_to_proto as server_to_proto
+
+    plain = _playfield_definition_with_dots()
+    for msg in (_playfield_definition_to_proto(plain), server_to_proto(plain)):
+        assert not msg.HasField("marker_size_mm")
+        assert all(
+            not e.HasField("size_mm") and not e.HasField("policy") for e in msg.dots
+        )
+        assert playfield_definition_from_proto(msg) == plain
+        assert _playfield_definition_from_proto(msg) == plain
+
+    sized = _sized_definition()
+    msg = server_to_proto(sized)
+    assert msg.HasField("marker_size_mm") and msg.marker_size_mm == 40.0
+    assert playfield_definition_from_proto(msg) == sized
+
+
+# ---------------------------------------------------------------------------
+# Calibration target on the wire (sprint 045 ticket 010).
+# ---------------------------------------------------------------------------
+
+
+def _targeted_definition() -> PlayfieldDefinition:
+    from aprilcam.config.interfaces import CalibrationTarget
+
+    return PlayfieldDefinition(
+        name="targeted-playfield",
+        width_cm=100.0,
+        height_cm=60.0,
+        calibration_target=CalibrationTarget(
+            kind="charuco", board="6x8:28:22:DICT_4X4_50",
+            centre_x_cm=5.0, centre_y_cm=-2.5, rotation_deg=90.0,
+        ),
+    )
+
+
+def test_calibration_target_round_trips_through_set_and_get_playfield(client):
+    client.set_playfield(_targeted_definition())
+
+    got = client.get_playfield("targeted-playfield").definition
+
+    assert got.calibration_target == _targeted_definition().calibration_target
+    assert got == _targeted_definition()
+
+
+def test_calibration_target_unset_on_the_wire_for_old_definitions():
+    from aprilcam.client.daemon_client import _playfield_definition_to_proto
+    from aprilcam.client.models import playfield_definition_from_proto
+    from aprilcam.daemon.rpc import _playfield_definition_from_proto
+    from aprilcam.daemon.rpc import _playfield_definition_to_proto as server_to_proto
+
+    plain = _playfield_definition_with_dots()
+    for msg in (_playfield_definition_to_proto(plain), server_to_proto(plain)):
+        assert not msg.HasField("calibration_target")
+        assert playfield_definition_from_proto(msg).calibration_target is None
+
+    targeted = _targeted_definition()
+    for msg in (_playfield_definition_to_proto(targeted), server_to_proto(targeted)):
+        assert msg.HasField("calibration_target")
+        assert playfield_definition_from_proto(msg) == targeted
+        assert _playfield_definition_from_proto(msg) == targeted

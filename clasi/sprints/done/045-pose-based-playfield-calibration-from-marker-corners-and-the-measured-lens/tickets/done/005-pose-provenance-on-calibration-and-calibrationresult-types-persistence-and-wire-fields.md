@@ -2,11 +2,12 @@
 id: '005'
 title: 'Pose provenance on Calibration and CalibrationResult: types, persistence and
   wire fields'
-status: open
+status: done
 use-cases:
 - SUC-001
 - SUC-004
-depends-on: ['004']
+depends-on:
+- '004'
 github-issue: ''
 issue: pose-based-playfield-calibration-with-marker-corners-and-measured-lens.md
 completes_issue: true
@@ -45,18 +46,18 @@ the soon-to-be-deleted `intrinsics_*` fields here (ticket 008).
 
 ## Acceptance Criteria
 
-- [ ] New fields exist on the value types and round-trip through
+- [x] New fields exist on the value types and round-trip through
       `to_dict`/`from_dict`; a pre-sprint `calibration.json` loads with all new
       fields `None` and re-serialises identically.
-- [ ] Proto regenerated (`uv run --extra dev python scripts/compile_proto.py`);
+- [x] Proto regenerated (`uv run --extra dev python scripts/compile_proto.py`);
       `calibration_result_to_proto`/`from_proto` and
       `calibration_to_proto`/`from_proto` round-trip the new fields; `optional`
       presence preserved.
-- [ ] `CameraState.calibration_method`/`calibration_confidence` populated in
+- [x] `CameraState.calibration_method`/`calibration_confidence` populated in
       `list_cameras` from the held calibration (empty for never-calibrated or
       old files).
-- [ ] `tests/test_no_cv2_in_client_modules.py` passes.
-- [ ] `Calibration.camera_geometry()` unit-tested (pose/fresh, pose/stale,
+- [x] `tests/test_no_cv2_in_client_modules.py` passes.
+- [x] `Calibration.camera_geometry()` unit-tested (pose/fresh, pose/stale,
       centre-point, absent).
 
 ## Implementation Plan

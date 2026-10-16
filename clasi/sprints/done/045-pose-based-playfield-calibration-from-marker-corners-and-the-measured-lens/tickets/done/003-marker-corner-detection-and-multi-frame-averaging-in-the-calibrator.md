@@ -1,10 +1,11 @@
 ---
 id: '003'
 title: Marker corner detection and multi-frame averaging in the Calibrator
-status: open
+status: done
 use-cases:
 - SUC-001
-depends-on: ['001']
+depends-on:
+- '001'
 github-issue: ''
 issue: pose-based-playfield-calibration-with-marker-corners-and-measured-lens.md
 completes_issue: true
@@ -41,18 +42,18 @@ pin subpixel for calibration bursts.
 
 ## Acceptance Criteria
 
-- [ ] `MarkerObservation` exists, cv2-free, frozen dataclass declaring fields
+- [x] `MarkerObservation` exists, cv2-free, frozen dataclass declaring fields
       (no properties, no `typing.Protocol`).
-- [ ] `_detect_markers` averages corners across frames; a marker seen in a
+- [x] `_detect_markers` averages corners across frames; a marker seen in a
       subset of frames averages over those frames.
-- [ ] `_detect_averaged` output unchanged for every existing test.
-- [ ] Synthetic test: markers rendered with `cv2.aruco.generateImageMarker`,
+- [x] `_detect_averaged` output unchanged for every existing test.
+- [x] Synthetic test: markers rendered with `cv2.aruco.generateImageMarker`,
       warped by a known homography, recovered corners within 0.3 px of truth
       (and the corner order is the marker's own TL/TR/BR/BL: a marker rendered
       rotated by 90 or 180 degrees, e.g. upside down, is NOT silently
       renumbered -- the pose solve (ticket 004) resolves the orientation
       from that order, so it must be preserved exactly).
-- [ ] Noise across frames reduces `corner_spread_px` as expected (jittered
+- [x] Noise across frames reduces `corner_spread_px` as expected (jittered
       sub-pixel shifts averaged).
 
 ## Implementation Plan

@@ -19,7 +19,7 @@ follows for ``FakeBackend`` (imported from
 
 from __future__ import annotations
 
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Tuple
 
 import cv2 as cv
 import numpy as np
@@ -32,28 +32,20 @@ from aprilcam.calibration.calibration import (
     DRIFT_TOLERANCE_CM,
     MAX_REPROJECTION_ERROR_CM,
     MIN_DRIFT_CHECK_MARKERS,
-    MIN_ELEVATED_FEATURES_FOR_ELEVATED_MODE,
-    MIN_ELEVATED_Z_SPREAD_CM,
-    MIN_SURVEYED_INTRINSICS_POINTS,
     Calibration,
     Calibrator,
-    _estimate_intrinsics,
-    _held_out_split,
-    _sanity_check_intrinsics,
     compute_drift_cm,
 )
 from aprilcam.config.interfaces import CameraConfig
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.errors import NoPlayfieldLinked
-from aprilcam.types import PixelPoint, TagFamily, WorldPoint
-from tests.aprilcam.vision._tag_fixtures import render_marker
+from aprilcam.types import PixelPoint, WorldPoint
 
 __all__ = [
     "MAIN_PLAYFIELD_ARUCO_POSITIONS",
     "main_playfield_definition",
     "main_playfield_definition_with_april_tag",
     "render_playfield_frame",
-    "render_projective_frame",
     "standard_pixel_for_world",
 ]
 
@@ -1096,7 +1088,7 @@ def test_to_pixel_of_to_world_round_trips_when_intrinsics_are_set():
 
 def test_calibrate_with_no_prior_calibration_produces_no_intrinsics():
     """The default path (no prior ``Calibration`` for this camera slug,
-    ticket 002's ``estimate_intrinsics`` not yet landed) must still
+    and no lens in the store) must still
     produce exactly what it did before this ticket: no lens model at
     all."""
     definition = main_playfield_definition()
@@ -1183,517 +1175,8 @@ def test_calibrate_undistorts_detected_pixels_before_solving_when_intrinsics_are
 
 
 # ---------------------------------------------------------------------------
-# Intrinsics estimation (sprint 030 ticket 002). Two kinds of fixtures:
-#
-# 1. The affine ``render_playfield_frame`` fixtures above -- fine for
-#    tests about *which points reach which step* (the homography/
-#    intrinsics split, the point-count floor), which do not depend on a
-#    real projective camera model.
-# 2. A NEW real *projective* camera model below (``render_projective_frame``
-#    et al.) for tests about the intrinsics fit *itself* -- the affine
-#    fixture above has no real perspective at all (uniform scale
-#    everywhere), which is actually the worst possible input for a
-#    focal-length estimate (indistinguishable from fx -> infinity, this
-#    module's own "fx/depth degeneracy" -- see calibration.calibration's
-#    module docstring). A real ``cv2.projectPoints`` model, at a real
-#    camera height and a real (if modest) mount tilt, is what this
-#    ticket's own empirical investigation actually used.
+# Homography point set: elevated ArUco entries stay out of the solve
 # ---------------------------------------------------------------------------
-
-#: Matches this ticket's own empirical investigation exactly (calibration.
-#: calibration's module docstring) -- a plausible overhead-webcam
-#: geometry: 127 cm mount height (sprint 029's own camera 3 height),
-#: 1280x720, fx=fy=900 (~70 deg FOV), a modest real k1/k2.
-_PROJECTIVE_IMAGE_SIZE: Tuple[int, int] = (1280, 720)
-_PROJECTIVE_CAMERA_HEIGHT_CM = 127.0
-_PROJECTIVE_WELL_CONDITIONED_TILT_DEG = 8.0
-_PROJECTIVE_TRUE_FX = 900.0
-_PROJECTIVE_TRUE_FY = 900.0
-_PROJECTIVE_TRUE_K1 = -0.18
-_PROJECTIVE_TRUE_K2 = 0.04
-_PROJECTIVE_TRUE_CAMERA_MATRIX = np.array(
-    [
-        [_PROJECTIVE_TRUE_FX, 0.0, _PROJECTIVE_IMAGE_SIZE[0] / 2.0],
-        [0.0, _PROJECTIVE_TRUE_FY, _PROJECTIVE_IMAGE_SIZE[1] / 2.0],
-        [0.0, 0.0, 1.0],
-    ]
-)
-_PROJECTIVE_TRUE_DIST_COEFFS = np.array(
-    [_PROJECTIVE_TRUE_K1, _PROJECTIVE_TRUE_K2, 0.0, 0.0, 0.0]
-)
-
-
-def _nadir_camera_pose(tilt_deg: float, height_cm: float) -> Tuple[np.ndarray, np.ndarray]:
-    """A camera mounted *height_cm* above the field's z=0 plane, aimed
-    straight down and then tilted *tilt_deg* about the x axis -- 0 deg is
-    a mathematically exact nadir mount (this module's own documented
-    degeneracy for a purely coplanar view); a few degrees is an
-    ordinary, realistic mounting imperfection."""
-    angle = np.radians(tilt_deg)
-    rot_x = np.array(
-        [[1.0, 0.0, 0.0], [0.0, np.cos(angle), -np.sin(angle)], [0.0, np.sin(angle), np.cos(angle)]]
-    )
-    # Base orientation: camera looks along -z (down), image x tracks
-    # world x (east), image y tracks -world y (a larger world-y/north
-    # sits higher in the image) -- the same convention
-    # ``standard_pixel_for_world`` uses above, expressed as a rotation
-    # matrix instead of a flat affine map.
-    base = np.array([[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]])
-    rotation = rot_x @ base
-    rvec, _ = cv.Rodrigues(rotation)
-    tvec = np.array([0.0, 0.0, height_cm])
-    return rvec, tvec
-
-
-def _project_world_points(
-    world_xyz: List[Tuple[float, float, float]],
-    *,
-    camera_matrix: np.ndarray,
-    dist_coeffs: np.ndarray,
-    rvec: np.ndarray,
-    tvec: np.ndarray,
-) -> np.ndarray:
-    obj = np.array(world_xyz, dtype=np.float64)
-    projected, _ = cv.projectPoints(obj, rvec, tvec, camera_matrix, dist_coeffs)
-    return projected.reshape(-1, 2)
-
-
-def render_projective_frame(
-    marker_world_positions: Dict[int, Tuple[float, float, float]],
-    *,
-    family: TagFamily = TagFamily.ARUCO,
-    tilt_deg: float = _PROJECTIVE_WELL_CONDITIONED_TILT_DEG,
-    camera_height_cm: float = _PROJECTIVE_CAMERA_HEIGHT_CM,
-    camera_matrix: np.ndarray = _PROJECTIVE_TRUE_CAMERA_MATRIX,
-    dist_coeffs: np.ndarray = _PROJECTIVE_TRUE_DIST_COEFFS,
-    marker_size: int = 40,
-    canvas_size: Tuple[int, int] = _PROJECTIVE_IMAGE_SIZE,
-) -> np.ndarray:
-    """Like :func:`render_playfield_frame`, but marker centres are the
-    output of a *real* ``cv2.projectPoints`` call (a real camera matrix,
-    a real distortion model, a real 3D pose -- ``height_cm`` genuinely
-    used, unlike the affine fixture above) rather than a flat scale+flip.
-    Real detection (``vision/detector.py``) still runs against the
-    result -- only the marker *placement* math changes."""
-    width, height = canvas_size
-    canvas = np.full((height, width, 3), 255, dtype=np.uint8)
-    rvec, tvec = _nadir_camera_pose(tilt_deg, camera_height_cm)
-    half = marker_size // 2
-    for tag_id, world_xyz in marker_world_positions.items():
-        (px, py) = _project_world_points(
-            [world_xyz], camera_matrix=camera_matrix, dist_coeffs=dist_coeffs, rvec=rvec, tvec=tvec
-        )[0]
-        marker = render_marker(family, tag_id, size=marker_size)
-        marker_bgr = cv.cvtColor(marker, cv.COLOR_GRAY2BGR)
-        x0, y0 = int(round(px - half)), int(round(py - half))
-        assert 0 <= x0 and x0 + marker_size <= width, (
-            f"tag {tag_id} projects to x={px:.1f}, outside the {width}px canvas -- fixture bug"
-        )
-        assert 0 <= y0 and y0 + marker_size <= height, (
-            f"tag {tag_id} projects to y={py:.1f}, outside the {height}px canvas -- fixture bug"
-        )
-        canvas[y0 : y0 + marker_size, x0 : x0 + marker_size] = marker_bgr
-    return canvas
-
-
-def _estimate_intrinsics_for_positions(
-    positions: Dict[int, Tuple[float, float, float]],
-    *,
-    tilt_deg: float,
-    camera_matrix: np.ndarray = _PROJECTIVE_TRUE_CAMERA_MATRIX,
-    dist_coeffs: np.ndarray = _PROJECTIVE_TRUE_DIST_COEFFS,
-    camera_height_cm: float = _PROJECTIVE_CAMERA_HEIGHT_CM,
-    image_size: Tuple[int, int] = _PROJECTIVE_IMAGE_SIZE,
-):
-    """Calls :func:`_estimate_intrinsics` directly against points
-    computed by the same real projective model :func:`render_projective_frame`
-    uses -- skips image rendering/detection entirely for tests that only
-    care about the fit itself, not the detection pipeline. Derives
-    ``elevated_feature_count``/``z_spread_cm`` from *positions*' own
-    height column, matching exactly what :meth:`Calibrator.calibrate`
-    computes from real detections."""
-    rvec, tvec = _nadir_camera_pose(tilt_deg, camera_height_cm)
-    world_xyz = list(positions.values())
-    image_points = _project_world_points(
-        world_xyz, camera_matrix=camera_matrix, dist_coeffs=dist_coeffs, rvec=rvec, tvec=tvec
-    )
-    object_points = np.array(world_xyz, dtype=np.float64)
-    heights = object_points[:, 2]
-    elevated_count = int(np.count_nonzero(heights > 0.0))
-    z_spread_cm = float(heights.max() - heights.min()) if len(heights) else 0.0
-    return _estimate_intrinsics(
-        object_points,
-        image_points,
-        image_size,
-        elevated_feature_count=elevated_count,
-        z_spread_cm=z_spread_cm,
-    )
-
-
-def _estimate_intrinsics_for_main_playfield(*, tilt_deg: float):
-    positions = {i: (x, y, 0.0) for i, (x, y) in MAIN_PLAYFIELD_ARUCO_POSITIONS.items()}
-    return _estimate_intrinsics_for_positions(positions, tilt_deg=tilt_deg)
-
-
-# ---------------------------------------------------------------------------
-# _held_out_split
-# ---------------------------------------------------------------------------
-
-
-def test_held_out_split_at_the_n_pts_floor_is_4_fit_2_holdout():
-    fit_idx, holdout_idx = _held_out_split(MIN_SURVEYED_INTRINSICS_POINTS)
-    assert len(fit_idx) == 4
-    assert len(holdout_idx) == 2
-    # Every index partitioned exactly once -- evenly spaced, not
-    # necessarily a contiguous prefix/suffix block (see
-    # _held_out_split's own docstring for why: a block split can
-    # systematically exclude a clustered point *kind*, e.g. elevated
-    # features conventionally appended last, from one side entirely).
-    assert sorted(fit_idx + holdout_idx) == list(range(MIN_SURVEYED_INTRINSICS_POINTS))
-    assert set(fit_idx).isdisjoint(holdout_idx)
-
-
-def test_held_out_split_at_main_playfields_11_points_is_8_fit_3_holdout():
-    fit_idx, holdout_idx = _held_out_split(11)
-    assert len(fit_idx) == 8
-    assert len(holdout_idx) == 3
-    assert sorted(fit_idx + holdout_idx) == list(range(11))
-    assert set(fit_idx).isdisjoint(holdout_idx)
-
-
-def test_held_out_split_is_deterministic_across_repeated_calls():
-    """No shuffling -- the same *n* always produces the same split, so
-    a test (or an operator diagnosing a fit) can reproduce it."""
-    first = _held_out_split(11)
-    second = _held_out_split(11)
-    assert first == second
-
-
-def test_held_out_split_does_not_cluster_every_holdout_index_at_one_end():
-    """The bug this ticket's own test suite caught: a trailing-block
-    split held out every elevated point at once when they were appended
-    last, silently starving the fit subset of the 3D structure elevated
-    mode exists to use. Evenly spaced indices make that impossible --
-    checked here directly by asserting the holdout indices are not all
-    contiguous at the end of the range."""
-    n = 13  # matches this ticket's own 10-coplanar + 3-elevated fixture shape
-    fit_idx, holdout_idx = _held_out_split(n)
-    assert len(holdout_idx) == 4
-    # Not every point >= (n - len(holdout_idx)) is held out -- i.e. the
-    # holdout set is not simply "the last k indices".
-    assert holdout_idx != list(range(n - len(holdout_idx), n))
-    # At least one of the last 3 indices (where this ticket's fixtures
-    # place elevated points) survives into the fit subset.
-    assert any(i in fit_idx for i in range(n - 3, n))
-
-
-# ---------------------------------------------------------------------------
-# _sanity_check_intrinsics -- v1's stored [0.42, -2.43, ...] is the
-# concrete rejection example throughout (sprint.md, this ticket).
-# ---------------------------------------------------------------------------
-
-_PLAUSIBLE_CAMERA_MATRIX = np.array(
-    [[900.0, 0.0, 640.0], [0.0, 900.0, 360.0], [0.0, 0.0, 1.0]]
-)
-
-
-def test_sanity_check_accepts_a_plausible_k1_only_fit():
-    dist = np.array([-0.15, 0.0, 0.0, 0.0, 0.0])
-    assert _sanity_check_intrinsics(
-        _PLAUSIBLE_CAMERA_MATRIX, dist, _PROJECTIVE_IMAGE_SIZE, k2_free=False
-    ) is None
-
-
-def test_sanity_check_rejects_v1s_stored_k2_over_k1_ratio():
-    """v1's actual archived ``dist_coeffs [0.42, -2.43, ...]``."""
-    dist = np.array([0.42, -2.43, 0.0, 0.0, 0.0])
-    reason = _sanity_check_intrinsics(
-        _PLAUSIBLE_CAMERA_MATRIX, dist, _PROJECTIVE_IMAGE_SIZE, k2_free=True
-    )
-    assert reason is not None
-    assert "k2" in reason.lower()
-    assert "0.42" in reason
-
-
-def test_sanity_check_does_not_apply_the_k2_ratio_bound_when_k2_is_fixed():
-    """The coplanar-constrained default never frees k2 -- a stored
-    ``dist_coeffs`` whose k2 slot happens to be nonzero (it should
-    always be exactly 0.0 when CALIB_FIX_K2 is set, but this proves the
-    *check* itself is correctly gated) is not evaluated against the
-    ratio bound when k2_free=False."""
-    dist = np.array([0.42, -2.43, 0.0, 0.0, 0.0])
-    assert _sanity_check_intrinsics(
-        _PLAUSIBLE_CAMERA_MATRIX, dist, _PROJECTIVE_IMAGE_SIZE, k2_free=False
-    ) is None
-
-
-def test_sanity_check_rejects_an_implausibly_large_k1():
-    dist = np.array([5.0, 0.0, 0.0, 0.0, 0.0])
-    reason = _sanity_check_intrinsics(
-        _PLAUSIBLE_CAMERA_MATRIX, dist, _PROJECTIVE_IMAGE_SIZE, k2_free=False
-    )
-    assert reason is not None
-    assert "k1" in reason.lower()
-
-
-def test_sanity_check_rejects_an_implausible_focal_length():
-    """The direct signature of this ticket's own fx/depth degeneracy
-    finding -- caught even with an otherwise-small k1."""
-    degenerate_matrix = np.array([[80000.0, 0.0, 640.0], [0.0, 80000.0, 360.0], [0.0, 0.0, 1.0]])
-    dist = np.array([-0.1, 0.0, 0.0, 0.0, 0.0])
-    reason = _sanity_check_intrinsics(
-        degenerate_matrix, dist, _PROJECTIVE_IMAGE_SIZE, k2_free=False
-    )
-    assert reason is not None
-    assert "focal length" in reason.lower()
-
-
-def test_sanity_check_accepts_focal_lengths_at_both_edges_of_the_plausible_band():
-    width = _PROJECTIVE_IMAGE_SIZE[0]
-    low = np.array([[0.3 * width, 0.0, 640.0], [0.0, 0.3 * width, 360.0], [0.0, 0.0, 1.0]])
-    high = np.array([[3.0 * width, 0.0, 640.0], [0.0, 3.0 * width, 360.0], [0.0, 0.0, 1.0]])
-    dist = np.array([-0.1, 0.0, 0.0, 0.0, 0.0])
-    assert _sanity_check_intrinsics(low, dist, _PROJECTIVE_IMAGE_SIZE, k2_free=False) is None
-    assert _sanity_check_intrinsics(high, dist, _PROJECTIVE_IMAGE_SIZE, k2_free=False) is None
-
-
-# ---------------------------------------------------------------------------
-# _estimate_intrinsics -- the coplanar-constrained default: flags, held-out
-# validation, and this ticket's own fx/depth degeneracy finding.
-# ---------------------------------------------------------------------------
-
-
-def test_estimate_intrinsics_coplanar_default_uses_the_constrained_flags(monkeypatch):
-    """The ticket's headline acceptance criterion, checked at the actual
-    ``cv2.calibrateCamera`` call boundary -- not merely described in a
-    docstring. Wraps (not replaces) the real function, so the rest of
-    this test still exercises a genuine fit."""
-    calls: List[int] = []
-    original = cv.calibrateCamera
-
-    def spy(*args, **kwargs):
-        calls.append(kwargs["flags"])
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(calibration_module.cv, "calibrateCamera", spy)
-
-    fit = _estimate_intrinsics_for_main_playfield(tilt_deg=_PROJECTIVE_WELL_CONDITIONED_TILT_DEG)
-
-    assert len(calls) == 1
-    required_bits = (
-        cv.CALIB_FIX_PRINCIPAL_POINT
-        | cv.CALIB_FIX_ASPECT_RATIO
-        | cv.CALIB_ZERO_TANGENT_DIST
-        | cv.CALIB_FIX_K3
-        | cv.CALIB_FIX_K2
-    )
-    assert (calls[0] & required_bits) == required_bits
-    assert fit.mode == "coplanar-constrained"
-
-
-def test_estimate_intrinsics_accepts_a_well_conditioned_coplanar_view():
-    fit = _estimate_intrinsics_for_main_playfield(tilt_deg=_PROJECTIVE_WELL_CONDITIONED_TILT_DEG)
-
-    assert fit.accepted is True, fit.reason
-    assert fit.mode == "coplanar-constrained"
-    assert fit.camera_matrix is not None
-    assert fit.dist_coeffs is not None
-    # k1 estimated, k2 fixed at exactly 0.0 (CALIB_FIX_K2) -- Open
-    # Question 5's decision, visible in the actual output.
-    assert fit.dist_coeffs[1] == 0.0
-    fx = fit.camera_matrix[0][0]
-    assert fx == pytest.approx(_PROJECTIVE_TRUE_FX, rel=0.2)
-
-
-def test_estimate_intrinsics_reports_held_out_rms_not_silently_discarded():
-    fit = _estimate_intrinsics_for_main_playfield(tilt_deg=_PROJECTIVE_WELL_CONDITIONED_TILT_DEG)
-
-    assert fit.held_out_rms_px is not None
-    assert fit.held_out_rms_px < 5.0  # a well-conditioned fit, real pixels
-
-
-def test_estimate_intrinsics_rejects_a_near_exact_nadir_single_coplanar_view():
-    """This ticket's own empirical finding (calibration.calibration's
-    module docstring): a mathematically exact 0 deg mount tilt makes fx
-    and camera-to-plane distance trade off along an exactly flat ridge,
-    even under the constrained flags -- caught here, not silently
-    stored."""
-    fit = _estimate_intrinsics_for_main_playfield(tilt_deg=0.0)
-
-    assert fit.accepted is False
-    assert fit.reason is not None
-    assert fit.camera_matrix is None
-    assert fit.dist_coeffs is None
-    assert fit.mode == "coplanar-constrained"
-
-
-def test_estimate_intrinsics_held_out_rms_is_still_reported_on_rejection():
-    """"Reported, not silently discarded" applies to a rejected fit too
-    -- the residual is still computed and returned, only the coefficients
-    themselves are withheld."""
-    fit = _estimate_intrinsics_for_main_playfield(tilt_deg=0.0)
-
-    assert fit.accepted is False
-    assert fit.held_out_rms_px is not None
-
-
-# ---------------------------------------------------------------------------
-# Mode selection is graded (Open Question 6) -- a concrete, evidence-based
-# threshold, never freed on a single elevated tag with a token height.
-# ---------------------------------------------------------------------------
-
-
-def _elevated_positions(count: int, height_cm: float) -> Dict[int, Tuple[float, float, float]]:
-    candidates = [(-30.0, 30.0), (30.0, 30.0), (0.0, -30.0), (-30.0, -30.0)]
-    assert count <= len(candidates)
-    return {100 + i: (x, y, height_cm) for i, (x, y) in enumerate(candidates[:count])}
-
-
-def _main_playfield_with_elevated(count: int, height_cm: float) -> Dict[int, Tuple[float, float, float]]:
-    positions: Dict[int, Tuple[float, float, float]] = {
-        i: (x, y, 0.0) for i, (x, y) in MAIN_PLAYFIELD_ARUCO_POSITIONS.items()
-    }
-    positions.update(_elevated_positions(count, height_cm))
-    return positions
-
-
-def test_mode_stays_coplanar_constrained_below_the_elevated_feature_count_floor():
-    """Two elevated points, well above the z-spread floor -- still not
-    enough *count* (:data:`MIN_ELEVATED_FEATURES_FOR_ELEVATED_MODE` is
-    3)."""
-    positions = _main_playfield_with_elevated(2, 15.0)
-    fit = _estimate_intrinsics_for_positions(positions, tilt_deg=0.0)
-    assert fit.mode == "coplanar-constrained"
-
-
-def test_mode_stays_coplanar_constrained_below_the_z_spread_floor():
-    """Three elevated points -- count clears the floor -- but only 2 cm
-    of z-spread, below :data:`MIN_ELEVATED_Z_SPREAD_CM` (5 cm): a token
-    height must not free the model."""
-    positions = _main_playfield_with_elevated(3, 2.0)
-    fit = _estimate_intrinsics_for_positions(positions, tilt_deg=0.0)
-    assert fit.mode == "coplanar-constrained"
-
-
-def test_mode_switches_to_elevated_once_both_thresholds_clear():
-    positions = _main_playfield_with_elevated(3, 15.0)
-    fit = _estimate_intrinsics_for_positions(positions, tilt_deg=0.0)
-    assert fit.mode == "elevated"
-    assert fit.accepted is True, fit.reason
-
-
-def test_elevated_mode_resolves_the_fx_depth_degeneracy_even_at_exact_nadir():
-    """The point of elevated ground truth (sprint.md Design Rationale
-    Decision 2): genuine 3D structure disambiguates fx from
-    camera-to-plane distance *without needing any mount tilt at all* --
-    unlike the coplanar-only case (0 deg tilt is rejected above), this
-    succeeds and lands close to the true focal length."""
-    positions = _main_playfield_with_elevated(3, 15.0)
-    fit = _estimate_intrinsics_for_positions(positions, tilt_deg=0.0)
-
-    assert fit.accepted is True, fit.reason
-    fx = fit.camera_matrix[0][0]
-    assert fx == pytest.approx(_PROJECTIVE_TRUE_FX, rel=0.2)
-
-
-def test_elevated_mode_frees_more_of_the_model_than_the_coplanar_default(monkeypatch):
-    """"Freed further" (sprint.md Design Rationale Decision 2) checked
-    structurally: none of the coplanar-constrained CALIB_FIX_* bits are
-    present once elevated mode runs."""
-    calls: List[int] = []
-    original = cv.calibrateCamera
-
-    def spy(*args, **kwargs):
-        calls.append(kwargs["flags"])
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(calibration_module.cv, "calibrateCamera", spy)
-
-    positions = _main_playfield_with_elevated(3, 15.0)
-    fit = _estimate_intrinsics_for_positions(positions, tilt_deg=0.0)
-
-    assert fit.mode == "elevated"
-    assert len(calls) == 1
-    constrained_bits = (
-        cv.CALIB_FIX_PRINCIPAL_POINT
-        | cv.CALIB_FIX_ASPECT_RATIO
-        | cv.CALIB_ZERO_TANGENT_DIST
-        | cv.CALIB_FIX_K3
-        | cv.CALIB_FIX_K2
-    )
-    assert (calls[0] & constrained_bits) == 0
-
-
-# ---------------------------------------------------------------------------
-# Calibrator.calibrate(estimate_intrinsics=...) end to end.
-# ---------------------------------------------------------------------------
-
-
-def test_estimate_intrinsics_fails_below_the_n_pts_floor_naming_the_count_before_any_frame():
-    """The floor counts what the playfield *definition* surveys (4 here),
-    never what a burst detects -- and is checked before any frame is
-    captured (mirrors NoPlayfieldLinked's own "zero backend calls" proof
-    shape)."""
-    positions = {1: (-40.0, 30.0), 2: (40.0, 30.0), 3: (40.0, -30.0), 4: (-40.0, -30.0)}
-    definition = PlayfieldDefinition(
-        name="tiny-field",
-        width_cm=120.0,
-        height_cm=100.0,
-        aruco_tags=tuple(
-            PlayfieldFeatureEntry(slug=f"a{i}", x=x, y=y, tag_id=i) for i, (x, y) in positions.items()
-        ),
-    )
-    capture_calls: List[str] = []
-
-    def capture_frames(slug: str) -> List[np.ndarray]:
-        capture_calls.append(slug)
-        return []
-
-    calibrator = Calibrator(
-        get_camera_config=lambda slug: CameraConfig(name=slug, playfield="tiny-field", settings={}),
-        get_playfield=lambda name: definition,
-        capture_frames=capture_frames,
-    )
-
-    result = calibrator.calibrate("test-camera", estimate_intrinsics=True)
-
-    assert result.succeeded is False
-    assert result.intrinsics_estimated is False
-    assert "4" in result.reason
-    assert str(MIN_SURVEYED_INTRINSICS_POINTS) in result.reason
-    assert capture_calls == []
-
-
-def test_estimate_intrinsics_proceeds_past_the_floor_with_exactly_6_surveyed_points():
-    """The boundary case: exactly the floor -- proceeds to frame capture
-    (proven here by an empty ``capture_frames`` raising the *next*
-    error, ``RuntimeError``, rather than the floor's own
-    ``CalibrationResult`` failure)."""
-    positions = {i: MAIN_PLAYFIELD_ARUCO_POSITIONS[i] for i in range(1, 7)}
-    definition = PlayfieldDefinition(
-        name="six-point-field",
-        width_cm=200.0,
-        height_cm=140.0,
-        aruco_tags=tuple(
-            PlayfieldFeatureEntry(slug=f"a{i}", x=x, y=y, tag_id=i) for i, (x, y) in positions.items()
-        ),
-    )
-    capture_calls: List[str] = []
-
-    def capture_frames(slug: str) -> List[np.ndarray]:
-        capture_calls.append(slug)
-        return []
-
-    calibrator = Calibrator(
-        get_camera_config=lambda slug: CameraConfig(name=slug, playfield="six-point-field", settings={}),
-        get_playfield=lambda name: definition,
-        capture_frames=capture_frames,
-    )
-
-    with pytest.raises(RuntimeError, match="no frames available"):
-        calibrator.calibrate("test-camera", estimate_intrinsics=True)
-
-    assert capture_calls == ["test-camera"]
 
 
 def test_elevated_aruco_feature_is_excluded_from_the_homography_solve_point_set(monkeypatch):
@@ -1768,62 +1251,6 @@ def test_elevated_aruco_feature_is_excluded_from_the_homography_solve_point_set(
     assert len(rms_world_pts) == 5
     assert not any(np.allclose(row, elevated_world) for row in homography_world_pts)
     assert not any(np.allclose(row, elevated_world) for row in rms_world_pts)
-
-
-def test_estimated_intrinsics_are_carried_forward_on_a_subsequent_no_flag_call():
-    """SUC-002's main flow step 5: a later, ordinary ``calibrate`` (no
-    flag) carries the stored intrinsics forward unchanged."""
-    definition = main_playfield_definition()
-    frame = render_projective_frame(
-        {i: (x, y, 0.0) for i, (x, y) in MAIN_PLAYFIELD_ARUCO_POSITIONS.items()},
-        tilt_deg=_PROJECTIVE_WELL_CONDITIONED_TILT_DEG,
-    )
-    frames_holder = {"frames": [frame, frame, frame]}
-    calibrator = _calibrator_for(definition, frames_holder)
-
-    first = calibrator.calibrate("test-camera", estimate_intrinsics=True)
-    assert first.succeeded is True, first.reason
-    assert first.intrinsics_estimated is True
-    assert first.intrinsics_mode == "coplanar-constrained"
-    assert first.elevated_features_used == 0
-    first_calibration = calibrator.get_calibration("test-camera")
-    assert first_calibration is not None
-    assert first_calibration.camera_matrix is not None
-    assert first_calibration.dist_coeffs is not None
-
-    second = calibrator.calibrate("test-camera")
-    assert second.succeeded is True, second.reason
-    assert second.intrinsics_estimated is False
-    second_calibration = calibrator.get_calibration("test-camera")
-    assert second_calibration is not None
-    assert second_calibration.camera_matrix == first_calibration.camera_matrix
-    assert second_calibration.dist_coeffs == first_calibration.dist_coeffs
-
-
-def test_estimate_intrinsics_true_uses_april_tag_ground_truth_too(caplog):
-    """``main-playfield``'s real shape: 10 ArUco + AprilTag 1 (sprint.md,
-    SUC-002) -- the AprilTag contributes to the intrinsics fit (visible
-    via the held-out-RMS log line, this ticket's own "reported, not
-    silently discarded" mechanism) even though it never enters the
-    homography (AprilTags never have before this ticket either)."""
-    definition = main_playfield_definition_with_april_tag()
-    positions = {i: (x, y, 0.0) for i, (x, y) in MAIN_PLAYFIELD_ARUCO_POSITIONS.items()}
-    frame = render_projective_frame(positions, tilt_deg=_PROJECTIVE_WELL_CONDITIONED_TILT_DEG)
-    april_frame = render_projective_frame(
-        {1: (0.0, 0.0, 0.0)}, family=TagFamily.APRILTAG, tilt_deg=_PROJECTIVE_WELL_CONDITIONED_TILT_DEG
-    )
-    combined = np.minimum(frame, april_frame)  # both are white-background, black-marker canvases
-
-    calibrator = _calibrator_for(definition, {"frames": [combined, combined, combined]})
-
-    import logging
-
-    with caplog.at_level(logging.INFO, logger="aprilcam.calibration.calibration"):
-        result = calibrator.calibrate("test-camera", estimate_intrinsics=True)
-
-    assert result.succeeded is True, result.reason
-    assert result.intrinsics_estimated is True
-    assert any("held_out_rms_px" in record.message for record in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -1945,16 +1372,29 @@ def test_from_dict_old_file_with_matrix_reads_back_legacy():
     assert Calibration.from_dict(_dummy_prior_calibration().to_dict()).lens_source is None
 
 
-def test_estimate_intrinsics_refused_while_measured_lens_installed(tmp_path):
-    store = LensStore(tmp_path)
-    store.put("test-camera", _store_lens())
-    calibrator = _calibrator_with_store(store, {"frames": [_plain_frame()]})
+def test_from_dict_old_estimated_file_loads_and_feeds_the_centre_point_path():
+    """An old ``lens_source: "estimated"`` calibration.json (written by the
+    deleted single-view estimator) still loads, keeps its source, and a
+    recalibration carries the matrix forward through the centre-point path."""
+    old = _dummy_prior_calibration(
+        camera_matrix=_SYNTHETIC_CAMERA_MATRIX, dist_coeffs=_SYNTHETIC_DIST_COEFFS
+    ).to_dict()
+    old["lens_source"] = "estimated"
+    restored = Calibration.from_dict(old)
+    assert restored.lens_source == "estimated"
+    assert restored.camera_matrix is not None
 
-    result = calibrator.calibrate("test-camera", estimate_intrinsics=True)
-
-    assert result.succeeded is False
-    assert "measured" in result.reason and "refused" in result.reason
-    assert calibrator.get_calibration("test-camera") is None
+    calibrator = _calibrator_for(
+        main_playfield_definition(),
+        {"frames": [render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)]},
+    )
+    _seed_prior_calibration(calibrator, "test-camera", restored)
+    result = calibrator.calibrate("test-camera")
+    assert result.method == "centre-point"
+    assert result.lens_model_source == "estimated"
+    carried = calibrator.get_calibration("test-camera")
+    assert carried is not None and carried.lens_source == "estimated"
+    assert carried.camera_matrix == restored.camera_matrix
 
 
 def test_failed_calibrate_leaves_the_store_intact(tmp_path):
@@ -1968,26 +1408,3 @@ def test_failed_calibrate_leaves_the_store_intact(tmp_path):
 
     assert result.succeeded is False
     assert store.path("test-camera").read_bytes() == before
-
-
-# ---------------------------------------------------------------------------
-# Six-point crash regression (sprint 044 ticket 010; clasi issue
-# estimate-intrinsics-crashes-with-exactly-six-ground-truth-points)
-# ---------------------------------------------------------------------------
-
-
-def test_estimate_intrinsics_with_exactly_six_points_is_a_clean_rejection_not_a_crash():
-    object_points = np.array(
-        [[0, 0, 0], [100, 0, 0], [100, 60, 0], [0, 60, 0], [50, 0, 0], [50, 60, 0]], dtype=float
-    )
-    image_points = np.array(
-        [[100, 400], [500, 410], [490, 100], [110, 90], [300, 395], [300, 95]], dtype=float
-    )
-
-    fit = _estimate_intrinsics(
-        object_points, image_points, (640, 480), elevated_feature_count=0, z_spread_cm=0.0
-    )
-
-    assert fit.accepted is False
-    assert fit.camera_matrix is None and fit.dist_coeffs is None
-    assert "too few ground-truth points" in fit.reason

@@ -209,8 +209,7 @@
 // the daemon (`aprilcam.calibration.interfaces.FlatFieldCapturer`,
 // ticket 002). `CaptureFlatFieldRequest` carries `camera` plus
 // optional `exposure`/`frames` and plain `force`/`dry_run` (`false`
-// already means "not requested", same as `Calibrate.
-// estimate_intrinsics`). `FlatFieldResult` mirrors
+// already means "not requested"). `FlatFieldResult` mirrors
 // `aprilcam.calibration.interfaces.FlatFieldResult` field for field,
 // **except** `gain` -- the built per-pixel gain map never crosses this
 // wire, mirroring `Calibration`'s own "report what happened, never the
@@ -507,6 +506,13 @@ message CameraState {
   // Mirrors types.CameraState.lens_model / .lens_pending.
   string lens_model = 11;
   bool lens_pending = 12;
+  // Sprint 045 ticket 005: how the held calibration was solved
+  // ("pose" | "centre-point") and how far to trust it ("full" |
+  // "reduced" | "low"). Empty string = unknown (never calibrated, or a
+  // pre-045 calibration file). Mirrors types.CameraState.calibration_method
+  // / .calibration_confidence.
+  string calibration_method = 13;
+  string calibration_confidence = 14;
 }
 
 // One backend a probe could not interrogate, and why (UC-25.S-7).
@@ -776,6 +782,23 @@ message PlayfieldFeatureEntry {
   // aprilcam.config.interfaces.Feature.height_cm's own `float = 0.0`
   // (never Optional[float]) shape.
   double height_cm = 6;
+  // Mirrors aprilcam.config.loader.PlayfieldFeatureEntry.size_mm (sprint
+  // 045): this marker's physical side length, mm. Absent = use the
+  // definition's marker_size_mm default.
+  optional double size_mm = 7;
+  // Mirrors aprilcam.config.loader.PlayfieldFeatureEntry.policy (sprint
+  // 045): "required" or "helpful". Absent = "required".
+  optional string policy = 8;
+}
+
+// A ChArUco board laid flat on the field. Mirrors aprilcam.config.
+// interfaces.CalibrationTarget (sprint 045).
+message CalibrationTarget {
+  string kind = 1;
+  string board = 2;
+  double centre_x_cm = 3;
+  double centre_y_cm = 4;
+  double rotation_deg = 5;
 }
 
 // A whole playfield definition document. Mirrors aprilcam.config.
@@ -788,6 +811,13 @@ message PlayfieldDefinition {
   repeated PlayfieldFeatureEntry aruco_tags = 5;
   repeated PlayfieldFeatureEntry rectangles = 6;
   repeated PlayfieldFeatureEntry dots = 7;
+  // Mirrors aprilcam.config.loader.PlayfieldDefinition.
+  // marker_size_mm_default (sprint 045): the field-level default marker
+  // size, mm, from playfield.marker_size_mm. Absent = not declared.
+  optional double marker_size_mm = 8;
+  // Mirrors PlayfieldDefinition.calibration_target (sprint 045). Unset
+  // (HasField false) = no target declared.
+  optional CalibrationTarget calibration_target = 9;
 }
 
 // A playfield the daemon knows about, as served. Mirrors aprilcam.
@@ -881,20 +911,11 @@ message CalibrationResult {
   // singular homography) -- absent when `missing_ids` alone explains
   // the failure, or on success.
   optional string reason = 5;
-  // sprint 030 ticket 002: whether *this call* estimated a lens model
-  // -- absent means the concept did not apply (the attempt failed
-  // before reaching that decision). Mirrors
-  // aprilcam.calibration.interfaces.CalibrationResult.intrinsics_estimated.
-  optional bool intrinsics_estimated = 6;
-  // Which intrinsics-estimation model ran this call
-  // ("coplanar-constrained" or "elevated") -- absent whenever
-  // intrinsics_estimated is not true. Mirrors
-  // CalibrationResult.intrinsics_mode.
-  optional string intrinsics_mode = 7;
-  // How many surveyed-and-detected elevated features contributed --
-  // absent under the same condition as intrinsics_mode. Mirrors
-  // CalibrationResult.elevated_features_used.
-  optional int32 elevated_features_used = 8;
+  // Fields 6-8 were `intrinsics_estimated`/`intrinsics_mode`/
+  // `elevated_features_used` (sprint 030 ticket 002), removed in sprint 045
+  // with the single-view intrinsics estimator. Never reuse the numbers.
+  reserved 6, 7, 8;
+  reserved "intrinsics_estimated", "intrinsics_mode", "elevated_features_used";
   // Sprint 044: which lens model this call applied -- "measured" |
   // "estimated" | "legacy" | "none"; absent when the attempt failed
   // before the lens decision. Mirrors CalibrationResult.lens_model_source.
@@ -903,6 +924,28 @@ message CalibrationResult {
   // lens model was measured at a different resolution and was ignored.
   // Mirrors CalibrationResult.lens_warning.
   optional string lens_warning = 10;
+  // Sprint 045 ticket 005: pose provenance. Every field is optional
+  // (absent = the concept did not apply / pre-045 daemon). Mirrors the
+  // same-named CalibrationResult fields in calibration/interfaces.py.
+  optional string method = 11;            // "pose" | "centre-point"
+  optional string method_reason = 12;     // why centre-point was used
+  optional string confidence = 13;        // "full" | "reduced" | "low"
+  optional int32 corner_count = 14;
+  optional double reprojection_error_px = 15;
+  optional double scale_agreement = 16;
+  optional double angular_spread_deg = 17;
+  optional double camera_height_cm = 18;
+  optional WorldPoint camera_nadir = 19;
+  optional double camera_tilt_deg = 20;
+  repeated string notes = 21;
+  repeated int32 helpful_missing_ids = 22;
+  optional int32 leave_one_out_worst_id = 23;
+  optional double leave_one_out_worst_cm = 24;
+  optional double layout_extent_ratio = 25;
+  // Sprint 045 ticket 007: per-marker leave-one-out residuals, as parallel
+  // arrays (same length, same order).
+  repeated int32 leave_one_out_ids = 26;
+  repeated double leave_one_out_cm = 27;
 }
 
 // A camera's established pixel<->world mapping. Mirrors
@@ -942,15 +985,26 @@ message Calibration {
   optional double lens_rms_px = 11;
   optional double lens_residual_px = 12;
   optional double lens_installed_at = 13;
+  // Sprint 045 ticket 005: persisted pose provenance (absent on a
+  // pre-045 calibration). Mirrors Calibration's same-named fields.
+  optional string method = 14;
+  optional string confidence = 15;
+  optional double camera_height_cm = 16;
+  optional double camera_nadir_x_cm = 17;
+  optional double camera_nadir_y_cm = 18;
+  optional double camera_tilt_deg = 19;
+  optional double reprojection_error_px = 20;
+  optional int32 corner_count = 21;
+  optional double scale_agreement = 22;
 }
 
 message CalibrateRequest {
   string camera = 1;
-  // sprint 030 ticket 002: opt into also estimating this camera's lens
-  // model from this call's detection burst (Daemon.calibrate's
-  // estimate_intrinsics). Plain bool -- false already means "not
-  // requested", matching the Python default.
-  bool estimate_intrinsics = 2;
+  // Field 2 was `bool estimate_intrinsics` (sprint 030), removed in sprint
+  // 045 with the single-view estimator. An older client that still sends it
+  // is ignored harmlessly (unknown field). Never reuse the number.
+  reserved 2;
+  reserved "estimate_intrinsics";
 }
 
 message CalibrateResponse {
@@ -1345,7 +1399,7 @@ message CaptureFlatFieldRequest {
   // Daemon.capture_flat_field(frames: Optional[int] = None).
   optional int32 frames = 3;
   // `false` already means "not requested" -- no presence check needed,
-  // matching `Calibrate.estimate_intrinsics`'s plain-bool convention.
+  // (plain-bool convention).
   bool force = 4;
   bool dry_run = 5;
 }

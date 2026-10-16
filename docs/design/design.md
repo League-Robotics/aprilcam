@@ -249,6 +249,7 @@ config_dir/                        # admin-owned documents (pushed or hand-place
 state_dir/                         # regenerable / runtime state
   cameras/registry.json            # identity -> enum + camera dir
   cameras/<cam>/calibration.json   # homography, static markers, provenance
+                                   #   (pose method/confidence, camera height/nadir)
   cameras/<cam>/flatfield.npy      # per-pixel/channel gain map (apply side
                                    #   shipped out-of-process, commit 7f4c0ac;
                                    #   capture side sprint 037)

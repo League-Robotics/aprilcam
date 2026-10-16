@@ -105,6 +105,8 @@ class _FakeDaemon:
     get_tag_raises: Optional[Exception] = None
     get_tag_calls: List[Tuple[str, TagId]] = field(default_factory=list)
 
+    calibration: Optional[object] = None
+
     set_camera_config_raises: Optional[Exception] = None
     pushed_camera_config: Optional[CameraConfig] = None
 
@@ -134,6 +136,9 @@ class _FakeDaemon:
         if self.get_tag_raises is not None:
             raise self.get_tag_raises
         return self.tag_records.get(tag)
+
+    def get_calibration(self, camera: str):
+        return self.calibration
 
     def set_camera_config(self, config: CameraConfig) -> None:
         if self.set_camera_config_raises is not None:
@@ -810,3 +815,54 @@ def test_locate_h_prints_help_not_a_missing_hostname_error():
     with pytest.raises(SystemExit) as excinfo:
         parser.parse_args(["camera", "locate", CAMERA, "-h"])
     assert excinfo.value.code == 0
+
+
+# ---------------------------------------------------------------------------
+# Sprint 045 ticket 009: pose-vs-solved comparison (informational)
+# ---------------------------------------------------------------------------
+
+
+def _pose_calibration(nadir: Tuple[float, float], height_cm: float):
+    from aprilcam.calibration.calibration import Calibration
+
+    return Calibration(
+        stale=False,
+        calibrated_at=1.0,
+        playfield=PLAYFIELD,
+        homography=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+        matched_ids=(1,),
+        method="pose",
+        camera_height_cm=height_cm,
+        camera_nadir_x_cm=nadir[0],
+        camera_nadir_y_cm=nadir[1],
+    )
+
+
+def _locate_with_calibration(calibration, capsys, tmp_path):
+    daemon = _FakeDaemon(
+        camera_config=_camera_config(),
+        playfield=_playfield(),
+        tag_records={_TAG_15: _record(_TAG_15, _TAG_15_OBSERVED), _TAG_14: _record(_TAG_14, _TAG_14_OBSERVED)},
+        calibration=calibration,
+    )
+    code = locate_cli.cmd_locate(
+        _args(reference=["15:dot-northeast-orange:17.2", "14:dot-southwest-orange:15.0"], dry_run=True),
+        **_seams(daemon=daemon, loader=_FakeCameraConfigLoader(config=_camera_config()), config_dir=tmp_path / "c"),
+    )
+    assert code == 0
+    return capsys.readouterr().out
+
+
+def test_locate_prints_comparison_when_pose_differs_by_more_than_5cm(capsys, tmp_path):
+    out = _locate_with_calibration(_pose_calibration((13.0, -2.8), 128.2), capsys, tmp_path)
+    assert "note: pose calibration places the camera" in out
+    assert "nadir=(13.000, -2.800)" in out
+
+
+def test_locate_silent_when_pose_agrees_within_5cm(capsys, tmp_path):
+    out = _locate_with_calibration(_pose_calibration((3.5, -2.5), 129.0), capsys, tmp_path)
+    assert "pose calibration" not in out
+
+
+def test_locate_silent_without_a_pose_calibration(capsys, tmp_path):
+    assert "pose calibration" not in _locate_with_calibration(None, capsys, tmp_path)

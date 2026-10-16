@@ -2,11 +2,12 @@
 id: '010'
 title: 'Calibration target schema: ChArUco spec and placement in the definition, loader
   and wire'
-status: open
+status: done
 use-cases:
 - SUC-006
 - SUC-002
-depends-on: ['002']
+depends-on:
+- '002'
 github-issue: ''
 issue: pose-based-playfield-calibration-with-marker-corners-and-measured-lens.md
 completes_issue: true
@@ -36,13 +37,13 @@ Wire: `PlayfieldDefinition.calibration_target` (new message
 
 ## Acceptance Criteria
 
-- [ ] Loader parses, validates (spec well-formed, dictionary name known to the
+- [x] Loader parses, validates (spec well-formed, dictionary name known to the
       accepted set, centre within the field +/- board half-size, finite
       rotation) and round-trips `calibration_target`; absent = unchanged.
-- [ ] Wire round-trip test; old definitions encode with the field unset.
-- [ ] `required_marker_ids()` semantics unchanged by the presence of a target
+- [x] Wire round-trip test; old definitions encode with the field unset.
+- [x] `required_marker_ids()` semantics unchanged by the presence of a target
       (a target-only definition has no required markers).
-- [ ] cv2-free test still passes.
+- [x] cv2-free test still passes.
 
 ## Implementation Plan
 

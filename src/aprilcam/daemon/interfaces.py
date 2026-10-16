@@ -267,18 +267,10 @@ class Daemon:
 
     # -- calibration -----------------------------------------------------
 
-    def calibrate(self, camera: str, *, estimate_intrinsics: bool = False) -> CalibrationResult:
+    def calibrate(self, camera: str) -> CalibrationResult:
         """Run calibration in the daemon (UC-04).
 
         All vision happens here; the caller sends a command, not pixels.
-
-        *estimate_intrinsics* (sprint 030 ticket 002, SUC-002) opts into
-        also estimating this camera's lens model (``camera_matrix``/
-        ``dist_coeffs``) from the same detection burst, over whatever
-        ArUco+AprilTag ground truth the linked playfield surveys --
-        never re-estimated on an ordinary (``False``, the default) call,
-        which instead carries forward whatever lens model this camera's
-        prior successful calibration already held.
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.calibrate")
 

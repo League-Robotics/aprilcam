@@ -423,6 +423,12 @@ class CameraState:
     embedded in the camera's current calibration -- i.e. a ``calibrate``
     run is needed to apply it. ``False`` when there is no calibration or
     no stored model."""
+    calibration_method: str = ""
+    """How the held calibration was solved (sprint 045): ``"pose"`` |
+    ``"centre-point"``; empty = unknown (never calibrated, or a pre-045
+    file). Overlaid by ``DaemonService.list_cameras``."""
+    calibration_confidence: str = ""
+    """``"full"`` | ``"reduced"`` | ``"low"``; empty = unknown."""
     number: Optional[int] = None
     """Stable registry enumeration (UC-14.S-1).
 

@@ -132,6 +132,7 @@ from aprilcam.daemon.detection import DetectionEngine
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus, ImageStream, MountRegistration, TagStream
 from aprilcam.intrinsics.interfaces import IntrinsicsFinishResult, IntrinsicsStatus
 from aprilcam.intrinsics.manager import IntrinsicsManager
+from aprilcam.intrinsics.target import ChArUcoTargetObserver
 from aprilcam.daemon.streaming import (
     BroadcasterImageStream,
     BroadcasterTagStream,
@@ -707,6 +708,9 @@ class DaemonService(Daemon):
             # Sprint 044 ticket 010: why the store was ignored (resolution
             # mismatch), reported on the CalibrationResult.
             get_lens_warning=lambda slug, size: self._lens_store.get(slug, size)[1],
+            # Sprint 045 ticket 011: reads a laid-down ChArUco calibration
+            # target; injected so calibration/ never imports intrinsics/.
+            observe_target=ChArUcoTargetObserver(),
         )
         # Sprint 044: live ChArUco intrinsics sessions. Thin wiring only --
         # frames come from the held-open Camera.read(), and an installed
@@ -796,6 +800,7 @@ class DaemonService(Daemon):
             playfield = self._playfield_link(record.slug)
             calibrated, calibration_stale = self._calibration_flags(record.slug)
             lens_model, lens_pending = self._lens_flags(record.slug)
+            cal_method, cal_confidence = self._calibration_method_flags(record.slug)
             flatfield_present, flatfield_stale = self._flatfield_flags(record.slug)
             held = self._cameras.get(record.slug)
             if held is not None:
@@ -809,6 +814,8 @@ class DaemonService(Daemon):
                         flatfield_stale=flatfield_stale,
                         lens_model=lens_model,
                         lens_pending=lens_pending,
+                        calibration_method=cal_method,
+                        calibration_confidence=cal_confidence,
                     )
                 )
                 continue
@@ -825,6 +832,8 @@ class DaemonService(Daemon):
                     flatfield_stale=flatfield_stale,
                     lens_model=lens_model,
                     lens_pending=lens_pending,
+                    calibration_method=cal_method,
+                    calibration_confidence=cal_confidence,
                     number=record.number,
                 )
             )
@@ -841,6 +850,15 @@ class DaemonService(Daemon):
         if calibration is None:
             return False, False
         return True, calibration.stale
+
+    def _calibration_method_flags(self, slug: str) -> Tuple[str, str]:
+        """``(calibration_method, calibration_confidence)`` for *slug*
+        (sprint 045 ticket 005), from the held calibration; ``("", "")``
+        when never calibrated or the file predates the pose solve."""
+        calibration = self.get_calibration(slug)
+        if calibration is None:
+            return "", ""
+        return calibration.method or "", calibration.confidence or ""
 
     def _lens_flags(self, slug: str) -> Tuple[str, bool]:
         """``(lens_model, lens_pending)`` for *slug* (sprint 044 ticket
@@ -1868,7 +1886,7 @@ class DaemonService(Daemon):
             return (
                 f"mount_z={params.mount_z:g} for {tag.family.value} {tag.number} is "
                 "currently inert: no camera this daemon knows about has been "
-                "located yet (CameraConfig.camera_position), so the parallax "
+                "located yet (no fresh pose calibration and no CameraConfig.camera_position), so the parallax "
                 "correction has nowhere to apply -- mount_x/mount_y/mount_yaw_rad "
                 "still apply normally. Ask your operator to run `aprilcam camera "
                 "locate` against the camera(s) that will observe this tag, then "
@@ -1940,6 +1958,15 @@ class DaemonService(Daemon):
         or via ``aprilcam camera locate``, sprint 029 ticket 003)
         exactly like every other camera setting.
 
+        **Sprint 045 ticket 009 (precedence)**: a fresh *pose*
+        calibration (``Calibration.camera_geometry()`` -- method
+        ``"pose"``, not stale, height and nadir set) wins over the
+        configured ``camera_position``: the pose solve measures the
+        camera centre directly from the marker corners, so it is
+        fresher than an operator-asserted or ``camera locate``-solved
+        value. A stale pose calibration, a centre-point calibration, or
+        none yields ``None`` there and the rules below apply unchanged.
+
         A camera with no known configuration at all (``config is
         None``) or one that has never been located (``config.
         camera_position is None``) falls back to the exact pre-029
@@ -1962,13 +1989,18 @@ class DaemonService(Daemon):
         """
         with self._lock:
             config = self._camera_configs.get(slug)
+            calibration = self._calibrations.get(slug)
+        pose = calibration.camera_geometry() if calibration is not None else None
+        if pose is not None:
+            return pose
         if config is None or config.camera_position is None:
             return WorldPoint(x=0.0, y=0.0), 0.0
         return config.camera_position.nadir, config.camera_position.height_cm
 
     def _any_camera_located(self) -> bool:
         """Whether **any** camera this service knows about currently
-        has real, solved geometry rather than :meth:`_camera_geometry_for`'s
+        has real geometry (a fresh pose calibration or a located
+        ``camera_position``, sprint 045 ticket 009) rather than :meth:`_camera_geometry_for`'s
         pre-029 stopgap (ticket 030-004, SUC-004).
 
         Reuses :meth:`_camera_geometry_for` itself, once per configured
@@ -1987,7 +2019,7 @@ class DaemonService(Daemon):
         particular camera is.
         """
         with self._lock:
-            slugs = tuple(self._camera_configs.keys())
+            slugs = tuple({*self._camera_configs.keys(), *self._calibrations.keys()})
         return any(self._camera_geometry_for(slug)[1] > 0.0 for slug in slugs)
 
     def _mount_z_applied(self, mount_z: float) -> bool:
@@ -2112,13 +2144,12 @@ class DaemonService(Daemon):
 
     # -- calibration (ticket 022-003) --------------------------------------
 
-    def calibrate(self, camera: str, *, estimate_intrinsics: bool = False) -> CalibrationResult:
+    def calibrate(self, camera: str) -> CalibrationResult:
         """See ``daemon.interfaces.Daemon.calibrate``.
 
         A thin wrapper: every vision/geometry decision (multi-frame
         averaging, id matching, all-or-nothing acceptance, homography
-        solve, degenerate-geometry rejection, and -- sprint 030 ticket
-        002 -- intrinsics estimation) lives in
+        solve, degenerate-geometry rejection, pose path) lives in
         ``calibration.calibration.Calibrator``, injected as
         ``self._calibrator`` -- this method's only job is to run it and,
         on success, persist the result. ``NoPlayfieldLinked`` propagates
@@ -2139,12 +2170,6 @@ class DaemonService(Daemon):
         resolution rather than re-implementing it (see
         :meth:`_resolve_slug_if_known`'s docstring).
 
-        *estimate_intrinsics* is passed straight through to
-        ``self._calibrator.calibrate`` -- this method makes no decision
-        of its own about it, matching the "pure carry a bool from
-        caller to Calibrator" framing of this parameter throughout the
-        stack (sprint.md Architecture, responsibility 4).
-
         A failed attempt (``result.succeeded is False``) leaves
         ``calibration.json`` and this service's in-memory
         ``self._calibrations`` entry for *camera* completely untouched
@@ -2154,7 +2179,7 @@ class DaemonService(Daemon):
         guard.
         """
         slug = self._resolve_slug_if_known(camera)
-        result = self._calibrator.calibrate(slug, estimate_intrinsics=estimate_intrinsics)
+        result = self._calibrator.calibrate(slug)
         if result.succeeded:
             calibration = self._calibrator.get_calibration(slug)
             assert calibration is not None, (

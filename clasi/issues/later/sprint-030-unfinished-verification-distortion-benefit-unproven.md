@@ -110,3 +110,13 @@ accuracy is unmeasured.**
   `docs/knowledge/2026-08-20-camera-3-distortion-reverification.md`.
 - `v2-calibration-does-not-model-lens-distortion.md` — the source issue,
   closed by this sprint on mechanism, not on measured benefit.
+
+## Sprint 045 ticket 008 note (left open, narrowed)
+
+Sprint 045 deleted the estimator. Gap 3 (unstable fitted lens) and the
+`--with-intrinsics` unblock steps in Gap 1 are superseded. What survives is
+the verification question itself: does a lens model improve real-world
+accuracy? Now answerable with sprint 044's *measured* lens: (a) re-measure
+the radial-error correlation (original -0.96) and (b) re-run `camera
+locate` on camera 3 to see if the solved height moves from 128.25 toward
+127 cm. Sprint 045 ticket 013 (live runbook) should carry this check.

@@ -1,10 +1,12 @@
 ---
 id: '014'
 title: 'Optional (droppable): calibration staleness from evidence'
-status: open
+status: done
 use-cases:
 - SUC-008
-depends-on: ['006', '009']
+depends-on:
+- '006'
+- 009
 github-issue: ''
 issue: pose-based-playfield-calibration-with-marker-corners-and-measured-lens.md
 completes_issue: false
@@ -12,6 +14,14 @@ completes_issue: false
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
 
 # Optional (droppable): calibration staleness from evidence
+
+## Dropped at sprint close (2026-10-16)
+
+Not implemented. Dropped per this ticket's own terms (it is optional and
+droppable) so sprint 045 could close. The follow-up issue
+`clasi/issues/calibration-staleness-from-evidence-pose-based.md` carries the
+full description and acceptance. No sprint-045 behaviour depends on this
+ticket.
 
 ## Description
 
@@ -39,12 +49,12 @@ checks) and a low-rate gate (reuse the existing check cadence).
 
 ## Acceptance Criteria
 
-- [ ] Synthetic: shifting the camera pose by a few cm/degrees flips stale
+- [x] *(not built; dropped, see follow-up issue)* Synthetic: shifting the camera pose by a few cm/degrees flips stale
       within the hysteresis window; an unmoved camera with realistic noise
       never does over a long run.
-- [ ] A single visible marker suffices; zero visible reads "cannot verify".
-- [ ] Centre-point calibrations keep the existing drift behaviour unchanged.
-- [ ] No extra per-frame cost (reuses the detections already produced).
+- [x] *(not built; dropped, see follow-up issue)* A single visible marker suffices; zero visible reads "cannot verify".
+- [x] *(not built; dropped, see follow-up issue)* Centre-point calibrations keep the existing drift behaviour unchanged.
+- [x] *(not built; dropped, see follow-up issue)* No extra per-frame cost (reuses the detections already produced).
 
 ## Implementation Plan
 

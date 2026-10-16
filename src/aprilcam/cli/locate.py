@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import math
 import json
 import os
 import sys
@@ -321,6 +322,8 @@ def cmd_locate(
         f"condition_number={solution.condition_number:.2f}"
     )
 
+    _print_pose_comparison(daemon, args.camera, solution)
+
     poor_fit = (
         solution.rms_residual_cm > RMS_RESIDUAL_THRESHOLD_CM
         or solution.condition_number > CONDITION_NUMBER_THRESHOLD
@@ -389,6 +392,41 @@ def cmd_locate(
         "no daemon restart needed"
     )
     return EXIT_OK
+
+
+#: Pose-vs-solved disagreement (cm) above which ``camera locate`` prints
+#: an informational comparison (sprint 045 ticket 009, Open Question 4).
+POSE_COMPARISON_THRESHOLD_CM = 5.0
+
+
+def _print_pose_comparison(daemon, camera: str, solution) -> None:
+    """Informational only: when the camera also holds a fresh pose
+    calibration (``Calibration.camera_geometry()``), print how its
+    camera position compares with this solve if they differ by more
+    than :data:`POSE_COMPARISON_THRESHOLD_CM` in nadir or height. A
+    fresh pose calibration takes precedence over the configured
+    ``camera_position`` for parallax, so the operator should know when
+    the two disagree. Never affects the solve, the write, or the exit
+    code -- any failure fetching the calibration is silently skipped."""
+    try:
+        calibration = daemon.get_calibration(camera)
+    except AprilCamError:
+        return
+    pose = calibration.camera_geometry() if calibration is not None else None
+    if pose is None:
+        return
+    nadir, height_cm = pose
+    nadir_delta = math.hypot(nadir.x - solution.nadir.x, nadir.y - solution.nadir.y)
+    height_delta = abs(height_cm - solution.height_cm)
+    if max(nadir_delta, height_delta) <= POSE_COMPARISON_THRESHOLD_CM:
+        return
+    print(
+        f"note: pose calibration places the camera at nadir=({nadir.x:.3f}, "
+        f"{nadir.y:.3f}) cm height={height_cm:.3f} cm; this solve differs by "
+        f"{nadir_delta:.1f} cm (nadir) / {height_delta:.1f} cm (height). A "
+        "fresh pose calibration takes precedence over the configured "
+        "camera_position for parallax."
+    )
 
 
 def add_subparser(sub: "argparse._SubParsersAction") -> None:

@@ -91,7 +91,7 @@ from aprilcam.intrinsics.interfaces import (
     IntrinsicsStatus,
     NoIntrinsicsSession,
 )
-from aprilcam.config.interfaces import CameraConfig, CameraPosition, Feature
+from aprilcam.config.interfaces import CalibrationTarget, CameraConfig, CameraPosition, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
 from aprilcam.daemon.lifecycle import ControlPlaneListener
@@ -223,6 +223,8 @@ def _camera_state_to_proto(state: CameraState) -> aprilcam_v2_pb2.CameraState:
         flatfield_stale=state.flatfield_stale,
         lens_model=state.lens_model,
         lens_pending=state.lens_pending,
+        calibration_method=state.calibration_method,
+        calibration_confidence=state.calibration_confidence,
     )
     # optional fields: only set when not None, so HasField() on the wire
     # matches Optional[...] being None on this side (design.md §6).
@@ -431,6 +433,10 @@ def _playfield_feature_entry_to_proto(
     )
     if entry.tag_id is not None:
         msg.id = entry.tag_id
+    if entry.size_mm is not None:
+        msg.size_mm = entry.size_mm
+    if entry.policy is not None:
+        msg.policy = entry.policy
     if entry.colour is not None:
         msg.colour = entry.colour
     return msg
@@ -446,6 +452,8 @@ def _playfield_feature_entry_from_proto(
         tag_id=msg.id if msg.HasField("id") else None,
         colour=msg.colour if msg.HasField("colour") else None,
         height_cm=msg.height_cm,
+        size_mm=msg.size_mm if msg.HasField("size_mm") else None,
+        policy=msg.policy if msg.HasField("policy") else None,
     )
 
 
@@ -456,7 +464,7 @@ def _playfield_definition_to_proto(definition: PlayfieldDefinition) -> aprilcam_
     docstring and ``aprilcam_v2.proto``'s header comment for why this
     is not built from the more abstract ``features()``/
     ``required_aruco_ids()`` view)."""
-    return aprilcam_v2_pb2.PlayfieldDefinition(
+    msg = aprilcam_v2_pb2.PlayfieldDefinition(
         name=definition.name,
         width_cm=definition.width_cm,
         height_cm=definition.height_cm,
@@ -464,6 +472,27 @@ def _playfield_definition_to_proto(definition: PlayfieldDefinition) -> aprilcam_
         aruco_tags=[_playfield_feature_entry_to_proto(e) for e in definition.aruco_tags],
         rectangles=[_playfield_feature_entry_to_proto(e) for e in definition.rectangles],
         dots=[_playfield_feature_entry_to_proto(e) for e in definition.dots],
+    )
+    if definition.marker_size_mm_default is not None:
+        msg.marker_size_mm = definition.marker_size_mm_default
+    if definition.calibration_target is not None:
+        t = definition.calibration_target
+        msg.calibration_target.CopyFrom(
+            aprilcam_v2_pb2.CalibrationTarget(
+                kind=t.kind, board=t.board, centre_x_cm=t.centre_x_cm,
+                centre_y_cm=t.centre_y_cm, rotation_deg=t.rotation_deg,
+            )
+        )
+    return msg
+
+
+def _calibration_target_from_proto(msg: aprilcam_v2_pb2.PlayfieldDefinition):
+    if not msg.HasField("calibration_target"):
+        return None
+    t = msg.calibration_target
+    return CalibrationTarget(
+        kind=t.kind, board=t.board, centre_x_cm=t.centre_x_cm,
+        centre_y_cm=t.centre_y_cm, rotation_deg=t.rotation_deg,
     )
 
 
@@ -480,6 +509,8 @@ def _playfield_definition_from_proto(msg: aprilcam_v2_pb2.PlayfieldDefinition) -
         aruco_tags=tuple(_playfield_feature_entry_from_proto(e) for e in msg.aruco_tags),
         rectangles=tuple(_playfield_feature_entry_from_proto(e) for e in msg.rectangles),
         dots=tuple(_playfield_feature_entry_from_proto(e) for e in msg.dots),
+        marker_size_mm_default=msg.marker_size_mm if msg.HasField("marker_size_mm") else None,
+        calibration_target=_calibration_target_from_proto(msg),
     )
 
 
@@ -597,14 +628,25 @@ def _camera_config_from_proto(msg: aprilcam_v2_pb2.CameraConfig) -> CameraConfig
     )
 
 
+#: Sprint 045: optional scalar pose-provenance fields, by shared name.
+_RESULT_POSE_OPTIONALS = (
+    "method", "method_reason", "confidence", "corner_count",
+    "reprojection_error_px", "scale_agreement", "angular_spread_deg",
+    "camera_height_cm", "camera_tilt_deg", "leave_one_out_worst_id",
+    "leave_one_out_worst_cm", "layout_extent_ratio",
+)
+_CALIBRATION_POSE_OPTIONALS = (
+    "method", "confidence", "camera_height_cm", "camera_nadir_x_cm",
+    "camera_nadir_y_cm", "camera_tilt_deg", "reprojection_error_px",
+    "corner_count", "scale_agreement",
+)
+
+
 def _calibration_result_to_proto(result: CalibrationResult) -> aprilcam_v2_pb2.CalibrationResult:
     """Python -> proto, for a ``Calibrate`` response. ``missing_ids``
-    always carries the exact ids (never a count, UC-04.S-2).
-    ``intrinsics_estimated``/``intrinsics_mode``/``elevated_features_used``
-    (sprint 030 ticket 002) are ``HasField``-guarded exactly like
-    ``reprojection_error_cm``/``reason`` above: ``None`` means "the
-    concept did not apply this call," never a fabricated ``False``/
-    empty-string/``0``."""
+    always carries the exact ids (never a count, UC-04.S-2). Optional
+    fields are ``HasField``-guarded: ``None`` means "the concept did not
+    apply this call," never a fabricated ``False``/empty-string/``0``."""
     msg = aprilcam_v2_pb2.CalibrationResult(
         succeeded=result.succeeded,
         matched_ids=list(result.matched_ids),
@@ -614,16 +656,21 @@ def _calibration_result_to_proto(result: CalibrationResult) -> aprilcam_v2_pb2.C
         msg.reprojection_error_cm = result.reprojection_error_cm
     if result.reason is not None:
         msg.reason = result.reason
-    if result.intrinsics_estimated is not None:
-        msg.intrinsics_estimated = result.intrinsics_estimated
-    if result.intrinsics_mode is not None:
-        msg.intrinsics_mode = result.intrinsics_mode
-    if result.elevated_features_used is not None:
-        msg.elevated_features_used = result.elevated_features_used
     if result.lens_model_source is not None:
         msg.lens_model_source = result.lens_model_source
     if result.lens_warning is not None:
         msg.lens_warning = result.lens_warning
+    # Sprint 045 pose provenance (HasField-guarded; None stays absent).
+    for name in _RESULT_POSE_OPTIONALS:
+        value = getattr(result, name)
+        if value is not None:
+            setattr(msg, name, value)
+    if result.camera_nadir is not None:
+        msg.camera_nadir.CopyFrom(_world_point_to_proto(result.camera_nadir))
+    msg.notes.extend(result.notes)
+    msg.helpful_missing_ids.extend(result.helpful_missing_ids)
+    msg.leave_one_out_ids.extend(i for i, _ in result.leave_one_out_cm)
+    msg.leave_one_out_cm.extend(cm for _, cm in result.leave_one_out_cm)
     return msg
 
 
@@ -659,6 +706,10 @@ def _calibration_to_proto(calibration: Calibration) -> aprilcam_v2_pb2.Calibrati
         msg.lens_residual_px = calibration.lens_residual_px
     if calibration.lens_installed_at is not None:
         msg.lens_installed_at = calibration.lens_installed_at
+    for name in _CALIBRATION_POSE_OPTIONALS:
+        value = getattr(calibration, name)
+        if value is not None:
+            setattr(msg, name, value)
     return msg
 
 
@@ -1077,9 +1128,7 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
 
     def Calibrate(self, request, context):  # noqa: N802
         try:
-            result = self._service.calibrate(
-                request.camera, estimate_intrinsics=request.estimate_intrinsics
-            )
+            result = self._service.calibrate(request.camera)
         except Exception as exc:  # noqa: BLE001
             _abort(context, exc)
             return aprilcam_v2_pb2.CalibrateResponse()

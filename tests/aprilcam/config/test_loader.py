@@ -842,3 +842,180 @@ def test_load_config_dir_loads_the_real_main_playfield_fixture(loader, tmp_path)
     assert len(result.playfields) == 1
     assert result.playfields[0].name == "main-playfield"
     assert result.errors == ()
+
+
+# ---------------------------------------------------------------------------
+# Sprint 045 ticket 001 -- marker size and required/helpful policy.
+# ---------------------------------------------------------------------------
+
+SECONDARY_PLAYFIELD_PATH = MAIN_PLAYFIELD_PATH.parent / "secondary-playfield.json"
+SHIPPING_DIR = REPO_ROOT / "config" / "aprilcam" / "playfields"
+
+
+def _doc_with(entry_extra: dict | None = None, field_extra: dict | None = None) -> dict:
+    doc = _minimal_playfield_doc()
+    doc["aruco_tags"][0].update(entry_extra or {})
+    doc["playfield"].update(field_extra or {})
+    return doc
+
+
+def test_marker_size_defaults_absent_and_resolves_none(loader):
+    d = loader.parse_playfield(_minimal_playfield_doc())
+    assert d.marker_size_mm_default is None
+    assert d.marker_size_mm(1) is None
+    assert d.aruco_tags[0].size_mm is None and d.aruco_tags[0].policy is None
+    assert d.required_marker_ids() == (1, 2)
+    assert d.helpful_marker_ids() == ()
+    assert d.required_aruco_ids() == (1, 2)
+
+
+def test_entry_size_overrides_field_default(loader):
+    d = loader.parse_playfield(_doc_with({"size_mm": 30}, {"marker_size_mm": 46}))
+    assert d.marker_size_mm(1) == 30.0
+    assert d.marker_size_mm(2) == 46.0
+    with pytest.raises(KeyError):
+        d.marker_size_mm(99)
+
+
+def test_policy_partitions_ids_and_required_aruco_ids_unchanged(loader):
+    d = loader.parse_playfield(_doc_with({"policy": "helpful"}))
+    assert d.required_marker_ids() == (2,)
+    assert d.helpful_marker_ids() == (1,)
+    assert d.required_aruco_ids() == (1, 2)
+
+
+def test_new_keys_round_trip_and_are_omitted_when_unset(loader):
+    d = loader.parse_playfield(_doc_with({"size_mm": 30, "policy": "helpful"}, {"marker_size_mm": 46}))
+    out = d.to_dict()
+    assert out["playfield"]["marker_size_mm"] == 46.0
+    assert out["aruco_tags"][0]["size_mm"] == 30.0
+    assert out["aruco_tags"][0]["policy"] == "helpful"
+    assert "size_mm" not in out["aruco_tags"][1] and "policy" not in out["aruco_tags"][1]
+    assert loader.parse_playfield(out) == d
+    plain = loader.parse_playfield(_minimal_playfield_doc()).to_dict()
+    assert "marker_size_mm" not in plain["playfield"]
+    assert plain == loader.parse_playfield(plain).to_dict()
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, float("nan"), float("inf"), 1000.5, "46", None])
+def test_invalid_entry_size_rejected_naming_entry_and_key(loader, bad):
+    with pytest.raises(MalformedDocument, match=r"'u1'.*'size_mm'"):
+        loader.parse_playfield(_doc_with({"size_mm": bad}))
+
+
+@pytest.mark.parametrize("bad", [0, -5, False, float("nan"), float("-inf"), 5000, "x"])
+def test_invalid_default_size_rejected_naming_key(loader, bad):
+    with pytest.raises(MalformedDocument, match="playfield.marker_size_mm"):
+        loader.parse_playfield(_doc_with(None, {"marker_size_mm": bad}))
+
+
+@pytest.mark.parametrize("bad", ["Required", "optional", "", 1, None])
+def test_invalid_policy_rejected_naming_entry_and_key(loader, bad):
+    with pytest.raises(MalformedDocument, match=r"'u1'.*'policy'"):
+        loader.parse_playfield(_doc_with({"policy": bad}))
+
+
+def test_rotation_deg_is_not_schema_and_is_ignored_like_any_unknown_key(loader):
+    d = loader.parse_playfield(_doc_with({"rotation_deg": 90}))
+    assert not hasattr(d.aruco_tags[0], "rotation_deg")
+    assert "rotation_deg" not in d.to_dict()["aruco_tags"][0]
+    assert d == loader.parse_playfield(_minimal_playfield_doc())
+
+
+def test_rectangles_and_dots_do_not_gain_the_keys(loader):
+    doc = _minimal_playfield_doc()
+    doc["rectangles"][0].update({"size_mm": 30, "policy": "helpful"})
+    d = loader.parse_playfield(doc)
+    assert d.rectangles[0].size_mm is None and d.rectangles[0].policy is None
+    assert "size_mm" not in d.to_dict()["rectangles"][0]
+
+
+def test_shipping_main_playfield_resolves_46_for_every_aruco_id(loader):
+    d = loader.load_playfield(SHIPPING_DIR / "main-playfield.json")
+    assert d.marker_size_mm_default == 46.0
+    assert all(d.marker_size_mm(i) == 46.0 for i in d.required_aruco_ids())
+    assert d.required_marker_ids() == d.required_aruco_ids()
+
+
+def test_shipping_secondary_playfield_resolves_none(loader):
+    d = loader.load_playfield(SHIPPING_DIR / "secondary-playfield.json")
+    assert d.marker_size_mm_default is None
+    assert all(d.marker_size_mm(i) is None for i in d.required_aruco_ids())
+
+
+@pytest.mark.parametrize("name", ["main-playfield.json", "secondary-playfield.json"])
+def test_shipping_playfields_round_trip(loader, name):
+    d = loader.load_playfield(SHIPPING_DIR / name)
+    assert loader.parse_playfield(d.to_dict()) == d
+
+
+# ---------------------------------------------------------------------------
+# calibration_target (sprint 045 ticket 010).
+# ---------------------------------------------------------------------------
+
+_BOARD = "6x8:28:22:DICT_4X4_50"
+
+
+def _target_doc(**target) -> dict:
+    doc = _minimal_playfield_doc()
+    doc["calibration_target"] = {"kind": "charuco", "board": _BOARD, **target}
+    return doc
+
+
+def test_calibration_target_absent_is_unchanged(loader):
+    d = loader.parse_playfield(_minimal_playfield_doc())
+    assert d.calibration_target is None
+    assert "calibration_target" not in d.to_dict()
+
+
+def test_calibration_target_defaults_and_round_trip(loader):
+    d = loader.parse_playfield(_target_doc())
+    t = d.calibration_target
+    assert (t.kind, t.board, t.centre_x_cm, t.centre_y_cm, t.rotation_deg) == (
+        "charuco", _BOARD, 0.0, 0.0, 0.0)
+    d2 = loader.parse_playfield(_target_doc(centre_x_cm=10, centre_y_cm=-5, rotation_deg=90))
+    assert d2.calibration_target.rotation_deg == 90.0
+    assert loader.parse_playfield(d2.to_dict()) == d2
+    assert loader.parse_playfield(d.to_dict()) == d
+
+
+def test_target_does_not_change_required_marker_ids(loader):
+    base = loader.parse_playfield(_minimal_playfield_doc())
+    with_t = loader.parse_playfield(_target_doc())
+    assert with_t.required_marker_ids() == base.required_marker_ids()
+    assert with_t.required_aruco_ids() == base.required_aruco_ids()
+
+
+def test_target_only_definition_is_valid_with_no_required_markers(loader):
+    doc = {"name": "t", "playfield": {"width_cm": 100, "height_cm": 60},
+           "calibration_target": {"kind": "charuco", "board": _BOARD}}
+    d = loader.parse_playfield(doc)
+    assert d.required_marker_ids() == () and d.calibration_target is not None
+
+
+@pytest.mark.parametrize("target", [
+    {"kind": "chessboard"}, {"kind": None},
+    {"board": "nonsense"}, {"board": "6x8:28:22"}, {"board": "1x8:28:22:DICT_4X4_50"},
+    {"board": "6x8:22:28:DICT_4X4_50"}, {"board": "6x8:-1:-2:DICT_4X4_50"},
+    {"board": "6x8:28:22:DICT_NOPE_50"}, {"board": "6x8:28:22:4X4_50"}, {"board": 5},
+    {"centre_x_cm": 500}, {"centre_y_cm": -500}, {"centre_x_cm": "a"},
+    {"centre_x_cm": True}, {"centre_x_cm": float("nan")},
+    {"rotation_deg": float("inf")}, {"rotation_deg": "90"}, {"rotation_deg": None},
+])
+def test_invalid_calibration_target_rejected(loader, target):
+    with pytest.raises(MalformedDocument, match="calibration_target"):
+        loader.parse_playfield(_target_doc(**target))
+
+
+def test_calibration_target_must_be_object(loader):
+    doc = _minimal_playfield_doc()
+    doc["calibration_target"] = "6x8"
+    with pytest.raises(MalformedDocument, match="calibration_target"):
+        loader.parse_playfield(doc)
+
+
+def test_target_centre_allowed_up_to_board_half_size_beyond_field(loader):
+    # 6x8 @ 28 mm: half-height 11.2 cm. Field half-height is bounded by the minimal doc.
+    h = loader.parse_playfield(_minimal_playfield_doc()).height_cm
+    d = loader.parse_playfield(_target_doc(centre_y_cm=h / 2 + 11.0))
+    assert d.calibration_target.centre_y_cm == h / 2 + 11.0

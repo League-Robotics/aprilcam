@@ -124,3 +124,15 @@ def test_format_camera_row_flags_lens_pending_in_the_trailing_flags():
     row = format_camera_row(_state(lens_model="measured", lens_pending=True, calibration_stale=True))
     assert row.endswith("(stale, lens-pending)")
     assert row.index("lens=measured") < row.index("(stale")
+
+
+def test_format_camera_row_shows_pose_method_and_confidence():
+    state = _state()
+    from dataclasses import replace
+
+    row = format_camera_row(replace(state, calibration_method="pose", calibration_confidence="full"))
+    assert "calibrated (pose, full)" in row
+    row = format_camera_row(replace(state, calibration_method="centre-point", calibration_confidence=""))
+    assert "calibrated (centre-point)" in row
+    assert row.startswith("[3]")
+    assert "calibrated  flatfield" in format_camera_row(state)

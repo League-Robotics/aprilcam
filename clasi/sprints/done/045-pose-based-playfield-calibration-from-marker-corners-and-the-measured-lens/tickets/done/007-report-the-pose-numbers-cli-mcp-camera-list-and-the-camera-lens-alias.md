@@ -1,12 +1,13 @@
 ---
 id: '007'
 title: 'Report the pose numbers: CLI, MCP, camera list and the camera lens alias'
-status: open
+status: done
 use-cases:
 - SUC-001
 - SUC-003
 - SUC-004
-depends-on: ['006']
+depends-on:
+- '006'
 github-issue: ''
 issue: pose-based-playfield-calibration-with-marker-corners-and-measured-lens.md
 completes_issue: true
@@ -36,16 +37,16 @@ model" / "field calibration" wording in new output.
 
 ## Acceptance Criteria
 
-- [ ] CLI success output for a pose calibration lists every number named
+- [x] CLI success output for a pose calibration lists every number named
       above, including the worst leave-one-out marker; for centre-point it prints `method: centre-point (<reason>)`.
-- [ ] CLI failure output names the failing gate, its threshold and the
+- [x] CLI failure output names the failing gate, its threshold and the
       measured value; `missing_ids` wording unchanged.
-- [ ] MCP `calibrate`/`get_calibration` expose the fields (leave-one-out
+- [x] MCP `calibrate`/`get_calibration` expose the fields (leave-one-out
       residuals included, per marker) (documented in the
       tool docstrings, which are the agent-facing contract).
-- [ ] `camera list` shows e.g. `calibrated (pose, full)` / `(centre-point)`.
-- [ ] `aprilcam camera lens` behaves identically to `camera intrinsics`.
-- [ ] `client/` and `mcp/` remain cv2-free.
+- [x] `camera list` shows e.g. `calibrated (pose, full)` / `(centre-point)`.
+- [x] `aprilcam camera lens` behaves identically to `camera intrinsics`.
+- [x] `client/` and `mcp/` remain cv2-free.
 
 ## Implementation Plan
 

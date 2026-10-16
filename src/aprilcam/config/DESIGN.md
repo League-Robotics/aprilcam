@@ -1,6 +1,6 @@
 # config/
 
-**Owner:** Eric Busboom · **Last reviewed:** 2026-08-21 · **Status:** stable
+**Owner:** Eric Busboom · **Last reviewed:** 2026-10-16 · **Status:** stable
 
 ---
 
@@ -95,6 +95,33 @@ module — `configuration.md` §1 states logs go to stderr only, and
   schema models (id/slug/x/y/colour/height_cm) but does not carry forward
   `cardinal`/per-entry `"type"`/`display_name`/rectangle-dot sizing —
   fields nothing currently reads back.
+- **Marker size and policy (sprint 045 ticket 001).** Each id-section
+  (`april_tags`/`aruco_tags`) entry may carry `size_mm` (outer side of the
+  black square, mm) and `policy` (`required` | `helpful`; unspecified =
+  required). The `playfield` block may carry `marker_size_mm`, a field-level
+  default that an entry's own `size_mm` overrides. Sizes must be finite
+  numbers in (0, 1000] (bool rejected); a bad value or policy literal raises
+  `MalformedDocument` naming the entry and key. `to_dict` emits these keys
+  only when set, so older files round-trip unchanged. Resolution lives on the
+  concrete class: `marker_size_mm(id)`, `required_marker_ids()`,
+  `helpful_marker_ids()`; `required_aruco_ids()` still lists every id.
+  `rectangles`/`dots` never gain these keys. **There is no rotation key:**
+  marker orientation is mixed on real fields and is *detected* from the
+  corner order by the pose solve, never declared; a stray `rotation_deg` is
+  ignored like any other unknown key. Elevated entries (`height_cm > 0`) are
+  excluded from pose use.
+- **Defaults and who uses these keys (sprint 045).** Every new key is optional and omitted from `to_dict` when unset, so older documents round-trip byte-identical; unspecified `policy` means `required`, which reproduces the old "every listed marker" rule. `main-playfield.json` carries `playfield.marker_size_mm: 46`; `secondary-playfield.json` deliberately carries none (its marker size is unknown), so that field calibrates on the centre-point path. The keys are consumed by `calibration/` (pose solve, policy) and, over the wire, by `daemon/rpc.py` and `client/`; user-facing text calls the result "field calibration". See `docs/knowledge/2026-10-16-pose-based-field-calibration.md` for authoring a sized definition.
+- **Calibration target (sprint 045 ticket 010).** The definition may carry
+  `calibration_target`: `kind` (`"charuco"`), `board` (sprint 044 spec
+  `COLSxROWS:SQUARE_MM:MARKER_MM:DICT`), `centre_x_cm`/`centre_y_cm`
+  (default 0, 0) and `rotation_deg` (default 0 = upright, top edge north,
+  rows increasing southward). Unlike markers this is a declared placement,
+  so it has a rotation. The board string is validated structurally in
+  `loader.py` (same grammar as `BoardSpec.parse`, no `intrinsics` import);
+  accepted dictionary names are `interfaces.CHARUCO_DICTIONARIES`. The
+  centre must lie within the field plus the unrotated board half-size.
+  `to_dict` emits the block only when set; `required_marker_ids()` is
+  unaffected, and a target-only definition is valid.
 - **Feature validation specifics** (all in `loader.py`, all raising
   `MalformedDocument`): a feature positioned outside the declared field's
   half-extents plus a `1e-6` cm epsilon (`_BOUNDS_EPSILON_CM`, sized to

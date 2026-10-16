@@ -277,11 +277,20 @@ anything. This is a precondition failure, not a calibration failure.
    remote).
 2. The CLI triggers calibration **in the daemon** — it does no vision
    work itself — and reports progress.
-3. Per UC-04, success requires **every ArUco fiducial the playfield
-   definition specifies** to be detected. The CLI reports success, or
-   failure naming the missing ids.
+3. Per UC-04, success requires every **`required`** ArUco fiducial the
+   playfield definition specifies to be detected (`helpful` ones are
+   optional). The CLI reports success, or failure naming the missing ids
+   or the quality gate that failed.
+4. On success it prints the matched ids and the lens model used, then the
+   field-calibration numbers: method (`pose` or `centre-point`),
+   confidence (`full`, `reduced`, `low`), corners used, reprojection error
+   in px and cm, scale agreement, angular spread, the camera's height,
+   position and tilt, and the worst leave-one-out marker. Warnings (reduced
+   or low confidence, why the centre-point fit was used, helpful markers
+   not seen) go to stderr. `--verbose` adds the per-marker leave-one-out
+   table.
 
-**Lens.** Calibrate carries forward the camera's measured lens model (UC-30) if one matches the frame size, else a prior calibration's lens, and prints which it used. `--with-intrinsics` (estimate a lens from the field markers) is the documented no-board fallback and is refused while a measured model is installed.
+**Lens.** Calibrate carries forward the camera's measured lens model (UC-30) if one matches the frame size, else a prior calibration's lens, and prints which it used. The pose solve requires a measured lens model; without one the centre-point fit runs and the output says why. There is no flag to estimate a lens model from the field: the old `--with-intrinsics` option was removed in sprint 045; measure the lens model with `aprilcam camera lens` (alias of `camera intrinsics`) instead.
 
 **Postconditions.** On success, the camera has a stored calibration and
 world coordinates become available. On failure, nothing is stored and any
@@ -289,8 +298,9 @@ previous calibration is untouched.
 
 **Failure modes.**
 - Camera has no playfield link → **error**: nothing to calibrate.
-- Not every specified fiducial visible → failure naming the missing ids
+- Not every `required` fiducial visible → failure naming the missing ids
   (UC-04.S-2).
+- A quality gate fails → failure naming the gate and the worst marker.
 - Camera unreadable → error.
 - `--all` → refused; calibration is single-daemon by the fan-out rule.
 
@@ -322,6 +332,20 @@ intact.
 **UC-15.S-4 — Fan-out refused** · _failure path_
 `aprilcam camera calibrate --all` is refused, explaining that calibration
 targets exactly one daemon.
+
+**UC-15.S-5 — Pose calibration report** · _happy path_
+`aprilcam camera calibrate 3` on a camera with a measured lens model and a
+sized definition prints `method: pose`, `confidence: full`, the corner
+count, the reprojection error, both scales, the camera height, position and
+tilt and the worst leave-one-out marker. With `--verbose` the per-marker
+leave-one-out table follows. `aprilcam camera list` shows
+`calibrated (pose, full)`.
+
+**UC-15.S-6 — Degraded or fallback calibration** · _degraded path_
+With only two markers visible, or with no measured lens model, the command
+still succeeds (exit zero) but prints a warning on stderr: confidence
+`reduced`/`low` and its notes, or `method: centre-point` with the reason.
+A marker swapped with another fails with the gate and the marker named.
 
 ---
 
@@ -1375,7 +1399,7 @@ writes, with or without `--force`.
 - Daemon unreachable → connection error naming the host.
 - `--all` is refused (single-daemon, mutating).
 
-**No board available.** `aprilcam camera calibrate <camera> --with-intrinsics` remains the documented fallback; it estimates a lens from the field markers and is refused while a measured model is installed.
+**No board available.** Calibration runs on the centre-point path without a lens model; the old `--with-intrinsics` estimator was removed in sprint 045.
 
 **Open questions.** None.
 

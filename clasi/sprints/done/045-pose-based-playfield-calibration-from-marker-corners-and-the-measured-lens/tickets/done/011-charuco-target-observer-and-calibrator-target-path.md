@@ -1,10 +1,12 @@
 ---
 id: '011'
 title: ChArUco target observer and Calibrator target path
-status: open
+status: done
 use-cases:
 - SUC-006
-depends-on: ['006', '010']
+depends-on:
+- '006'
+- '010'
 github-issue: ''
 issue: pose-based-playfield-calibration-with-marker-corners-and-measured-lens.md
 completes_issue: true
@@ -41,18 +43,18 @@ anywhere; the board is removed after calibration by the operator.
 
 ## Acceptance Criteria
 
-- [ ] Synthetic ChArUco board (use `tests/aprilcam/intrinsics/boards.py`
+- [x] Synthetic ChArUco board (use `tests/aprilcam/intrinsics/boards.py`
       renderer) laid at the origin of a marker-free definition, measured
       lens: calibration succeeds with `method: pose`, 24+ corners.
-- [ ] **Agreement:** on the same synthetic camera, the board-based
+- [x] **Agreement:** on the same synthetic camera, the board-based
       calibration and a four-marker calibration map a grid of field points
       (including points where the board was NOT) to within 0.5 cm.
-- [ ] Orientation/centre convention verified: moving `centre_x_cm` /
+- [x] Orientation/centre convention verified: moving `centre_x_cm` /
       `rotation_deg` in the definition shifts/rotates the resulting field
       frame accordingly (north-up, no mirror).
-- [ ] Board not found / too few corners: clear failure reason, previous
+- [x] Board not found / too few corners: clear failure reason, previous
       calibration untouched.
-- [ ] No `calibration -> intrinsics` import anywhere (add an import-graph
+- [x] No `calibration -> intrinsics` import anywhere (add an import-graph
       test); `Calibrator` works unchanged when no observer is supplied.
 
 ## Implementation Plan

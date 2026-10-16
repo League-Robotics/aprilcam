@@ -305,7 +305,11 @@ every id present (D-05).
    (calibration/interfaces.py) — command, not pixels; all vision
    daemon-side
 2. `CalibrationResult.succeeded / .matched_ids / .missing_ids /
-   .reprojection_error_cm`
+   .reprojection_error_cm`; since sprint 045 also `.method`,
+   `.method_reason`, `.confidence`, `.corner_count`,
+   `.reprojection_error_px`, `.scale_agreement`, `.angular_spread_deg`,
+   `.camera_height_cm / .camera_nadir / .camera_tilt_deg`, `.notes`,
+   `.helpful_missing_ids` and the leave-one-out fields
 3. `Daemon.get_calibration(camera)` → `Optional[Calibration]` —
    `to_world` / `to_pixel` / `stale`
 4. Verify: `Daemon.get_tag(camera, TagId(APRILTAG, 1))` →
@@ -326,6 +330,18 @@ entries. The stray-marker failure mode (detected ids not in the
 definition, "ignored, reported") is *reportable* only via `matched_ids`'s
 complement — there is no `extra_ids` field — a caveat, not a blocker,
 since no scenario asserts it.
+
+**Sprint 045 update.** The all-or-nothing rule is now a per-marker policy
+(`PlayfieldDefinition.required_marker_ids()` / `helpful_marker_ids()`; the
+old `required_aruco_ids()` still lists every id). S-2 and S-3 hold when the
+markers are `required`, which is the default. S-4 (helpful marker missing)
+is `succeeded` true with `helpful_missing_ids == (9,)`. S-5 and S-6 are
+`succeeded` true with `confidence` `reduced` / `low` and `notes`. S-7 is
+`succeeded` false with `reason` naming the gate and
+`leave_one_out_worst_id` the swapped marker. S-8 is `method ==
+"centre-point"` with `method_reason`. `Calibration.camera_geometry()`
+exposes the pose-derived camera position that UC-12's parallax correction
+prefers over `camera_position`.
 
 Two notes keep this from clean COVERED. First, S-1's "client fetches the
 homography and inspects it": `Calibration` exposes the *mapping*

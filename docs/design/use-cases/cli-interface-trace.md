@@ -243,7 +243,12 @@ camera. The unknown-target error shape also gained a type
    (`src/aprilcam/daemon/interfaces.py`,
    `src/aprilcam/calibration/interfaces.py`)
 3. `CalibrationResult.succeeded` / `.matched_ids` / `.missing_ids` →
-   what the command reports
+   what the command reports; since sprint 045 the pose fields
+   (`.method`, `.confidence`, `.corner_count`, `.reprojection_error_px`,
+   `.reprojection_error_cm`, `.scale_agreement`, `.angular_spread_deg`,
+   `.camera_height_cm`/`.camera_nadir`/`.camera_tilt_deg`, `.notes`,
+   `.helpful_missing_ids`, `.leave_one_out_cm` for `--verbose`) →
+   the report lines of S-5 and S-6. `--with-intrinsics` no longer exists.
 
 The result type is well matched to the scenarios. S-1: `succeeded`
 true, `matched_ids` lists the ten ids to report, and the follow-up

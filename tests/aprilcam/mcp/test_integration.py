@@ -191,7 +191,7 @@ class _GoldenFakeDaemon:
     def set_camera_config(self, config: CameraConfig) -> None:
         self.pushed_camera_config = config
 
-    def calibrate(self, camera: str, *, estimate_intrinsics: bool = False) -> CalibrationResult:
+    def calibrate(self, camera: str) -> CalibrationResult:
         self.requested_camera = camera
         assert self.calibration_result is not None, "test forgot to set calibration_result"
         return self.calibration_result
@@ -309,15 +309,26 @@ async def test_golden_path_against_a_fake_daemon(tmp_path):
             "missing_ids": [],
             "reprojection_error_cm": 0.18,
             "reason": None,
-            # sprint 030 ticket 002: absent this call (no
-            # estimate_intrinsics argument passed above -> defaults to
-            # False -> the concept never ran).
-            "intrinsics_estimated": None,
-            "intrinsics_mode": None,
-            "elevated_features_used": None,
             # sprint 044: which lens model the call applied.
             "lens_model_source": "none",
             "lens_warning": None,
+            # sprint 045: pose provenance, all absent for this fake result.
+            "method": None,
+            "method_reason": None,
+            "confidence": None,
+            "corner_count": None,
+            "reprojection_error_px": None,
+            "scale_agreement": None,
+            "angular_spread_deg": None,
+            "camera_height_cm": None,
+            "camera_nadir": None,
+            "camera_tilt_deg": None,
+            "notes": [],
+            "helpful_missing_ids": [],
+            "leave_one_out_worst_id": None,
+            "leave_one_out_worst_cm": None,
+            "layout_extent_ratio": None,
+            "leave_one_out_cm": [],
         }
 
         # -- perceive again: tags, then a deskewed frame --

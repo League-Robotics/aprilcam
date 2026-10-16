@@ -103,7 +103,6 @@ from tests.aprilcam.calibration.test_calibration import (
     MAIN_PLAYFIELD_ARUCO_POSITIONS,
     main_playfield_definition,
     render_playfield_frame,
-    render_projective_frame,
 )
 from tests.aprilcam.camera.test_camera import FakeBackend, _FakeHeartbeatBackend
 from tests.aprilcam.daemon.conftest import hardware_test_camera_config
@@ -2112,6 +2111,57 @@ def test_camera_geometry_for_configured_camera_returns_its_real_nadir_and_height
 
     assert position == WorldPoint(x=3.05, y=-2.75)
     assert height_cm == 128.25
+
+
+def _pose_cal(*, method="pose", stale=False):
+
+    return Calibration(
+        stale=stale,
+        calibrated_at=1.0,
+        playfield="main-playfield",
+        homography=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+        matched_ids=(1,),
+        method=method,
+        camera_height_cm=144.0,
+        camera_nadir_x_cm=3.47,
+        camera_nadir_y_cm=-2.85,
+    )
+
+
+def test_camera_geometry_for_precedence_pose_then_config_then_sentinel(service, held_camera):
+    """Sprint 045 ticket 009: fresh pose > configured camera_position >
+    sentinel; stale/centre-point pose calibrations fall through."""
+    _, slug, _ = held_camera
+    pose = (WorldPoint(x=3.47, y=-2.85), 144.0)
+    sentinel = (WorldPoint(x=0.0, y=0.0), 0.0)
+    configured = (WorldPoint(x=1.0, y=2.0), 100.0)
+
+    # Fresh pose, no configured position.
+    service._calibrations[slug] = _pose_cal()
+    assert service._camera_geometry_for(slug) == pose
+    assert service._any_camera_located() is True
+
+    # Fresh pose still wins over a configured position.
+    service.set_camera_config(
+        CameraConfig(
+            name=slug, playfield="main-playfield", settings={},
+            camera_position=CameraPosition(nadir=configured[0], height_cm=configured[1]),
+        )
+    )
+    assert service._camera_geometry_for(slug) == pose
+
+    # Stale pose and centre-point fall back to the configured value.
+    service._calibrations[slug] = _pose_cal(stale=True)
+    assert service._camera_geometry_for(slug) == configured
+    service._calibrations[slug] = _pose_cal(method="centre-point")
+    assert service._camera_geometry_for(slug) == configured
+
+    # ...and without a configured value, to the sentinel.
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service._camera_geometry_for(slug) == sentinel
+    service._calibrations.pop(slug)
+    assert service._camera_geometry_for(slug) == sentinel
+    assert service._any_camera_located() is False
 
 
 # ---------------------------------------------------------------------------
@@ -4499,111 +4549,40 @@ def test_rpc_calibrate_no_playfield_linked_maps_to_failed_precondition(stub, hel
 
 
 # ---------------------------------------------------------------------------
-# Opt-in intrinsics estimation (sprint 030 ticket 002) -- estimate_intrinsics
-# plumbing end to end over the real RPC/proto wire, height_cm playfield
-# round trip, and the confirmed carry-forward-after-restart bug fix.
+# Calibrate wire (sprint 045 ticket 008): the single-view intrinsics
+# estimator is gone; its proto numbers are reserved. Plus the height_cm
+# playfield round trip and the carry-forward-after-restart bug fix.
 # ---------------------------------------------------------------------------
 
 
-def test_rpc_calibrate_estimate_intrinsics_true_stores_and_reports_intrinsics(directories, registry):
-    frame = render_projective_frame(
-        {i: (x, y, 0.0) for i, (x, y) in MAIN_PLAYFIELD_ARUCO_POSITIONS.items()}, tilt_deg=8.0
-    )
-    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
-    service = _service_with_camera(directories, registry, identity, slug, cam)
-    service.set_playfield(main_playfield_definition())
-    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
-
-    with _bind_stub(service) as stub:
-        response = stub.Calibrate(
-            aprilcam_v2_pb2.CalibrateRequest(camera=slug, estimate_intrinsics=True)
-        )
-
-    assert response.result.succeeded is True, response.result.reason
-    assert response.result.HasField("intrinsics_estimated")
-    assert response.result.intrinsics_estimated is True
-    assert response.result.intrinsics_mode == "coplanar-constrained"
-    assert response.result.elevated_features_used == 0
-
-    calibration = service.get_calibration(slug)
-    assert calibration.camera_matrix is not None
-    assert calibration.dist_coeffs is not None
-
-    path = _calibration_path(directories, slug)
-    data = json.loads(path.read_text(encoding="utf-8"))
-    assert "camera_matrix" in data
-    assert "dist_coeffs" in data
+def test_calibrate_proto_reserves_the_removed_estimator_fields():
+    request = aprilcam_v2_pb2.CalibrateRequest.DESCRIPTOR
+    assert "estimate" + "_intrinsics" not in request.fields_by_name
+    assert 2 not in {f.number for f in request.fields}
+    result = aprilcam_v2_pb2.CalibrationResult.DESCRIPTOR
+    for name in ("intrinsics_estimated", "intrinsics_mode", "elevated_features_used"):
+        assert name not in result.fields_by_name
+    assert not {6, 7, 8} & {f.number for f in result.fields}
 
 
-def test_rpc_calibrate_without_the_flag_reports_intrinsics_estimated_false(directories, registry):
+def test_rpc_calibrate_ignores_a_stale_clients_field_2(directories, registry):
+    """An older client still sends the removed estimator flag (field 2, varint
+    1); the unknown field is ignored and an ordinary calibration runs."""
     frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
     identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
     service = _service_with_camera(directories, registry, identity, slug, cam)
     service.set_playfield(main_playfield_definition())
     service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
 
-    with _bind_stub(service) as stub:
-        response = stub.Calibrate(aprilcam_v2_pb2.CalibrateRequest(camera=slug))
-
-    assert response.result.succeeded is True
-    assert response.result.HasField("intrinsics_estimated")
-    assert response.result.intrinsics_estimated is False
-    assert response.result.HasField("intrinsics_mode") is False
-    assert response.result.HasField("elevated_features_used") is False
-
-
-def test_rpc_calibrate_request_without_estimate_intrinsics_field_defaults_to_false(
-    directories, registry
-):
-    """Proto3's own default -- an old client that has never heard of
-    this field sends a request with it simply absent, which must behave
-    identically to ``estimate_intrinsics=False`` explicitly."""
-    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
-    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
-    service = _service_with_camera(directories, registry, identity, slug, cam)
-    service.set_playfield(main_playfield_definition())
-    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    stale = aprilcam_v2_pb2.CalibrateRequest(camera=slug).SerializeToString() + b"\x10\x01"
+    request = aprilcam_v2_pb2.CalibrateRequest.FromString(stale)
+    assert request.camera == slug
 
     with _bind_stub(service) as stub:
-        request = aprilcam_v2_pb2.CalibrateRequest(camera=slug)
         response = stub.Calibrate(request)
 
-    assert response.result.succeeded is True
-    assert response.result.intrinsics_estimated is False
-
-
-def test_rpc_estimate_intrinsics_flag_genuinely_reaches_the_daemon(directories, registry):
-    """A structural proof the field actually crosses the wire, not just
-    that the response happens to look right: a playfield with only 4
-    surveyed ArUco points (below the n_pts >= 6 floor) succeeds under a
-    plain ``Calibrate`` but fails, naming the floor, only when
-    ``estimate_intrinsics=True`` is genuinely threaded through --
-    something a silently-dropped field could never produce."""
-    positions = {1: (-40.0, 30.0), 2: (40.0, 30.0), 3: (40.0, -30.0), 4: (-40.0, -30.0)}
-    small_definition = PlayfieldDefinition(
-        name="tiny-field",
-        width_cm=120.0,
-        height_cm=100.0,
-        aruco_tags=tuple(
-            PlayfieldFeatureEntry(slug=f"a{i}", x=x, y=y, tag_id=i) for i, (x, y) in positions.items()
-        ),
-    )
-    frame = render_playfield_frame(positions, canvas_size=(700, 700))
-    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
-    service = _service_with_camera(directories, registry, identity, slug, cam)
-    service.set_playfield(small_definition)
-    service.set_camera_config(CameraConfig(name=slug, playfield="tiny-field", settings={}))
-
-    with _bind_stub(service) as stub:
-        plain = stub.Calibrate(aprilcam_v2_pb2.CalibrateRequest(camera=slug))
-        assert plain.result.succeeded is True, plain.result.reason
-
-        with_intrinsics = stub.Calibrate(
-            aprilcam_v2_pb2.CalibrateRequest(camera=slug, estimate_intrinsics=True)
-        )
-    assert with_intrinsics.result.succeeded is False
-    assert "6" in with_intrinsics.result.reason
-    assert "4" in with_intrinsics.result.reason
+    assert response.result.succeeded is True, response.result.reason
+    assert response.result.method == "centre-point"
 
 
 def test_rpc_playfield_feature_height_cm_round_trips(directories, registry):
@@ -4646,70 +4625,51 @@ def test_rpc_playfield_feature_height_cm_round_trips(directories, registry):
     assert entries[2].height_cm == 0.0
 
 
-def test_recalibration_after_a_simulated_restart_carries_forward_previously_estimated_intrinsics(
+def test_recalibration_after_a_simulated_restart_carries_forward_an_estimated_lens(
     directories, registry
 ):
-    """The confirmed bug ticket 001 left open for this ticket to close:
-    ``Calibrator``'s in-process cache (populated only by a successful
-    ``calibrate()`` call *in this process*) is not the same store as
-    ``DaemonService``'s own disk-loaded ``self._calibrations``. Before
-    ``Calibrator.__init__``'s ``get_prior_calibration`` was wired to
-    ``DaemonService.get_calibration``, an ordinary recalibration
-    immediately after a daemon restart read the former (empty) instead
-    of the latter (disk-backed), silently wiping a previously-estimated
-    lens model back to ``None`` with no error. Exercised here with the
-    calibration living *only* on disk when the second ``DaemonService``
-    is constructed -- this process's first ``calibrate()`` call for that
-    instance is the plain, no-flag recalibration itself, so a
-    same-process-only test would pass with the bug still present."""
-    frame = render_projective_frame(
-        {i: (x, y, 0.0) for i, (x, y) in MAIN_PLAYFIELD_ARUCO_POSITIONS.items()}, tilt_deg=8.0
-    )
+    """The confirmed bug ticket 001 left open: ``Calibrator``'s in-process
+    cache is not the same store as ``DaemonService``'s disk-loaded
+    ``self._calibrations``. An ordinary recalibration right after a daemon
+    restart must carry forward the lens in the on-disk ``calibration.json``
+    (here an old ``lens_source: "estimated"`` file -- the estimator that
+    wrote it is gone, the carry-forward is not) rather than wiping it."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
     identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
     service = _service_with_camera(directories, registry, identity, slug, cam)
     service.set_playfield(main_playfield_definition())
     service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
-
-    first_result = service.calibrate(slug, estimate_intrinsics=True)
-    assert first_result.succeeded is True, first_result.reason
-    original = service.get_calibration(slug)
-    assert original is not None
-    assert original.camera_matrix is not None
-    assert original.dist_coeffs is not None
-
-    # Simulate a restart: a brand-new DaemonService instance (its own
-    # fresh Calibrator, whose in-process cache has never seen a
-    # calibrate() call), reading the SAME state_dir -- calibration.json
-    # is the only thing that survives a restart (UC-01); everything
-    # else (playfields, camera config) does not, which is why they are
-    # re-pushed below exactly like a real operator/agent would after a
-    # restart.
-    frame2 = render_projective_frame(
-        {i: (x, y, 0.0) for i, (x, y) in MAIN_PLAYFIELD_ARUCO_POSITIONS.items()}, tilt_deg=8.0
+    matrix = ((400.0, 0.0, 450.0), (0.0, 400.0, 350.0), (0.0, 0.0, 1.0))
+    old = Calibration(
+        stale=False,
+        calibrated_at=1.0,
+        playfield="main-playfield",
+        homography=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+        matched_ids=(1,),
+        camera_matrix=matrix,
+        dist_coeffs=(-0.01, 0.0, 0.0, 0.0, 0.0),
+        lens_source="estimated",
     )
-    identity2, slug2, cam2, _backend2 = _open_camera_with_frames(registry, [frame2])
-    assert slug2 == slug  # same physical camera identity -> same slug
+    service._persist_calibration(slug, old)
+
+    identity2, slug2, cam2, _backend2 = _open_camera_with_frames(registry, [frame])
+    assert slug2 == slug
     restarted = _service_with_camera(directories, registry, identity2, slug2, cam2)
     restarted.set_playfield(main_playfield_definition())
     restarted.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
 
-    # Sanity: the fresh instance really did reload it from disk, before
-    # this process ever calls calibrate() on it.
     reloaded = restarted.get_calibration(slug)
-    assert reloaded is not None
-    assert reloaded.camera_matrix == original.camera_matrix
+    assert reloaded is not None and reloaded.lens_source == "estimated"
 
-    second_result = restarted.calibrate(slug)  # ordinary, no estimate_intrinsics
+    result = restarted.calibrate(slug)
 
-    assert second_result.succeeded is True, second_result.reason
-    assert second_result.intrinsics_estimated is False
-    after_recalibration = restarted.get_calibration(slug)
-    assert after_recalibration is not None
-    assert after_recalibration.camera_matrix is not None, (
-        "the bug this test guards: intrinsics silently wiped on a post-restart recalibration"
-    )
-    assert after_recalibration.camera_matrix == original.camera_matrix
-    assert after_recalibration.dist_coeffs == original.dist_coeffs
+    assert result.succeeded is True, result.reason
+    assert result.lens_model_source == "estimated"
+    assert result.method == "centre-point"
+    after = restarted.get_calibration(slug)
+    assert after is not None
+    assert after.camera_matrix == matrix
+    assert after.lens_source == "estimated"
 
 
 # ---------------------------------------------------------------------------
@@ -7098,6 +7058,6 @@ def test_installed_lens_is_used_by_next_calibrate_and_survives_playfield_change(
     assert service.get_calibration(slug).lens_source == "measured"
 
     service.set_playfield(main_playfield_definition())  # playfield change
-    refused = service.calibrate(slug, estimate_intrinsics=True)
-    assert refused.succeeded is False
+    again = service.calibrate(slug)
+    assert again.succeeded is True, again.reason
     assert lens_path.read_bytes() == before

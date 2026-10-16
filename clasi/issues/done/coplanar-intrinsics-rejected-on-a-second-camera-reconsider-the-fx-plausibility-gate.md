@@ -1,5 +1,5 @@
 ---
-status: pending
+status: done
 ---
 
 # Coplanar intrinsics rejected on a second camera — the fx-plausibility gate may be the wrong test
@@ -116,3 +116,10 @@ real (non-synthetic) ground truth, which sprint 030 shipped untested.
   benefit.
 - Sprint 030 ticket 002 completion notes (Open Questions 5 and 6) and
   ticket 003's stability finding.
+
+## Resolution
+
+Superseded by sprint 045 ticket 008: the single-view estimator and its
+fx-plausibility gate were deleted. The fit was non-physical (fx/k1 ridge);
+the measured ChArUco lens model (sprint 044) replaces it, so there is no
+gate left to reconsider.

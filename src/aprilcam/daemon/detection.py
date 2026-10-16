@@ -154,8 +154,8 @@ constructed with no real lookup injected (every test in this module
 that never sets ``camera_geometry_lookup`` explicitly, plus any future
 caller with no reason to need real geometry). A real daemon process
 instead injects ``daemon.service.DaemonService._camera_geometry_for``,
-which reads a configured camera's real ``camera_position`` when one
-exists, falling back to this exact stopgap only for a camera nobody has
+which prefers a fresh pose calibration's camera position (sprint 045),
+then a configured camera's real ``camera_position``, falling back to this exact stopgap only for a camera nobody has
 run ``aprilcam camera locate`` against (or hand-authored
 ``camera_position`` for) -- so a registered ``mount_z`` now has a real,
 measurable effect against a configured live camera, not only against

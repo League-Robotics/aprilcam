@@ -142,6 +142,14 @@ def format_camera_row(state: CameraState) -> str:
     usability = "usable" if state.usable else "unusable"
     playfield = state.playfield if state.playfield is not None else "-"
     calibration = "calibrated" if state.calibrated else "uncalibrated"
+    if state.calibrated and state.calibration_method:
+        # Sprint 045 ticket 007: how it was solved and how far to trust it.
+        detail = (
+            f"{state.calibration_method}, {state.calibration_confidence}"
+            if state.calibration_confidence
+            else state.calibration_method
+        )
+        calibration += f" ({detail})"
     flatfield = "flatfield=present" if state.flatfield_present else "flatfield=absent"
     lens = f"lens={state.lens_model}"
     flags = []

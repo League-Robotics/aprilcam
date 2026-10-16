@@ -1,7 +1,7 @@
 ---
 id: '001'
 title: 'Definition schema: marker size and required/helpful policy'
-status: open
+status: done
 use-cases:
 - SUC-002
 depends-on: []
@@ -44,21 +44,21 @@ loader's existing unknown-key behaviour; pin that with a test). `to_dict` emits 
 
 ## Acceptance Criteria
 
-- [ ] `PlayfieldFeatureEntry` gains `size_mm` and `policy`;
+- [x] `PlayfieldFeatureEntry` gains `size_mm` and `policy`;
       `PlayfieldDefinition` gains the field-level default read from
       `playfield.marker_size_mm`; all default to "absent" and equal today's
       values. No `rotation_deg` anywhere in the schema.
-- [ ] Resolution methods implemented and unit-tested (entry overrides default;
+- [x] Resolution methods implemented and unit-tested (entry overrides default;
       no size anywhere -> `None`).
-- [ ] `main-playfield.json` loads with `marker_size_mm: 46` resolved for every
+- [x] `main-playfield.json` loads with `marker_size_mm: 46` resolved for every
       aruco id; `secondary-playfield.json` resolves `None`.
-- [ ] Invalid values rejected with messages naming the entry and key.
-- [ ] `config/aprilcam/playfields/main-playfield.json` and
+- [x] Invalid values rejected with messages naming the entry and key.
+- [x] `config/aprilcam/playfields/main-playfield.json` and
       `secondary-playfield.json` (and every playfield fixture under tests/)
       load and round-trip unchanged.
-- [ ] `rectangles`/`dots` entries do not gain these keys (their `height_cm` /
+- [x] `rectangles`/`dots` entries do not gain these keys (their `height_cm` /
       `width_cm` meaning is untouched).
-- [ ] `config/interfaces.py` base class docstring updated: the
+- [x] `config/interfaces.py` base class docstring updated: the
       "all-or-nothing" wording on `required_aruco_ids` now points at the
       per-field policy.
 
