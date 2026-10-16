@@ -102,8 +102,11 @@ class FieldCorner:
 
 #: ``(frame, calibration_target) -> field-frame corner correspondences``
 #: (sprint 045 Decision 6). Injected into ``Calibrator``; the target type is
-#: left as ``Any`` here because ``CalibrationTarget`` arrives with ticket 011.
-TargetObserver = Callable[[np.ndarray, Any], Sequence[FieldCorner]]
+#: left as ``Any`` and the corners are read by attribute (``field_cm``,
+#: ``pixel``): the observer lives in ``intrinsics`` (``target.TargetCorner``,
+#: shape-compatible with :class:`FieldCorner`) and this package must not
+#: import it.
+TargetObserver = Callable[[np.ndarray, Any], Sequence[Any]]
 
 
 # ---- geometry primitives --------------------------------------------------

@@ -132,6 +132,7 @@ from aprilcam.daemon.detection import DetectionEngine
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus, ImageStream, MountRegistration, TagStream
 from aprilcam.intrinsics.interfaces import IntrinsicsFinishResult, IntrinsicsStatus
 from aprilcam.intrinsics.manager import IntrinsicsManager
+from aprilcam.intrinsics.target import ChArUcoTargetObserver
 from aprilcam.daemon.streaming import (
     BroadcasterImageStream,
     BroadcasterTagStream,
@@ -707,6 +708,9 @@ class DaemonService(Daemon):
             # Sprint 044 ticket 010: why the store was ignored (resolution
             # mismatch), reported on the CalibrationResult.
             get_lens_warning=lambda slug, size: self._lens_store.get(slug, size)[1],
+            # Sprint 045 ticket 011: reads a laid-down ChArUco calibration
+            # target; injected so calibration/ never imports intrinsics/.
+            observe_target=ChArUcoTargetObserver(),
         )
         # Sprint 044: live ChArUco intrinsics sessions. Thin wiring only --
         # frames come from the held-open Camera.read(), and an installed

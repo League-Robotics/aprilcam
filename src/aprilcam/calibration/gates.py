@@ -155,6 +155,8 @@ def classify(
     required: Iterable[int],
     helpful: Iterable[int],
     metrics: GateMetrics,
+    *,
+    has_target: bool = False,
 ) -> Tuple[str, Tuple[str, ...], Optional[str]]:
     """The degradation ladder: ``(label, notes, failure_reason)``.
 
@@ -166,11 +168,14 @@ def classify(
     Weak geometry (angular spread, IPPE ambiguity, collinear layout,
     ambiguous marker rotation) caps the label at ``low`` with a note. All thresholds are
     inclusive on the passing side.
+
+    *has_target*: a calibration target (ChArUco board) contributed corners, so
+    zero or one matched markers is not by itself a failure or a ``low`` cap.
     """
     m = sorted(set(int(i) for i in matched))
     req = set(int(i) for i in required)
     hlp = set(int(i) for i in helpful)
-    if not m:
+    if not m and not has_target:
         return LABEL_FAIL, (), "no calibration markers matched"
     missing_req = sorted(req - set(m))
     if missing_req:
@@ -194,7 +199,7 @@ def classify(
     notes = []
     listed = req | hlp
     absent = sorted(listed - set(m))
-    if len(m) == 1:
+    if len(m) == 1 and not has_target:
         label = LABEL_LOW
         notes.append("pose-only, low confidence: one marker matched")
     elif not absent:

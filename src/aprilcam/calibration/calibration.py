@@ -607,6 +607,13 @@ class Calibrator(_CalibratorBase):
     pipeline_config:
         Passed straight through to ``vision.pipeline.run_pipeline`` for
         every captured frame. ``None`` uses that function's own default.
+    observe_target:
+        Optional calibration-target observer (sprint 045 ticket 011), a
+        ``pose.TargetObserver``: ``(gray_frame, CalibrationTarget) ->
+        corners`` with ``field_cm`` and ``pixel`` attributes. Injected (the
+        daemon builds a ChArUco one) so this package never imports
+        ``intrinsics``. Without it a definition's ``calibration_target`` is
+        ignored and the calibrator behaves exactly as before.
     max_reprojection_error_cm:
         The reprojection-error acceptance ceiling (ticket 023-006) --
         defaults to the module-level :data:`MAX_REPROJECTION_ERROR_CM`
@@ -663,7 +670,9 @@ class Calibrator(_CalibratorBase):
         get_prior_calibration: Optional[CalibrationLookup] = None,
         get_lens_model: Optional[LensLookup] = None,
         get_lens_warning: Optional[LensWarningLookup] = None,
+        observe_target: Optional[pose.TargetObserver] = None,
     ) -> None:
+        self._observe_target = observe_target
         self._get_lens_model = get_lens_model
         self._get_lens_warning = get_lens_warning
         self._get_camera_config = get_camera_config
@@ -804,9 +813,54 @@ class Calibrator(_CalibratorBase):
         # Strategy choice: the pose path needs a measured lens at this frame
         # size and at least one matched on-plane marker with a known size.
         aruco_by_id = {entry.tag_id: entry for entry in definition.aruco_tags}
+        target = definition.calibration_target if self._observe_target is not None else None
+        target_corners: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        target_notes: List[str] = []
+        usable_markers = any(
+            aruco_by_id[i].height_cm == 0.0 and definition.marker_size_mm(i) is not None
+            for i in matched_ids
+        )
+        if target is not None:
+            lens_reason = self._pose_ineligibility(
+                camera_slug, definition, aruco_by_id, matched_ids, stored_lens,
+                lens_warning, has_target=True,
+            )
+            if lens_reason is not None:
+                if not usable_markers:
+                    return CalibrationResult(
+                        succeeded=False,
+                        reason=(
+                            "calibration target needs a measured lens model "
+                            f"({lens_reason}); measure the lens first"
+                        ),
+                        matched_ids=matched_ids,
+                        missing_ids=missing_ids,
+                        lens_warning=lens_warning,
+                        method="pose",
+                        method_reason=lens_reason,
+                    )
+                target_notes.append(f"calibration target ignored: {lens_reason}")
+            else:
+                target_corners, target_problem = self._observe_target_burst(frames, target)
+                if target_corners is None:
+                    if not usable_markers:
+                        return CalibrationResult(
+                            succeeded=False,
+                            reason=f"calibration target not usable: {target_problem}",
+                            matched_ids=matched_ids,
+                            missing_ids=missing_ids,
+                            lens_warning=lens_warning,
+                            lens_model_source=LENS_SOURCE_MEASURED,
+                            method="pose",
+                            method_reason="calibration target declared",
+                        )
+                    target_notes.append(
+                        f"calibration target not usable ({target_problem}); "
+                        "calibrated from the markers alone"
+                    )
         centre_reason = self._pose_ineligibility(
             camera_slug, definition, aruco_by_id, matched_ids, stored_lens,
-            lens_warning,
+            lens_warning, has_target=target_corners is not None,
         )
         if centre_reason is None:
             assert stored_lens is not None
@@ -820,6 +874,8 @@ class Calibrator(_CalibratorBase):
                 helpful_missing=helpful_missing,
                 lens=stored_lens,
                 lens_warning=lens_warning,
+                target_corners=target_corners,
+                target_notes=tuple(target_notes),
             )
         logger.info("calibrate(%s): centre-point path: %s", camera_slug, centre_reason)
         return self._calibrate_by_centres(
@@ -842,9 +898,12 @@ class Calibrator(_CalibratorBase):
         matched_ids: Sequence[int],
         stored_lens: Optional[LensModel],
         lens_warning: Optional[str],
+        *,
+        has_target: bool = False,
     ) -> Optional[str]:
         """Why the centre-point path must run instead of the pose path, as
-        the one-line ``method_reason``; ``None`` when the pose path applies."""
+        the one-line ``method_reason``; ``None`` when the pose path applies.
+        *has_target*: calibration-target corners stand in for marker sizes."""
         if stored_lens is None:
             if lens_warning:
                 return "lens measured at a different resolution"
@@ -854,7 +913,7 @@ class Calibrator(_CalibratorBase):
             return "no measured lens model"
         if stored_lens.source != LENS_SOURCE_MEASURED:
             return f"lens source is {stored_lens.source}"
-        if not any(
+        if not has_target and not any(
             aruco_by_id[i].height_cm == 0.0 and definition.marker_size_mm(i) is not None
             for i in matched_ids
         ):
@@ -873,15 +932,22 @@ class Calibrator(_CalibratorBase):
         helpful_missing: Tuple[int, ...],
         lens: LensModel,
         lens_warning: Optional[str],
+        target_corners: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+        target_notes: Tuple[str, ...] = (),
     ) -> CalibrationResult:
         """Planar-pose calibration from marker corners and the measured lens.
+
+        *target_corners* (``(obj, img)`` from :meth:`_observe_target_burst`)
+        are calibration-target correspondences, pooled with the marker
+        corners when both exist (``pose: markers+target``) and solved by the
+        same :func:`pose.solve_planar_pose` under the same gates.
 
         An orchestrator: ``calibration/pose.py`` does the arithmetic,
         ``calibration/gates.py`` decides. Nothing is stored on failure, so a
         previous calibration survives a rejected attempt.
         """
         aruco_by_id = {entry.tag_id: entry for entry in definition.aruco_tags}
-        notes: List[str] = []
+        notes: List[str] = list(target_notes)
         surveyed: Dict[int, pose.SurveyedMarker] = {}
         excluded: List[int] = []
         for tag_id in matched_ids:
@@ -912,7 +978,11 @@ class Calibrator(_CalibratorBase):
             lens_model_source=LENS_SOURCE_MEASURED,
             lens_warning=lens_warning,
             method="pose",
-            method_reason="measured lens model and marker sizes",
+            method_reason=(
+                "measured lens model and marker sizes" if target_corners is None
+                else "measured lens model; pose: "
+                + ("markers+target" if used else "target")
+            ),
             helpful_missing_ids=helpful_missing,
         )
 
@@ -935,19 +1005,37 @@ class Calibrator(_CalibratorBase):
             )
 
         try:
-            rotations = pose.detect_marker_rotations(obs, surveyed, camera_matrix, dist_coeffs)
-            turns = {i: rotations[i].quarter_turns for i in used}
-            obj, img = pose.correspondences(obs, surveyed, turns)
+            rotations: Dict[int, pose.MarkerRotation] = {}
+            turns: Dict[int, int] = {}
+            loo: Dict[int, float] = {}
+            obj = np.zeros((0, 3), dtype=np.float64)
+            img = np.zeros((0, 2), dtype=np.float64)
+            if used:
+                rotations = pose.detect_marker_rotations(obs, surveyed, camera_matrix, dist_coeffs)
+                turns = {i: rotations[i].quarter_turns for i in used}
+                obj, img = pose.correspondences(obs, surveyed, turns)
+                loo = pose.leave_one_out_residuals(obs, surveyed, turns, camera_matrix, dist_coeffs)
+            if target_corners is not None:
+                obj = np.vstack([obj, target_corners[0]])
+                img = np.vstack([img, target_corners[1]])
             planar = pose.solve_planar_pose(obj, img, camera_matrix, dist_coeffs)
-            loo = pose.leave_one_out_residuals(obs, surveyed, turns, camera_matrix, dist_coeffs)
         except ValueError as exc:
             return failure(f"pose solve failed: {exc}")
 
         height, nadir, tilt = pose.camera_position_from_pose(planar)
         err_cm = pose.reprojection_error_cm(planar, camera_matrix, dist_coeffs, obj, img)
         rms_cm = float(np.sqrt(np.mean(err_cm ** 2)))
-        local, glob = pose.marker_distances(obs, surveyed, planar, camera_matrix, dist_coeffs)
-        scale = gates.scale_agreement(local, glob) if len(local) == len(used) else None
+        if used:
+            local, glob = pose.marker_distances(obs, surveyed, planar, camera_matrix, dist_coeffs)
+        else:
+            local, glob = [], []
+        scale = (
+            gates.scale_agreement(local, glob) if used and len(local) == len(used) else None
+        )
+        if target_corners is not None and not used:
+            notes.append(
+                "scale agreement not applicable: the calibration target is the only scale"
+            )
         spread = gates.angular_spread_deg(pose.viewing_rays(img, camera_matrix, dist_coeffs))
         # Two points are trivially collinear, so the layout gate speaks only
         # for three or more markers; the two-marker case is already labelled
@@ -986,6 +1074,7 @@ class Calibrator(_CalibratorBase):
             [i for i in required if i not in excluded],
             [i for i in helpful if i not in excluded],
             metrics,
+            has_target=target_corners is not None,
         )
         notes.extend(gate_notes)
         if fail_reason is None and rms_cm > self._max_reprojection_error_cm:
@@ -1028,6 +1117,44 @@ class Calibrator(_CalibratorBase):
         return CalibrationResult(
             succeeded=True, confidence=label, notes=tuple(notes), **common, **measured
         )
+
+    #: Fewest distinct target corners a burst must yield to be solved from.
+    MIN_TARGET_CORNERS = 8
+
+    def _observe_target_burst(
+        self, frames: Sequence[np.ndarray], target: Any
+    ) -> Tuple[Optional[Tuple[np.ndarray, np.ndarray]], Optional[str]]:
+        """Run the injected target observer over *frames*, averaging each
+        board corner's pixel across the frames it was seen in.
+
+        Returns ``((obj (N, 3), img (N, 2)), None)`` -- field cm with z = 0 and
+        averaged raw pixels -- or ``(None, why)`` when the board was not found
+        or too few corners were read. A corner is keyed by its field position
+        (the observer's output is deterministic per corner id).
+        """
+        assert self._observe_target is not None
+        accum: Dict[Tuple[float, float], List[Tuple[float, float]]] = {}
+        try:
+            for frame in frames:
+                gray = (
+                    cv.cvtColor(frame, cv.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+                )
+                for c in self._observe_target(gray, target):
+                    key = (round(float(c.field_cm[0]), 4), round(float(c.field_cm[1]), 4))
+                    accum.setdefault(key, []).append((float(c.pixel.x), float(c.pixel.y)))
+        except ValueError as exc:
+            return None, f"target could not be read: {exc}"
+        if not accum:
+            return None, "the calibration board was not found in the frame"
+        if len(accum) < self.MIN_TARGET_CORNERS:
+            return None, (
+                f"only {len(accum)} board corners read (need at least "
+                f"{self.MIN_TARGET_CORNERS})"
+            )
+        keys = sorted(accum)
+        obj = np.array([[k[0], k[1], 0.0] for k in keys], dtype=np.float64)
+        img = np.array([np.mean(accum[k], axis=0) for k in keys], dtype=np.float64)
+        return (obj, img), None
 
     def _calibrate_by_centres(
         self,

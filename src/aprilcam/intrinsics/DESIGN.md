@@ -17,6 +17,7 @@ The boundary with `calibration/`: this package *produces* a lens model; `calibra
 - **`collector.py`** — `ViewCollector`: decides which detections become kept views — minimum corners, IPPE pose with an ambiguity ratio gate, frame-to-frame motion gate, blur gate relative to the camera's best sharpness, and a novelty/coverage rule (shift, tilt delta, nine frame regions, edge emphasis). Thresholds are named constants.
 - **`solver.py`** — `LensSolver`: solves on all views and on random halves, undistorts a grid over the central ~85% of the field, absorbs projective differences with a homography (a planar field would), and takes the worst disagreement as the **good-enough residual** (`GOOD_RESIDUAL_PX = 4.0`, RMS gate `0.6`). Also produces the plain-language **next hint** (which region, which tilt).
 - **`session.py`** — one live session on one camera: a capture thread (`Camera.read()` at ~8 fps) and a solver thread (re-solve every 3 new views), publishing one immutable `IntrinsicsStatus` snapshot under a lock. Holds corner arrays only, never frames. Time/thread dependent parts are injectable; `step()`/`maybe_solve()` are driven synchronously in tests.
+- **`target.py`** — `ChArUcoTargetObserver` (sprint 045): a callable `(gray, CalibrationTarget) -> [TargetCorner(field_cm, pixel)]` that runs `BoardDetector` and maps each ChArUco corner id (via `collector.object_points`, board metres -> cm) through the declared placement: board centre, rotation (counter-clockwise from above; 0 = upright, top edge north) and the single board-y-down -> field-y-north flip (`board_to_field_cm`, pinned by test). `DaemonService` constructs it and injects it into `calibration.Calibrator` as `observe_target`; `calibration/` never imports this package (sprint 045 Decision 6, enforced by an import-graph test). Nothing about the board is persisted.
 - **`manager.py`** — `IntrinsicsManager`: at most one session per camera slug, a 120 s no-status-poll auto-abort watchdog, abort-everything on shutdown. The only thing `DaemonService` talks to; it knows nothing about cameras or stores (the service injects a frame-source factory and an install callback).
 
 ## 3. Constraints and Invariants
@@ -38,7 +39,7 @@ Decisions (sprint 044): installation is a per-camera `intrinsics.json` via `Lens
 `DaemonService.start_intrinsics / get_intrinsics_status / finish_intrinsics / abort_intrinsics`, via the four RPCs and `IntrinsicsStatus` message (`daemon/DESIGN.md`, `proto/DESIGN.md`).
 
 ### Consumes
-`camera.Camera.read()` through an injected frame source; `calibration.lens.LensStore` and `LensModel` through an injected install callback.
+`camera.Camera.read()` through an injected frame source; `calibration.lens.LensStore` and `LensModel` through an injected install callback; `config.interfaces.CalibrationTarget` (new edge `intrinsics -> config`, value type only, used by `target.py`).
 
 ## 6. Open Questions / Known Limitations
 
