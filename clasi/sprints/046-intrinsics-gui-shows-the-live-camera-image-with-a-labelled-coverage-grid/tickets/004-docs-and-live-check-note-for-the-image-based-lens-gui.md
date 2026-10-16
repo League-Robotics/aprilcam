@@ -1,9 +1,13 @@
 ---
 id: '004'
 title: Docs and live-check note for the image-based lens GUI
-status: open
-use-cases: [SUC-001, SUC-002, SUC-003]
-depends-on: ['003']
+status: done
+use-cases:
+- SUC-001
+- SUC-002
+- SUC-003
+depends-on:
+- '003'
 github-issue: ''
 issue: intrinsics-gui-shows-the-live-camera-image-with-a-labelled-coverage-grid.md
 completes_issue: true
@@ -36,10 +40,10 @@ including the acceptance-rate comparison with and without the image.
 
 ## Acceptance Criteria
 
-- [ ] Both DESIGN.md files describe the new behaviour accurately.
-- [ ] Runbook/knowledge note contains the live-check steps and the rate
+- [x] Both DESIGN.md files describe the new behaviour accurately.
+- [x] Runbook/knowledge note contains the live-check steps and the rate
       comparison procedure with a place to record results.
-- [ ] Docs only; no code changes.
+- [x] Docs only; no code changes.
 
 ## Testing
 

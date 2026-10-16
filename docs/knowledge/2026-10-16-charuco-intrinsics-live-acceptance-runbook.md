@@ -287,3 +287,35 @@ Do not patch in this ticket. Capture and file an issue
 | 10 | Daemon restarts after step 1 (expect 0) | | |
 
 Date/time of run, host, git commit of the install (`git rev-parse --short HEAD`):
+
+## Live check: image-based lens GUI (sprint 046)
+
+Cameras 2 and 3 already carry measured lenses (promoted on 2026-10-16); camera 4
+is the one to measure. Run:
+
+```
+aprilcam camera lens 2 4
+```
+
+1. Two columns appear, each with a live camera image (not just 3x3 tiles).
+2. A labelled coverage grid is drawn over each image.
+3. Hold the board in view: its outline follows it; move it away and the outline
+   disappears.
+4. As the board covers a region, that cell goes amber then green, at the same
+   moment the corresponding tile would.
+5. Rate comparison: perform the same board motion for one minute twice, once
+   with the GUI (image on) and once with `aprilcam camera lens 2 4 --no-gui`
+   (text mode, baseline). Count kept views per minute in each run and record
+   them below.
+6. Stop the daemon mid-session: the image dims and the banner shows
+   `[cam] frame: ...`. Restart the daemon before further runs.
+7. Remote daemon (`-d HOST`): each camera pulls a JPEG at about 4.5 fps, so
+   expect noticeable bandwidth; a slow `get_frame` also delays that poller
+   step (no time budget).
+
+| Run | Kept views per minute |
+|---|---|
+| Image on (GUI) | |
+| Baseline (`--no-gui`) | |
+
+Date/host/commit of this check:
