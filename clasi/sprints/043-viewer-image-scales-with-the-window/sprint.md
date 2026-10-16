@@ -6,6 +6,8 @@ branch: sprint/043-viewer-image-scales-with-the-window
 use-cases: []
 issues:
 - camera-and-playfield-view-image-should-scale-with-the-window.md
+- tags-generate-should-produce-a-single-printable-pdf-like-v1.md
+- stream-subscribe-errors-are-lost-so-playfield-view-reports-no-frame-instead-of-not-calibrated.md
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
 
@@ -22,6 +24,19 @@ it — for both the raw camera view and the playfield view, with and
 without the tag sidebar (the sidebar keeps its fixed width; the image
 area takes the rest).
 
+Two further issues were added to this sprint after it was first
+planned, each independent of the viewer work:
+
+- **Tag generation as a printable PDF.** Reinstate the v1 labelled
+  multi-page PDF tag generator as `aprilcam tags generate` (stakeholder
+  decision, 2026-10-16): one tag per 59 x 102 mm label page, a caption
+  naming family and id under every tag, no size parameter.
+- **Stream subscribe errors reach the client.** When the daemon's
+  stream transport fails a subscribe (for example `NotCalibrated`),
+  the client must see that typed error instead of a silent close, so
+  `aprilcam playfield view` says "not calibrated" rather than "no frame
+  received".
+
 ## Problem
 
 Today `show()` (`viewer.py` around line 612) only ever scales a frame
@@ -32,6 +47,26 @@ space or clips the image rather than rescaling it.
 
 Source issue:
 `clasi/issues/camera-and-playfield-view-image-should-scale-with-the-window.md`.
+
+**Tag generation regression.** Sprint 028's `aprilcam tags generate`
+(UC-21, `cli/tags.py` -> `tags/generator.py`) writes one bare PNG per
+id with no quiet zone, no caption, no DPI metadata and a *required*
+`--size-cm`. The stakeholder's actual printing workflow (v1,
+`archive/src/aprilcam/tags/taggen.py`) is one multi-page PDF of labelled
+tags printed at 100% on a label printer, with size an output of printing
+rather than an input to generation. Today the stakeholder runs the
+archived script by hand. Source issue:
+`clasi/issues/tags-generate-should-produce-a-single-printable-pdf-like-v1.md`.
+
+**Lost stream subscribe errors.** `daemon/stream_transport.py`'s
+`_Listener._sender_loop` catches an exception from the subscribe
+callable, logs it, and closes the socket without sending anything. The
+client (`client/streams.py`) sees a bare EOF, `view/viewer.py` times
+out and raises `FirstFrameTimeout`, and `cli/playfield.py` prints the
+"camera's capture session may be wedged" diagnostic; its
+`NotCalibrated` handler (the UC-18.S-2 "calibrate first" pointer) is
+never reached. Source issue:
+`clasi/issues/stream-subscribe-errors-are-lost-so-playfield-view-reports-no-frame-instead-of-not-calibrated.md`.
 
 ## Solution
 
@@ -46,6 +81,25 @@ purely an on-screen convenience, per the existing "raw means raw"
 comment on `_MAX_DISPLAY_WIDTH`. Guard against a resize feedback loop:
 the displayed image must never force the widget to grow the window.
 
+**Tag generation.** `aprilcam tags generate` writes a v1-style PDF by
+default: ids spec (`1-8`, `0-3,7`), `-A/--aruco` to choose ArUco 4x4
+over AprilTag 36h11, `-o` output path, `--png` as the opt-in
+per-id-image alternative. Each page is 59 x 102 mm with the tag centred
+inside a small quiet zone and a caption `ArUco 4x4 ID: 3` /
+`AprilTag 36h11 ID: 7` beneath it. The v2 implementation is written
+fresh against `tags/interfaces.py` (a PDF-sheet method added to
+`TagGenerator`), using the page geometry and quiet-zone ratio v1 learned;
+v1's hard-coded `ARUCO_POSITIONS` captions are not carried over (they
+are stale against `main-playfield.json`). `fpdf2` moves into the base
+dependencies. UC-21 and `tags/DESIGN.md` are updated: the deliverable
+is a printable sheet and the "PDF output" open question is closed.
+
+**Stream errors.** On subscribe failure the stream transport sends one
+typed error frame before closing; `SocketImageStream`/`SocketTagStream`
+decode it and raise the matching `AprilCamError` subclass
+(`NotCalibrated`, `UnknownCamera`, `CameraNotPresent`) from iteration,
+so the existing `cli/playfield.py`/`cli/camera.py` handlers fire.
+
 ## Success Criteria
 
 - Resizing either view window rescales the displayed image to fill the
@@ -55,6 +109,15 @@ the displayed image must never force the widget to grow the window.
 - Initial window size stays close to today's behavior (frame size
   capped at ~960px wide).
 - No resize feedback loop (window doesn't grow on its own).
+- `aprilcam tags generate 1-8 -A -o out.pdf` writes one 59 x 102 mm page
+  per id with a family-and-id caption under each tag and no `--size-cm`;
+  `--png` still produces per-id images; an out-of-range id still errors
+  naming the valid range and writes nothing.
+- No stale position captions; `fpdf2` is a declared base dependency;
+  UC-21 and `tags/DESIGN.md` describe the sheet deliverable.
+- `aprilcam playfield view` against an uncalibrated camera prints the
+  "not calibrated" message, not "no frame received"; likewise unknown
+  and not-present cameras surface their own errors.
 - The fit-size computation is covered by unit tests with no display
   required.
 
@@ -69,6 +132,14 @@ the displayed image must never force the widget to grow the window.
 - Updating `src/aprilcam/view/DESIGN.md` to reflect the new resize
   behavior, superseding the current fixed-`_MAX_DISPLAY_WIDTH`
   description.
+- Tag generation PDF: `tags/generator.py`, `tags/interfaces.py`,
+  `cli/tags.py`, `pyproject.toml` (`fpdf2` to base dependencies),
+  UC-21 in `docs/design/use-cases/cli.md`, `src/aprilcam/tags/DESIGN.md`.
+- Stream error propagation: `daemon/stream_transport.py` (send a typed
+  error frame on subscribe failure), the wire message in
+  `proto/aprilcam_v2.proto` plus regenerated `proto/aprilcam_v2_pb2*`,
+  `client/streams.py` (decode and raise), and the `stream_transport`/
+  `streams` design notes.
 
 ### Out of Scope
 
@@ -77,6 +148,11 @@ the displayed image must never force the widget to grow the window.
 - The collapsible per-layer panel UI noted as a spec/implementation gap
   in `DESIGN.md` — unrelated to this issue.
 - Any non-Tk view client.
+- Tag generation: captioning ids with playfield positions (omitted
+  entirely), a size parameter on the PDF, multi-up/sheet layouts other
+  than one tag per label page, other label sizes.
+- Stream errors: mid-stream (post-subscribe) failures, reconnect logic,
+  and changing the FirstFrameTimeout diagnostic text itself.
 
 ## Test Strategy
 
@@ -91,11 +167,36 @@ widget wiring (layout, `<Configure>` handling, re-render on resize, no
 grow-feedback) gets a `@pytest.mark.camera` smoke test, mirroring how
 this module already tests other real-window behavior (e.g. the sidebar
 roster wiring). No integration or daemon-facing tests are needed —
-nothing streamed, subscribed, or sent to the daemon changes.
+nothing streamed, subscribed, or sent to the daemon changes *for the
+viewer ticket*.
+
+The tag-generation ticket is tested without hardware or a daemon:
+`tests/aprilcam/tags/` covers the PDF (page count and size equal ids and
+59 x 102 mm, captions present in the extracted text, no position text,
+range validation writes nothing), and
+`tests/aprilcam/cli/test_tags_cli.py` covers the CLI shape with the
+existing fake-generator pattern. The stream-error ticket uses a loopback
+socket pair / fake daemon: `tests/aprilcam/client/test_streams.py` for
+the error frame to typed exception mapping, the daemon-side transport
+test for the frame being sent, and
+`tests/aprilcam/cli/test_playfield_cli.py` for a fake daemon whose
+`stream_images` raises `NotCalibrated` surfacing as "not calibrated" in
+CLI output (not the FirstFrameTimeout text).
 
 ## Architecture
 
-**Compact** — this sprint changes one module (`view/viewer.py`'s
+**Sizing (revised when issues 2 and 3 were added): Substantial, no
+diagram.** Three independent changes: the viewer (one module,
+`view/viewer.py`), tag generation (`tags/` and `cli/tags.py`), and
+stream error propagation (`daemon/stream_transport.py`,
+`client/streams.py`, plus the wire definition they share). The stream
+fix touches the daemon/client wire contract (a new message on an
+existing channel), which by the sizing rules pushes the sprint past
+compact. No diagram is included: no new dependency edge or composition
+exists between the three changes, and the daemon-to-client socket edge
+already exists, so a diagram would restate existing structure.
+
+The original viewer analysis follows unchanged: this part changes one module (`view/viewer.py`'s
 `TkWindow`) with no new cross-module dependency, no dependency-direction
 change, and no data-model change; it revises how one class lays out and
 resizes its own widgets. No diagrams are included per the compact
@@ -181,10 +282,88 @@ label/frame (or explicitly disable `pack_propagate`/rely on `fill`/
 `expand` sizing from the parent rather than the reverse) so the causal
 direction is always window → image, never image → window.
 
+### Architecture: Tag generation PDF (`tags/`, `cli/tags.py`)
+
+**What changed.** `tags.interfaces.TagGenerator` gains a PDF-sheet
+method (working name `generate_sheet(family, ids, *, out_path) -> Path`)
+alongside the existing `generate(...)`, which remains as the `--png`
+path. The concrete `tags/generator.py` renders each tag with OpenCV as
+today (lazy `_import_cv`, so the base CLI stays importable without the
+daemon extra), then lays it out on a 59 x 102 mm page with `fpdf2`:
+tag centred, small quiet zone (v1 used a 0.04 ratio so the tag fills the
+label), caption centred beneath (`ArUco 4x4 ID: n` / `AprilTag 36h11 ID:
+n`). Page geometry, quiet-zone ratio and caption position are module
+constants taken from v1's evidence, not v1's code. `cmd_generate`
+changes shape: ids spec, `-A/--aruco`, `-o`, `--png`; `--size-cm` is
+removed from the PDF path (retained only with `--png`, ticket 002 pins
+the default). Id validation (`InvalidTagId`) and writability checks
+(`UnwritableOutputPath`) run before anything is written, as today.
+
+**Why.** The printing workflow needs one labelled file; size is measured
+after printing. **Impact.** `TagGenerator` consumers: only `cli/tags.py`
+(verify `mcp/tools/mobile_tags.py` is unaffected; it uses mount
+parameters, not generation). `fpdf2` moves from the `daemon` extra to
+base dependencies (pure Python). **Rationale.** Decision: add a method
+rather than change `generate`'s signature, so the PNG path and its
+tests are untouched; alternative (one method with a format switch)
+rejected as it would blur two different return shapes. Captions omit
+position: v1's table is stale against `main-playfield.json`, and
+deriving from a playfield definition would make an offline tool depend
+on config.
+
+### Architecture: Stream subscribe error propagation (`daemon/stream_transport.py`, `client/streams.py`, wire definition)
+
+**What changed.** In `_Listener._sender_loop`, the subscribe `except`
+now, before `_drop(conn)`, best-effort sends one length-prefixed error
+frame (error kind among `NotCalibrated`, `UnknownCamera`,
+`CameraNotPresent`, otherwise a generic daemon error, plus the message
+text) and still logs the exception. The frame must be distinguishable
+from the `GetFrameResponse`/tag payloads sharing the channel; the exact
+encoding (a new `StreamError` message in `proto/aprilcam_v2.proto` with
+regenerated modules, plus how it is told apart from data frames) is
+ticket 003's decision, constrained to leave successful streams
+byte-identical. `SocketImageStream.__iter__` and the tag stream's
+equivalent decode the error frame and raise the matching `AprilCamError`
+subclass from `aprilcam.errors`, so `viewer.StreamLoop` relays it
+(it already relays reader-thread exceptions to `run()`), and the existing
+`except NotCalibrated` in `cli/playfield.py` fires.
+
+**Why / Impact.** Without a payload the client cannot tell a failed
+subscribe from a wedged camera. Existing consumers of successful
+streams are unaffected. A client reading an old daemon sees no error
+frame and behaves as today. **Design check.** `streams.py` stays
+cv2-free (standing gate) and imports only `aprilcam.errors` additionally,
+an already-allowed dependency. Dependency direction is unchanged
+(client and daemon both depend on the shared wire/errors, neither on
+the other).
+
+### Architecture Self-Review (additions)
+
+Consistency: the three parts are independent and each section matches
+its ticket. Codebase alignment: `_sender_loop` and `cmd_generate`
+behave as described above. Design quality: `TagGenerator` stays
+cohesive (render printable fiducials); the transport gains one
+responsibility (report subscribe failure) in the module that owns the
+failure. Anti-patterns: none; the one watch item is that the error frame
+encoding must not leak into data-frame parsing (tested). Risks: wire
+change (mitigated: additive, successful path identical), regenerated pb2
+diffs (mechanical). Verdict: APPROVE.
+
 ### Migration Concerns
 
-None — no data model, no persisted state, no daemon-facing contract
-changes. Purely a client-local UI behavior change.
+None for the viewer — no data model, no persisted state. Tag generation:
+`--size-cm` leaves the default path, so anyone scripting
+`tags generate --size-cm N` must add `--png` (UC-21 and DESIGN.md note
+this). Stream errors: additive wire message; daemon and client ship
+together in this repo, and an old client reading a new daemon's error
+frame sees a malformed data frame only in the already-failing
+subscribe case.
+
+### Open Questions
+
+- Error-frame discrimination on the shared stream channel (ticket 003
+  to settle and record in the transport's docstring).
+- Default `--size-cm` for `--png` (ticket 002 to settle).
 
 ## Use Cases
 
@@ -239,6 +418,36 @@ Parent: UC-16 / UC-18
   - [ ] Initial window width is close to the existing ~960px-capped
         behavior for a typical camera frame size.
 
+### SUC-003: Print a labelled tag sheet
+Parent: UC-21
+
+- **Actor**: Developer building or repairing a physical playfield.
+- **Preconditions**: None; offline (cv2 available, as UC-21 already requires).
+- **Main Flow**: Developer runs `aprilcam tags generate 1-8 -A -o tags.pdf`;
+  the command writes one PDF, one tag per 59 x 102 mm page with a
+  family-and-id caption beneath; developer prints at 100%.
+- **Postconditions**: One PDF exists; nothing else changes.
+- **Acceptance Criteria**:
+  - [ ] Page count equals the number of ids; page size is 59 x 102 mm.
+  - [ ] Every page's caption names family and id, with no position text.
+  - [ ] An out-of-range id errors naming the valid range and writes nothing.
+  - [ ] `--png` still writes per-id images.
+
+### SUC-004: See why a stream view failed
+Parent: UC-18 / UC-16
+
+- **Actor**: Operator running `aprilcam playfield view` (or `camera view`).
+- **Preconditions**: The named camera is not calibrated (or unknown, or not present).
+- **Main Flow**: Operator runs the view command; the daemon rejects the
+  subscribe and reports the typed reason; the CLI prints the
+  corresponding message ("not calibrated -- calibrate first", unknown
+  camera, camera not present) and exits non-zero.
+- **Postconditions**: No misleading "capture session may be wedged" text.
+- **Acceptance Criteria**:
+  - [ ] A subscribe failure arrives at the client as the matching typed error.
+  - [ ] `playfield view` on an uncalibrated camera prints "not calibrated".
+  - [ ] Successful streams are unchanged.
+
 ## GitHub Issues
 
 (GitHub issues linked to this sprint's tickets. Format: `owner/repo#N`.)
@@ -258,5 +467,7 @@ Before tickets can be created, all of the following must be true:
 | # | Title | Depends On |
 |---|-------|------------|
 | 001 | Viewer image scales with window resize | (none) |
+| 002 | Tag generation as a labelled printable PDF | (none) |
+| 003 | Propagate stream subscribe errors to the client | (none) |
 
 Tickets execute serially in the order listed.
