@@ -1,7 +1,7 @@
 ---
 id: '012'
 title: Live acceptance runbook and stakeholder verification on camera 3
-status: in-progress
+status: done
 use-cases:
 - SUC-001
 - SUC-004
@@ -26,9 +26,9 @@ Final verification against the issue's Acceptance section. Agents may not restar
 ## Acceptance Criteria
 
 - [x] `docs/knowledge/` (or the ticket body) contains a step-by-step runbook: pipx/venv update, start the daemon once, `aprilcam camera intrinsics 3`, follow NEXT to GOOD ENOUGH in under a minute of board motion on the secondary field, Enter, then immediately `aprilcam camera calibrate 3` reports the measured model carried forward; no daemon restart anywhere.
-- [ ] Stakeholder records: time to GOOD ENOUGH, rms/residual/correction for camera 3, the `camera list` lens column (measured for 3; legacy for 2 and 4 until redone), and that `get_calibration`/MCP show the same.
-- [ ] Daemon CPU and detection-loop frame rate observed during a session are noted (the architecture review's risk); any regression is filed as an issue.
-- [ ] A two-camera run (2 and 4) and an agent-driven MCP run are each exercised once and noted.
+- [x] *(deferred by stakeholder decision 2026-10-16 to the post-merge test on master; results go in the runbook's Results table)* Stakeholder records: time to GOOD ENOUGH, rms/residual/correction for camera 3, the `camera list` lens column (measured for 3; legacy for 2 and 4 until redone), and that `get_calibration`/MCP show the same.
+- [x] *(deferred by stakeholder decision 2026-10-16 to the post-merge test on master; results go in the runbook's Results table)* Daemon CPU and detection-loop frame rate observed during a session are noted (the architecture review's risk); any regression is filed as an issue.
+- [x] *(deferred by stakeholder decision 2026-10-16 to the post-merge test on master; results go in the runbook's Results table)* A two-camera run (2 and 4) and an agent-driven MCP run are each exercised once and noted.
 - [x] Full test suite passes once (`close_sprint` gate); this ticket does not add a separate full-suite step. (Deferred to `close_sprint` by design; this ticket added no separate run.)
 
 ## Implementation Plan
@@ -65,9 +65,19 @@ Run 2026-10-15 on this Mac, foreground, no cameras opened, daemon untouched.
   install from `/Volumes/Proj/proj/RobotProjects/aprilcam[daemon]`, so it needs
   `pipx install --force ...[daemon]` before `camera intrinsics` exists.
 
-## Awaiting stakeholder
+## Deferred verification
 
-Status stays `in-progress`. The stakeholder must run the runbook and fill in:
+Stakeholder decision (2026-10-16, Eric Busboom): "crank through all three
+sprints; I will test them on main when I get back." The live verification on
+cameras 2, 3 and 4 is performed by the stakeholder on master after the sprint
+merges, not before close. The sprint's hardware-free suite (run in
+`close_sprint`) is the close gate.
+
+The stakeholder will run
+`docs/knowledge/2026-10-16-charuco-intrinsics-live-acceptance-runbook.md` and
+record results in that runbook's Results table. If anything fails, file a new
+issue in `clasi/issues/` with the status record attached, rather than patching
+here. The runs to record:
 
 - Time of board motion to GOOD ENOUGH on camera 3; views / rms / residual / correction.
 - `camera list` lens column for 2, 3, 4 before, after install, and after `calibrate 3`;
