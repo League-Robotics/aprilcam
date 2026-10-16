@@ -1824,3 +1824,170 @@ def test_estimate_intrinsics_true_uses_april_tag_ground_truth_too(caplog):
     assert result.succeeded is True, result.reason
     assert result.intrinsics_estimated is True
     assert any("held_out_rms_px" in record.message for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Per-camera lens store + carry-forward order + lens_source (sprint 044 / 001)
+# ---------------------------------------------------------------------------
+
+from aprilcam.calibration.lens import LensModel, LensStore  # noqa: E402
+
+# The store lens is the one the frames below are actually distorted by, so
+# the solve only succeeds if it (not the mismatched prior) is applied.
+_STORE_MATRIX = _SYNTHETIC_CAMERA_MATRIX
+_STORE_DIST = _SYNTHETIC_DIST_COEFFS
+_WRONG_PRIOR_MATRIX = ((300.0, 0.0, 450.0), (0.0, 300.0, 350.0), (0.0, 0.0, 1.0))
+
+
+def _store_lens(size=CANVAS_SIZE) -> LensModel:
+    return LensModel(
+        camera_matrix=_STORE_MATRIX,
+        dist_coeffs=_STORE_DIST,
+        image_size=size,
+        views=10,
+        installed_at=1.0,
+    )
+
+
+def _calibrator_with_store(store: LensStore, frames_holder, prior=None) -> Calibrator:
+    definition = main_playfield_definition()
+    configs = {"test-camera": CameraConfig(name="test-camera", playfield="main-playfield", settings={})}
+    return Calibrator(
+        get_camera_config=configs.get,
+        get_playfield={"main-playfield": definition}.get,
+        capture_frames=lambda slug: frames_holder["frames"],
+        get_prior_calibration=(lambda slug: prior),
+        get_lens_model=store.get_lens_model,
+    )
+
+
+def _plain_frame():
+    return render_playfield_frame(
+        MAIN_PLAYFIELD_ARUCO_POSITIONS, pixel_for_world=_distorted_pixel_for_world
+    )
+
+
+def test_store_lens_beats_embedded_prior_matrix(tmp_path):
+    store = LensStore(tmp_path)
+    store.put("test-camera", _store_lens())
+    prior = _dummy_prior_calibration(
+        camera_matrix=_WRONG_PRIOR_MATRIX, dist_coeffs=_SYNTHETIC_DIST_COEFFS
+    )
+    calibrator = _calibrator_with_store(store, {"frames": [_plain_frame()]}, prior=prior)
+
+    result = calibrator.calibrate("test-camera")
+
+    assert result.succeeded is True, result.reason
+    assert result.lens_model_source == "measured"
+    cal = calibrator.get_calibration("test-camera")
+    assert cal.camera_matrix == _STORE_MATRIX
+    assert cal.dist_coeffs == _STORE_DIST
+    assert cal.lens_source == "measured"
+    assert Calibration.from_dict(cal.to_dict()) == cal
+
+
+def test_legacy_fallback_when_store_has_no_file(tmp_path):
+    prior = _dummy_prior_calibration(
+        camera_matrix=_SYNTHETIC_CAMERA_MATRIX, dist_coeffs=_SYNTHETIC_DIST_COEFFS
+    )
+    calibrator = _calibrator_with_store(LensStore(tmp_path), {"frames": [_plain_frame()]}, prior=prior)
+
+    result = calibrator.calibrate("test-camera")
+
+    assert result.lens_model_source == "legacy"
+    cal = calibrator.get_calibration("test-camera")
+    assert cal.camera_matrix == _SYNTHETIC_CAMERA_MATRIX
+    assert cal.lens_source == "legacy"
+
+
+def test_size_mismatched_store_falls_back_to_embedded(tmp_path):
+    store = LensStore(tmp_path)
+    store.put("test-camera", _store_lens(size=(1920, 1080)))
+    prior = _dummy_prior_calibration(
+        camera_matrix=_SYNTHETIC_CAMERA_MATRIX, dist_coeffs=_SYNTHETIC_DIST_COEFFS
+    )
+    calibrator = _calibrator_with_store(store, {"frames": [_plain_frame()]}, prior=prior)
+
+    result = calibrator.calibrate("test-camera")
+
+    assert result.lens_model_source == "legacy"
+
+
+def test_no_lens_anywhere_reports_none(tmp_path):
+    calibrator = _calibrator_with_store(LensStore(tmp_path), {"frames": [render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)]})
+
+    result = calibrator.calibrate("test-camera")
+
+    assert result.succeeded is True
+    assert result.lens_model_source == "none"
+    cal = calibrator.get_calibration("test-camera")
+    assert cal.lens_source is None
+    assert "lens_source" not in cal.to_dict()
+
+
+def test_calibrator_without_get_lens_model_is_unchanged():
+    calibrator = _calibrator_for(main_playfield_definition(), {"frames": [render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)]})
+    result = calibrator.calibrate("test-camera")
+    assert result.succeeded is True
+    assert result.lens_model_source == "none"
+
+
+def test_from_dict_old_file_with_matrix_reads_back_legacy():
+    cal = _dummy_prior_calibration(
+        camera_matrix=_SYNTHETIC_CAMERA_MATRIX, dist_coeffs=_SYNTHETIC_DIST_COEFFS
+    )
+    old = cal.to_dict()
+    old.pop("lens_source")  # what a pre-sprint-044 file looks like
+    restored = Calibration.from_dict(old)
+    assert restored.lens_source == "legacy"
+    assert Calibration.from_dict(restored.to_dict()) == restored
+    # No matrix, no lens_source: stays None.
+    assert Calibration.from_dict(_dummy_prior_calibration().to_dict()).lens_source is None
+
+
+def test_estimate_intrinsics_refused_while_measured_lens_installed(tmp_path):
+    store = LensStore(tmp_path)
+    store.put("test-camera", _store_lens())
+    calibrator = _calibrator_with_store(store, {"frames": [_plain_frame()]})
+
+    result = calibrator.calibrate("test-camera", estimate_intrinsics=True)
+
+    assert result.succeeded is False
+    assert "measured" in result.reason and "refused" in result.reason
+    assert calibrator.get_calibration("test-camera") is None
+
+
+def test_failed_calibrate_leaves_the_store_intact(tmp_path):
+    store = LensStore(tmp_path)
+    store.put("test-camera", _store_lens())
+    before = store.path("test-camera").read_bytes()
+    blank = np.full((CANVAS_SIZE[1], CANVAS_SIZE[0], 3), 255, dtype=np.uint8)
+    calibrator = _calibrator_with_store(store, {"frames": [blank]})
+
+    result = calibrator.calibrate("test-camera")
+
+    assert result.succeeded is False
+    assert store.path("test-camera").read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# Six-point crash regression (sprint 044 ticket 010; clasi issue
+# estimate-intrinsics-crashes-with-exactly-six-ground-truth-points)
+# ---------------------------------------------------------------------------
+
+
+def test_estimate_intrinsics_with_exactly_six_points_is_a_clean_rejection_not_a_crash():
+    object_points = np.array(
+        [[0, 0, 0], [100, 0, 0], [100, 60, 0], [0, 60, 0], [50, 0, 0], [50, 60, 0]], dtype=float
+    )
+    image_points = np.array(
+        [[100, 400], [500, 410], [490, 100], [110, 90], [300, 395], [300, 95]], dtype=float
+    )
+
+    fit = _estimate_intrinsics(
+        object_points, image_points, (640, 480), elevated_feature_count=0, z_spread_cm=0.0
+    )
+
+    assert fit.accepted is False
+    assert fit.camera_matrix is None and fit.dist_coeffs is None
+    assert "too few ground-truth points" in fit.reason

@@ -94,6 +94,14 @@ Relationship: `calibration.py` is the only thing that *produces* a `Calibration`
 
 **Deskew** (`Deskewer`) is architecturally separate from the homography math: it is constructed once per camera+playfield from an already-solved `Calibration` and the playfield's `width_cm`/`height_cm`, computes `output_size`/`px_per_cm`/`world_extent` once at construction (stable for the instance's life, never recomputed per frame), and warps via two independently-built quads sharing the same four world corners — source in raw camera pixel space (`Calibration.to_pixel`), destination the literal output-canvas corners (deliberately *not* `world_to_deskewed_pixel`'s own output, which can fall a sub-pixel short of the canvas edge on a non-square field). `px_per_cm` is always derived from the actual output width, never a chosen constant (`specification.md` §4.1).
 
+### Lens store and carry-forward (sprint 044)
+
+`lens.py` (`cv2`-free) holds `LensModel` (camera matrix, distortion coefficients, image size, source) and `LensStore`, which persists one model per camera at `<state_dir>/cameras/<slug>/intrinsics.json` (atomic tmp+fsync+rename; a corrupt file reads as "no model" and is tolerated, never raised). Measured models are produced by the `intrinsics/` workflow (ChArUco board); they are installed here and nowhere else.
+
+**Carry-forward order.** When `Calibrator.calibrate()` needs a lens model it takes, in order: (1) the store's model if its image size matches the frame; (2) the prior `calibration.json`'s embedded matrix, read as source `legacy` when the file has no `lens_source`; (3) none. A field calibration therefore never discards a measured lens. `Calibration.lens_source` is persisted; `CalibrationResult.lens_model_source` reports which was used and `lens_warning` flags a resolution mismatch (a store model of the wrong size is not applied).
+
+**Decision 2 pairing.** `--with-intrinsics` (estimating a lens from the field markers) is refused while a measured model is installed, because the two sources would fight over the same slot; it remains the documented fallback when no board is available. The six-point estimate crash is now a clean rejection.
+
 ## 5. Interfaces
 
 ### Exposes

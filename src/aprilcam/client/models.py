@@ -38,6 +38,7 @@ import json
 from typing import Dict, Optional, Tuple
 
 from aprilcam.calibration.interfaces import Calibration, CalibrationResult, FlatFieldInfo, FlatFieldResult
+from aprilcam.intrinsics.interfaces import BoardLayout, IntrinsicsFinishResult, IntrinsicsStatus
 from aprilcam.config.interfaces import CameraConfig, CameraPosition, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import DaemonStatus, MountRegistration
@@ -79,6 +80,8 @@ __all__ = [
     "features_from_proto",
     "flatfield_info_from_proto",
     "flatfield_result_from_proto",
+    "intrinsics_status_from_proto",
+    "intrinsics_finish_from_proto",
     "image_frame_from_proto",
     "mount_parameters_from_proto",
     "playfield_definition_from_proto",
@@ -110,6 +113,9 @@ def camera_state_from_proto(msg: aprilcam_v2_pb2.CameraState) -> CameraState:
         # as calibrated/calibration_stale above).
         flatfield_present=msg.flatfield_present,
         flatfield_stale=msg.flatfield_stale,
+        # Sprint 044 ticket 010: "" (an older daemon) reads as "absent".
+        lens_model=msg.lens_model or "absent",
+        lens_pending=msg.lens_pending,
         number=msg.number if msg.HasField("number") else None,
     )
 
@@ -455,6 +461,10 @@ def calibration_result_from_proto(msg: aprilcam_v2_pb2.CalibrationResult) -> Cal
         elevated_features_used=(
             msg.elevated_features_used if msg.HasField("elevated_features_used") else None
         ),
+        lens_model_source=(
+            msg.lens_model_source if msg.HasField("lens_model_source") else None
+        ),
+        lens_warning=msg.lens_warning if msg.HasField("lens_warning") else None,
     )
 
 
@@ -481,7 +491,21 @@ def calibration_from_proto(msg: aprilcam_v2_pb2.Calibration) -> Calibration:
     not). See ``tests/aprilcam/mcp/test_integration.py``'s no-cv2 sweep
     for the mechanical check this fixes.
     """
-    return Calibration(stale=msg.stale, calibrated_at=msg.calibrated_at, playfield=msg.playfield)
+    def _opt(name: str):
+        return getattr(msg, name) if msg.HasField(name) else None
+
+    # Sprint 044 ticket 010: only the lens *provenance* crosses to clients
+    # (never camera_matrix/dist_coeffs).
+    return Calibration(
+        stale=msg.stale,
+        calibrated_at=msg.calibrated_at,
+        playfield=msg.playfield,
+        lens_source=_opt("lens_source"),
+        lens_views=_opt("lens_views"),
+        lens_rms_px=_opt("lens_rms_px"),
+        lens_residual_px=_opt("lens_residual_px"),
+        lens_installed_at=_opt("lens_installed_at"),
+    )
 
 
 def flatfield_result_from_proto(msg: aprilcam_v2_pb2.FlatFieldResult) -> FlatFieldResult:
@@ -501,6 +525,56 @@ def flatfield_result_from_proto(msg: aprilcam_v2_pb2.FlatFieldResult) -> FlatFie
         reason=msg.reason if msg.HasField("reason") else None,
         forced_checks=tuple(msg.forced_checks),
         gain=None,
+    )
+
+
+_CELL_ORDER = ("NW", "N", "NE", "W", "C", "E", "SW", "S", "SE")
+_TILT_ORDER = ("N", "E", "S", "W")
+
+
+def intrinsics_status_from_proto(msg: aprilcam_v2_pb2.IntrinsicsStatus) -> IntrinsicsStatus:
+    """Mirror of ``daemon/rpc.py``'s ``_intrinsics_status_to_proto`` (sprint
+    044 ticket 006). Optionals round-trip through ``HasField()``; an empty
+    repeated coverage/size field decodes to the empty dict / ``None``."""
+
+    def opt(name: str):
+        return getattr(msg, name) if msg.HasField(name) else None
+
+    return IntrinsicsStatus(
+        camera=msg.camera,
+        state=msg.state,
+        board_spec=opt("board_spec"),
+        layout=BoardLayout(msg.layout),
+        image_size=tuple(msg.image_size) if msg.image_size else None,
+        board_visible=msg.board_visible,
+        view_count=msg.view_count,
+        tilted_count=msg.tilted_count,
+        cell_coverage=dict(zip(_CELL_ORDER, msg.cell_coverage)) if msg.cell_coverage else {},
+        tilt_coverage=dict(zip(_TILT_ORDER, msg.tilt_coverage)) if msg.tilt_coverage else {},
+        rms_px=opt("rms_px"),
+        residual_px=opt("residual_px"),
+        correction_px=opt("correction_px"),
+        fx=opt("fx"),
+        hfov_deg=opt("hfov_deg"),
+        good=msg.good,
+        banner=msg.banner,
+        next_hint=opt("next_hint"),
+        last_reject=opt("last_reject"),
+        errors=tuple(msg.errors),
+        started_at=msg.started_at,
+        solved_at=opt("solved_at"),
+    )
+
+
+def intrinsics_finish_from_proto(
+    msg: aprilcam_v2_pb2.FinishIntrinsicsResponse,
+) -> IntrinsicsFinishResult:
+    """Mirror of ``daemon/rpc.py``'s ``_intrinsics_finish_to_proto``."""
+    return IntrinsicsFinishResult(
+        installed=msg.installed,
+        reason=msg.reason if msg.HasField("reason") else None,
+        status=intrinsics_status_from_proto(msg.status),
+        lens=json.loads(msg.lens_json) if msg.HasField("lens_json") else None,
     )
 
 

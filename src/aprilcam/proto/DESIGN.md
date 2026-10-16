@@ -82,6 +82,10 @@ cross-cutting wire conventions (world-cm coordinates confined to
 `TagRecord`, `optional` scalar discipline, bulk-stream framing,
 backpressure), see design.md §5-§6.
 
+### Intrinsics RPCs (sprint 044)
+
+`StartIntrinsics`, `GetIntrinsicsStatus`, `FinishIntrinsics`, `AbortIntrinsics` plus the `IntrinsicsStatus` message were added to `proto/aprilcam_v2.proto`. Additive only; `PROTOCOL_VERSION` is unchanged at 1.
+
 ## 5. Interfaces
 
 ### Exposes

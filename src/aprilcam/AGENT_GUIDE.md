@@ -305,6 +305,18 @@ correction immediately, no daemon restart needed.
 
 > Flat-field summary: optional per-camera lighting correction, captured with a white sheet over the field and (usually) a temporary low-exposure override; `capture_flatfield`/`get_flatfield`/`clear_flatfield` mirror `calibrate`/`get_calibration`'s explicit-failure-is-data and staleness-is-advisory contracts exactly.
 
+### Lens intrinsics with a ChArUco board
+
+To calibrate a camera's lens, a human holds a printed ChArUco board while
+you drive the session: `start_intrinsics(camera, board=None)`, then poll
+`get_intrinsics_status(camera)` about once per second. Read `next_hint`
+and relay it to the human; `banner` is `show_board`, `keep_going` or
+`good_enough`. Call `finish_intrinsics(camera, install=True)` only at
+`good_enough` (a not-good solve returns `installed: false` with a
+`reason`; `force=True` overrides, only with human approval). Always call
+`abort_intrinsics(camera)` if you give up. A session that is not polled
+for 120 s aborts itself.
+
 If you are writing a robot control program rather than working
 interactively, read the companion **`robot`** guide next
 (`aprilcam guide robot`, or `Guides().get("robot")` in Python) — it

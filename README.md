@@ -115,6 +115,25 @@ aprilcam arucogen   # Generate 4x4 ArUco marker images
 aprilcam cameras    # List available cameras
 ```
 
+### Lens (intrinsics) calibration
+
+```
+aprilcam camera intrinsics <camera...> [--board SPEC] [--install] [--no-gui] [-d HOST]
+```
+
+Measures each camera's lens from a printed ChArUco board, inside the daemon,
+and installs it without a daemon restart. The board spec
+(`COLSxROWS:SQUARE_MM:MARKER_MM:DICT`) resolves `--board`, then the
+`APRILCAM_CHARUCO_BOARD` environment variable, then the default
+`5x7:37:28:DICT_5X5_100`. A fullscreen window shows progress (Enter installs
+good cameras, Esc aborts); `--no-gui` gives a text mode that works over SSH.
+`aprilcam camera list` shows `lens=<source>` per camera (and `lens-pending`
+until the next `camera calibrate` applies a newly installed lens). With no
+board available, `aprilcam camera calibrate <camera> --with-intrinsics` is the
+documented fallback (refused while a measured lens is installed). MCP tools:
+`start_intrinsics`, `get_intrinsics_status`, `finish_intrinsics`,
+`abort_intrinsics`.
+
 ## Development
 
 ```

@@ -35,3 +35,5 @@ uv run python scripts/generate_usecases_index.py
 ## UC-27: Ask the system how to use itself
 ## UC-28: Draw on the playfield for everyone to see
 ## UC-29: Determine a camera's physical position and height
+## UC-30: Measure a camera's lens with a ChArUco board
+## UC-31: Run a lens-intrinsics session on a camera

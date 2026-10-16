@@ -120,6 +120,7 @@ them.
 | `camera/` | [DESIGN.md](../../src/aprilcam/camera/DESIGN.md) | Camera identity resolution across re-plugs, the persistent registry, pluggable capture backends (OpenCV/v4l2loopback/uvc-util/per-camera worker process, sprint 038) | yes |
 | `vision/` | [DESIGN.md](../../src/aprilcam/vision/DESIGN.md) | Stateless frame vision: preprocessing pipeline, AprilTag/ArUco raw detection, world-position kinematics | yes |
 | `calibration/` | [DESIGN.md](../../src/aprilcam/calibration/DESIGN.md) | Pixel↔world calibration engine (homography, lens distortion, intrinsics), deskew geometry, mount/parallax correction, flat-field gain-map capture (sprint 037) | yes |
+| `intrinsics/` | [DESIGN.md](../../src/aprilcam/intrinsics/DESIGN.md) | ChArUco-board lens-intrinsics calibration sessions run inside the daemon (sprint 044); installs a per-camera `intrinsics.json` | yes *(interfaces.py cv2-free)* |
 | `playfield/` | [DESIGN.md](../../src/aprilcam/playfield/DESIGN.md) | The surveyed playfield as a definition document plus feature queries ("where is the blue dot") | no |
 | `config/` | [DESIGN.md](../../src/aprilcam/config/DESIGN.md) | `config_dir`/`state_dir`/`socket_dir` resolution, and the config-document schema/loader (camera configs, playfield definitions) | no |
 | `client/` | [DESIGN.md](../../src/aprilcam/client/DESIGN.md) | The one sanctioned way to talk to a daemon: gRPC wrapper, discovery, stream consumers, `from_proto` model boundary, annotation renderer | no *(enforced)* |
@@ -255,6 +256,10 @@ state_dir/                         # regenerable / runtime state
                                    #   gain_min/max, stale (sprint 037,
                                    #   mirrors calibration.json's own
                                    #   provenance+stale fields)
+  cameras/<cam>/intrinsics.json    # measured lens model (camera matrix, dist
+                                   #   coeffs, size, source) installed by the
+                                   #   ChArUco workflow; carried forward by
+                                   #   calibrate (sprint 044)
   cameras/<cam>/info.json          # advisory: calibration_stale, frame_dark
   mounts/registry.json             # TagId -> MountParameters (sprint 036;
                                    #  previously in-memory only, register at

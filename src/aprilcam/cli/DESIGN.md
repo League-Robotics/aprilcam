@@ -333,6 +333,10 @@ tags <camera>` ships instead, camera-addressed like `camera image`,
 with the deferred spelling and the reasoning recorded directly in
 `camera.py`'s module docstring rather than silently improvised.
 
+### `camera intrinsics` (sprint 044)
+
+`aprilcam camera intrinsics <camera...> [--board SPEC] [--install] [--no-gui] [-d HOST]` (`cli/intrinsics.py`). The board spec resolves request (`--board`) > env `APRILCAM_CHARUCO_BOARD` > default `5x7:37:28:DICT_5X5_100`. With a display it opens the fullscreen Tk GUI (`view/intrinsics_gui.py`, driven by the pure `view/intrinsics_model.py`); `--no-gui` (and any session with no display, e.g. over SSH) uses a text-mode status loop. The GUI never auto-quits on green; Enter installs the good cameras, Esc aborts. Exit code 0 only when every camera ended installed. `--install` installs good cameras on finish without the prompt. `camera list` rows gain `lens=<source>` and `lens-pending`; `camera calibrate` prints the lens model it carried forward, and `--with-intrinsics` is the documented fallback when no board is available.
+
 ## 5. Interfaces
 
 ### Exposes

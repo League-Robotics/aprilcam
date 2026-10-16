@@ -169,6 +169,10 @@ it — every other tool either returns no image or hands a structured
 dataclass straight back for FastMCP's pydantic `TypeAdapter` to
 serialize natively.
 
+### Intrinsics tools (sprint 044, extends the ticket 044-009 entry in §5)
+
+The four tools mirror the CLI's daemon commands one for one; an agent starts a session, polls `get_intrinsics_status` about once per second (an unpolled session auto-aborts after 120 s), follows `next_hint`, and calls `finish_intrinsics(install=True)` only when `good_enough`. Board resolution is the same chain as the CLI. `get_calibration` and `list_cameras` surface `lens_source`/`lens_pending`.
+
 ## 5. Interfaces
 
 ### Exposes
@@ -197,6 +201,13 @@ MCP tool groups, registered in this order by `server.py`'s
   `estimate_intrinsics` shape), `get_flatfield`, `clear_flatfield`.
   Whole-document push/fetch plus the calibration and flat-field-capture
   triggers.
+- **Intrinsics** (`tools/intrinsics.py`, sprint 044) — `start_intrinsics`
+  (`camera`, optional `board`), `get_intrinsics_status`,
+  `finish_intrinsics` (`install`, `force`), `abort_intrinsics`. Return
+  plain JSON dicts built from the cv2-free `intrinsics.interfaces` types;
+  an agent polls status, relays `next_hint` to the human holding the
+  board, finishes with install at `good_enough`, and always aborts when
+  giving up (the daemon self-aborts after 120 s without polling).
 - **Mobile tags** (`tools/mobile_tags.py`) — `register_tag`,
   `unregister_tag`, `list_tag_parameters`. In-memory mount-parameter
   registrations that do not survive a daemon restart.

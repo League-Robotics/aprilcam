@@ -31,10 +31,38 @@ close to right.
 The board measures the **lens**. Moving the camera or the table does not
 invalidate it; only swapping a camera/lens, refocusing, or changing
 resolution does. After any move, `aprilcam camera calibrate <n>` (field
-markers, seconds) is all that is needed. **Restart the daemon before that
-calibrate if the lens model was written to disk by an outside tool** -- the
-daemon only reads `calibration.json` at start-up and `calibrate` writes its
-in-memory (old) lens model back over the file.
+markers, seconds) is all that is needed.
+
+**Restart caveat -- resolved (sprint 044).** The old rule ("restart the
+daemon before calibrate if an outside tool wrote the lens model") existed
+because the prototype wrote into `calibration.json`, which the daemon only
+read at start-up and then overwrote from its in-memory copy. The daemon
+workflow removes the cause: the lens is installed by the daemon itself into
+a per-camera `<state_dir>/cameras/<slug>/intrinsics.json` (and into memory),
+and `calibrate` carries it forward (store model of matching size > prior
+calibration's embedded lens > none). No restart is needed; just run
+`aprilcam camera calibrate <n>` after installing to apply it (`camera list`
+shows `lens-pending` until then).
+
+## Running it (daemon workflow)
+
+```
+aprilcam camera intrinsics 2 3 4 [--board 5x7:37:28:DICT_5X5_100] [--install] [--no-gui] [-d HOST]
+```
+
+Board spec resolves `--board` > env `APRILCAM_CHARUCO_BOARD` > the default
+above. With a display you get the fullscreen window (Enter installs the
+cameras that are green, Esc aborts); over SSH use `--no-gui` for a text
+status loop. MCP agents use `start_intrinsics` / `get_intrinsics_status` /
+`finish_intrinsics` / `abort_intrinsics`. With no board at all,
+`aprilcam camera calibrate <n> --with-intrinsics` is the fallback (refused
+while a measured lens is installed).
+
+**Differences from the prototype:** all vision runs in the daemon; it never
+auto-finishes when green (a person decides); the result is a per-camera
+`intrinsics.json`, not a rewrite of `calibration.json`; sessions read the
+camera the daemon already owns (~8 fps) and keep corner arrays only, never
+frames; an unpolled session auto-aborts after 120 s.
 
 ## Detection gotchas, in order of pain
 

@@ -1,5 +1,10 @@
 # ChArUco intrinsics prototype (2026-10-15)
 
+> **Superseded (sprint 044).** The daemon workflow replaces this prototype:
+> run `aprilcam camera intrinsics <camera...>` (see
+> `docs/knowledge/2026-10-15-charuco-intrinsics-calibration-lessons.md`).
+> Kept as evidence only; do not run it against a current daemon.
+
 Out-of-process prototype that produced the first measured lens models for
 cameras 2, 3 and 4. **Evidence and ideas, not code to port** -- it runs
 OpenCV in a client process, which violates the vision boundary; the real

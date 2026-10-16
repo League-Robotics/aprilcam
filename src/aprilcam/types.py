@@ -412,6 +412,17 @@ class CameraState:
     camera's current mounting/lighting/resolution (sprint 037) --
     advisory only, mirroring ``calibration_stale``: a stale map is still
     applied, never withheld."""
+    lens_model: str = "absent"
+    """Which lens model this camera has (sprint 044): ``"measured"`` (the
+    per-camera lens store), ``"estimated"``, ``"legacy"`` (embedded in a
+    pre-sprint-044 calibration) or ``"absent"``. Overlaid by
+    ``DaemonService.list_cameras``; the store wins over an embedded lens
+    because it is what the next ``calibrate`` will apply."""
+    lens_pending: bool = False
+    """Whether the lens store holds a model that differs from the one
+    embedded in the camera's current calibration -- i.e. a ``calibrate``
+    run is needed to apply it. ``False`` when there is no calibration or
+    no stored model."""
     number: Optional[int] = None
     """Stable registry enumeration (UC-14.S-1).
 

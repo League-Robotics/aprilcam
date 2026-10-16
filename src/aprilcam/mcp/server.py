@@ -37,7 +37,7 @@ from aprilcam.client.interfaces import Guides as GuidesBase
 from aprilcam.mcp.connection import ConnectionManager
 from aprilcam.mcp.errors import handle_tool_errors
 from aprilcam.mcp.images import create_temp_dir
-from aprilcam.mcp.tools import configuration, mobile_tags, perception
+from aprilcam.mcp.tools import configuration, intrinsics, mobile_tags, perception
 
 # Aliased, not `from aprilcam.mcp.tools import annotations` alongside the
 # rest -- this module's own (mandatory, must-be-first-statement) `from
@@ -162,6 +162,9 @@ def build_server(
     # mobile_tags.py`'s module docstring. Same `register(mcp,
     # connection, temp_dir)` shape; independent of tickets 002/003/005.
     mobile_tags.register(mcp, connection, temp_dir)
+
+    # Sprint 044 ticket 009: ChArUco intrinsics session tools.
+    intrinsics.register(mcp, connection, temp_dir)
 
     # Ticket 005: the annotation/drawing surface -- see `mcp/tools/
     # annotations.py`'s module docstring. Same `register(mcp,

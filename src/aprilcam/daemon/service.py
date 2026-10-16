@@ -97,7 +97,7 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2 as cv
 import numpy as np
@@ -108,6 +108,7 @@ from aprilcam.calibration.calibration import Calibration, Calibrator
 from aprilcam.calibration.deskew import Deskewer
 from aprilcam.calibration.flatfield import FlatFieldCapturer
 from aprilcam.calibration.interfaces import CalibrationResult, FlatFieldInfo, FlatFieldResult
+from aprilcam.calibration.lens import LensStore
 from aprilcam.camera.backends import (
     CaptureBackend,
     ControlBackend,
@@ -129,6 +130,8 @@ from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
 from aprilcam.daemon.broadcast import Broadcaster
 from aprilcam.daemon.detection import DetectionEngine
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus, ImageStream, MountRegistration, TagStream
+from aprilcam.intrinsics.interfaces import IntrinsicsFinishResult, IntrinsicsStatus
+from aprilcam.intrinsics.manager import IntrinsicsManager
 from aprilcam.daemon.streaming import (
     BroadcasterImageStream,
     BroadcasterTagStream,
@@ -447,6 +450,15 @@ def _flatfield_info_from_dict(data: object) -> FlatFieldInfo:
     )
 
 
+def _same_lens(calibration: Calibration, stored: Any) -> bool:
+    """Whether *calibration* embeds exactly *stored*'s lens model."""
+    if calibration.camera_matrix is None or calibration.dist_coeffs is None:
+        return False
+    return tuple(map(tuple, calibration.camera_matrix)) == tuple(
+        map(tuple, stored.camera_matrix)
+    ) and tuple(calibration.dist_coeffs) == tuple(stored.dist_coeffs)
+
+
 class DaemonService(Daemon):
     """Concrete ``daemon.interfaces.Daemon`` (this sprint's slice only).
 
@@ -670,6 +682,7 @@ class DaemonService(Daemon):
         # never restarted).
         self._image_stream_producers: Dict[Tuple[str, bool], ImageStreamProducer] = {}
         self._lock = threading.Lock()
+        self._lens_store = LensStore(self._directories.state_dir)
         self._calibrator = calibrator if calibrator is not None else Calibrator(
             get_camera_config=self._camera_config_for_calibration,
             get_playfield=self._playfield_for_calibration,
@@ -687,6 +700,21 @@ class DaemonService(Daemon):
             # get_prior_calibration docstring for the full story and the
             # test that specifically exercises the restart path.
             get_prior_calibration=self.get_calibration,
+            # Sprint 044: the per-camera lens store is consulted before
+            # the prior calibration's embedded lens. Read-only here --
+            # nothing in calibrate()/set_playfield() ever writes it.
+            get_lens_model=self._lens_store.get_lens_model,
+            # Sprint 044 ticket 010: why the store was ignored (resolution
+            # mismatch), reported on the CalibrationResult.
+            get_lens_warning=lambda slug, size: self._lens_store.get(slug, size)[1],
+        )
+        # Sprint 044: live ChArUco intrinsics sessions. Thin wiring only --
+        # frames come from the held-open Camera.read(), and an installed
+        # model goes into the same LensStore the Calibrator reads, so the
+        # next calibrate() picks it up with no restart.
+        self._intrinsics = IntrinsicsManager(
+            frame_source_for=lambda slug: self._camera_for(slug).read,
+            install=self._lens_store.put,
         )
         self._calibrations: Dict[str, Calibration] = {}
         self._load_calibrations()
@@ -767,6 +795,7 @@ class DaemonService(Daemon):
         for record in self._registry.records():
             playfield = self._playfield_link(record.slug)
             calibrated, calibration_stale = self._calibration_flags(record.slug)
+            lens_model, lens_pending = self._lens_flags(record.slug)
             flatfield_present, flatfield_stale = self._flatfield_flags(record.slug)
             held = self._cameras.get(record.slug)
             if held is not None:
@@ -778,6 +807,8 @@ class DaemonService(Daemon):
                         calibration_stale=calibration_stale,
                         flatfield_present=flatfield_present,
                         flatfield_stale=flatfield_stale,
+                        lens_model=lens_model,
+                        lens_pending=lens_pending,
                     )
                 )
                 continue
@@ -792,6 +823,8 @@ class DaemonService(Daemon):
                     calibration_stale=calibration_stale,
                     flatfield_present=flatfield_present,
                     flatfield_stale=flatfield_stale,
+                    lens_model=lens_model,
+                    lens_pending=lens_pending,
                     number=record.number,
                 )
             )
@@ -808,6 +841,36 @@ class DaemonService(Daemon):
         if calibration is None:
             return False, False
         return True, calibration.stale
+
+    def _lens_flags(self, slug: str) -> Tuple[str, bool]:
+        """``(lens_model, lens_pending)`` for *slug* (sprint 044 ticket
+        010). ``lens_model`` is the lens-store model's source when one is
+        stored (it is what the next :meth:`calibrate` applies), else the
+        provenance of the lens embedded in the current calibration
+        (``legacy`` for a pre-044 file), else ``"absent"``.
+        ``lens_pending`` is true only when a calibration *and* a stored
+        model both exist and the stored model differs from the embedded
+        one -- a stored calibration keeps the lens it was solved with
+        until ``calibrate`` runs again (sprint.md Decision 2)."""
+        stored = self._lens_store.load(slug)
+        calibration = self.get_calibration(slug)
+        embedded = (
+            calibration.lens_source
+            if calibration is not None and calibration.camera_matrix is not None
+            else None
+        )
+        if stored is not None:
+            lens_model = stored.source
+        elif embedded is not None:
+            lens_model = embedded
+        else:
+            lens_model = "absent"
+        pending = (
+            stored is not None
+            and calibration is not None
+            and not _same_lens(calibration, stored)
+        )
+        return lens_model, pending
 
     def _flatfield_flags(self, slug: str) -> Tuple[bool, bool]:
         """``(flatfield_present, flatfield_stale)`` for *slug*, from
@@ -2125,7 +2188,23 @@ class DaemonService(Daemon):
         """
         slug = self._resolve_slug_if_known(camera)
         with self._lock:
-            return self._calibrations.get(slug)
+            calibration = self._calibrations.get(slug)
+        if calibration is None or calibration.lens_source != "measured":
+            return calibration
+        # Sprint 044 ticket 010: summarise a measured lens (views/rms/...)
+        # from the store, but only while the store still holds the very
+        # model this calibration embedded -- otherwise the numbers would
+        # describe a different lens.
+        stored = self._lens_store.load(slug)
+        if stored is None or not _same_lens(calibration, stored):
+            return calibration
+        return replace(
+            calibration,
+            lens_views=stored.views,
+            lens_rms_px=stored.rms_px,
+            lens_residual_px=stored.residual_px,
+            lens_installed_at=stored.installed_at or None,
+        )
 
     def _mark_stale(self, slug: str) -> None:
         """Flip *slug*'s currently-held calibration's ``stale`` bit, if
@@ -2290,6 +2369,31 @@ class DaemonService(Daemon):
                 )
                 continue
             self._calibrations[entry.name] = calibration
+
+    # -- ChArUco intrinsics (sprint 044) ---------------------------------------
+    #
+    # Orchestration only: session lifecycle lives in
+    # ``intrinsics.manager.IntrinsicsManager`` and all ChArUco math in the
+    # ``intrinsics`` package.
+
+    def start_intrinsics(self, camera: str, board: Optional[str] = None) -> IntrinsicsStatus:
+        """See ``daemon.interfaces.Daemon.start_intrinsics``."""
+        cam = self._camera_for(camera)  # opens on demand; UnknownCamera etc. propagate
+        return self._intrinsics.start(cam.slug, board)
+
+    def get_intrinsics_status(self, camera: str) -> IntrinsicsStatus:
+        """See ``daemon.interfaces.Daemon.get_intrinsics_status``."""
+        return self._intrinsics.status(self._resolve_slug_if_known(camera))
+
+    def finish_intrinsics(
+        self, camera: str, install: bool, force: bool = False
+    ) -> IntrinsicsFinishResult:
+        """See ``daemon.interfaces.Daemon.finish_intrinsics``."""
+        return self._intrinsics.finish(self._resolve_slug_if_known(camera), install, force)
+
+    def abort_intrinsics(self, camera: str) -> IntrinsicsStatus:
+        """See ``daemon.interfaces.Daemon.abort_intrinsics``."""
+        return self._intrinsics.abort(self._resolve_slug_if_known(camera))
 
     # -- flat-field gain map (sprint 037) ------------------------------------
     #
@@ -2689,6 +2793,7 @@ class DaemonService(Daemon):
         first.
         """
         self.stop_control_watchdog()
+        self._intrinsics.abort_all()
         with self._lock:
             tag_producers = list(self._tag_stream_producers.values())
             self._tag_stream_producers.clear()

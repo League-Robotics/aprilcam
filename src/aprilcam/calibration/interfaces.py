@@ -111,6 +111,15 @@ class CalibrationResult:
     than left to guess. ``None`` under the same condition as
     :attr:`intrinsics_mode`.
     """
+    lens_model_source: Optional[str] = None
+    """Which lens model this call applied (sprint 044): ``"measured"``
+    (per-camera lens store), ``"estimated"``, ``"legacy"`` (embedded in a
+    pre-sprint-044 calibration) or ``"none"``. ``None`` when the attempt
+    failed before the lens decision was made."""
+    lens_warning: Optional[str] = None
+    """A non-fatal lens note (sprint 044 ticket 010) -- e.g. the stored
+    lens model was measured at a different resolution than the frames and
+    was ignored. ``None`` when there is nothing to warn about."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -145,6 +154,17 @@ class Calibration:
     marks the calibration stale (UC-02), so the calibration must
     name which definition it believes in.
     """
+    lens_source: Optional[str] = None
+    """Provenance of the lens embedded in this calibration (sprint 044
+    ticket 010): ``"measured"`` | ``"estimated"`` | ``"legacy"``, ``None``
+    when no lens is embedded. The matrix itself never crosses the wire."""
+    lens_views: Optional[int] = None
+    lens_rms_px: Optional[float] = None
+    lens_residual_px: Optional[float] = None
+    lens_installed_at: Optional[float] = None
+    """Summary of a *measured* lens (board views, solve RMS, held-out
+    residual, install time); ``None`` otherwise. Transient: filled in by
+    the daemon when reporting, never persisted in ``calibration.json``."""
 
     def to_world(self, pixel: PixelPoint) -> WorldPoint:
         """Map a detection to the field, in cm.

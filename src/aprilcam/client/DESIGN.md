@@ -69,6 +69,10 @@ Rough call shape: an adapter constructs a `Discovery`, calls `.connect(host)` to
 - `client.lifecycle.DaemonLifecycle.start()` pre-flight-probes the lock before spawning, rather than "spawn and see," specifically so a contended start never touches the process table of an already-running daemon (UC-01.S-3).
 - `calibration_from_proto` intentionally narrows to `calibration.interfaces.Calibration` rather than round-tripping every field the wire message carries — those are daemon-internal solve details no client-side consumer needs, and building the interface type instead of the concrete one is what keeps this module, and everything that imports it, `cv2`-free.
 
+### Intrinsics wrappers (sprint 044)
+
+`GrpcDaemon` gains `start_intrinsics`, `get_intrinsics_status`, `finish_intrinsics`, `abort_intrinsics`; `client/models.py` converts the `IntrinsicsStatus` proto message into the cv2-free `intrinsics.interfaces` types at the `from_proto` boundary. `PROTOCOL_VERSION` stays at 1 (additive RPCs only). Camera state converters also carry `lens_source` / `lens_pending` for `camera list`.
+
 ## 5. Interfaces
 
 ### Exposes

@@ -7024,3 +7024,80 @@ def test_control_watchdog_thread_runs_all_three_passes_on_one_interval(
     finally:
         service.stop_control_watchdog()
     assert threading.active_count() == threads_before
+
+
+# ---------------------------------------------------------------------------
+# Per-camera lens store wiring (sprint 044 ticket 001)
+# ---------------------------------------------------------------------------
+
+
+def test_fresh_service_carries_legacy_lens_forward_from_on_disk_calibration_json(
+    directories, registry
+):
+    """A pre-sprint-044 calibration.json (matrix, no lens_source) and no
+    intrinsics.json: a fresh DaemonService reads it back as 'legacy' and
+    the next calibrate still carries the lens forward."""
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame])
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service.calibrate(slug).succeeded is True
+
+    path = _calibration_path(directories, slug)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["camera_matrix"] = [[400.0, 0.0, 450.0], [0.0, 400.0, 350.0], [0.0, 0.0, 1.0]]
+    data["dist_coeffs"] = [-0.01, 0.0, 0.0, 0.0, 0.0]
+    data.pop("lens_source", None)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    identity2, slug2, cam2, _b = _open_camera_with_frames(registry, [frame])
+    restarted = _service_with_camera(directories, registry, identity2, slug2, cam2)
+    restarted.set_playfield(main_playfield_definition())
+    restarted.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert restarted.get_calibration(slug).lens_source == "legacy"
+
+    result = restarted.calibrate(slug)
+
+    assert result.succeeded is True, result.reason
+    assert result.lens_model_source == "legacy"
+    assert restarted.get_calibration(slug).camera_matrix == (
+        (400.0, 0.0, 450.0),
+        (0.0, 400.0, 350.0),
+        (0.0, 0.0, 1.0),
+    )
+    assert not (directories.state_dir / "cameras" / slug / "intrinsics.json").exists()
+
+
+def test_installed_lens_is_used_by_next_calibrate_and_survives_playfield_change(
+    directories, registry
+):
+    from aprilcam.calibration.lens import LensModel
+
+    frame = render_playfield_frame(MAIN_PLAYFIELD_ARUCO_POSITIONS)
+    identity, slug, cam, _backend = _open_camera_with_frames(registry, [frame] * 100)
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    service.set_playfield(main_playfield_definition())
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    size = (frame.shape[1], frame.shape[0])
+    service._lens_store.put(
+        slug,
+        LensModel(
+            camera_matrix=((410.0, 0.0, 450.0), (0.0, 410.0, 350.0), (0.0, 0.0, 1.0)),
+            dist_coeffs=(-0.01, 0.0, 0.0, 0.0, 0.0),
+            image_size=size,
+            installed_at=1.0,
+        ),
+    )
+    lens_path = service._lens_store.path(slug)
+    before = lens_path.read_bytes()
+
+    result = service.calibrate(slug)
+    assert result.succeeded is True, result.reason
+    assert result.lens_model_source == "measured"
+    assert service.get_calibration(slug).lens_source == "measured"
+
+    service.set_playfield(main_playfield_definition())  # playfield change
+    refused = service.calibrate(slug, estimate_intrinsics=True)
+    assert refused.succeeded is False
+    assert lens_path.read_bytes() == before

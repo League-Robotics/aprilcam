@@ -79,6 +79,11 @@ def cmd_calibrate(
     except AprilCamError as exc:
         return report_error(exc)
 
+    # Sprint 044 ticket 010: a resolution-mismatched lens store was
+    # ignored -- say so on every outcome, stderr like other caveats.
+    if result.lens_warning:
+        print(f"warning: {result.lens_warning}", file=sys.stderr)
+
     if result.succeeded:
         matched = ", ".join(str(i) for i in result.matched_ids)
         error_note = (
@@ -101,6 +106,7 @@ def cmd_calibrate(
                 "intrinsics not estimated this call "
                 "(any previously-stored lens model carried forward unchanged)"
             )
+        print(_lens_line(result.lens_model_source))
         if len(result.matched_ids) <= 4:
             print(
                 "caveat: reprojection_error_cm is degrees-of-freedom-limited with only "
@@ -109,6 +115,13 @@ def cmd_calibrate(
             )
         return EXIT_OK
 
+    if result.lens_model_source == "measured" and result.intrinsics_estimated is False:
+        # --with-intrinsics refused over an installed measured model.
+        print(
+            "lens model: measured (--with-intrinsics refused; measure with "
+            "'aprilcam camera intrinsics', or remove the installed model first)",
+            file=sys.stderr,
+        )
     if result.missing_ids:
         missing = ", ".join(str(i) for i in result.missing_ids)
         print(
@@ -119,6 +132,21 @@ def cmd_calibrate(
         reason = result.reason or "calibration failed for an unspecified reason"
         print(f"calibration failed for {args.camera!r}: {reason}", file=sys.stderr)
     return EXIT_ERROR
+
+
+_LENS_LINES = {
+    "measured": "lens model: measured (from the per-camera lens store, carried forward)",
+    "estimated": "lens model: estimated (fitted from the field ground truth this call)",
+    "legacy": "lens model: legacy (embedded in the previous calibration, carried forward)",
+    "none": "lens model: none (no lens correction applied)",
+}
+
+
+def _lens_line(source: "str | None") -> str:
+    """One line naming which lens model a successful calibrate applied."""
+    if source is None:
+        return "lens model: unknown (daemon did not report provenance)"
+    return _LENS_LINES.get(source, f"lens model: {source}")
 
 
 def add_subparser(sub: "argparse._SubParsersAction") -> None:
@@ -136,9 +164,11 @@ def add_subparser(sub: "argparse._SubParsersAction") -> None:
         action="store_true",
         default=False,
         help=(
-            "also estimate this camera's lens model (camera_matrix/dist_coeffs) from this "
-            "call's detection burst (sprint 030 ticket 002); default is to leave any "
-            "previously-estimated lens model exactly as it was"
+            "no-board fallback: also estimate this camera's lens model "
+            "(camera_matrix/dist_coeffs) from the field's ground-truth points in this "
+            "call's detection burst. Prefer a ChArUco measurement ('aprilcam camera "
+            "intrinsics'); this is refused while a measured lens model is installed. "
+            "Default is to leave any previously-stored lens model exactly as it was"
         ),
     )
     add_daemon_option(p_calibrate)

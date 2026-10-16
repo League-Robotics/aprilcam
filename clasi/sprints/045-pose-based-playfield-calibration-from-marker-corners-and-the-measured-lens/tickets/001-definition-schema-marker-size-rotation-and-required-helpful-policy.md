@@ -1,0 +1,88 @@
+---
+id: '001'
+title: 'Definition schema: marker size and required/helpful policy'
+status: open
+use-cases:
+- SUC-002
+depends-on: []
+github-issue: ''
+issue: pose-based-playfield-calibration-with-marker-corners-and-measured-lens.md
+completes_issue: true
+---
+<!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
+
+# Definition schema: marker size and required/helpful policy
+
+## Description
+
+Teach the playfield definition the data the pose solve needs, without
+changing behaviour for any existing definition. On each `aruco_tags` entry:
+`size_mm` (outer side of the black square, optional) and `policy`
+(`required` | `helpful`, optional). **There is no rotation key:** marker
+orientation is mixed on real fields and is detected by the pose solve from the
+corner order (ticket 004), never declared. On the definition's `playfield`
+block: `marker_size_mm` (optional field-level default; an entry's own
+`size_mm` overrides it). The main-playfield file already carries
+`"playfield": {"marker_size_mm": 46}` and must load with that exact key; the
+secondary field has no size and stays unset.
+
+Resolution rules live on the concrete `PlayfieldDefinition` as additive
+methods (same pattern as `aruco_position`): `marker_size_mm(id) -> Optional[float]`,
+`required_marker_ids()` and `helpful_marker_ids()`.
+`required_aruco_ids()` keeps its current meaning (every listed id) so existing
+callers and the centre-point path are untouched; the new `required_marker_ids()`
+returns the ids whose effective policy is `required` (unspecified = required,
+Open Question 5). Elevated entries (`height_cm > 0`) are excluded from pose
+use (documented, enforced in ticket 006).
+
+Validation (whole-document `MalformedDocument`, naming the entry): `size_mm`
+and `playfield.marker_size_mm` must be positive numbers (reject bool, NaN, inf,
+absurd > 1000 mm); `policy` must be one of the two literals. A `rotation_deg`
+key on an aruco entry is not part of the schema (rejected or ignored per the
+loader's existing unknown-key behaviour; pin that with a test). `to_dict` emits the new keys only when set, so
+`load(x.to_dict()) == x` and old files are byte-identical on dump.
+
+## Acceptance Criteria
+
+- [ ] `PlayfieldFeatureEntry` gains `size_mm` and `policy`;
+      `PlayfieldDefinition` gains the field-level default read from
+      `playfield.marker_size_mm`; all default to "absent" and equal today's
+      values. No `rotation_deg` anywhere in the schema.
+- [ ] Resolution methods implemented and unit-tested (entry overrides default;
+      no size anywhere -> `None`).
+- [ ] `main-playfield.json` loads with `marker_size_mm: 46` resolved for every
+      aruco id; `secondary-playfield.json` resolves `None`.
+- [ ] Invalid values rejected with messages naming the entry and key.
+- [ ] `config/aprilcam/playfields/main-playfield.json` and
+      `secondary-playfield.json` (and every playfield fixture under tests/)
+      load and round-trip unchanged.
+- [ ] `rectangles`/`dots` entries do not gain these keys (their `height_cm` /
+      `width_cm` meaning is untouched).
+- [ ] `config/interfaces.py` base class docstring updated: the
+      "all-or-nothing" wording on `required_aruco_ids` now points at the
+      per-field policy.
+
+## Implementation Plan
+
+**Approach.** Extend `_parse_section` for the two id sections only (mirror
+`_parse_feature_height_cm`), add `_parse_default_marker_size`, extend `to_dict`.
+Keep `config` cv2-free.
+
+**Files to modify:** `src/aprilcam/config/loader.py`,
+`src/aprilcam/config/interfaces.py` (docstrings, no new Protocol),
+`src/aprilcam/config/DESIGN.md` (schema section; full doc pass is ticket 012,
+but record the schema here so it is not lost).
+
+**Files to create:** tests in `tests/aprilcam/config/test_loader.py` (extend).
+
+## Testing
+
+- **Existing tests to run**: `uv run pytest tests/aprilcam/config tests/aprilcam/calibration/test_calibration.py -x`
+- **New tests to write**: parse/round-trip with and without each key; default
+  vs entry size; invalid size/policy; shipping files unchanged
+  (golden `to_dict` equality against pre-change output).
+- **Verification command**: `uv run pytest tests/aprilcam/config`
+
+## Documentation Updates
+
+`config/DESIGN.md` schema paragraph (state that orientation is detected); full pass in ticket 012.

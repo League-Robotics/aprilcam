@@ -74,6 +74,12 @@ from typing import Dict, Optional, Tuple
 import grpc
 
 from aprilcam.calibration.interfaces import Calibration, CalibrationResult, FlatFieldInfo, FlatFieldResult
+from aprilcam.intrinsics.interfaces import (
+    IntrinsicsFinishResult,
+    IntrinsicsSessionActive,
+    IntrinsicsStatus,
+    NoIntrinsicsSession,
+)
 from aprilcam.client.models import (
     annotation_set_from_proto,
     calibration_from_proto,
@@ -84,6 +90,8 @@ from aprilcam.client.models import (
     features_from_proto,
     flatfield_info_from_proto,
     flatfield_result_from_proto,
+    intrinsics_finish_from_proto,
+    intrinsics_status_from_proto,
     image_frame_from_proto,
     playfield_from_proto,
     playfields_from_proto,
@@ -351,6 +359,10 @@ def _reconstruct_error(exc: grpc.RpcError, target: str) -> Exception:
         return NoPlayfieldLinked(metadata.get("aprilcam-camera", "unknown"))
     if error_type == "NoFieldMask":
         return NoFieldMask(metadata.get("aprilcam-camera", "unknown"))
+    if error_type == "IntrinsicsSessionActive":
+        return IntrinsicsSessionActive(metadata.get("aprilcam-camera", "unknown"))
+    if error_type == "NoIntrinsicsSession":
+        return NoIntrinsicsSession(metadata.get("aprilcam-camera", "unknown"))
     if error_type == "UnknownGuide":
         return UnknownGuide(
             metadata.get("aprilcam-requested", ""),
@@ -617,6 +629,38 @@ class GrpcDaemon(Daemon):
         a caller to supply."""
         request = aprilcam_v2_pb2.ClearFlatFieldRequest(camera=camera)
         self._call(self._stub.ClearFlatField, request)
+
+    # -- ChArUco intrinsics calibration (sprint 044 ticket 006) -----------
+
+    def start_intrinsics(self, camera: str, board: Optional[str] = None) -> IntrinsicsStatus:
+        """See ``daemon.interfaces.Daemon.start_intrinsics``."""
+        request = aprilcam_v2_pb2.StartIntrinsicsRequest(camera=camera)
+        if board is not None:
+            request.board = board
+        response = self._call(self._stub.StartIntrinsics, request)
+        return intrinsics_status_from_proto(response.status)
+
+    def get_intrinsics_status(self, camera: str) -> IntrinsicsStatus:
+        """See ``daemon.interfaces.Daemon.get_intrinsics_status``."""
+        request = aprilcam_v2_pb2.GetIntrinsicsStatusRequest(camera=camera)
+        response = self._call(self._stub.GetIntrinsicsStatus, request)
+        return intrinsics_status_from_proto(response.status)
+
+    def finish_intrinsics(
+        self, camera: str, install: bool, force: bool = False
+    ) -> IntrinsicsFinishResult:
+        """See ``daemon.interfaces.Daemon.finish_intrinsics``."""
+        request = aprilcam_v2_pb2.FinishIntrinsicsRequest(
+            camera=camera, install=install, force=force
+        )
+        response = self._call(self._stub.FinishIntrinsics, request)
+        return intrinsics_finish_from_proto(response)
+
+    def abort_intrinsics(self, camera: str) -> IntrinsicsStatus:
+        """See ``daemon.interfaces.Daemon.abort_intrinsics``."""
+        request = aprilcam_v2_pb2.AbortIntrinsicsRequest(camera=camera)
+        response = self._call(self._stub.AbortIntrinsics, request)
+        return intrinsics_status_from_proto(response.status)
 
     def put_annotation(self, playfield: str, annotation: Annotation) -> None:
         """Upsert one annotation on *playfield* (UC-28) -- the RPC face
