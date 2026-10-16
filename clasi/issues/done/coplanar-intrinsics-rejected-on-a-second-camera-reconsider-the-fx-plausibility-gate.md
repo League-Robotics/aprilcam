@@ -1,5 +1,5 @@
 ---
-status: pending
+status: done
 ---
 
 # Coplanar intrinsics rejected on a second camera — the fx-plausibility gate may be the wrong test
