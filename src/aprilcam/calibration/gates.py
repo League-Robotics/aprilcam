@@ -10,9 +10,17 @@ seeded synthetic noise sweep recorded in ticket 004's implementation notes
 (camera 144 cm up, tilt 4 deg, 1280x720, fx 1000, k1 -0.25, 46 mm markers;
 "clean" = 0.3 px corner noise, worst of 40 seeds):
 
-* ``MAX_RMS_PX = 1.5`` -- clean 4- and 10-marker solves give <= 0.5 px rms
-  (3x margin; 1.0 px noise gives 1.64, correctly beyond it); a marker 1 cm
-  off its surveyed spot gives 1.8 px.
+* ``MAX_RMS_PX = 12.0`` -- a corruption cap, not the accuracy rule (changed
+  2026-10-16; it was 1.5 from the synthetic sweep above, which had exact survey
+  positions). On a real field the pixel rms is dominated by survey error: at
+  120 cm the cameras see about 9 px/cm, so a survey good to 0.5 cm gives 3.5 to
+  4.5 px by itself. First live pose solves (46 mm markers, ten hand-surveyed,
+  measured lenses): camera 2 3.75 px / 0.50 cm, camera 4 3.50 px / 0.46 cm,
+  both otherwise healthy (scale 1.005 / 1.019, spread ~70 deg) and both wrongly
+  rejected at 1.5 px. 12 px is about 1.3 cm at 9 px/cm, so the centimetre gate
+  below governs accuracy; this one only catches gross corruption (wrong size,
+  wrong dictionary, wrong orientation lock), which the scale, rotation-ratio
+  and leave-one-out gates mostly catch first.
 * ``MAX_RMS_CM = 1.0`` -- the project's existing centre-point threshold;
   clean solves give <= 0.08 cm rms.
 * ``SCALE_TOLERANCE = 0.05`` -- clean |median ratio - 1| <= 0.012; markers
@@ -53,7 +61,7 @@ __all__ = [
     "LABEL_FULL", "LABEL_REDUCED", "LABEL_LOW", "LABEL_FAIL",
 ]
 
-MAX_RMS_PX = 1.5
+MAX_RMS_PX = 12.0
 MAX_RMS_CM = 1.0
 SCALE_TOLERANCE = 0.05
 MIN_ANGULAR_SPREAD_DEG = 10.0

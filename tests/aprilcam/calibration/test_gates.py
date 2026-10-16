@@ -78,7 +78,7 @@ def test_required_missing_names_ids():
 
 
 @pytest.mark.parametrize("kw,passes", [
-    ({"rms_px": 1.5}, True), ({"rms_px": 1.51}, False),
+    ({"rms_px": 12.0}, True), ({"rms_px": 12.01}, False),
     ({"rms_cm": 1.0}, True), ({"rms_cm": 1.01}, False),
     ({"scale_ratio": 1.05}, True), ({"scale_ratio": 1.06}, False),
     ({"loo_worst": (4, 2.0)}, True), ({"loo_worst": (4, 2.01)}, False),
@@ -126,3 +126,11 @@ def test_gates_module_imports_no_cv2():
             imported.add(node.module.split(".")[0])
     assert "cv2" not in imported
     assert imported <= {"__future__", "dataclasses", "typing", "numpy"}
+
+
+def test_live_field_solve_with_survey_limited_pixel_rms_is_full():
+    """2026-10-16 camera 2: 3.75 px / 0.50 cm was wrongly rejected by a 1.5 px cap."""
+    m = GateMetrics(rms_px=3.75, rms_cm=0.50, scale_ratio=1.005, angular_spread_deg=70.0,
+                    ambiguity_ratio=5.0, layout_extent_ratio=0.5, loo_worst=(7, 1.23))
+    label, _, fail = classify([1, 2, 3], [1, 2, 3], [], m)
+    assert label == "full", fail

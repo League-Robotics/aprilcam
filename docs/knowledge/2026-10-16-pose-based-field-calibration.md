@@ -56,7 +56,7 @@ over the capture frames.
 
 | Gate | Threshold | Why |
 |---|---|---|
-| corner rms | 1.5 px | clean solves give <= 0.5 px; 1 cm survey error gives 1.8 px |
+| corner rms | 12 px (corruption cap) | 2026-10-16: was 1.5 px from the exact-survey sweep; first live solves gave 3.75 px / 0.50 cm (camera 2) and 3.50 px / 0.46 cm (camera 4) at about 9 px/cm, so survey error alone dominates; the cm gate is the accuracy rule |
 | field rms | 1.0 cm | the project's existing centre-point threshold; clean <= 0.08 cm |
 | scale agreement | 5 % | clean <= 1.2 %; markers printed 3 % / 10 % large read 3.7 % / 9.8 % |
 | angular spread | 10 deg | four corner markers span about 51 deg; one marker about 2.5 deg |

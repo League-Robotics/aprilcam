@@ -21,6 +21,7 @@ import cv2
 import numpy as np
 import pytest
 
+from aprilcam.calibration import gates
 from aprilcam.calibration.calibration import Calibration, Calibrator
 from aprilcam.calibration.lens import LensModel
 from aprilcam.config.interfaces import CameraConfig
@@ -194,7 +195,7 @@ def test_four_markers_measured_lens_sized_definition_uses_pose(frame4):
         result.leave_one_out_worst_id, result.leave_one_out_worst_cm,
     ):
         assert value is not None
-    assert result.reprojection_error_px < 1.5 and result.reprojection_error_cm < 1.0
+    assert result.reprojection_error_px < gates.MAX_RMS_PX and result.reprojection_error_cm < 1.0
     assert abs(result.scale_agreement - 1.0) < 0.05
     assert abs(result.camera_tilt_deg - 4.0) < 1.5
     assert result.helpful_missing_ids == ()
@@ -383,13 +384,13 @@ def _pf46(layout, **kw) -> PlayfieldDefinition:
 
 
 def test_inflated_corner_noise_is_rejected_by_the_px_gate():
-    obs, _, _ = scene(CORNERS4, noise=2.0, seed=3)
+    obs, _, _ = scene(CORNERS4, noise=14.0, seed=3)
     cal = calibrator(_pf46(CORNERS4), BLANK, lens=lens_model())
     inject(cal, obs)
     result = cal.calibrate(CAM)
     assert result.succeeded is False
-    assert "px" in result.reason and "1.5" in result.reason
-    assert result.reprojection_error_px > 1.5
+    assert "px" in result.reason and "12.0" in result.reason
+    assert result.reprojection_error_px > gates.MAX_RMS_PX
     assert result.method == "pose" and result.corner_count == 16
     assert cal.get_calibration(CAM) is None
 
