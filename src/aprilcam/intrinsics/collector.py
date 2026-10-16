@@ -149,7 +149,8 @@ class ViewCollector:
             hit = {_region_index(x, y, w, h) for x, y in v.corners}
             for r in hit:
                 regions[r] += 1
-            if v.tilt_deg is not None and v.tilt_deg >= TILTED_MIN_DEG:
+            if (v.tilt_deg is not None and v.azimuth_deg is not None
+                    and v.tilt_deg >= TILTED_MIN_DEG):
                 tilted += 1
                 dirs[_direction(v.azimuth_deg)] += 1
         return CoverageSummary(view_count=len(self._views), region_counts=tuple(regions),
@@ -229,7 +230,8 @@ class ViewCollector:
         k = np.array([[w, 0, w / 2.0], [0, w, h / 2.0], [0, 0, 1]], dtype=np.float64)
         try:
             n_sol, rvecs, _tvecs, errs = cv2.solvePnPGeneric(
-                obj, img, k, None, flags=cv2.SOLVEPNP_IPPE)
+                obj, img, k, np.zeros((4, 1), dtype=np.float64),
+                flags=cv2.SOLVEPNP_IPPE)
         except cv2.error:
             return None
         if n_sol < 1:

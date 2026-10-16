@@ -51,6 +51,8 @@ Hardware-free: none new. Manual: the runbook above, executed by the stakeholder.
 
 Run 2026-10-15 on this Mac, foreground, no cameras opened, daemon untouched.
 
+- mypy fix (tests/test_typing.py gate): None guard in intrinsics/collector.py, explicit zero dist arrays in collector.py (solvePnPGeneric) and solver.py (calibrateCamera), typed `_as_matrix3` helper in intrinsics/session.py, `shell: Any` annotation in view/intrinsics_gui.py.
+
 - `uv run aprilcam camera intrinsics --help`: usage printed with `camera [camera ...]`,
   `--board SPEC` (default `$APRILCAM_CHARUCO_BOARD` or `5x7:37:28:DICT_5X5_100`),
   `--install`, `--no-gui`, `-d/--daemon HOST`. Matches the README and runbook.

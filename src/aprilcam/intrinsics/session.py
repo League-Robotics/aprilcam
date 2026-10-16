@@ -23,7 +23,7 @@ import dataclasses
 import logging
 import threading
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -317,7 +317,7 @@ class IntrinsicsSession:
         sol = ev.solution
         spec = self._spec
         return LensModel(
-            camera_matrix=tuple(tuple(r) for r in sol.camera_matrix),
+            camera_matrix=_as_matrix3(sol.camera_matrix),
             dist_coeffs=tuple(sol.dist_coeffs),
             image_size=(int(sol.image_size[0]), int(sol.image_size[1])),
             source=LENS_SOURCE_MEASURED,
@@ -342,6 +342,18 @@ class IntrinsicsSession:
             self._status = dataclasses.replace(
                 s, banner=derive_banner(board_visible=s.board_visible,
                                         view_count=s.view_count, good=s.good))
+
+
+def _as_matrix3(m: Sequence[Sequence[float]] | np.ndarray) -> tuple[
+        tuple[float, float, float], tuple[float, float, float],
+        tuple[float, float, float]]:
+    """A 3x3 array as the tuple-of-rows shape :class:`LensModel` stores."""
+    a = np.asarray(m, dtype=np.float64).reshape(3, 3)
+    return (
+        (float(a[0, 0]), float(a[0, 1]), float(a[0, 2])),
+        (float(a[1, 0]), float(a[1, 1]), float(a[1, 2])),
+        (float(a[2, 0]), float(a[2, 1]), float(a[2, 2])),
+    )
 
 
 def _lens_summary(ev: LensEvaluation) -> dict:

@@ -16,7 +16,7 @@ Esc / window close ends the run. No cv2 here.
 from __future__ import annotations
 
 import threading
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from aprilcam.intrinsics.interfaces import IntrinsicsStatus
 from aprilcam.view.intrinsics_model import (
@@ -300,6 +300,7 @@ def run_intrinsics_gui(
     if reason is not None and shell_factory is None:
         raise NoDisplayAvailable(reason)
     controller = IntrinsicsController(daemon, cameras, install=install)
+    shell: Any
     try:
         if shell_factory is None:
             try:

@@ -155,7 +155,8 @@ class LensSolver:
     def _calibrate(objs, imgs, size):
         try:
             rms, k, d, _, _ = cv2.calibrateCamera(
-                objs, imgs, size, None, None, flags=cv2.CALIB_FIX_K3)
+                objs, imgs, size, np.zeros((3, 3), dtype=np.float64),
+                np.zeros((5, 1), dtype=np.float64), flags=cv2.CALIB_FIX_K3)
         except cv2.error:
             return None
         return float(rms), k, d
