@@ -191,6 +191,13 @@ class PlayfieldDefinition(ConfigDocument):
         incomplete view means the camera cannot see the field it claims
         to observe, and a homography from it would be silently wrong
         somewhere.
+
+        This lists *every* listed id. Since sprint 045 the per-marker
+        ``policy`` (``required`` | ``helpful``, unspecified = required)
+        decides what each calibration path demands: the concrete
+        implementation's ``required_marker_ids()`` /
+        ``helpful_marker_ids()`` give that split, so the strict
+        all-or-nothing gate applies to the *required* subset only.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not implement PlayfieldDefinition.required_aruco_ids"

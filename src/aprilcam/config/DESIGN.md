@@ -95,6 +95,21 @@ module — `configuration.md` §1 states logs go to stderr only, and
   schema models (id/slug/x/y/colour/height_cm) but does not carry forward
   `cardinal`/per-entry `"type"`/`display_name`/rectangle-dot sizing —
   fields nothing currently reads back.
+- **Marker size and policy (sprint 045 ticket 001).** Each id-section
+  (`april_tags`/`aruco_tags`) entry may carry `size_mm` (outer side of the
+  black square, mm) and `policy` (`required` | `helpful`; unspecified =
+  required). The `playfield` block may carry `marker_size_mm`, a field-level
+  default that an entry's own `size_mm` overrides. Sizes must be finite
+  numbers in (0, 1000] (bool rejected); a bad value or policy literal raises
+  `MalformedDocument` naming the entry and key. `to_dict` emits these keys
+  only when set, so older files round-trip unchanged. Resolution lives on the
+  concrete class: `marker_size_mm(id)`, `required_marker_ids()`,
+  `helpful_marker_ids()`; `required_aruco_ids()` still lists every id.
+  `rectangles`/`dots` never gain these keys. **There is no rotation key:**
+  marker orientation is mixed on real fields and is *detected* from the
+  corner order by the pose solve, never declared; a stray `rotation_deg` is
+  ignored like any other unknown key. Elevated entries (`height_cm > 0`) are
+  excluded from pose use.
 - **Feature validation specifics** (all in `loader.py`, all raising
   `MalformedDocument`): a feature positioned outside the declared field's
   half-extents plus a `1e-6` cm epsilon (`_BOUNDS_EPSILON_CM`, sized to

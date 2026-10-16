@@ -63,6 +63,7 @@ caller uses.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -129,6 +130,15 @@ class PlayfieldFeatureEntry:
     ``0.0`` (the default) round-trips identically to every entry parsed
     before this ticket, whether or not the on-disk JSON carries a
     ``height_cm`` key at all (:func:`_parse_section`)."""
+    size_mm: Optional[float] = None
+    """Outer side of the marker's black square, mm (sprint 045 ticket
+    001). ``None`` = unspecified: fall back to the definition's
+    ``marker_size_mm`` default. id-section entries only."""
+    policy: Optional[str] = None
+    """``"required"`` or ``"helpful"`` (sprint 045 ticket 001); ``None``
+    = unspecified, which resolves to ``required``. id-section entries
+    only. There is deliberately no rotation key: marker orientation is
+    detected from the corner order, never declared."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -150,6 +160,9 @@ class PlayfieldDefinition(_PlayfieldDefinitionBase):
     aruco_tags: Tuple[PlayfieldFeatureEntry, ...] = ()
     rectangles: Tuple[PlayfieldFeatureEntry, ...] = ()
     dots: Tuple[PlayfieldFeatureEntry, ...] = ()
+    marker_size_mm_default: Optional[float] = None
+    """Field-level default marker size from ``playfield.marker_size_mm``;
+    an entry's own ``size_mm`` overrides it. ``None`` = not declared."""
 
     def features(self) -> Tuple[Feature, ...]:
         """See ``PlayfieldDefinition.features``. Every surveyed entry,
@@ -174,6 +187,35 @@ class PlayfieldDefinition(_PlayfieldDefinitionBase):
         all-or-nothing acceptance gate to report against, independent
         of the document's own (arbitrary) array order."""
         return tuple(sorted(entry.tag_id for entry in self.aruco_tags if entry.tag_id is not None))
+
+    def marker_size_mm(self, aruco_id: int) -> Optional[float]:
+        """Effective size of ArUco *aruco_id* in mm: the entry's own
+        ``size_mm``, else the field-level default, else ``None``. Additive
+        to the base-class contract (like :meth:`aruco_position`). Raises
+        ``KeyError`` for an id not listed."""
+        for entry in self.aruco_tags:
+            if entry.tag_id == aruco_id:
+                return entry.size_mm if entry.size_mm is not None else self.marker_size_mm_default
+        raise KeyError(aruco_id)
+
+    def _ids_with_policy(self, policy: str) -> Tuple[int, ...]:
+        return tuple(
+            sorted(
+                entry.tag_id
+                for entry in self.aruco_tags
+                if entry.tag_id is not None and (entry.policy or "required") == policy
+            )
+        )
+
+    def required_marker_ids(self) -> Tuple[int, ...]:
+        """Sorted ArUco ids whose effective policy is ``required``
+        (unspecified = required). Distinct from :meth:`required_aruco_ids`,
+        which still lists every id."""
+        return self._ids_with_policy("required")
+
+    def helpful_marker_ids(self) -> Tuple[int, ...]:
+        """Sorted ArUco ids whose policy is ``helpful``."""
+        return self._ids_with_policy("helpful")
 
     def aruco_position(self, aruco_id: int) -> WorldPoint:
         """The surveyed position for ArUco *aruco_id* -- what
@@ -213,12 +255,19 @@ class PlayfieldDefinition(_PlayfieldDefinitionBase):
                     item["color"] = entry.colour
                 if entry.height_cm != 0.0:
                     item["height_cm"] = entry.height_cm
+                if entry.size_mm is not None:
+                    item["size_mm"] = entry.size_mm
+                if entry.policy is not None:
+                    item["policy"] = entry.policy
                 out.append(item)
             return out
 
+        geometry: Dict[str, Any] = {"width_cm": self.width_cm, "height_cm": self.height_cm}
+        if self.marker_size_mm_default is not None:
+            geometry["marker_size_mm"] = self.marker_size_mm_default
         return {
             "name": self.name,
-            "playfield": {"width_cm": self.width_cm, "height_cm": self.height_cm},
+            "playfield": geometry,
             "april_tags": _section(self.april_tags, with_id=True),
             "aruco_tags": _section(self.aruco_tags, with_id=True),
             "rectangles": _section(self.rectangles, with_id=False),
@@ -389,6 +438,7 @@ class ConfigLoader(_ConfigLoaderBase):
             aruco_tags=sections["aruco_tags"],
             rectangles=sections["rectangles"],
             dots=sections["dots"],
+            marker_size_mm_default=_parse_default_marker_size(data, source=source),
         )
 
 
@@ -616,13 +666,64 @@ def _parse_section(
             else 0.0
         )
 
+        size_mm: Optional[float] = None
+        policy: Optional[str] = None
+        if with_id:
+            if "size_mm" in raw:
+                size_mm = _check_marker_size(
+                    raw["size_mm"], what=f"{slug!r} in {section!r} 'size_mm'", source=source
+                )
+            if "policy" in raw:
+                policy = raw["policy"]
+                if policy not in _POLICIES:
+                    raise MalformedDocument(
+                        f"playfield definition in {source}: {slug!r} in {section!r} has an "
+                        f"invalid 'policy' ({policy!r}) -- must be 'required' or 'helpful'"
+                    )
+
         colour = raw.get("color")
         entries.append(
             PlayfieldFeatureEntry(
-                slug=slug, x=x, y=y, tag_id=tag_id, colour=colour, height_cm=entry_height_cm
+                slug=slug,
+                x=x,
+                y=y,
+                tag_id=tag_id,
+                colour=colour,
+                height_cm=entry_height_cm,
+                size_mm=size_mm,
+                policy=policy,
             )
         )
     return tuple(entries)
+
+
+_POLICIES = ("required", "helpful")
+_MAX_MARKER_SIZE_MM = 1000.0
+
+
+def _check_marker_size(value: Any, *, what: str, source: str) -> float:
+    """Validate a marker size in mm: a real number (not bool), finite,
+    positive, and at most 1000 mm."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise MalformedDocument(
+            f"playfield definition in {source}: {what} must be a number (got {value!r})"
+        )
+    size = float(value)
+    if not math.isfinite(size) or size <= 0 or size > _MAX_MARKER_SIZE_MM:
+        raise MalformedDocument(
+            f"playfield definition in {source}: {what} must be a positive number of at most "
+            f"{_MAX_MARKER_SIZE_MM:g} mm (got {value!r})"
+        )
+    return size
+
+
+def _parse_default_marker_size(data: Dict[str, Any], *, source: str) -> Optional[float]:
+    pf = data["playfield"]  # _require_geometry has already guaranteed a dict
+    if "marker_size_mm" not in pf:
+        return None
+    return _check_marker_size(
+        pf["marker_size_mm"], what="'playfield.marker_size_mm'", source=source
+    )
 
 
 def _parse_feature_height_cm(raw: Dict[str, Any], *, slug: str, section: str, source: str) -> float:
