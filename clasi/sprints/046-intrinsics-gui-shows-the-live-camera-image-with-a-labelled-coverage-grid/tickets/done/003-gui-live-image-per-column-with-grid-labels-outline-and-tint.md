@@ -70,3 +70,7 @@ Files: `src/aprilcam/view/intrinsics_gui.py` (and optional overlay module),
 - **Existing tests to run**: `tests/aprilcam/view/`, `tests/aprilcam/cli/` lens tests, `tests/test_no_cv2_in_client_modules.py`
 - **New tests to write**: controller frame polling/rate/failure with fake daemon returning synthetic JPEG bytes (made with Pillow); overlay composition pixel checks
 - **Verification command**: `uv run pytest tests/aprilcam/view tests/test_no_cv2_in_client_modules.py`
+
+## Notes
+
+- mypy fix applied: `ImageColor.getrgb(...)[:3]` in `view/intrinsics_overlay.py` (Pillow stub returns a 3- or 4-tuple); `tests/test_typing.py` now passes.
