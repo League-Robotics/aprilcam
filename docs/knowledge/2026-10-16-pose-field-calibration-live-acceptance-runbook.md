@@ -20,27 +20,16 @@ file an issue and attach the result record (see "If something fails").
 
 - **Main-playfield markers are 46 mm** (outer black square); the definition
   already says so (`playfield.marker_size_mm: 46`).
-- **Ids 9 and 10 are physically swapped** relative to the surveyed
-  definition. The definition is correct: **9 must be west at (-35, 0), 10
-  east at (35, 0)**. **Exchange the two physical tags BEFORE calibrating the
-  main field.** Step 2 confirms it.
-- Marker orientations on the main field are mixed (1, 2, 3 upright; 4 +90;
-  8 -90; 5, 6, 7, 9, 10 upside down). The pose path detects orientation itself;
-  no definition change is needed or wanted.
-- Camera 2 is linked to `main-playfield`; camera 3 to `secondary-playfield`
-  (four corner markers, **marker size unknown**, so it stays on the
-  centre-point path until a size is added; see step 4). Camera 4 uses whatever
-  field it is linked to (`aprilcam camera list`).
-- Cameras 2, 3, 4 currently carry only **legacy** lenses from 2026-10-15. The
-  pose path needs a **measured** lens, hence step 3.
-- Camera 2 reference pose: **144 cm over nadir (3.47, -2.85)**.
+- **Ids 9 and 10 are recorded where they physically are**: 9 east at (35, 0),
+  10 west at (-35, 0) (definition updated 2026-10-16; do not move the tags).
 
 ## 0. Install and restart (needed: pipx is a plain copy)
 
 ```sh
-cd /Volumes/Proj/proj/RobotProjects/aprilcam
+cd /Volumes/Proj/proj/robot-projects/aprilcam
 git branch --show-current                  # expect master (post-merge)
-pipx install --force '/Volumes/Proj/proj/RobotProjects/aprilcam[daemon]'
+pipx install --force /Volumes/Proj/proj/robot-projects/aprilcam
+pipx inject aprilcam 'mss>=9.0' 'websockets>=12.0' 'cv2-enumerate-cameras>=1.3' 'msgpack>=1.0' 'grpcio-reflection>=1.60' 'opencv-contrib-python>=4.8'   # the [daemon] extra; pipx 1.8 cannot parse 'path[extra]'
 aprilcam camera calibrate --help           # expect --verbose, NO --with-intrinsics
 aprilcam camera lens --help                # alias of camera intrinsics; must print usage
 aprilcam daemon stop
@@ -68,9 +57,9 @@ Expect cameras 2, 3, 4 present, `lens=legacy`. Confirm the definition sizes:
 `grep marker_size_mm config/aprilcam/playfields/*.json` (main: 46; secondary:
 none). Pass/fail: [ ]
 
-## 2. Confirm ids 9 and 10 are exchanged (out-of-process check)
+## 2. Confirm the definition matches the field (out-of-process check)
 
-Exchange the physical tags 9 and 10 first. Then, with the daemon running:
+With the daemon running:
 
 ```sh
 aprilcam camera image 2 --encoding png -o FRAME.png
@@ -82,7 +71,7 @@ uv run python docs/knowledge/assets/field-check/field_check.py FRAME.png \
 (`<slug>` for camera 2 is `arducam-ov9281-usb-camera`.) Expect all ten ids
 seen, none missing/stray/duplicated, and about **0.23 cm rms** with leave-one-out
 worst about 0.75 cm. If it reports about **30 cm rms**, the tags are still
-swapped: exchange them and repeat. Do not continue until it is right. Open
+off: a marker has moved or the definition is wrong. Do not continue until it is right. Open
 `OUT.png` to eyeball the annotation. Pass/fail: [ ]
 
 ## 3. Measure the lens on each camera (sprint 044)

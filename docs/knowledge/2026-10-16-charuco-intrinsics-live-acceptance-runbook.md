@@ -32,18 +32,19 @@ corner markers out of view when you do.
 
 `~/.local/pipx/venvs/aprilcam/pipx_metadata.json` shows the pipx venv was
 installed as a plain (non-editable) copy from
-`/Volumes/Proj/proj/RobotProjects/aprilcam[daemon]`, version 0.20260914.1.
+`/Volumes/Proj/proj/robot-projects/aprilcam[daemon]`, version 0.20260914.1.
 It does not contain sprint 044 and will not until reinstalled:
 
 ```sh
-cd /Volumes/Proj/proj/RobotProjects/aprilcam      # same checkout as robot-projects/aprilcam
+cd /Volumes/Proj/proj/robot-projects/aprilcam      # same checkout as robot-projects/aprilcam
 git branch --show-current                          # expect sprint/044-charuco-...
-pipx install --force '/Volumes/Proj/proj/RobotProjects/aprilcam[daemon]'
+pipx install --force /Volumes/Proj/proj/robot-projects/aprilcam
+pipx inject aprilcam 'mss>=9.0' 'websockets>=12.0' 'cv2-enumerate-cameras>=1.3' 'msgpack>=1.0' 'grpcio-reflection>=1.60' 'opencv-contrib-python>=4.8'   # the [daemon] extra; pipx 1.8 cannot parse 'path[extra]'
 aprilcam camera intrinsics --help                  # must print usage, not "invalid choice"
 ```
 
-(`pipx reinstall aprilcam` also works and reuses the stored source and
-extras.) Keep the `[daemon]` extra: without it the daemon has no OpenCV
+(Do not use `pipx reinstall aprilcam`: with this pipx it uninstalls and then
+fails to parse the stored `path[daemon]` spec, leaving no `aprilcam` at all.) Keep the `[daemon]` extra: without it the daemon has no OpenCV
 capture backend. Alternative that avoids pipx entirely: run every command
 below as `uv run aprilcam ...` from the checkout.
 
@@ -62,7 +63,7 @@ and `2026-09-06-cameras-plugged-in-after-daemon-start-need-a-restart.md`):
 
 - If `camera list` shows every camera `absent`/`unusable` after the start,
   the pipx build enumerated no devices. Stop it and start from the repo:
-  `aprilcam daemon stop; cd /Volumes/Proj/proj/RobotProjects/aprilcam; uv run aprilcam daemon start`.
+  `aprilcam daemon stop; cd /Volumes/Proj/proj/robot-projects/aprilcam; uv run aprilcam daemon start`.
 - Cameras plugged in after the daemon started only appear after a restart,
   so plug everything in first.
 - A restart drops tag mounts and closes open views/streams; reopen them.

@@ -154,11 +154,15 @@ solve to 0.385 cm (acceptance was 0.5 cm). A target-only definition is valid.
 
 - Markers are 46 mm. Orientations: ids 1, 2, 3 upright; 4 is +90; 8 is -90;
   5, 6, 7, 9, 10 are upside down.
-- The reprinted ids 9 and 10 were physically placed **swapped** relative to the
-  survey. The definition is kept as surveyed (9 west, 10 east); the physical
-  tags are to be exchanged.
-- Worked example for the leave-one-out gate: with the swap, the ten-marker
-  centre-point fit was **30 cm rms**; with the swap corrected it is **0.23 cm
+- The internal pair is id 9 **east** (35, 0) and id 10 **west** (-35, 0): that is
+  where the tags are stuck down and have been for weeks. The 2026-08-23 image-
+  matrix fixtures show the opposite layout, so they carry a frozen copy of the
+  definition they were captured against (`tests/images/fs-20260823/
+  main-playfield.json`, resolved by `playfield_definition_path` in
+  `tests/image_matrix/conftest.py`); the live definition follows the field.
+- Worked example for the leave-one-out gate: with 9 and 10 entered the wrong way
+  round, the ten-marker centre-point fit was **30 cm rms**; with the definition
+  matching the field it is **0.23 cm
   rms and 0.75 cm worst leave-one-out**. The 2 cm leave-one-out gate would have
   named marker 9 or 10 immediately.
 

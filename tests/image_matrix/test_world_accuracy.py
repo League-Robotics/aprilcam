@@ -48,7 +48,7 @@ from aprilcam.daemon.detection import _default_detector_factory
 from aprilcam.types import PixelPoint, WorldPoint
 from aprilcam.vision.pipeline import run_pipeline
 
-from tests.image_matrix.conftest import PLAYFIELDS_DIR, FixtureEntry
+from tests.image_matrix.conftest import FixtureEntry, playfield_definition_path
 
 __all__ = ["test_world_accuracy"]
 
@@ -68,8 +68,10 @@ MIN_TRUSTWORTHY_MATCHED_MARKERS = 5
 _loader = ConfigLoader()
 
 
-def _surveyed_positions(playfield_name: str) -> dict:
-    definition = _loader.load_playfield(PLAYFIELDS_DIR / f"{playfield_name}.json")
+def _surveyed_positions(entry: FixtureEntry) -> dict:
+    definition = _loader.load_playfield(
+        playfield_definition_path(entry.field_state_id, entry.playfield)
+    )
     positions: dict = {}
     for entry in definition.april_tags:
         if entry.tag_id is not None:
@@ -101,7 +103,7 @@ def test_world_accuracy(fixture_entry: FixtureEntry) -> None:
             "not held to WORLD_ACCURACY_TOLERANCE_CM on that false-precision basis"
         )
 
-    surveyed = _surveyed_positions(fixture_entry.playfield)
+    surveyed = _surveyed_positions(fixture_entry)
 
     frame = cv.imread(str(fixture_entry.image_path))
     assert frame is not None, f"{fixture_entry.fixture_id}: failed to read {fixture_entry.image_path}"

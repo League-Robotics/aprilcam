@@ -59,6 +59,7 @@ __all__ = [
     "IMAGES_ROOT",
     "FIELD_STATE_PATH",
     "PLAYFIELDS_DIR",
+    "playfield_definition_path",
     "FixtureEntry",
     "DiscoveryResult",
     "discover_fixture_entries",
@@ -73,6 +74,23 @@ REPO_ROOT = _THIS_DIR.parent.parent
 IMAGES_ROOT = _THIS_DIR.parent / "images"
 FIELD_STATE_PATH = IMAGES_ROOT / "field-state.json"
 PLAYFIELDS_DIR = REPO_ROOT / "config" / "aprilcam" / "playfields"
+
+
+def playfield_definition_path(field_state_id: str, playfield: str) -> Path:
+    """The playfield definition a fixture's world-coordinate checks must be
+    judged against: the field-state snapshot
+    ``tests/images/<field_state_id>/<playfield>.json`` when one exists, else
+    the live ``config/aprilcam/playfields/<playfield>.json``.
+
+    A recorded field state is a physical layout at capture time, and the
+    live definition is free to move on (2026-10-16: main-playfield's internal
+    pair 9/10 were re-surveyed east/west after the ``fs-20260823`` frames
+    were captured with them the other way round). Freezing a copy beside the
+    frames keeps world-accuracy fixtures judging against the field they
+    actually show, without pinning the live definition to history.
+    """
+    snapshot = IMAGES_ROOT / field_state_id / f"{playfield}.json"
+    return snapshot if snapshot.is_file() else PLAYFIELDS_DIR / f"{playfield}.json"
 
 
 @dataclass(frozen=True, kw_only=True)

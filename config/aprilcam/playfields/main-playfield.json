@@ -5,7 +5,7 @@
     "width_cm": 134.3,
     "height_cm": 89.3,
     "origin": "apriltag-center-a1",
-    "description": "Origin at AprilTag A1 (center of field). X increases east, Y increases north. ArUco markers reprinted 2026-10-16, 46 mm square (outer black edge).",
+    "description": "Origin at AprilTag A1 (center of field). X increases east, Y increases north. ArUco markers reprinted 2026-10-16, 46 mm square (outer black edge). Internal pair: id 9 east (35, 0), id 10 west (-35, 0), as physically placed and verified from a camera-2 frame on 2026-10-16 (0.23 cm rms over all ten markers).",
     "display_name": "Main Playfield",
     "marker_size_mm": 46
   },
@@ -85,19 +85,19 @@
       "y": -44.65
     },
     {
-      "slug": "aruco-west-internal-u9",
+      "slug": "aruco-east-internal-u9",
       "type": "aruco_tag",
       "id": 9,
-      "cardinal": "west",
-      "x": -35,
+      "cardinal": "east",
+      "x": 35,
       "y": 0
     },
     {
-      "slug": "aruco-east-internal-u10",
+      "slug": "aruco-west-internal-u10",
       "type": "aruco_tag",
       "id": 10,
-      "cardinal": "east",
-      "x": 35,
+      "cardinal": "west",
+      "x": -35,
       "y": 0
     }
   ],

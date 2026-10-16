@@ -78,7 +78,7 @@ from aprilcam.daemon.detection import _default_detector_factory
 from aprilcam.types import PixelPoint
 from aprilcam.vision.pipeline import run_pipeline
 
-from tests.image_matrix.conftest import PLAYFIELDS_DIR, FixtureEntry, discover_fixture_entries
+from tests.image_matrix.conftest import FixtureEntry, discover_fixture_entries, playfield_definition_path
 
 __all__ = ["test_geometry_east_west_and_north_up"]
 
@@ -148,7 +148,9 @@ def _deskewed_aruco_positions(entry: FixtureEntry) -> Dict[int, PixelPoint]:
     calibration_data = json.loads(entry.calibration_path.read_text())
     calibration = Calibration.from_dict(calibration_data)
 
-    definition = _loader.load_playfield(PLAYFIELDS_DIR / f"{entry.playfield}.json")
+    definition = _loader.load_playfield(
+        playfield_definition_path(entry.field_state_id, entry.playfield)
+    )
     width_cm, height_cm = definition.width_cm, definition.height_cm
     output_width_px, _output_height_px = geometry.deskewed_output_size(width_cm, height_cm)
     px_per_cm = output_width_px / width_cm
