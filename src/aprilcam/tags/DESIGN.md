@@ -1,13 +1,13 @@
 # tags/
 
-**Owner:** Eric Busboom · **Last reviewed:** 2026-08-21 · **Status:** stable
+**Owner:** Eric Busboom · **Last reviewed:** 2026-10-16 · **Status:** stable
 
 ---
 
 ## 1. Purpose
 
-`tags/` generates printable AprilTag (36h11) and ArUco (4x4) fiducial images
-(UC-21) — nothing else. It is **purely offline**: no daemon, no camera, no
+`tags/` generates printable AprilTag (36h11) and ArUco (4x4) fiducials
+(UC-21) — by default one labelled PDF sheet, one tag per page — nothing else. It is **purely offline**: no daemon, no camera, no
 network, no import of `daemon/`, `client/`, or `vision/` anywhere in its call
 path. It is the one capability in the whole system that works on a bare
 install, which is exactly when it's needed — an operator generates tags
@@ -44,7 +44,7 @@ One behavioral interface, one concrete implementation, both named
 `TagGenerator`:
 
 - **`interfaces.py` — `TagGenerator`.** A plain base class (not
-  `typing.Protocol` — CLAUDE.md's interfaces rule), with two methods, both
+  `typing.Protocol` — CLAUDE.md's interfaces rule), with three methods, all
   `raise NotImplementedError` bodies:
   - `valid_ids(family) -> range` — the family's dictionary range, published
     so a caller (the CLI) can validate before generating and name the valid
@@ -55,6 +55,15 @@ One behavioral interface, one concrete implementation, both named
     generation both to survey (corner ArUcos must match the playfield
     definition, UC-21.S-1) and to detection (a robot tag must match the
     `size` registered for mobile-tag mount parameters, UC-21.S-2, UC-12).
+    This is the opt-in `--png` path.
+  - `generate_sheet(family, ids, *, out_path) -> Path` — **the default
+    deliverable** (sprint 043, ticket 002): one multi-page PDF, one tag per
+    59 x 102 mm label page, tag centred with a small quiet zone and a
+    caption beneath (`ArUco 4x4 ID: 3` / `AprilTag 36h11 ID: 7`). **No size
+    parameter**: the tag fills the page, the operator prints at 100% and
+    measures the result; size is an output of printing, not an input. No
+    position text is ever drawn (v1's `ARUCO_POSITIONS` captions were stale
+    and are deliberately gone).
 
 - **`generator.py` — `TagGenerator`.** The concrete class, deriving from
   `tags.interfaces.TagGenerator` the same way `client.discovery.Discovery`
@@ -144,6 +153,21 @@ directly from `tags.generator` and `tags.interfaces`.
    marker image, written to `out_dir / f"{family.value}-{tag_id}.png"` via
    `cv.imwrite`. The full tuple of written paths is returned.
 
+### Sheet (`generate_sheet`)
+
+Same up-front order as `generate()`: import `cv2`, validate every id
+(`InvalidTagId`), check `out_path` writability (`UnwritableOutputPath`,
+also refusing a directory) — all before anything is rendered or written.
+Then, per id: render the marker at 960 px (divisible by 6 and 8 so every
+module is whole pixels for both families), pad a 0.04-of-edge white quiet
+zone (v1's PDF value), encode to PNG in memory, and place it on a fresh
+59 x 102 mm `fpdf2` page with 1 mm margins — `min(57, 94)` = 57 mm square,
+horizontally centred, vertically centred in the area above a 6 mm caption
+band — with a 7 pt Helvetica caption 1 mm below. Page geometry, quiet-zone
+ratio and caption placement are v1's, re-derived fresh. `fpdf2` is a **base**
+dependency (pure Python; moved out of the `daemon` extra in sprint 043),
+imported where used.
+
 `valid_ids()` itself is a one-liner: look up the family's OpenCV predefined
 dictionary and return `range(0, dictionary.bytesList.shape[0])`.
 
@@ -152,6 +176,7 @@ dictionary and return `range(0, dictionary.bytesList.shape[0])`.
 ### Exposes
 
 - `tags.generator.TagGenerator` — `valid_ids(family: TagFamily) -> range`;
+  `generate_sheet(family, ids, *, out_path) -> Path` (the PDF);
   `generate(family, ids, *, size_cm, out_dir, dpi=300) -> tuple[Path, ...]`.
 - `tags.interfaces.TagGenerator` — the base class it derives from.
 - Typed errors (`aprilcam.errors`): `InvalidTagId` (names the valid range;
@@ -169,29 +194,25 @@ dictionary and return `range(0, dictionary.bytesList.shape[0])`.
   extra — see §4, step 0.
 
 The one caller today is `cli/tags.py`'s `cmd_generate` (`aprilcam tags
-generate --family FAMILY --ids SPEC --size-cm CM --out DIR [--dpi DPI]`,
-UC-21). It is a thin argv-to-call shell: parses the `--ids` spec
-("1-10", "1-3,55") into a `tuple[int, ...]` (id *validity* is deliberately
-not checked there — that whole-batch check belongs to `TagGenerator.generate`
-itself), then calls `generate()` exactly once with the whole id tuple (never
-looping per-id), letting `InvalidTagId`/`UnwritableOutputPath` flow through
-`cli._common.report_error` unchanged. Unlike every other command in
-`cli/tags.py` (`mount register/clear/list`, which are daemon RPCs), `tags
-generate` takes no `-d`/`--daemon` or `--all` flag — there is no daemon in
-its path for those flags to target, consistent with §1's offline contract.
+generate IDS [-A] [-o PATH] [--png [--size-cm CM] [--dpi DPI]]`, UC-21,
+v1's argument shape). It is a thin argv-to-call shell: parses the ids spec
+("1-8", "0-3,7") into a `tuple[int, ...]` (id *validity* is deliberately
+not checked there — that whole-batch check belongs to the generator), then
+calls `generate_sheet()` (default, PDF at `-o`, default `tags.pdf`) or, with
+`--png`, `generate()` (images into directory `-o`, default `tags/`;
+`--size-cm` optional, default 5 cm; `--dpi` default 300) exactly once with
+the whole id tuple, letting `InvalidTagId`/`UnwritableOutputPath` flow
+through `cli._common.report_error` unchanged. `--size-cm`/`--dpi` without
+`--png` are refused: the PDF path takes no size. Unlike every other command
+in `cli/tags.py`, `tags generate` takes no `-d`/`--daemon` or `--all` flag —
+consistent with §1's offline contract.
 
 ## 6. Open Questions / Known Limitations
 
-- **PDF / multi-tag-sheet output remains genuinely open** — flagged directly
-  in the code ("Open (UC-21): PDF output for multi-tag sheets, as v1 had").
-  Sprint 028 considered and explicitly declined it for that sprint: porting
-  v1's `fpdf`-based sheet generator would move a second dependency
-  (`fpdf2`, currently gated behind the `daemon` extra) into the base install
-  for a capability none of that sprint's verification criteria needed, plus
-  real page-layout logic (margins, per-page centering) beyond UC-21's core
-  contracts. This was recorded as **not decided against** — genuinely open,
-  a future sprint's call. Today an operator needing a multi-tag print sheet
-  runs `tags generate` once per id/range and assembles a sheet externally.
+- **PDF output — resolved (sprint 043, ticket 002).** Previously open;
+  the stakeholder decided (2026-10-16) that v1's printable labelled sheet is
+  the right deliverable. `generate_sheet` is the default; per-id PNGs
+  survive as `--png`. `fpdf2` moved to the base dependencies.
 - **`docs/design/specification.md` §4.10's stale sentence is now partially
   re-aligned, not fully resolved.** It describes OpenCV as tolerated in
   `tags/` "or replaced with pre-rendered dictionaries to make the base

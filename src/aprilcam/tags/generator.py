@@ -50,6 +50,7 @@ on disk (UC-21.S-3, SUC-002, SUC-003).
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 import warnings
@@ -155,6 +156,43 @@ def _out_dir_writable(path: Path) -> bool:
     return False
 
 
+# Label-sheet geometry, taken from v1's sheet generator (evidence, not a
+# port): the stakeholder prints on a 59 x 102 mm label printer at 100%.
+_PAGE_W_MM = 59.0
+_PAGE_H_MM = 102.0
+_MARGIN_MM = 1.0
+_CAPTION_H_MM = 6.0
+_CAPTION_GAP_MM = 1.0
+_CAPTION_FONT_PT = 7
+# Quiet-zone border around the marker, as a fraction of its edge (v1's
+# PDF value: just enough for detection while the tag fills the page).
+_SHEET_QUIET_RATIO = 0.04
+# Marker render edge in pixels. Divisible by both 6 (ArUco 4x4 plus
+# border) and 8 (AprilTag 36h11 plus border) so every module is a whole
+# number of pixels and edges stay crisp when scaled onto the page.
+_SHEET_MARKER_PX = 960
+
+_FAMILY_CAPTION = {
+    TagFamily.ARUCO: "ArUco 4x4",
+    TagFamily.APRILTAG: "AprilTag 36h11",
+}
+
+
+def _caption(family: TagFamily, tag_id: int) -> str:
+    return f"{_FAMILY_CAPTION[family]} ID: {tag_id}"
+
+
+def _file_writable(path: Path) -> bool:
+    """True if a file could be created at *path*: its parent exists (or
+    has an existing ancestor that does) and is writable, and *path* is
+    not a directory or an unwritable existing file."""
+    if path.is_dir():
+        return False
+    if path.exists():
+        return os.access(path, os.W_OK)
+    return _out_dir_writable(path.parent)
+
+
 class TagGenerator(_TagGeneratorBase):
     """Concrete :class:`aprilcam.tags.interfaces.TagGenerator`.
 
@@ -221,3 +259,54 @@ class TagGenerator(_TagGeneratorBase):
             cv.imwrite(str(path), image)
             written.append(path)
         return tuple(written)
+
+    def generate_sheet(
+        self,
+        family: TagFamily,
+        ids: tuple[int, ...],
+        *,
+        out_path: Path,
+    ) -> Path:
+        cv = _import_cv()
+
+        # Validate every id, then output writability, before rendering or
+        # writing anything (UC-21.S-3).
+        valid = self.valid_ids(family)
+        for tag_id in ids:
+            if tag_id not in valid:
+                raise InvalidTagId(family.value, tag_id, valid)
+        out_path = Path(out_path)
+        if not _file_writable(out_path):
+            raise UnwritableOutputPath(out_path)
+
+        from fpdf import FPDF  # base dependency; imported where used
+
+        dictionary = cv.aruco.getPredefinedDictionary(_dictionary_by_family(cv)[family])
+        pdf = FPDF(unit="mm", format=(_PAGE_W_MM, _PAGE_H_MM))
+        pdf.set_auto_page_break(auto=False)
+        pdf.set_font("Helvetica", size=_CAPTION_FONT_PT)
+
+        avail_w = _PAGE_W_MM - 2 * _MARGIN_MM
+        avail_h = _PAGE_H_MM - 2 * _MARGIN_MM - _CAPTION_H_MM
+        tag_dim = min(avail_w, avail_h)
+        x = (_PAGE_W_MM - tag_dim) / 2
+        y = _MARGIN_MM + (avail_h - tag_dim) / 2
+
+        for tag_id in ids:
+            marker = cv.aruco.generateImageMarker(dictionary, tag_id, _SHEET_MARKER_PX)
+            pad = max(1, round(_SHEET_MARKER_PX * _SHEET_QUIET_RATIO))
+            padded = cv.copyMakeBorder(
+                marker, pad, pad, pad, pad, cv.BORDER_CONSTANT, value=255
+            )
+            ok, png = cv.imencode(".png", padded)
+            if not ok:
+                raise RuntimeError(f"could not encode {_caption(family, tag_id)} as PNG")
+
+            pdf.add_page()
+            pdf.image(io.BytesIO(png.tobytes()), x=x, y=y, w=tag_dim, h=tag_dim)
+            pdf.set_xy(0, y + tag_dim + _CAPTION_GAP_MM)
+            pdf.cell(_PAGE_W_MM, 4, _caption(family, tag_id), align="C")
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        pdf.output(str(out_path))
+        return out_path

@@ -47,7 +47,7 @@ presentation.
 | `locate.py` | 431 | `camera locate` — solves camera ground nadir/height from surveyed AprilTag references. The one file in this package with a client-side geometry dependency (§3). |
 | `daemon.py` | 313 | `daemon start\|stop\|restart\|status\|list` — process lifecycle (local-only) plus remote status/discovery. |
 | `playfield.py` | 688 | `playfield list\|config\|image\|view\|annotations\|where` — playfield-addressed commands, including client-side camera resolution for the ones that need a camera but name none. |
-| `tags.py` | 429 | `tags mount register\|clear\|list` (mobile-tag mount registry, daemon-backed) and `tags generate` (offline AprilTag/ArUco image generation, no daemon). |
+| `tags.py` | 429 | `tags mount register\|clear\|list` (mobile-tag mount registry, daemon-backed) and `tags generate` (offline AprilTag/ArUco printable PDF sheet, or per-id PNGs with `--png`; no daemon). |
 | `guide.py` | 75 | `guide [name]` — prints a packaged usage guide. Deliberately makes no daemon connection at all (§3). |
 | `mcp.py` | 54 | `mcp [-d HOST]` — starts the MCP stdio server; passes `-d` through as the server's connection-manager default and blocks for the process lifetime. |
 
