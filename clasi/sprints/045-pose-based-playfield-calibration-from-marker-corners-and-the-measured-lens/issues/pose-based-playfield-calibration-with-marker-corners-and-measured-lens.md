@@ -1,5 +1,21 @@
 ---
-status: pending
+status: in-progress
+sprint: '045'
+tickets:
+- 045-001
+- 045-002
+- 045-003
+- 045-004
+- 045-005
+- 045-006
+- 045-007
+- 045-008
+- 045-009
+- 045-010
+- 045-011
+- 045-012
+- 045-013
+- 045-014
 ---
 
 # Pose-based playfield calibration: marker corners plus the measured lens model, so a field needs fewer tags
