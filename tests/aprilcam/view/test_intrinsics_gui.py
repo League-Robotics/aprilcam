@@ -259,3 +259,22 @@ def test_compose_dimmed_and_decode_failure():
     out = compose_camera_image(b"garbage", model, None, None, (100, 100), fallback=bright)
     assert out.size == bright.size and out.getpixel((10, 10)) == dim.getpixel((10, 10))
     assert compose_camera_image(b"", model, None, None, (100, 100)).size[0] > 0
+
+
+def test_frames_are_keyed_by_the_status_camera_slug_not_the_typed_token():
+    """Regression (2026-10-16): ``aprilcam camera lens 4`` never showed the
+    image because frames were stored under the typed token ("4") while the
+    renderer looked them up by the slug the daemon's status reports."""
+
+    class SlugDaemon(Daemon):
+        def get_intrinsics_status(self, cam):
+            return _st("arducam-ov9782-usb-camera", False)
+
+    clk = _Clock()
+    c = gui.IntrinsicsController(SlugDaemon(), ["4"], install=False, clock=clk)
+    c.step()
+    snap = c.snapshot()
+    assert snap.statuses[0].camera == "arducam-ov9782-usb-camera"
+    assert "arducam-ov9782-usb-camera" in snap.frames
+    assert snap.frame_stale["arducam-ov9782-usb-camera"] is False
+    assert "4" not in snap.frames

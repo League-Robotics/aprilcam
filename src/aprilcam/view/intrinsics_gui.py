@@ -135,6 +135,14 @@ class IntrinsicsController:
             if last is not None and now - last < _FRAME_INTERVAL_S:
                 continue
             self._last_frame_try[cam] = now
+            # Frames are keyed by the camera name the *status* reports (the
+            # daemon's slug), because the renderer looks them up from the
+            # status it draws. The operator may have typed a persistent
+            # number ("4"); keying by that token would never match the slug
+            # and the image would never replace the fallback tiles.
+            with self._lock:
+                st = self._statuses.get(cam)
+            key = st.camera if st is not None and st.camera else cam
             try:
                 frame = self._daemon.get_frame(cam)
                 data = frame.data
@@ -143,12 +151,12 @@ class IntrinsicsController:
             except Exception as exc:  # noqa: BLE001 - dim the old image, show banner
                 with self._lock:
                     self._frame_errors[cam] = f"[{cam}] frame: {str(exc) or type(exc).__name__}"
-                    if cam in self._frames:
-                        self._frame_stale[cam] = True
+                    if key in self._frames:
+                        self._frame_stale[key] = True
                 continue
             with self._lock:
-                self._frames[cam] = data
-                self._frame_stale[cam] = False
+                self._frames[key] = data
+                self._frame_stale[key] = False
                 self._frame_errors.pop(cam, None)
 
     def _run_command(self, cmd: str) -> None:
