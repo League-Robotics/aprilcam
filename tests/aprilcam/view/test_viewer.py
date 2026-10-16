@@ -558,6 +558,51 @@ def test_tag_roster_never_admits_an_aruco_record():
     assert roster.snapshot() == ()
 
 
+@pytest.mark.parametrize(
+    "src, area, expected",
+    [
+        ((640, 480), (1280, 960), (1280, 960)),  # landscape upscale
+        ((640, 480), (320, 240), (320, 240)),  # landscape downscale
+        ((640, 480), (1000, 240), (320, 240)),  # height-limited
+        ((640, 480), (320, 1000), (320, 240)),  # width-limited
+        ((300, 600), (600, 600), (300, 600)),  # portrait upscale, height-limited
+        ((300, 600), (100, 100), (50, 100)),  # portrait downscale
+        ((100, 100), (250, 400), (250, 250)),  # square
+        ((100, 100), (50, 50), (50, 50)),
+        ((0, 480), (100, 100), (1, 1)),  # degenerate
+        ((640, 480), (0, 100), (1, 1)),
+        ((640, 480), (-5, 100), (1, 1)),
+    ],
+)
+def test_fit_size_table(src, area, expected):
+    assert viewer._fit_size(*src, *area) == expected
+
+
+@pytest.mark.camera
+def test_tkwindow_rescales_on_resize_and_sidebar_width_is_stable():
+    buf = io.BytesIO()
+    Image.new("RGB", (400, 200), (10, 20, 30)).save(buf, format="JPEG")
+    window = viewer.TkWindow("aprilcam resize test", show_sidebar=True)
+    try:
+        window.show(buf.getvalue())
+        window.pump()
+        sidebar_before = window._sidebar_text.winfo_width()
+        window._root.geometry("1200x700")
+        for _ in range(5):
+            window.pump()
+        # Image grew with the window, aspect preserved, sidebar unchanged.
+        assert window._photo.width() > 400
+        assert abs(window._photo.width() - 2 * window._photo.height()) <= 2
+        assert window._sidebar_text.winfo_width() == sidebar_before
+        window._root.geometry("500x300")
+        for _ in range(5):
+            window.pump()
+        assert window._photo.width() < 903
+        assert abs(window._photo.width() - 2 * window._photo.height()) <= 2
+    finally:
+        window.close()
+
+
 @pytest.mark.camera
 def test_tkwindow_with_sidebar_builds_a_side_panel_and_updates_it_from_tags():
     """A thin smoke-level check of the real Tk widget wiring (the

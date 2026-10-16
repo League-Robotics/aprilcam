@@ -1,8 +1,10 @@
 ---
 id: '001'
 title: Viewer image scales with window resize
-status: open
-use-cases: [SUC-001, SUC-002]
+status: in-progress
+use-cases:
+- SUC-001
+- SUC-002
 depends-on: []
 github-issue: ''
 issue: camera-and-playfield-view-image-should-scale-with-the-window.md
