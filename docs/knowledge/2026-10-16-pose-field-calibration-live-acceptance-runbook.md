@@ -28,8 +28,8 @@ file an issue and attach the result record (see "If something fails").
 ```sh
 cd /Volumes/Proj/proj/robot-projects/aprilcam
 git branch --show-current                  # expect master (post-merge)
-pipx install --force /Volumes/Proj/proj/robot-projects/aprilcam
-pipx inject aprilcam 'mss>=9.0' 'websockets>=12.0' 'cv2-enumerate-cameras>=1.3' 'msgpack>=1.0' 'grpcio-reflection>=1.60' 'opencv-contrib-python>=4.8'   # the [daemon] extra; pipx 1.8 cannot parse 'path[extra]'
+pipx install --force '/Volumes/Proj/proj/robot-projects/aprilcam[daemon]'   # first time, or after the checkout moves
+pipx reinstall aprilcam                                                        # every time after that
 aprilcam camera calibrate --help           # expect --verbose, NO --with-intrinsics
 aprilcam camera lens --help                # alias of camera intrinsics; must print usage
 aprilcam daemon stop

@@ -38,13 +38,14 @@ It does not contain sprint 044 and will not until reinstalled:
 ```sh
 cd /Volumes/Proj/proj/robot-projects/aprilcam      # same checkout as robot-projects/aprilcam
 git branch --show-current                          # expect sprint/044-charuco-...
-pipx install --force /Volumes/Proj/proj/robot-projects/aprilcam
-pipx inject aprilcam 'mss>=9.0' 'websockets>=12.0' 'cv2-enumerate-cameras>=1.3' 'msgpack>=1.0' 'grpcio-reflection>=1.60' 'opencv-contrib-python>=4.8'   # the [daemon] extra; pipx 1.8 cannot parse 'path[extra]'
+pipx install --force '/Volumes/Proj/proj/robot-projects/aprilcam[daemon]'   # first time, or after the checkout moves
+pipx reinstall aprilcam                                                        # every time after that
 aprilcam camera intrinsics --help                  # must print usage, not "invalid choice"
 ```
 
-(Do not use `pipx reinstall aprilcam`: with this pipx it uninstalls and then
-fails to parse the stored `path[daemon]` spec, leaving no `aprilcam` at all.) Keep the `[daemon]` extra: without it the daemon has no OpenCV
+(`pipx reinstall aprilcam` reuses the stored `path[daemon]` spec, so it is the
+normal update command. It only fails if the checkout path has moved, in which
+case run the first line again with the new path.) Keep the `[daemon]` extra: without it the daemon has no OpenCV
 capture backend. Alternative that avoids pipx entirely: run every command
 below as `uv run aprilcam ...` from the checkout.
 
