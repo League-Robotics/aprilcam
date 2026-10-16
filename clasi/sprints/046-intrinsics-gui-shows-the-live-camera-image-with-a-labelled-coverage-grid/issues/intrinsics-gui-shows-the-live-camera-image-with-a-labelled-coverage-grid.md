@@ -1,5 +1,11 @@
 ---
-status: pending
+status: in-progress
+sprint: '046'
+tickets:
+- 046-001
+- 046-002
+- 046-003
+- 046-004
 ---
 
 # Intrinsics GUI: show the live camera image with a labelled coverage grid and the detected board
