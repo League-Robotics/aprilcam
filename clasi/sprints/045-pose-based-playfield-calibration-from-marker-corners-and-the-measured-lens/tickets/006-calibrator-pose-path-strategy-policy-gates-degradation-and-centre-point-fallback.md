@@ -2,12 +2,15 @@
 id: '006'
 title: 'Calibrator pose path: strategy, policy, gates, degradation and centre-point
   fallback'
-status: open
+status: done
 use-cases:
 - SUC-001
 - SUC-003
 - SUC-004
-depends-on: ['003', '004', '005']
+depends-on:
+- '003'
+- '004'
+- '005'
 github-issue: ''
 issue: pose-based-playfield-calibration-with-marker-corners-and-measured-lens.md
 completes_issue: true
@@ -56,27 +59,27 @@ continues to take the old branch; the pose path is not entered in that case.
 
 ## Acceptance Criteria
 
-- [ ] Four markers, measured lens, sized definition: `method: pose`,
+- [x] Four markers, measured lens, sized definition: `method: pose`,
       `corner_count == 16`, `confidence: full`, camera height/nadir within
       synthetic tolerance, all metrics populated.
-- [ ] Two-marker diagonal definition (or two of four visible with the others
+- [x] Two-marker diagonal definition (or two of four visible with the others
       `helpful`): succeeds, `confidence: reduced`, warning note.
-- [ ] One marker visible (others `helpful`): succeeds, `confidence: low`.
-- [ ] Any `required` marker covered: fails with `missing_ids`, identical
+- [x] One marker visible (others `helpful`): succeeds, `confidence: low`.
+- [x] Any `required` marker covered: fails with `missing_ids`, identical
       wording/shape to today; prior calibration untouched.
-- [ ] Definition without `size_mm`, or no/mismatched/non-measured lens:
+- [x] Definition without `size_mm`, or no/mismatched/non-measured lens:
       centre-point path, `method_reason` set, results numerically identical
       to the pre-sprint implementation (existing tests unchanged and green).
-- [ ] Each gate failing in isolation (inflated corner noise, wrong
+- [x] Each gate failing in isolation (inflated corner noise, wrong
       `size_mm`, markers clustered in one image corner, one marker's
       surveyed position displaced / two markers swapped) is rejected with the right reason and the numbers
       reported.
-- [ ] Mixed-orientation markers (all four rotations incl. upside down) in
+- [x] Mixed-orientation markers (all four rotations incl. upside down) in
       the definition-driven synthetic scene calibrate with `method: pose`
       and the same result as upright.
-- [ ] A swapped/misplaced marker (e.g. 9 and 10 exchanged) fails the
+- [x] A swapped/misplaced marker (e.g. 9 and 10 exchanged) fails the
       leave-one-out gate naming the marker, not just an aggregate rms.
-- [ ] Derived homography agrees with the centre-point homography on the same
+- [x] Derived homography agrees with the centre-point homography on the same
       synthetic data to < 0.2 cm over the field (no-distortion case).
 
 ## Implementation Plan

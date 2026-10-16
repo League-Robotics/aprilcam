@@ -134,7 +134,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import cv2 as cv
 import numpy as np
 
-from aprilcam.calibration import distortion, geometry
+from aprilcam.calibration import distortion, gates, geometry, pose
 from aprilcam.calibration.interfaces import Calibration as _CalibrationBase
 from aprilcam.calibration.interfaces import CalibrationResult
 from aprilcam.calibration.interfaces import Calibrator as _CalibratorBase
@@ -1247,6 +1247,22 @@ class Calibrator(_CalibratorBase):
         :attr:`_get_prior_calibration` (**not** :meth:`get_calibration`
         directly -- see that attribute's own docstring for the
         carry-forward-after-restart bug this distinction fixes).
+
+        **Strategy (sprint 045).** After the marker policy check
+        (``required`` ids all seen, else a failure naming ``missing_ids``;
+        ``helpful`` ones only sharpen the result), one of two solves runs.
+        The **pose** path (:meth:`_calibrate_by_pose`) is used iff the lens
+        store holds a *measured* model at this frame size and a matched
+        on-plane marker has a ``size_mm``: it solves the camera's planar
+        pose from the marker corners, derives the homography from it, and
+        gates the result (``calibration/gates.py``), reporting ``method``,
+        ``confidence`` (``full`` / ``reduced`` / ``low``) and every gate
+        metric on the :class:`CalibrationResult`. Otherwise the unchanged
+        **centre-point** path (:meth:`_calibrate_by_centres`) runs and the
+        result says ``method='centre-point'`` with a one-line
+        ``method_reason``. ``estimate_intrinsics=True`` always takes the
+        centre-point path. A gate failure stores nothing: the previous
+        calibration survives.
         """
         config = self._get_camera_config(camera_slug)
         if config is None or config.playfield is None:
@@ -1337,15 +1353,25 @@ class Calibrator(_CalibratorBase):
                 ),
             )
 
-        detected = self._detect_averaged(frames)
-        aruco_detected = detected.get(TagFamily.ARUCO, {})
-        april_detected = detected.get(TagFamily.APRILTAG, {})
+        detected_markers = self._detect_markers(frames)
+        aruco_markers = detected_markers.get(TagFamily.ARUCO, {})
+        aruco_detected = {tag_id: obs.centre for tag_id, obs in aruco_markers.items()}
+        april_detected = {
+            tag_id: obs.centre
+            for tag_id, obs in detected_markers.get(TagFamily.APRILTAG, {}).items()
+        }
 
-        required = definition.required_aruco_ids()
-        matched_ids = tuple(sorted(i for i in required if i in aruco_detected))
+        # Policy (sprint 045): ``required`` ids must all be seen; ``helpful``
+        # ones only sharpen the result. A definition with no policy anywhere
+        # lists every id as required -- today's all-or-nothing behaviour.
+        required = definition.required_marker_ids()
+        helpful = definition.helpful_marker_ids()
+        listed = set(required) | set(helpful)
+        matched_ids = tuple(sorted(i for i in listed if i in aruco_detected))
         missing_ids = tuple(sorted(i for i in required if i not in aruco_detected))
+        helpful_missing = tuple(sorted(i for i in helpful if i not in aruco_detected))
 
-        stray = sorted(set(aruco_detected) - set(required))
+        stray = sorted(set(aruco_detected) - listed)
         if stray:
             logger.info(
                 "calibrate(%s): ignoring %d detected ArUco id(s) not in the "
@@ -1363,6 +1389,269 @@ class Calibrator(_CalibratorBase):
                 lens_warning=lens_warning,
             )
 
+        # Strategy choice: the pose path needs a measured lens at this frame
+        # size and at least one matched on-plane marker with a known size.
+        # ``estimate_intrinsics`` keeps the centre-point branch (it replaces
+        # the lens, which the pose path must not).
+        aruco_by_id = {entry.tag_id: entry for entry in definition.aruco_tags}
+        centre_reason = self._pose_ineligibility(
+            camera_slug, definition, aruco_by_id, matched_ids, stored_lens,
+            lens_warning, estimate_intrinsics,
+        )
+        if centre_reason is None:
+            assert stored_lens is not None
+            return self._calibrate_by_pose(
+                camera_slug=camera_slug,
+                definition=definition,
+                aruco_markers=aruco_markers,
+                matched_ids=matched_ids,
+                required=required,
+                helpful=helpful,
+                helpful_missing=helpful_missing,
+                lens=stored_lens,
+                lens_warning=lens_warning,
+            )
+        logger.info("calibrate(%s): centre-point path: %s", camera_slug, centre_reason)
+        return self._calibrate_by_centres(
+            camera_slug=camera_slug,
+            definition=definition,
+            image_size=image_size,
+            aruco_detected=aruco_detected,
+            april_detected=april_detected,
+            matched_ids=matched_ids,
+            helpful_missing=helpful_missing,
+            stored_lens=stored_lens,
+            lens_warning=lens_warning,
+            estimate_intrinsics=estimate_intrinsics,
+            method_reason=centre_reason,
+        )
+
+    def _pose_ineligibility(
+        self,
+        camera_slug: str,
+        definition: _ConcretePlayfieldDefinition,
+        aruco_by_id: Dict[int, Any],
+        matched_ids: Sequence[int],
+        stored_lens: Optional[LensModel],
+        lens_warning: Optional[str],
+        estimate_intrinsics: bool,
+    ) -> Optional[str]:
+        """Why the centre-point path must run instead of the pose path, as
+        the one-line ``method_reason``; ``None`` when the pose path applies."""
+        if estimate_intrinsics:
+            return "intrinsics estimation requested"
+        if stored_lens is None:
+            if lens_warning:
+                return "lens measured at a different resolution"
+            prior = self._get_prior_calibration(camera_slug)
+            if prior is not None and prior.camera_matrix is not None:
+                return f"lens source is {prior.lens_source or LENS_SOURCE_LEGACY}"
+            return "no measured lens model"
+        if stored_lens.source != LENS_SOURCE_MEASURED:
+            return f"lens source is {stored_lens.source}"
+        if not any(
+            aruco_by_id[i].height_cm == 0.0 and definition.marker_size_mm(i) is not None
+            for i in matched_ids
+        ):
+            return "definition has no marker size"
+        return None
+
+    def _calibrate_by_pose(
+        self,
+        *,
+        camera_slug: str,
+        definition: _ConcretePlayfieldDefinition,
+        aruco_markers: Dict[int, MarkerObservation],
+        matched_ids: Tuple[int, ...],
+        required: Tuple[int, ...],
+        helpful: Tuple[int, ...],
+        helpful_missing: Tuple[int, ...],
+        lens: LensModel,
+        lens_warning: Optional[str],
+    ) -> CalibrationResult:
+        """Planar-pose calibration from marker corners and the measured lens.
+
+        An orchestrator: ``calibration/pose.py`` does the arithmetic,
+        ``calibration/gates.py`` decides. Nothing is stored on failure, so a
+        previous calibration survives a rejected attempt.
+        """
+        aruco_by_id = {entry.tag_id: entry for entry in definition.aruco_tags}
+        notes: List[str] = []
+        surveyed: Dict[int, pose.SurveyedMarker] = {}
+        excluded: List[int] = []
+        for tag_id in matched_ids:
+            entry = aruco_by_id[tag_id]
+            size_mm = definition.marker_size_mm(tag_id)
+            if entry.height_cm != 0.0:
+                excluded.append(tag_id)
+                logger.info(
+                    "calibrate(%s): marker %d is elevated (%.1f cm); ignored by the pose solve",
+                    camera_slug, tag_id, entry.height_cm,
+                )
+                continue
+            if size_mm is None:
+                excluded.append(tag_id)
+                notes.append(f"marker {tag_id} has no size; not used in the pose solve")
+                continue
+            surveyed[tag_id] = pose.SurveyedMarker(
+                tag_id=tag_id, centre_cm=(entry.x, entry.y), size_mm=size_mm
+            )
+        used = sorted(surveyed)
+        obs = [aruco_markers[i] for i in used]
+        camera_matrix = np.array(lens.camera_matrix, dtype=np.float64)
+        dist_coeffs = np.array(lens.dist_coeffs, dtype=np.float64)
+
+        common: Dict[str, Any] = dict(
+            matched_ids=matched_ids,
+            missing_ids=(),
+            intrinsics_estimated=False,
+            lens_model_source=LENS_SOURCE_MEASURED,
+            lens_warning=lens_warning,
+            method="pose",
+            method_reason="measured lens model and marker sizes",
+            helpful_missing_ids=helpful_missing,
+        )
+
+        def failure(reason: str, **metrics: Any) -> CalibrationResult:
+            worst_id = metrics.get("leave_one_out_worst_id")
+            if worst_id is not None and f"marker {worst_id}" not in reason:
+                # An aggregate gate tripped first: still name the marker the
+                # other markers disagree with most, so a mis-surveyed or
+                # swapped marker is identified, not just an rms.
+                reason += (
+                    f" (worst leave-one-out: marker {worst_id}, "
+                    f"{metrics['leave_one_out_worst_cm']:.2f} cm from where the others place it)"
+                )
+            return CalibrationResult(
+                succeeded=False,
+                reason=f"pose calibration rejected: {reason}",
+                notes=tuple(notes),
+                **common,
+                **metrics,
+            )
+
+        try:
+            rotations = pose.detect_marker_rotations(obs, surveyed, camera_matrix, dist_coeffs)
+            turns = {i: rotations[i].quarter_turns for i in used}
+            obj, img = pose.correspondences(obs, surveyed, turns)
+            planar = pose.solve_planar_pose(obj, img, camera_matrix, dist_coeffs)
+            loo = pose.leave_one_out_residuals(obs, surveyed, turns, camera_matrix, dist_coeffs)
+        except ValueError as exc:
+            return failure(f"pose solve failed: {exc}")
+
+        height, nadir, tilt = pose.camera_position_from_pose(planar)
+        err_cm = pose.reprojection_error_cm(planar, camera_matrix, dist_coeffs, obj, img)
+        rms_cm = float(np.sqrt(np.mean(err_cm ** 2)))
+        local, glob = pose.marker_distances(obs, surveyed, planar, camera_matrix, dist_coeffs)
+        scale = gates.scale_agreement(local, glob) if len(local) == len(used) else None
+        spread = gates.angular_spread_deg(pose.viewing_rays(img, camera_matrix, dist_coeffs))
+        # Two points are trivially collinear, so the layout gate speaks only
+        # for three or more markers; the two-marker case is already labelled
+        # ``reduced`` with its own note about the poorly constrained camera.
+        centres = np.array([surveyed[i].centre_cm for i in used], dtype=np.float64)
+        extent = gates.layout_extent_ratio(centres) if len(used) >= 3 else None
+        worst = gates.per_marker_leave_one_out(loo)
+        metrics = gates.GateMetrics(
+            rms_px=planar.rms_px,
+            rms_cm=rms_cm,
+            scale_ratio=scale,
+            angular_spread_deg=spread,
+            ambiguity_ratio=planar.ambiguity_ratio,
+            layout_extent_ratio=extent,
+            loo_worst=worst,
+            rotation_ambiguous_ids=tuple(
+                i for i in used if rotations[i].ratio < gates.MIN_ROTATION_RATIO
+            ),
+        )
+        measured: Dict[str, Any] = dict(
+            reprojection_error_cm=rms_cm,
+            corner_count=int(len(obj)),
+            reprojection_error_px=planar.rms_px,
+            scale_agreement=scale,
+            angular_spread_deg=spread,
+            camera_height_cm=height,
+            camera_nadir=nadir,
+            camera_tilt_deg=tilt,
+            leave_one_out_worst_id=worst[0] if worst else None,
+            leave_one_out_worst_cm=worst[1] if worst else None,
+            layout_extent_ratio=extent,
+        )
+        label, gate_notes, fail_reason = gates.classify(
+            used,
+            [i for i in required if i not in excluded],
+            [i for i in helpful if i not in excluded],
+            metrics,
+        )
+        notes.extend(gate_notes)
+        if fail_reason is None and rms_cm > self._max_reprojection_error_cm:
+            fail_reason = (
+                f"corner reprojection rms {rms_cm:.3f} cm exceeds the "
+                f"{self._max_reprojection_error_cm:.3f} cm acceptance threshold"
+            )
+        if fail_reason is not None:
+            return failure(fail_reason, **measured)
+        if len(used) == 2:
+            # Two markers fix the field mapping but leave the camera's roll
+            # about their baseline weakly constrained: never better than reduced.
+            if label == gates.LABEL_FULL:
+                label = gates.LABEL_REDUCED
+            notes.append("two markers: camera position is poorly constrained")
+
+        homography = pose.homography_from_pose(planar, camera_matrix)
+        calibration = Calibration(
+            stale=False,
+            calibrated_at=time.time(),
+            playfield=definition.name,
+            homography=_matrix_to_tuple(homography),
+            matched_ids=matched_ids,
+            reprojection_error_cm=rms_cm,
+            camera_matrix=lens.camera_matrix,
+            dist_coeffs=lens.dist_coeffs,
+            lens_source=LENS_SOURCE_MEASURED,
+            method="pose",
+            confidence=label,
+            camera_height_cm=height,
+            camera_nadir_x_cm=nadir.x,
+            camera_nadir_y_cm=nadir.y,
+            camera_tilt_deg=tilt,
+            reprojection_error_px=planar.rms_px,
+            corner_count=int(len(obj)),
+            scale_agreement=scale,
+        )
+        with self._lock:
+            self._calibrations[camera_slug] = calibration
+        return CalibrationResult(
+            succeeded=True, confidence=label, notes=tuple(notes), **common, **measured
+        )
+
+    def _calibrate_by_centres(
+        self,
+        *,
+        camera_slug: str,
+        definition: _ConcretePlayfieldDefinition,
+        image_size: Tuple[int, int],
+        aruco_detected: Dict[int, PixelPoint],
+        april_detected: Dict[int, PixelPoint],
+        matched_ids: Tuple[int, ...],
+        helpful_missing: Tuple[int, ...],
+        stored_lens: Optional[LensModel],
+        lens_warning: Optional[str],
+        estimate_intrinsics: bool,
+        method_reason: str,
+    ) -> CalibrationResult:
+        """The centre-point strategy: homography from marker centres alone
+        (DLT over surveyed positions), unchanged by sprint 045 apart from
+        reporting ``method``/``method_reason``. Also the home of the
+        ``estimate_intrinsics`` branch."""
+        extra: Dict[str, Any] = dict(
+            method="centre-point",
+            method_reason=method_reason,
+            helpful_missing_ids=helpful_missing,
+            notes=(
+                (f"helpful marker(s) not seen: {list(helpful_missing)}",)
+                if helpful_missing else ()
+            ),
+        )
         aruco_by_id = {entry.tag_id: entry for entry in definition.aruco_tags}
         april_by_id = {entry.tag_id: entry for entry in definition.april_tags}
 
@@ -1427,6 +1716,7 @@ class Calibrator(_CalibratorBase):
             )
             if not fit.accepted:
                 return CalibrationResult(
+            **extra,
                     succeeded=False,
                     matched_ids=matched_ids,
                     missing_ids=(),
@@ -1514,6 +1804,7 @@ class Calibrator(_CalibratorBase):
         degenerate = _degeneracy_reason(pixel_pts, world_pts)
         if degenerate is not None:
             return CalibrationResult(
+            **extra,
                 succeeded=False,
                 matched_ids=matched_ids,
                 missing_ids=(),
@@ -1528,6 +1819,7 @@ class Calibrator(_CalibratorBase):
         homography = _solve_homography(pixel_pts, world_pts)
         if homography is None:
             return CalibrationResult(
+            **extra,
                 succeeded=False,
                 matched_ids=matched_ids,
                 missing_ids=(),
@@ -1551,6 +1843,7 @@ class Calibrator(_CalibratorBase):
             # contract every other rejection branch above already
             # honors.
             return CalibrationResult(
+            **extra,
                 succeeded=False,
                 matched_ids=matched_ids,
                 missing_ids=(),
@@ -1581,16 +1874,18 @@ class Calibrator(_CalibratorBase):
             self._calibrations[camera_slug] = calibration
 
         return CalibrationResult(
+            **extra,
             succeeded=True,
             matched_ids=matched_ids,
             missing_ids=(),
             reprojection_error_cm=rms,
             intrinsics_estimated=intrinsics_estimated,
-                lens_model_source=lens_model_source,
-                lens_warning=lens_warning,
+            lens_model_source=lens_model_source,
+            lens_warning=lens_warning,
             intrinsics_mode=intrinsics_mode,
             elevated_features_used=elevated_features_used,
         )
+
 
     def get_calibration(self, camera_slug: str) -> Optional[Calibration]:
         """The :class:`Calibration` a successful :meth:`calibrate` call
