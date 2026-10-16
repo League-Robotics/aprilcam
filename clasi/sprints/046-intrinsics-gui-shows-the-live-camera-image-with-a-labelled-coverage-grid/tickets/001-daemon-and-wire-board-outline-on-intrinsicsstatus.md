@@ -1,8 +1,9 @@
 ---
 id: '001'
 title: 'Daemon and wire: board_outline on IntrinsicsStatus'
-status: open
-use-cases: [SUC-001]
+status: in-progress
+use-cases:
+- SUC-001
 depends-on: []
 github-issue: ''
 issue: intrinsics-gui-shows-the-live-camera-image-with-a-labelled-coverage-grid.md

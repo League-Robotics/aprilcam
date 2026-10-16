@@ -61,6 +61,20 @@ RUN_CALIBRATE_NOTE = "installed; run calibrate to apply it"
 FrameSource = Callable[[], Optional[np.ndarray]]
 
 
+def _board_outline(boards) -> Optional[tuple]:
+    """One convex hull per detected board (native pixels); ``None`` if none.
+    A hull of fewer than 3 distinct points is skipped."""
+    hulls = []
+    for board in boards:
+        pts = np.asarray(board.corners, dtype=np.float32).reshape(-1, 2)
+        if len(np.unique(pts, axis=0)) < 3:
+            continue
+        hull = cv2.convexHull(pts).reshape(-1, 2)
+        if len(hull) >= 3:
+            hulls.append(tuple((float(x), float(y)) for x, y in hull))
+    return tuple(hulls) or None
+
+
 class IntrinsicsSession:
     """Collect views, solve incrementally, and finish with an optional install."""
 
@@ -186,6 +200,7 @@ class IntrinsicsSession:
         cells = dict(zip(REGION_NAMES, cov.region_counts))
         self._update(
             board_visible=bool(boards),
+            board_outline=_board_outline(boards),
             layout=self._detector.layout,
             view_count=cov.view_count,
             tilted_count=cov.tilted_count,

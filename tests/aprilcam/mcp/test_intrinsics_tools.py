@@ -209,3 +209,13 @@ def test_guide_mentions_the_tools():
     text = Guides().get()
     for name in ("start_intrinsics", "get_intrinsics_status", "finish_intrinsics", "abort_intrinsics"):
         assert name in text
+
+
+async def test_status_includes_board_outline(tmp_path):
+    poly = ((1.0, 2.0), (30.0, 4.0), (20.0, 40.0))
+    d = _FakeDaemon(status=_status(board_outline=(poly,)))
+    out = _data(await _call(_build(d, tmp_path), "get_intrinsics_status", {"camera": "cam0"}))
+    assert out["board_outline"] == [[[1.0, 2.0], [30.0, 4.0], [20.0, 40.0]]]
+    d2 = _FakeDaemon(status=_status())
+    out2 = _data(await _call(_build(d2, tmp_path), "get_intrinsics_status", {"camera": "cam0"}))
+    assert out2["board_outline"] is None

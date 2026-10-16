@@ -756,6 +756,8 @@ def _intrinsics_status_to_proto(status: IntrinsicsStatus) -> aprilcam_v2_pb2.Int
         msg.cell_coverage.extend(status.cell_coverage.get(k, 0) for k in _CELL_ORDER)
     if status.tilt_coverage:
         msg.tilt_coverage.extend(status.tilt_coverage.get(k, 0) for k in _TILT_ORDER)
+    for poly in status.board_outline or ():
+        msg.board_outline.add().xy.extend(c for pt in poly for c in pt)
     for name in ("board_spec", "rms_px", "residual_px", "correction_px", "fx",
                  "hfov_deg", "next_hint", "last_reject", "solved_at"):
         value = getattr(status, name)

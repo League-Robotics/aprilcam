@@ -1461,6 +1461,14 @@ message IntrinsicsStatus {
   repeated string errors = 20;
   double started_at = 21;
   optional double solved_at = 22;
+  // Sprint 046 ticket 001: one convex hull per detected board, native
+  // pixels. Empty means no board visible (decodes to None).
+  repeated IntrinsicsPolygon board_outline = 23;
+}
+
+// A flat [x0, y0, x1, y1, ...] list of one polygon's points.
+message IntrinsicsPolygon {
+  repeated double xy = 1;
 }
 
 message StartIntrinsicsRequest {

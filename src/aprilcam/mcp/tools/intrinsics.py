@@ -75,6 +75,7 @@ def _status_to_dict(status: Any) -> dict[str, Any]:
         "errors": _plain(status.errors),
         "started_at": status.started_at,
         "solved_at": _plain(status.solved_at),
+        "board_outline": _plain(getattr(status, "board_outline", None)),
     }
 
 

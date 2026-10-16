@@ -236,3 +236,36 @@ def test_manager_finish_installs_into_store(tmp_path, frames):
     model = store.load("cam")
     assert model is not None and model.source == "measured"
     assert mgr.active_slugs() == []
+
+
+def test_session_fills_and_clears_board_outline():
+    from aprilcam.intrinsics.interfaces import BoardDetection, BoardLayout
+
+    square = ((10.0, 10.0), (50.0, 10.0), (50.0, 40.0), (10.0, 40.0), (30.0, 25.0))
+    degenerate = ((5.0, 5.0), (5.0, 5.0))
+
+    class FakeDetector:
+        layout = BoardLayout.CURRENT
+
+        def __init__(self):
+            self.script = [
+                [BoardDetection(corners=square, ids=(0, 1, 2, 3, 4),
+                                marker_count=5, layout=BoardLayout.CURRENT),
+                 BoardDetection(corners=degenerate, ids=(0, 1),
+                                marker_count=1, layout=BoardLayout.CURRENT)],
+                [],
+            ]
+
+        def detect(self, gray):
+            return self.script.pop(0)
+
+    blank = np.zeros((64, 96), dtype=np.uint8)
+    session = IntrinsicsSession("cam", SPEC, Feed([blank, blank]), detector=FakeDetector())
+    assert session.status().board_outline is None
+    assert session.step()
+    outline = session.status().board_outline
+    assert outline is not None and len(outline) == 1  # degenerate hull skipped
+    assert set(outline[0]) == {(10.0, 10.0), (50.0, 10.0), (50.0, 40.0), (10.0, 40.0)}
+    assert session.step()
+    st = session.status()
+    assert st.board_outline is None and not st.board_visible
