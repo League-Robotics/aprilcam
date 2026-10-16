@@ -30,7 +30,16 @@ seeded synthetic noise sweep recorded in ticket 004's implementation notes
 * ``MIN_AMBIGUITY_RATIO = 1.3`` -- borrowed from the intrinsics collector.
   Caveat from the sweep: it flags a lone marker only about half the time
   (median 1.5, min 1.0), so the marker-count rule and the layout gate below
-  carry the weight; for a spread layout the ratio is a backstop.
+  carry the weight. Applies only to narrow layouts (see next bullet).
+* ``AMBIGUITY_APPLIES_BELOW_SPREAD_DEG = 30.0`` -- the ambiguity cap is a
+  narrow-layout guard (changed 2026-10-16). The ratio is taken before LM
+  refinement, and for a near-fronto-parallel view the two IPPE solutions differ
+  only in the sign of a tiny tilt, so it sits near 1 whatever the layout. Live
+  main field, ten 46 mm markers, measured lenses: cameras 2 and 4 solved
+  cleanly (40 corners, 0.48 to 0.51 cm rms, scale 1.009 / 1.019, spread 70 deg,
+  heights 119 to 120 cm) yet read ratios 1.25 and 1.09 and were wrongly capped
+  at ``low``. With a wide spread and 3+ markers the LM fit over all corners is
+  unambiguous, so the ratio is reported in a note but does not cap.
 * ``MIN_LAYOUT_EXTENT_RATIO = 0.2`` -- smallest/largest singular value of the
   centred marker centres. Found by the sweep, not in the original plan: a
   collinear or near-collinear layout (two diagonal markers, three in a row)
@@ -55,7 +64,7 @@ import numpy as np
 
 __all__ = [
     "MAX_RMS_PX", "MAX_RMS_CM", "SCALE_TOLERANCE", "MIN_ANGULAR_SPREAD_DEG",
-    "MIN_AMBIGUITY_RATIO", "MIN_LAYOUT_EXTENT_RATIO", "MAX_LOO_CM", "MIN_ROTATION_RATIO",
+    "MIN_AMBIGUITY_RATIO", "AMBIGUITY_APPLIES_BELOW_SPREAD_DEG", "MIN_LAYOUT_EXTENT_RATIO", "MAX_LOO_CM", "MIN_ROTATION_RATIO",
     "GateMetrics", "angular_spread_deg", "scale_agreement", "scale_ok",
     "ambiguity_ok", "layout_extent_ratio", "per_marker_leave_one_out", "classify",
     "LABEL_FULL", "LABEL_REDUCED", "LABEL_LOW", "LABEL_FAIL",
@@ -66,6 +75,7 @@ MAX_RMS_CM = 1.0
 SCALE_TOLERANCE = 0.05
 MIN_ANGULAR_SPREAD_DEG = 10.0
 MIN_AMBIGUITY_RATIO = 1.3
+AMBIGUITY_APPLIES_BELOW_SPREAD_DEG = 30.0
 MIN_LAYOUT_EXTENT_RATIO = 0.2
 MAX_LOO_CM = 2.0
 MIN_ROTATION_RATIO = 2.0
@@ -173,7 +183,8 @@ def classify(
     disagreement, or a leave-one-out outlier (the worst marker is named).
     Otherwise: every listed marker matched -> ``full``; two or more ->
     ``reduced`` (with a note naming the absentees); exactly one -> ``low``.
-    Weak geometry (angular spread, IPPE ambiguity, collinear layout,
+    Weak geometry (angular spread, IPPE ambiguity -- narrow layouts only: spread
+    under 30 deg or fewer than 3 markers -- collinear layout,
     ambiguous marker rotation) caps the label at ``low`` with a note. All thresholds are
     inclusive on the passing side.
 
@@ -220,7 +231,14 @@ def classify(
     if metrics.angular_spread_deg is not None and metrics.angular_spread_deg < MIN_ANGULAR_SPREAD_DEG:
         cap.append(f"angular spread {metrics.angular_spread_deg:.1f} deg < {MIN_ANGULAR_SPREAD_DEG}")
     if not ambiguity_ok(metrics.ambiguity_ratio):
-        cap.append(f"pose ambiguity ratio {metrics.ambiguity_ratio:.2f} < {MIN_AMBIGUITY_RATIO}")
+        spread = metrics.angular_spread_deg
+        wide = (spread is not None and spread >= AMBIGUITY_APPLIES_BELOW_SPREAD_DEG
+                and len(m) >= 3)
+        if wide:
+            notes.append(f"pose ambiguity ratio {metrics.ambiguity_ratio:.2f} ignored: "
+                         f"{len(m)} markers spread {spread:.0f} deg")
+        else:
+            cap.append(f"pose ambiguity ratio {metrics.ambiguity_ratio:.2f} < {MIN_AMBIGUITY_RATIO}")
     if (metrics.layout_extent_ratio is not None
             and metrics.layout_extent_ratio < MIN_LAYOUT_EXTENT_RATIO):
         cap.append(f"markers nearly collinear (extent ratio {metrics.layout_extent_ratio:.2f} "

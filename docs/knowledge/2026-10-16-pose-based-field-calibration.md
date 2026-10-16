@@ -60,7 +60,7 @@ over the capture frames.
 | field rms | 1.0 cm | the project's existing centre-point threshold; clean <= 0.08 cm |
 | scale agreement | 5 % | clean <= 1.2 %; markers printed 3 % / 10 % large read 3.7 % / 9.8 % |
 | angular spread | 10 deg | four corner markers span about 51 deg; one marker about 2.5 deg |
-| IPPE ambiguity ratio | 1.3 | borrowed from the intrinsics collector (see caveat below) |
+| IPPE ambiguity ratio | 1.3, narrow layouts only (spread < 30 deg or < 3 markers) | borrowed from the intrinsics collector; wide layouts skip it (2026-10-16: ten markers at 70 deg read 1.25 / 1.09 yet were unambiguous, 0.5 cm rms) |
 | leave-one-out | 2 cm | clean <= 0.22 cm; a marker displaced d cm reads d cm |
 | rotation ratio | 2.0 | right turn beats runner-up >= 40x at 0.3 px; lone marker about 1 |
 | layout extent ratio | 0.2 | min/max singular value of the centred marker centres |

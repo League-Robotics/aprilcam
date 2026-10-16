@@ -97,7 +97,8 @@ def test_loo_failure_names_marker():
 
 @pytest.mark.parametrize("kw,passes", [
     ({"angular_spread_deg": 10.0}, True), ({"angular_spread_deg": 9.9}, False),
-    ({"ambiguity_ratio": 1.3}, True), ({"ambiguity_ratio": 1.29}, False),
+    ({"ambiguity_ratio": 1.3, "angular_spread_deg": 12.0}, True),
+    ({"ambiguity_ratio": 1.29, "angular_spread_deg": 12.0}, False),
     ({"layout_extent_ratio": 0.2}, True), ({"layout_extent_ratio": 0.19}, False),
     ({"rotation_ambiguous_ids": ()}, True), ({"rotation_ambiguous_ids": (4,)}, False),
 ])
@@ -134,3 +135,32 @@ def test_live_field_solve_with_survey_limited_pixel_rms_is_full():
                     ambiguity_ratio=5.0, layout_extent_ratio=0.5, loo_worst=(7, 1.23))
     label, _, fail = classify([1, 2, 3], [1, 2, 3], [], m)
     assert label == "full", fail
+
+
+def test_live_wide_layout_ambiguity_ratio_is_ignored_not_capped():
+    """2026-10-16 camera 2: ratio 1.25 on a ten-marker, 70 deg layout must stay full."""
+    m = GateMetrics(rms_px=3.83, rms_cm=0.51, scale_ratio=1.009, angular_spread_deg=69.9,
+                    ambiguity_ratio=1.25, layout_extent_ratio=0.5, loo_worst=(7, 1.32))
+    ids = list(range(1, 11))
+    label, notes, fail = classify(ids, ids, [], m)
+    assert (label, fail) == ("full", None)
+    assert any("ignored" in n and "1.25" in n for n in notes)
+    assert not any("capped" in n for n in notes)
+
+
+def test_narrow_layout_ambiguity_still_caps_low():
+    m = GateMetrics(**{**GOOD.__dict__, "angular_spread_deg": 12.0, "ambiguity_ratio": 1.1})
+    label, notes, fail = classify([1, 2], [1, 2], [], m)
+    assert (label, fail) == ("low", None)
+    assert any("capped at low" in n and "ambiguity" in n for n in notes)
+
+
+def test_ambiguity_spread_boundary_at_30_deg():
+    base = {**GOOD.__dict__, "ambiguity_ratio": 1.1}
+    ids = [1, 2, 3]
+    at = classify(ids, ids, [], GateMetrics(**{**base, "angular_spread_deg": 30.0}))
+    below = classify(ids, ids, [], GateMetrics(**{**base, "angular_spread_deg": 29.9}))
+    assert at[0] == "full" and below[0] == "low"
+    # wide spread but under 3 markers still caps
+    two = classify([1, 2], [1, 2], [], GateMetrics(**{**base, "angular_spread_deg": 60.0}))
+    assert two[0] == "low"
