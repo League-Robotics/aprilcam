@@ -116,6 +116,8 @@ def camera_state_from_proto(msg: aprilcam_v2_pb2.CameraState) -> CameraState:
         # Sprint 044 ticket 010: "" (an older daemon) reads as "absent".
         lens_model=msg.lens_model or "absent",
         lens_pending=msg.lens_pending,
+        calibration_method=msg.calibration_method,
+        calibration_confidence=msg.calibration_confidence,
         number=msg.number if msg.HasField("number") else None,
     )
 
@@ -468,6 +470,23 @@ def calibration_result_from_proto(msg: aprilcam_v2_pb2.CalibrationResult) -> Cal
             msg.lens_model_source if msg.HasField("lens_model_source") else None
         ),
         lens_warning=msg.lens_warning if msg.HasField("lens_warning") else None,
+        # Sprint 045 pose provenance.
+        **{
+            name: getattr(msg, name) if msg.HasField(name) else None
+            for name in (
+                "method", "method_reason", "confidence", "corner_count",
+                "reprojection_error_px", "scale_agreement", "angular_spread_deg",
+                "camera_height_cm", "camera_tilt_deg", "leave_one_out_worst_id",
+                "leave_one_out_worst_cm", "layout_extent_ratio",
+            )
+        },
+        camera_nadir=(
+            WorldPoint(msg.camera_nadir.x, msg.camera_nadir.y)
+            if msg.HasField("camera_nadir")
+            else None
+        ),
+        notes=tuple(msg.notes),
+        helpful_missing_ids=tuple(msg.helpful_missing_ids),
     )
 
 
@@ -508,6 +527,15 @@ def calibration_from_proto(msg: aprilcam_v2_pb2.Calibration) -> Calibration:
         lens_rms_px=_opt("lens_rms_px"),
         lens_residual_px=_opt("lens_residual_px"),
         lens_installed_at=_opt("lens_installed_at"),
+        method=_opt("method"),
+        confidence=_opt("confidence"),
+        camera_height_cm=_opt("camera_height_cm"),
+        camera_nadir_x_cm=_opt("camera_nadir_x_cm"),
+        camera_nadir_y_cm=_opt("camera_nadir_y_cm"),
+        camera_tilt_deg=_opt("camera_tilt_deg"),
+        reprojection_error_px=_opt("reprojection_error_px"),
+        corner_count=_opt("corner_count"),
+        scale_agreement=_opt("scale_agreement"),
     )
 
 

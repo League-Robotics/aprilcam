@@ -796,6 +796,7 @@ class DaemonService(Daemon):
             playfield = self._playfield_link(record.slug)
             calibrated, calibration_stale = self._calibration_flags(record.slug)
             lens_model, lens_pending = self._lens_flags(record.slug)
+            cal_method, cal_confidence = self._calibration_method_flags(record.slug)
             flatfield_present, flatfield_stale = self._flatfield_flags(record.slug)
             held = self._cameras.get(record.slug)
             if held is not None:
@@ -809,6 +810,8 @@ class DaemonService(Daemon):
                         flatfield_stale=flatfield_stale,
                         lens_model=lens_model,
                         lens_pending=lens_pending,
+                        calibration_method=cal_method,
+                        calibration_confidence=cal_confidence,
                     )
                 )
                 continue
@@ -825,6 +828,8 @@ class DaemonService(Daemon):
                     flatfield_stale=flatfield_stale,
                     lens_model=lens_model,
                     lens_pending=lens_pending,
+                    calibration_method=cal_method,
+                    calibration_confidence=cal_confidence,
                     number=record.number,
                 )
             )
@@ -841,6 +846,15 @@ class DaemonService(Daemon):
         if calibration is None:
             return False, False
         return True, calibration.stale
+
+    def _calibration_method_flags(self, slug: str) -> Tuple[str, str]:
+        """``(calibration_method, calibration_confidence)`` for *slug*
+        (sprint 045 ticket 005), from the held calibration; ``("", "")``
+        when never calibrated or the file predates the pose solve."""
+        calibration = self.get_calibration(slug)
+        if calibration is None:
+            return "", ""
+        return calibration.method or "", calibration.confidence or ""
 
     def _lens_flags(self, slug: str) -> Tuple[str, bool]:
         """``(lens_model, lens_pending)`` for *slug* (sprint 044 ticket

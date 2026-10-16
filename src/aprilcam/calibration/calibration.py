@@ -351,6 +351,20 @@ def _default_detector_factory() -> TagDetector:
     return TagDetector(DetectorConfig(corner_refine="subpix", detect_inverted=False))
 
 
+#: Sprint 045 persisted pose-provenance fields -> their JSON converters.
+_POSE_PERSISTED_FIELDS: Dict[str, Callable[[Any], Any]] = {
+    "method": str,
+    "confidence": str,
+    "camera_height_cm": float,
+    "camera_nadir_x_cm": float,
+    "camera_nadir_y_cm": float,
+    "camera_tilt_deg": float,
+    "reprojection_error_px": float,
+    "corner_count": int,
+    "scale_agreement": float,
+}
+
+
 @dataclass(frozen=True, kw_only=True)
 class Calibration(_CalibrationBase):
     """Concrete ``calibration.interfaces.Calibration``.
@@ -483,6 +497,12 @@ class Calibration(_CalibrationBase):
             data["dist_coeffs"] = list(self.dist_coeffs)
         if self.lens_source is not None:
             data["lens_source"] = self.lens_source
+        # Sprint 045 pose provenance: omitted when absent so a pre-045 file
+        # re-serialises byte-identically.
+        for name in _POSE_PERSISTED_FIELDS:
+            value = getattr(self, name)
+            if value is not None:
+                data[name] = value
         return data
 
     @classmethod
@@ -505,7 +525,12 @@ class Calibration(_CalibrationBase):
         lens_source_raw = data.get("lens_source")
         if lens_source_raw is None and camera_matrix_raw is not None:
             lens_source_raw = LENS_SOURCE_LEGACY
+        pose_kwargs: Dict[str, Any] = {}
+        for name, conv in _POSE_PERSISTED_FIELDS.items():
+            if data.get(name) is not None:
+                pose_kwargs[name] = conv(data[name])
         return cls(
+            **pose_kwargs,
             lens_source=str(lens_source_raw) if lens_source_raw is not None else None,
             stale=bool(data.get("stale", False)),
             calibrated_at=float(data["calibrated_at"]),

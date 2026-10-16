@@ -507,6 +507,13 @@ message CameraState {
   // Mirrors types.CameraState.lens_model / .lens_pending.
   string lens_model = 11;
   bool lens_pending = 12;
+  // Sprint 045 ticket 005: how the held calibration was solved
+  // ("pose" | "centre-point") and how far to trust it ("full" |
+  // "reduced" | "low"). Empty string = unknown (never calibrated, or a
+  // pre-045 calibration file). Mirrors types.CameraState.calibration_method
+  // / .calibration_confidence.
+  string calibration_method = 13;
+  string calibration_confidence = 14;
 }
 
 // One backend a probe could not interrogate, and why (UC-25.S-7).
@@ -914,6 +921,24 @@ message CalibrationResult {
   // lens model was measured at a different resolution and was ignored.
   // Mirrors CalibrationResult.lens_warning.
   optional string lens_warning = 10;
+  // Sprint 045 ticket 005: pose provenance. Every field is optional
+  // (absent = the concept did not apply / pre-045 daemon). Mirrors the
+  // same-named CalibrationResult fields in calibration/interfaces.py.
+  optional string method = 11;            // "pose" | "centre-point"
+  optional string method_reason = 12;     // why centre-point was used
+  optional string confidence = 13;        // "full" | "reduced" | "low"
+  optional int32 corner_count = 14;
+  optional double reprojection_error_px = 15;
+  optional double scale_agreement = 16;
+  optional double angular_spread_deg = 17;
+  optional double camera_height_cm = 18;
+  optional WorldPoint camera_nadir = 19;
+  optional double camera_tilt_deg = 20;
+  repeated string notes = 21;
+  repeated int32 helpful_missing_ids = 22;
+  optional int32 leave_one_out_worst_id = 23;
+  optional double leave_one_out_worst_cm = 24;
+  optional double layout_extent_ratio = 25;
 }
 
 // A camera's established pixel<->world mapping. Mirrors
@@ -953,6 +978,17 @@ message Calibration {
   optional double lens_rms_px = 11;
   optional double lens_residual_px = 12;
   optional double lens_installed_at = 13;
+  // Sprint 045 ticket 005: persisted pose provenance (absent on a
+  // pre-045 calibration). Mirrors Calibration's same-named fields.
+  optional string method = 14;
+  optional string confidence = 15;
+  optional double camera_height_cm = 16;
+  optional double camera_nadir_x_cm = 17;
+  optional double camera_nadir_y_cm = 18;
+  optional double camera_tilt_deg = 19;
+  optional double reprojection_error_px = 20;
+  optional int32 corner_count = 21;
+  optional double scale_agreement = 22;
 }
 
 message CalibrateRequest {

@@ -223,6 +223,8 @@ def _camera_state_to_proto(state: CameraState) -> aprilcam_v2_pb2.CameraState:
         flatfield_stale=state.flatfield_stale,
         lens_model=state.lens_model,
         lens_pending=state.lens_pending,
+        calibration_method=state.calibration_method,
+        calibration_confidence=state.calibration_confidence,
     )
     # optional fields: only set when not None, so HasField() on the wire
     # matches Optional[...] being None on this side (design.md §6).
@@ -607,6 +609,20 @@ def _camera_config_from_proto(msg: aprilcam_v2_pb2.CameraConfig) -> CameraConfig
     )
 
 
+#: Sprint 045: optional scalar pose-provenance fields, by shared name.
+_RESULT_POSE_OPTIONALS = (
+    "method", "method_reason", "confidence", "corner_count",
+    "reprojection_error_px", "scale_agreement", "angular_spread_deg",
+    "camera_height_cm", "camera_tilt_deg", "leave_one_out_worst_id",
+    "leave_one_out_worst_cm", "layout_extent_ratio",
+)
+_CALIBRATION_POSE_OPTIONALS = (
+    "method", "confidence", "camera_height_cm", "camera_nadir_x_cm",
+    "camera_nadir_y_cm", "camera_tilt_deg", "reprojection_error_px",
+    "corner_count", "scale_agreement",
+)
+
+
 def _calibration_result_to_proto(result: CalibrationResult) -> aprilcam_v2_pb2.CalibrationResult:
     """Python -> proto, for a ``Calibrate`` response. ``missing_ids``
     always carries the exact ids (never a count, UC-04.S-2).
@@ -634,6 +650,15 @@ def _calibration_result_to_proto(result: CalibrationResult) -> aprilcam_v2_pb2.C
         msg.lens_model_source = result.lens_model_source
     if result.lens_warning is not None:
         msg.lens_warning = result.lens_warning
+    # Sprint 045 pose provenance (HasField-guarded; None stays absent).
+    for name in _RESULT_POSE_OPTIONALS:
+        value = getattr(result, name)
+        if value is not None:
+            setattr(msg, name, value)
+    if result.camera_nadir is not None:
+        msg.camera_nadir.CopyFrom(_world_point_to_proto(result.camera_nadir))
+    msg.notes.extend(result.notes)
+    msg.helpful_missing_ids.extend(result.helpful_missing_ids)
     return msg
 
 
@@ -669,6 +694,10 @@ def _calibration_to_proto(calibration: Calibration) -> aprilcam_v2_pb2.Calibrati
         msg.lens_residual_px = calibration.lens_residual_px
     if calibration.lens_installed_at is not None:
         msg.lens_installed_at = calibration.lens_installed_at
+    for name in _CALIBRATION_POSE_OPTIONALS:
+        value = getattr(calibration, name)
+        if value is not None:
+            setattr(msg, name, value)
     return msg
 
 
