@@ -290,6 +290,15 @@ conversion callable differ between the two views.
 
 `intrinsics_model.py` is a pure (Tk-free, `cv2`-free) view model turning `IntrinsicsStatus` snapshots into per-camera panel text, coverage grid and banner; `intrinsics_gui.py` is the fullscreen Tk shell around it (poll loop, Enter installs good cameras, Esc aborts, never auto-quits on green). The text mode used by `--no-gui` shares the same model, so the two cannot disagree.
 
+**Live image per column (sprint 046).** Each camera column now shows the camera's live image above the coverage grid, with the grid drawn over it, instead of 3x3 tiles alone.
+
+- *Model additions* (`intrinsics_model.py`, still Tk-free and `cv2`-free): `GRID_EDGE_FRACTION` (0.4, parity-tested against the collector's edge definition so the drawn grid matches what the collector counts), `grid_rects` (labelled cell rectangles in image coordinates), `cell_overlays` (per-cell label and tint), `tint_colour` (none / amber / green, matching the tile state), `DIM_FACTOR`, `fit_rect` (letterbox the frame into the column) and `scale_polygons` (native-pixel board outlines to display coordinates).
+- *Overlay is a pure function*: `intrinsics_overlay.compose_camera_image` (Pillow only) takes the decoded frame, grid, tints and `IntrinsicsStatus.board_outline` and returns the composed image. It never raises; on any failure it returns the dimmed image rather than propagating, so a bad frame cannot take the GUI down.
+- *Frame cadence*: after each status poll the controller in `intrinsics_gui.py` fetches `get_frame` for each camera, at most once per 0.22 s (the poll interval was lowered from 0.33 s to 0.22 s for this, about 4.5 fps). `Snapshot.frames` carries the latest frame per camera and `Snapshot.frame_stale` marks one that could not be refreshed.
+- *Dimmed on failure*: when a frame fetch fails the last image is shown dimmed by `DIM_FACTOR` and the failure feeds the banner as `[cam] frame: ...`. Until the first frame arrives (or if none ever does) the 3x3 tiles remain the fallback display. Tilt tiles sit below the image.
+- *No-cv2 rule*: the GUI gets pixels from the daemon (`get_frame`, JPEG) and decodes and draws with Pillow only; the daemon remains the sole vision authority. The board outline is computed by the daemon and shipped as data.
+- *Known caveats*: a slow `get_frame` delays that poller step (there is no time budget), and a remote daemon pays JPEG bandwidth at about 4.5 fps per camera.
+
 ## 5. Interfaces
 
 ### Exposes

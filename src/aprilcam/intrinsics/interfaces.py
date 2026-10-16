@@ -228,6 +228,10 @@ class IntrinsicsStatus:
     errors: tuple[str, ...] = ()
     started_at: float = 0.0
     solved_at: Optional[float] = None
+    #: One convex hull per board currently detected, in native image pixels:
+    #: a tuple of polygons, each 3+ (x, y) points. ``None`` when no board is
+    #: visible (so a renderer never draws a stale outline).
+    board_outline: Optional[tuple[tuple[tuple[float, float], ...], ...]] = None
 
 
 @dataclass(frozen=True, kw_only=True)

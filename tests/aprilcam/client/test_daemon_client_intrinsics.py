@@ -132,3 +132,24 @@ def test_service_errors_reconstructed_as_typed_exceptions(exc, op):
             call()
     if hasattr(exc, "camera"):
         assert info.value.camera == "cam1"
+
+
+@pytest.mark.parametrize(
+    "outline",
+    [
+        None,
+        (((1.5, 2.0), (30.25, 4.0), (20.0, 40.75)),),
+        (
+            ((1.5, 2.0), (30.25, 4.0), (20.0, 40.75)),
+            ((100.0, 100.0), (200.0, 100.0), (200.0, 200.0), (100.0, 200.0)),
+        ),
+    ],
+)
+def test_board_outline_round_trips(outline):
+    status = IntrinsicsStatus(camera="cam1", board_visible=outline is not None,
+                              board_outline=outline)
+    fake = _FakeIntrinsicsDaemon(status=status)
+    with _bind_stub(fake) as stub:
+        got = GrpcDaemon(stub, target="localhost").get_intrinsics_status("cam1")
+    assert got == status
+    assert got.board_outline == outline

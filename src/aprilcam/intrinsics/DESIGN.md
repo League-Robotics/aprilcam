@@ -33,6 +33,8 @@ The boundary with `calibration/`: this package *produces* a lens model; `calibra
 
 Decisions (sprint 044): installation is a per-camera `intrinsics.json` via `LensStore` rather than a field inside `calibration.json`, so a field `calibrate` can never overwrite a measured lens with a stale in-memory copy (this removes the old restart-the-daemon caveat); the daemon, not a client, owns the camera and the vision; the GUI/CLI/MCP are thin pollers of the same four commands; the good-enough metric measures *worst undistortion disagreement across the field*, not reprojection RMS alone, because RMS looks fine while the corners are badly modelled.
 
+Sprint 046: `IntrinsicsStatus.board_outline` carries, per detected board in the latest frame, one convex hull polygon in native pixel coordinates, so the GUI can draw the board over the live image without any vision code. It is `None` when no board is detected (cleared, never stale). On the wire it is repeated `IntrinsicsPolygon` messages in field 23, and the MCP `get_intrinsics_status` dict includes it.
+
 ## 5. Interfaces
 
 ### Exposes

@@ -46,6 +46,15 @@ __all__ = [
     "decide_enter",
     "exit_code_for",
     "connection_banner",
+    "GRID_EDGE_FRACTION",
+    "DIM_FACTOR",
+    "CellOverlay",
+    "grid_rects",
+    "cell_overlays",
+    "tint_colour",
+    "dim_colour",
+    "scale_polygons",
+    "fit_rect",
 ]
 
 CELL_ORDER = ("NW", "N", "NE", "W", "C", "E", "SW", "S", "SE")
@@ -340,3 +349,100 @@ def connection_banner(error: Optional[str]) -> Optional[str]:
     if not error:
         return None
     return f"DAEMON CONNECTION LOST -- {error}"
+
+
+# ---------------------------------------------------------------------------
+# Live-image overlay geometry (sprint 046): pure, no Tk / Pillow / cv2.
+# ---------------------------------------------------------------------------
+
+#: Display copy of ``intrinsics.collector.EDGE_FRACTION`` (the client must not
+#: import the cv2-bearing collector); a parity test pins the two together.
+GRID_EDGE_FRACTION = 0.4
+
+#: Blend toward black applied to the overlay when the live image is stale/failed.
+DIM_FACTOR = 0.4
+
+_TINT_COLOURS = {"none": None, "some": "#ffbf00", "good": "#2ecc71"}
+
+Rect = tuple  # (x0, y0, x1, y1)
+
+
+def grid_rects(width: int, height: int) -> tuple:
+    """Nine ``(x0, y0, x1, y1)`` rectangles tiling a ``width x height`` image
+    in :data:`CELL_ORDER` (NW..SE): outer bands 40 %, centre band 20 %."""
+    w, h = max(int(width), 0), max(int(height), 0)
+    xs = (0, int(round(GRID_EDGE_FRACTION * w)), int(round((1 - GRID_EDGE_FRACTION) * w)), w)
+    ys = (0, int(round(GRID_EDGE_FRACTION * h)), int(round((1 - GRID_EDGE_FRACTION) * h)), h)
+    return tuple(
+        (xs[c], ys[r], xs[c + 1], ys[r + 1]) for r in range(3) for c in range(3)
+    )
+
+
+@dataclass(frozen=True, kw_only=True)
+class CellOverlay:
+    """Per-cell overlay: label text and tint (``None`` = no tint)."""
+
+    name: str
+    label: str
+    level: str
+    tint: Optional[str]
+
+
+def tint_colour(level: str) -> Optional[str]:
+    """Hex tint for a coverage level: none -> no tint, some -> amber, good -> green."""
+    return _TINT_COLOURS.get(level)
+
+
+def cell_overlays(cells: Sequence[TileState]) -> tuple:
+    """Label and tint per cell, from the same ``TileState.level`` the tiles use."""
+    return tuple(
+        CellOverlay(name=c.name, label=f"{c.name} {c.count}", level=c.level,
+                    tint=tint_colour(c.level))
+        for c in cells
+    )
+
+
+def dim_colour(hex_colour: str, factor: float = DIM_FACTOR) -> str:
+    """Blend a ``#rrggbb`` colour toward black by *factor* (0 = unchanged)."""
+    h = hex_colour.lstrip("#")
+    keep = 1.0 - factor
+    r, g, b = (int(int(h[i:i + 2], 16) * keep) for i in (0, 2, 4))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def fit_rect(image_size, column_rect) -> tuple:
+    """Aspect-preserved, centred ``(x0, y0, x1, y1)`` for an image of
+    *image_size* ``(w, h)`` inside *column_rect* (letterbox; scales up and
+    down; same rule as ``viewer._fit_size``). Degenerate inputs yield a
+    1x1 rectangle at the column's top-left."""
+    cx0, cy0, cx1, cy1 = column_rect
+    aw, ah = cx1 - cx0, cy1 - cy0
+    try:
+        sw, sh = image_size
+    except (TypeError, ValueError):
+        sw = sh = 0
+    if sw <= 0 or sh <= 0 or aw <= 0 or ah <= 0:
+        return (cx0, cy0, cx0 + 1, cy0 + 1)
+    scale = min(aw / sw, ah / sh)
+    w, h = max(int(sw * scale), 1), max(int(sh * scale), 1)
+    x0 = cx0 + (aw - w) // 2
+    y0 = cy0 + (ah - h) // 2
+    return (x0, y0, x0 + w, y0 + h)
+
+
+def scale_polygons(polygons, image_size, dest_rect) -> tuple:
+    """Map native-pixel polygon points into *dest_rect*. ``None``, empty, or a
+    degenerate *image_size* give ``()``."""
+    if not polygons:
+        return ()
+    try:
+        sw, sh = image_size
+    except (TypeError, ValueError):
+        return ()
+    if sw <= 0 or sh <= 0:
+        return ()
+    x0, y0, x1, y1 = dest_rect
+    fx, fy = (x1 - x0) / sw, (y1 - y0) / sh
+    return tuple(
+        tuple((x0 + px * fx, y0 + py * fy) for px, py in poly) for poly in polygons
+    )

@@ -16,6 +16,7 @@ Esc / window close ends the run. No cv2 here.
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any, Callable, Optional
 
 from aprilcam.intrinsics.interfaces import IntrinsicsStatus
@@ -27,14 +28,17 @@ from aprilcam.view.intrinsics_model import (
     exit_code_for,
     finish_text_lines,
     font_sizes,
+    fit_rect,
     key_action,
     tile_colour,
 )
+from aprilcam.view.intrinsics_overlay import compose_camera_image
 from aprilcam.view.viewer import NoDisplayAvailable, _ensure_tk_library_env, _headless_reason
 
 __all__ = ["IntrinsicsController", "Snapshot", "run_intrinsics_gui"]
 
-_POLL_INTERVAL_S = 0.33
+_POLL_INTERVAL_S = 0.22
+_FRAME_INTERVAL_S = 0.22
 _DRAW_INTERVAL_MS = 150
 _BG = "#101418"
 
@@ -42,7 +46,9 @@ _BG = "#101418"
 class Snapshot:
     """Immutable-by-convention view of the controller state for one redraw."""
 
-    def __init__(self, statuses, notice_lines, error, finished):
+    def __init__(self, statuses, notice_lines, error, finished, frames=None, frame_stale=None):
+        self.frames = frames if frames is not None else {}
+        self.frame_stale = frame_stale if frame_stale is not None else {}
         self.statuses = statuses
         self.notice_lines = notice_lines
         self.error = error
@@ -52,8 +58,14 @@ class Snapshot:
 class IntrinsicsController:
     """Session bookkeeping and RPCs, independent of Tk (testable directly)."""
 
-    def __init__(self, daemon, cameras: list, *, install: bool) -> None:
+    def __init__(self, daemon, cameras: list, *, install: bool,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self._daemon = daemon
+        self._clock = clock
+        self._frames: dict = {}
+        self._frame_stale: dict = {}
+        self._frame_errors: dict = {}
+        self._last_frame_try: dict = {}
         self.cameras = list(cameras)
         self._install = install
         self.owned: set = set(cameras)
@@ -76,7 +88,11 @@ class IntrinsicsController:
     def snapshot(self) -> Snapshot:
         with self._lock:
             ordered = [self._statuses[c] for c in self.cameras if c in self._statuses]
-            return Snapshot(ordered, list(self._notice), self._error, self.finished)
+            error = self._error
+            if error is None and self._frame_errors:
+                error = next(iter(self._frame_errors.values()))
+            return Snapshot(ordered, list(self._notice), error, self.finished,
+                            dict(self._frames), dict(self._frame_stale))
 
     def exit_code(self) -> int:
         return exit_code_for(sorted(self.installed), self.cameras)
@@ -101,12 +117,39 @@ class IntrinsicsController:
                 self._statuses[cam] = st
         with self._lock:
             self._error = error
+        self._poll_frames()
         if self._install:
             for cam in list(self.owned):
                 st = self._statuses.get(cam)
                 if st is not None and st.good and cam not in self._auto_tried:
                     self._auto_tried.add(cam)
                     self._finish(cam)
+
+    def _poll_frames(self) -> None:
+        """Fetch one JPEG per owned camera, at most every ``_FRAME_INTERVAL_S``.
+        A failure keeps the previous bytes (marked stale) and never touches the
+        status result."""
+        for cam in list(self.owned):
+            now = self._clock()
+            last = self._last_frame_try.get(cam)
+            if last is not None and now - last < _FRAME_INTERVAL_S:
+                continue
+            self._last_frame_try[cam] = now
+            try:
+                frame = self._daemon.get_frame(cam)
+                data = frame.data
+                if not data:
+                    raise ValueError("empty frame")
+            except Exception as exc:  # noqa: BLE001 - dim the old image, show banner
+                with self._lock:
+                    self._frame_errors[cam] = f"[{cam}] frame: {str(exc) or type(exc).__name__}"
+                    if cam in self._frames:
+                        self._frame_stale[cam] = True
+                continue
+            with self._lock:
+                self._frames[cam] = data
+                self._frame_stale[cam] = False
+                self._frame_errors.pop(cam, None)
 
     def _run_command(self, cmd: str) -> None:
         if cmd == "enter":
@@ -177,6 +220,8 @@ class _TkShell:
             pass
         self._canvas = tk.Canvas(self._root, bg=_BG, highlightthickness=0)
         self._canvas.pack(fill=tk.BOTH, expand=True)
+        self._photos: dict = {}  # camera -> (cache key, jpeg, PhotoImage); keeps refs alive
+        self._last_good: dict = {}  # camera -> last composed (undimmed) PIL image
         self._root.bind("<Key>", self._on_key)
         self._root.protocol("WM_DELETE_WINDOW", lambda: controller.request("close"))
 
@@ -230,22 +275,41 @@ class _TkShell:
                           font=("Helvetica", -fs.banner, "bold"))
             y = fs.banner + 20
         col_w = w // n
-        for i, cam in enumerate(vm.cameras):
-            self._draw_camera(cam, i * col_w, y, col_w, fs)
         bottom = h - 10
         lines = list(snap.notice_lines)
-        if lines:
-            bottom -= len(lines) * (fs.body + 8)
-            for k, line in enumerate(lines):
-                c.create_text(10, bottom + k * (fs.body + 8), text=line, anchor="nw",
-                              fill=colour_for("plain"), font=("Courier", -fs.body))
+        bottom -= len(lines) * (fs.body + 8)
+        limit = bottom - fs.next_line * 3 if vm.next_line else bottom - 10
+        for i, cam in enumerate(vm.cameras):
+            self._draw_camera(cam, i * col_w, y, col_w, fs, limit, snap)
+        for k, line in enumerate(lines):
+            c.create_text(10, bottom + k * (fs.body + 8), text=line, anchor="nw",
+                          fill=colour_for("plain"), font=("Courier", -fs.body))
         if vm.next_line:
             c.create_text(w // 2, bottom - fs.next_line * 2, text="NEXT: " + vm.next_line,
                           fill=colour_for("yellow" if not vm.all_good else "green"),
                           font=("Helvetica", -fs.next_line, "bold"), justify="center",
                           width=w - 40)
 
-    def _draw_camera(self, cam, x0: int, y: int, col_w: int, fs) -> None:
+    def _compose(self, cam, jpeg, status, model, dest, dimmed, fs):
+        """Composed PhotoImage for one camera, cached so the 150 ms redraw
+        tick does not re-decode an unchanged frame."""
+        from PIL import ImageTk
+
+        key = (id(jpeg), dest, dimmed, tuple(t.level for t in model.cells),
+               tuple(t.count for t in model.cells), status.board_outline)
+        hit = self._photos.get(cam)
+        if hit is not None and hit[0] == key:
+            return hit[2]
+        img = compose_camera_image(
+            jpeg, model, status.board_outline, status.image_size, dest, dimmed=dimmed,
+            fallback=self._last_good.get(cam), label_px=fs.metric)
+        if not dimmed:
+            self._last_good[cam] = img
+        photo = ImageTk.PhotoImage(img)
+        self._photos[cam] = (key, jpeg, photo)
+        return photo
+
+    def _draw_camera(self, cam, x0: int, y: int, col_w: int, fs, limit: int, snap: Snapshot) -> None:
         c = self._canvas
         pad = 12
         cx = x0 + col_w // 2
@@ -260,6 +324,26 @@ class _TkShell:
                       fill=colour_for(cam.could_change_class),
                       font=("Helvetica", -fs.metric * 2 // 3, "bold"), width=col_w - 2 * pad)
         y += int(fs.metric * 2.2)
+        notes = ([cam.reject_note] if cam.reject_note else []) + list(cam.errors)
+        tside = max(min((col_w - 2 * pad) // 3, fs.metric * 3) * 2 // 3, 18)
+        jpeg = snap.frames.get(cam.camera)
+        status = next((s for s in snap.statuses if s.camera == cam.camera), None)
+        if jpeg is not None and status is not None:
+            tilt_h = tside + 10
+            notes_h = len(notes) * (fs.body + 6)
+            area_h = limit - y - tilt_h - notes_h
+            if area_h >= 60:
+                dest = (col_w - 2 * pad, area_h)
+                photo = self._compose(cam.camera, jpeg, status, cam, dest,
+                                      bool(snap.frame_stale.get(cam.camera)), fs)
+                fx0, fy0, fx1, fy1 = fit_rect((photo.width(), photo.height()),
+                                              (x0 + pad, y, x0 + col_w - pad, y + area_h))
+                c.create_image(fx0, fy0, image=photo, anchor="nw")
+                y = fy1 + 8
+                self._draw_tilts(cam, cx, y, tside, fs)
+                y += tilt_h
+                self._draw_notes(notes, cx, y, col_w - 2 * pad, fs)
+                return
         side = max(min((col_w - 2 * pad) // 3, fs.metric * 3), 20)
         left = cx - side * 3 // 2
         for idx, tile in enumerate(cam.cells):
@@ -267,13 +351,19 @@ class _TkShell:
             self._tile(left + k * side, y + r * side, side, tile, fs)
         y += side * 3 + 14
         tside = max(side * 2 // 3, 18)
+        self._draw_tilts(cam, cx, y, tside, fs)
+        y += tside + 10
+        self._draw_notes(notes, cx, y, col_w - 2 * pad, fs)
+
+    def _draw_tilts(self, cam, cx: int, y: int, tside: int, fs) -> None:
         tleft = cx - tside * len(cam.tilts) // 2
         for k, tile in enumerate(cam.tilts):
             self._tile(tleft + k * tside, y, tside, tile, fs)
-        y += tside + 10
-        for note in ([cam.reject_note] if cam.reject_note else []) + list(cam.errors):
-            c.create_text(cx, y, text=note, anchor="n", fill=colour_for("red"),
-                          font=("Helvetica", -fs.body), width=col_w - 2 * pad)
+
+    def _draw_notes(self, notes, cx: int, y: int, width: int, fs) -> None:
+        for note in notes:
+            self._canvas.create_text(cx, y, text=note, anchor="n", fill=colour_for("red"),
+                                     font=("Helvetica", -fs.body), width=width)
             y += fs.body + 6
 
     def _tile(self, x: int, y: int, side: int, tile, fs) -> None:

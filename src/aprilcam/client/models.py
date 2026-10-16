@@ -599,6 +599,9 @@ def intrinsics_status_from_proto(msg: aprilcam_v2_pb2.IntrinsicsStatus) -> Intri
         errors=tuple(msg.errors),
         started_at=msg.started_at,
         solved_at=opt("solved_at"),
+        board_outline=tuple(
+            tuple(zip(p.xy[0::2], p.xy[1::2])) for p in msg.board_outline
+        ) or None,
     )
 
 

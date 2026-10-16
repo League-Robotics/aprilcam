@@ -147,7 +147,7 @@ and installs it without a daemon restart. The board spec
 `5x7:37:28:DICT_5X5_100`. A fullscreen window shows progress (Enter installs
 good cameras, Esc aborts); `--no-gui` gives a text mode that works over SSH.
 `aprilcam camera list` shows `lens=<source>` per camera (and `lens-pending`
-until the next `camera calibrate` applies a newly installed lens). With no
+until the next `camera calibrate` applies a newly installed lens). The GUI shows each camera's live image with a labelled coverage grid, the detected board outline and green/amber cell tints. With no
 board available, calibration uses the centre-point path without a lens model
 (the single-view estimator was removed in sprint 045). MCP tools:
 `start_intrinsics`, `get_intrinsics_status`, `finish_intrinsics`,
