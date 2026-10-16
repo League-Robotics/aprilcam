@@ -1197,3 +1197,49 @@ def test_definition_without_new_keys_leaves_wire_fields_unset():
     msg = server_to_proto(sized)
     assert msg.HasField("marker_size_mm") and msg.marker_size_mm == 40.0
     assert playfield_definition_from_proto(msg) == sized
+
+
+# ---------------------------------------------------------------------------
+# Calibration target on the wire (sprint 045 ticket 010).
+# ---------------------------------------------------------------------------
+
+
+def _targeted_definition() -> PlayfieldDefinition:
+    from aprilcam.config.interfaces import CalibrationTarget
+
+    return PlayfieldDefinition(
+        name="targeted-playfield",
+        width_cm=100.0,
+        height_cm=60.0,
+        calibration_target=CalibrationTarget(
+            kind="charuco", board="6x8:28:22:DICT_4X4_50",
+            centre_x_cm=5.0, centre_y_cm=-2.5, rotation_deg=90.0,
+        ),
+    )
+
+
+def test_calibration_target_round_trips_through_set_and_get_playfield(client):
+    client.set_playfield(_targeted_definition())
+
+    got = client.get_playfield("targeted-playfield").definition
+
+    assert got.calibration_target == _targeted_definition().calibration_target
+    assert got == _targeted_definition()
+
+
+def test_calibration_target_unset_on_the_wire_for_old_definitions():
+    from aprilcam.client.daemon_client import _playfield_definition_to_proto
+    from aprilcam.client.models import playfield_definition_from_proto
+    from aprilcam.daemon.rpc import _playfield_definition_from_proto
+    from aprilcam.daemon.rpc import _playfield_definition_to_proto as server_to_proto
+
+    plain = _playfield_definition_with_dots()
+    for msg in (_playfield_definition_to_proto(plain), server_to_proto(plain)):
+        assert not msg.HasField("calibration_target")
+        assert playfield_definition_from_proto(msg).calibration_target is None
+
+    targeted = _targeted_definition()
+    for msg in (_playfield_definition_to_proto(targeted), server_to_proto(targeted)):
+        assert msg.HasField("calibration_target")
+        assert playfield_definition_from_proto(msg) == targeted
+        assert _playfield_definition_from_proto(msg) == targeted

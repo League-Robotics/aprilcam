@@ -110,6 +110,17 @@ module — `configuration.md` §1 states logs go to stderr only, and
   corner order by the pose solve, never declared; a stray `rotation_deg` is
   ignored like any other unknown key. Elevated entries (`height_cm > 0`) are
   excluded from pose use.
+- **Calibration target (sprint 045 ticket 010).** The definition may carry
+  `calibration_target`: `kind` (`"charuco"`), `board` (sprint 044 spec
+  `COLSxROWS:SQUARE_MM:MARKER_MM:DICT`), `centre_x_cm`/`centre_y_cm`
+  (default 0, 0) and `rotation_deg` (default 0 = upright, top edge north,
+  rows increasing southward). Unlike markers this is a declared placement,
+  so it has a rotation. The board string is validated structurally in
+  `loader.py` (same grammar as `BoardSpec.parse`, no `intrinsics` import);
+  accepted dictionary names are `interfaces.CHARUCO_DICTIONARIES`. The
+  centre must lie within the field plus the unrotated board half-size.
+  `to_dict` emits the block only when set; `required_marker_ids()` is
+  unaffected, and a target-only definition is valid.
 - **Feature validation specifics** (all in `loader.py`, all raising
   `MalformedDocument`): a feature positioned outside the declared field's
   half-extents plus a `1e-6` cm epsilon (`_BOUNDS_EPSILON_CM`, sized to

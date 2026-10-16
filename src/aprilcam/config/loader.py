@@ -68,6 +68,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from aprilcam.config.interfaces import CHARUCO_DICTIONARIES, CalibrationTarget
 from aprilcam.config.interfaces import CameraConfig, CameraPosition, ConfigLoader as _ConfigLoaderBase
 from aprilcam.config.interfaces import Directories
 from aprilcam.config.interfaces import Feature
@@ -163,6 +164,9 @@ class PlayfieldDefinition(_PlayfieldDefinitionBase):
     marker_size_mm_default: Optional[float] = None
     """Field-level default marker size from ``playfield.marker_size_mm``;
     an entry's own ``size_mm`` overrides it. ``None`` = not declared."""
+    calibration_target: Optional[CalibrationTarget] = None
+    """Optional ChArUco board placement (sprint 045 ticket 010). Does not
+    affect ``required_marker_ids()``; ``None`` = none declared."""
 
     def features(self) -> Tuple[Feature, ...]:
         """See ``PlayfieldDefinition.features``. Every surveyed entry,
@@ -265,7 +269,7 @@ class PlayfieldDefinition(_PlayfieldDefinitionBase):
         geometry: Dict[str, Any] = {"width_cm": self.width_cm, "height_cm": self.height_cm}
         if self.marker_size_mm_default is not None:
             geometry["marker_size_mm"] = self.marker_size_mm_default
-        return {
+        out: Dict[str, Any] = {
             "name": self.name,
             "playfield": geometry,
             "april_tags": _section(self.april_tags, with_id=True),
@@ -273,6 +277,16 @@ class PlayfieldDefinition(_PlayfieldDefinitionBase):
             "rectangles": _section(self.rectangles, with_id=False),
             "dots": _section(self.dots, with_id=False),
         }
+        if self.calibration_target is not None:
+            t = self.calibration_target
+            out["calibration_target"] = {
+                "kind": t.kind,
+                "board": t.board,
+                "centre_x_cm": t.centre_x_cm,
+                "centre_y_cm": t.centre_y_cm,
+                "rotation_deg": t.rotation_deg,
+            }
+        return out
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -439,6 +453,9 @@ class ConfigLoader(_ConfigLoaderBase):
             rectangles=sections["rectangles"],
             dots=sections["dots"],
             marker_size_mm_default=_parse_default_marker_size(data, source=source),
+            calibration_target=_parse_calibration_target(
+                data, source=source, width_cm=width_cm, height_cm=height_cm
+            ),
         )
 
 
@@ -695,6 +712,76 @@ def _parse_section(
             )
         )
     return tuple(entries)
+
+
+def _finite_number(value: Any, *, what: str, source: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise MalformedDocument(
+            f"playfield definition in {source}: {what} must be a finite number (got {value!r})"
+        )
+    return float(value)
+
+
+def _parse_calibration_target(
+    data: Dict[str, Any], *, source: str, width_cm: float, height_cm: float
+) -> Optional[CalibrationTarget]:
+    """Parse the optional ``calibration_target`` block (sprint 045 ticket
+    010). The board spec is validated structurally here -- the same grammar
+    as ``intrinsics.BoardSpec.parse`` -- without importing ``intrinsics``."""
+    if "calibration_target" not in data:
+        return None
+    raw = data["calibration_target"]
+    where = "'calibration_target'"
+    if not isinstance(raw, dict):
+        raise MalformedDocument(f"playfield definition in {source}: {where} must be an object")
+    kind = raw.get("kind")
+    if kind != "charuco":
+        raise MalformedDocument(
+            f"playfield definition in {source}: {where} 'kind' must be 'charuco' (got {kind!r})"
+        )
+    board = raw.get("board")
+    if not isinstance(board, str):
+        raise MalformedDocument(
+            f"playfield definition in {source}: {where} 'board' must be a "
+            f"COLSxROWS:SQUARE_MM:MARKER_MM:DICT string (got {board!r})"
+        )
+    fmt = "expected COLSxROWS:SQUARE_MM:MARKER_MM:DICT, e.g. 5x7:37:28:DICT_5X5_100"
+    bad = f"playfield definition in {source}: {where} 'board' {board!r}"
+    parts = [p.strip() for p in board.strip().split(":")]
+    if len(parts) != 4:
+        raise MalformedDocument(f"{bad} is malformed: {fmt}")
+    size, sq, mk, dname = parts
+    try:
+        cols_s, rows_s = size.lower().split("x")
+        cols, rows = int(cols_s), int(rows_s)
+        square_mm, marker_mm = float(sq), float(mk)
+    except ValueError:
+        raise MalformedDocument(f"{bad} is malformed: {fmt}") from None
+    if cols < 2 or rows < 2:
+        raise MalformedDocument(f"{bad}: need at least 2x2 squares")
+    if not (math.isfinite(square_mm) and math.isfinite(marker_mm)
+            and square_mm > 0 and marker_mm > 0):
+        raise MalformedDocument(f"{bad}: square and marker sizes must be positive and finite")
+    if marker_mm >= square_mm:
+        raise MalformedDocument(f"{bad}: marker size must be smaller than square size")
+    if dname not in CHARUCO_DICTIONARIES:
+        raise MalformedDocument(f"{bad}: unknown ArUco dictionary {dname!r}")
+
+    cx = _finite_number(raw.get("centre_x_cm", 0.0), what=f"{where} 'centre_x_cm'", source=source)
+    cy = _finite_number(raw.get("centre_y_cm", 0.0), what=f"{where} 'centre_y_cm'", source=source)
+    rot = _finite_number(raw.get("rotation_deg", 0.0), what=f"{where} 'rotation_deg'", source=source)
+    # Centre must lie within the field +/- the (unrotated) board half-size.
+    board_half_w = cols * square_mm / 20.0
+    board_half_h = rows * square_mm / 20.0
+    if (abs(cx) > width_cm / 2 + board_half_w + _BOUNDS_EPSILON_CM
+            or abs(cy) > height_cm / 2 + board_half_h + _BOUNDS_EPSILON_CM):
+        raise MalformedDocument(
+            f"playfield definition in {source}: {where} centre ({cx:g}, {cy:g}) cm is outside "
+            f"the {width_cm:g} x {height_cm:g} cm field plus the board half-size"
+        )
+    return CalibrationTarget(
+        kind=kind, board=board, centre_x_cm=cx, centre_y_cm=cy, rotation_deg=rot
+    )
 
 
 _POLICIES = ("required", "helpful")

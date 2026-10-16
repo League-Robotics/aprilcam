@@ -204,6 +204,40 @@ class PlayfieldDefinition(ConfigDocument):
         )
 
 
+#: ArUco dictionary names a ChArUco calibration target may name. cv2-free
+#: mirror of the ``cv2.aruco`` predefined dictionaries (``config`` must not
+#: import ``intrinsics``, which resolves them for real daemon-side).
+CHARUCO_DICTIONARIES = frozenset(
+    {
+        f"DICT_{n}X{n}_{k}"
+        for n in (4, 5, 6, 7)
+        for k in (50, 100, 250, 1000)
+    }
+    | {"DICT_ARUCO_ORIGINAL", "DICT_APRILTAG_16h5", "DICT_APRILTAG_25h9",
+       "DICT_APRILTAG_36h10", "DICT_APRILTAG_36h11"}
+)
+
+
+@dataclass(frozen=True, kw_only=True)
+class CalibrationTarget:
+    """A ChArUco board laid flat on the field (sprint 045 ticket 010).
+
+    A deliberate, declared *placement* of a calibration target -- unlike
+    markers, which carry no rotation key. ``rotation_deg`` 0 means the board
+    is upright: top edge toward north, lattice rows increasing southward.
+    ``(centre_x_cm, centre_y_cm)`` is the board centre in the field frame
+    (default the field origin).
+    """
+
+    kind: str
+    """Only ``"charuco"`` is defined."""
+    board: str
+    """Sprint 044 spec string ``COLSxROWS:SQUARE_MM:MARKER_MM:DICT``."""
+    centre_x_cm: float = 0.0
+    centre_y_cm: float = 0.0
+    rotation_deg: float = 0.0
+
+
 @dataclass(frozen=True, kw_only=True)
 class Feature:
     """One surveyed thing on the playfield, at a known world position."""

@@ -193,6 +193,14 @@ def _playfield_definition_to_proto(definition: PlayfieldDefinition) -> aprilcam_
     )
     if definition.marker_size_mm_default is not None:
         msg.marker_size_mm = definition.marker_size_mm_default
+    if definition.calibration_target is not None:
+        t = definition.calibration_target
+        msg.calibration_target.CopyFrom(
+            aprilcam_v2_pb2.CalibrationTarget(
+                kind=t.kind, board=t.board, centre_x_cm=t.centre_x_cm,
+                centre_y_cm=t.centre_y_cm, rotation_deg=t.rotation_deg,
+            )
+        )
     return msg
 
 

@@ -39,7 +39,7 @@ from typing import Dict, Optional, Tuple
 
 from aprilcam.calibration.interfaces import Calibration, CalibrationResult, FlatFieldInfo, FlatFieldResult
 from aprilcam.intrinsics.interfaces import BoardLayout, IntrinsicsFinishResult, IntrinsicsStatus
-from aprilcam.config.interfaces import CameraConfig, CameraPosition, Feature
+from aprilcam.config.interfaces import CalibrationTarget, CameraConfig, CameraPosition, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import DaemonStatus, MountRegistration
 from aprilcam.playfield.playfield import Playfield
@@ -318,6 +318,16 @@ def _playfield_feature_entry_from_proto(
     )
 
 
+def _calibration_target_from_proto(msg: aprilcam_v2_pb2.PlayfieldDefinition):
+    if not msg.HasField("calibration_target"):
+        return None
+    t = msg.calibration_target
+    return CalibrationTarget(
+        kind=t.kind, board=t.board, centre_x_cm=t.centre_x_cm,
+        centre_y_cm=t.centre_y_cm, rotation_deg=t.rotation_deg,
+    )
+
+
 def playfield_definition_from_proto(msg: aprilcam_v2_pb2.PlayfieldDefinition) -> PlayfieldDefinition:
     """The client-side mirror of ``daemon/rpc.py``'s
     ``_playfield_definition_to_proto`` -- field for field, in reverse.
@@ -335,6 +345,7 @@ def playfield_definition_from_proto(msg: aprilcam_v2_pb2.PlayfieldDefinition) ->
         rectangles=tuple(_playfield_feature_entry_from_proto(e) for e in msg.rectangles),
         dots=tuple(_playfield_feature_entry_from_proto(e) for e in msg.dots),
         marker_size_mm_default=msg.marker_size_mm if msg.HasField("marker_size_mm") else None,
+        calibration_target=_calibration_target_from_proto(msg),
     )
 
 

@@ -947,3 +947,75 @@ def test_shipping_secondary_playfield_resolves_none(loader):
 def test_shipping_playfields_round_trip(loader, name):
     d = loader.load_playfield(SHIPPING_DIR / name)
     assert loader.parse_playfield(d.to_dict()) == d
+
+
+# ---------------------------------------------------------------------------
+# calibration_target (sprint 045 ticket 010).
+# ---------------------------------------------------------------------------
+
+_BOARD = "6x8:28:22:DICT_4X4_50"
+
+
+def _target_doc(**target) -> dict:
+    doc = _minimal_playfield_doc()
+    doc["calibration_target"] = {"kind": "charuco", "board": _BOARD, **target}
+    return doc
+
+
+def test_calibration_target_absent_is_unchanged(loader):
+    d = loader.parse_playfield(_minimal_playfield_doc())
+    assert d.calibration_target is None
+    assert "calibration_target" not in d.to_dict()
+
+
+def test_calibration_target_defaults_and_round_trip(loader):
+    d = loader.parse_playfield(_target_doc())
+    t = d.calibration_target
+    assert (t.kind, t.board, t.centre_x_cm, t.centre_y_cm, t.rotation_deg) == (
+        "charuco", _BOARD, 0.0, 0.0, 0.0)
+    d2 = loader.parse_playfield(_target_doc(centre_x_cm=10, centre_y_cm=-5, rotation_deg=90))
+    assert d2.calibration_target.rotation_deg == 90.0
+    assert loader.parse_playfield(d2.to_dict()) == d2
+    assert loader.parse_playfield(d.to_dict()) == d
+
+
+def test_target_does_not_change_required_marker_ids(loader):
+    base = loader.parse_playfield(_minimal_playfield_doc())
+    with_t = loader.parse_playfield(_target_doc())
+    assert with_t.required_marker_ids() == base.required_marker_ids()
+    assert with_t.required_aruco_ids() == base.required_aruco_ids()
+
+
+def test_target_only_definition_is_valid_with_no_required_markers(loader):
+    doc = {"name": "t", "playfield": {"width_cm": 100, "height_cm": 60},
+           "calibration_target": {"kind": "charuco", "board": _BOARD}}
+    d = loader.parse_playfield(doc)
+    assert d.required_marker_ids() == () and d.calibration_target is not None
+
+
+@pytest.mark.parametrize("target", [
+    {"kind": "chessboard"}, {"kind": None},
+    {"board": "nonsense"}, {"board": "6x8:28:22"}, {"board": "1x8:28:22:DICT_4X4_50"},
+    {"board": "6x8:22:28:DICT_4X4_50"}, {"board": "6x8:-1:-2:DICT_4X4_50"},
+    {"board": "6x8:28:22:DICT_NOPE_50"}, {"board": "6x8:28:22:4X4_50"}, {"board": 5},
+    {"centre_x_cm": 500}, {"centre_y_cm": -500}, {"centre_x_cm": "a"},
+    {"centre_x_cm": True}, {"centre_x_cm": float("nan")},
+    {"rotation_deg": float("inf")}, {"rotation_deg": "90"}, {"rotation_deg": None},
+])
+def test_invalid_calibration_target_rejected(loader, target):
+    with pytest.raises(MalformedDocument, match="calibration_target"):
+        loader.parse_playfield(_target_doc(**target))
+
+
+def test_calibration_target_must_be_object(loader):
+    doc = _minimal_playfield_doc()
+    doc["calibration_target"] = "6x8"
+    with pytest.raises(MalformedDocument, match="calibration_target"):
+        loader.parse_playfield(doc)
+
+
+def test_target_centre_allowed_up_to_board_half_size_beyond_field(loader):
+    # 6x8 @ 28 mm: half-height 11.2 cm. Field half-height is bounded by the minimal doc.
+    h = loader.parse_playfield(_minimal_playfield_doc()).height_cm
+    d = loader.parse_playfield(_target_doc(centre_y_cm=h / 2 + 11.0))
+    assert d.calibration_target.centre_y_cm == h / 2 + 11.0

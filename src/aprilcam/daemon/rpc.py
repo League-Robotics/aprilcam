@@ -91,7 +91,7 @@ from aprilcam.intrinsics.interfaces import (
     IntrinsicsStatus,
     NoIntrinsicsSession,
 )
-from aprilcam.config.interfaces import CameraConfig, CameraPosition, Feature
+from aprilcam.config.interfaces import CalibrationTarget, CameraConfig, CameraPosition, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
 from aprilcam.daemon.lifecycle import ControlPlaneListener
@@ -475,7 +475,25 @@ def _playfield_definition_to_proto(definition: PlayfieldDefinition) -> aprilcam_
     )
     if definition.marker_size_mm_default is not None:
         msg.marker_size_mm = definition.marker_size_mm_default
+    if definition.calibration_target is not None:
+        t = definition.calibration_target
+        msg.calibration_target.CopyFrom(
+            aprilcam_v2_pb2.CalibrationTarget(
+                kind=t.kind, board=t.board, centre_x_cm=t.centre_x_cm,
+                centre_y_cm=t.centre_y_cm, rotation_deg=t.rotation_deg,
+            )
+        )
     return msg
+
+
+def _calibration_target_from_proto(msg: aprilcam_v2_pb2.PlayfieldDefinition):
+    if not msg.HasField("calibration_target"):
+        return None
+    t = msg.calibration_target
+    return CalibrationTarget(
+        kind=t.kind, board=t.board, centre_x_cm=t.centre_x_cm,
+        centre_y_cm=t.centre_y_cm, rotation_deg=t.rotation_deg,
+    )
 
 
 def _playfield_definition_from_proto(msg: aprilcam_v2_pb2.PlayfieldDefinition) -> PlayfieldDefinition:
@@ -492,6 +510,7 @@ def _playfield_definition_from_proto(msg: aprilcam_v2_pb2.PlayfieldDefinition) -
         rectangles=tuple(_playfield_feature_entry_from_proto(e) for e in msg.rectangles),
         dots=tuple(_playfield_feature_entry_from_proto(e) for e in msg.dots),
         marker_size_mm_default=msg.marker_size_mm if msg.HasField("marker_size_mm") else None,
+        calibration_target=_calibration_target_from_proto(msg),
     )
 
 

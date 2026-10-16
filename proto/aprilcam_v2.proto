@@ -791,6 +791,16 @@ message PlayfieldFeatureEntry {
   optional string policy = 8;
 }
 
+// A ChArUco board laid flat on the field. Mirrors aprilcam.config.
+// interfaces.CalibrationTarget (sprint 045).
+message CalibrationTarget {
+  string kind = 1;
+  string board = 2;
+  double centre_x_cm = 3;
+  double centre_y_cm = 4;
+  double rotation_deg = 5;
+}
+
 // A whole playfield definition document. Mirrors aprilcam.config.
 // loader.PlayfieldDefinition field-for-field.
 message PlayfieldDefinition {
@@ -805,6 +815,9 @@ message PlayfieldDefinition {
   // marker_size_mm_default (sprint 045): the field-level default marker
   // size, mm, from playfield.marker_size_mm. Absent = not declared.
   optional double marker_size_mm = 8;
+  // Mirrors PlayfieldDefinition.calibration_target (sprint 045). Unset
+  // (HasField false) = no target declared.
+  optional CalibrationTarget calibration_target = 9;
 }
 
 // A playfield the daemon knows about, as served. Mirrors aprilcam.
