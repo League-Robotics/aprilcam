@@ -95,6 +95,10 @@ frames; an unpolled session auto-aborts after 120 s.
 6. **Coverage must be judged by board extent, not centroid**, over the
    outer 40 % bands, or a user cannot satisfy corner regions on two
    cameras that frame the table differently.
+   *Update 2026-10-16:* the bands became equal thirds (`EDGE_FRACTION = 1/3`)
+   at the stakeholder's request after a live run (unequal regions, some only
+   reachable by turning the target sideways). Extent-based counting still
+   makes the outer third easy to reach.
 
 ## "Good enough" -- the metric that finally let the stakeholder stop
 

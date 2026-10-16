@@ -55,6 +55,9 @@ __all__ = [
     "dim_colour",
     "scale_polygons",
     "fit_rect",
+    "ColumnLayout",
+    "column_layout",
+    "PANEL_FRACTION",
 ]
 
 CELL_ORDER = ("NW", "N", "NE", "W", "C", "E", "SW", "S", "SE")
@@ -357,7 +360,7 @@ def connection_banner(error: Optional[str]) -> Optional[str]:
 
 #: Display copy of ``intrinsics.collector.EDGE_FRACTION`` (the client must not
 #: import the cv2-bearing collector); a parity test pins the two together.
-GRID_EDGE_FRACTION = 0.4
+GRID_EDGE_FRACTION = 1 / 3
 
 #: Blend toward black applied to the overlay when the live image is stale/failed.
 DIM_FACTOR = 0.4
@@ -369,10 +372,14 @@ Rect = tuple  # (x0, y0, x1, y1)
 
 def grid_rects(width: int, height: int) -> tuple:
     """Nine ``(x0, y0, x1, y1)`` rectangles tiling a ``width x height`` image
-    in :data:`CELL_ORDER` (NW..SE): outer bands 40 %, centre band 20 %."""
+    in :data:`CELL_ORDER` (NW..SE): three equal bands per axis (thirds)."""
     w, h = max(int(width), 0), max(int(height), 0)
     xs = (0, int(round(GRID_EDGE_FRACTION * w)), int(round((1 - GRID_EDGE_FRACTION) * w)), w)
     ys = (0, int(round(GRID_EDGE_FRACTION * h)), int(round((1 - GRID_EDGE_FRACTION) * h)), h)
+    # Rounding can only make two interior edges coincide on tiny images; keep
+    # them monotone so the nine rects always tile exactly.
+    xs = (xs[0], xs[1], max(xs[1], xs[2]), xs[3])
+    ys = (ys[0], ys[1], max(ys[1], ys[2]), ys[3])
     return tuple(
         (xs[c], ys[r], xs[c + 1], ys[r + 1]) for r in range(3) for c in range(3)
     )
@@ -446,3 +453,56 @@ def scale_polygons(polygons, image_size, dest_rect) -> tuple:
     return tuple(
         tuple((x0 + px * fx, y0 + py * fy) for px, py in poly) for poly in polygons
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-camera column geometry (fixed: independent of which notes exist).
+# ---------------------------------------------------------------------------
+
+#: Width of the right-hand panel as a fraction of the camera column.
+PANEL_FRACTION = 0.30
+_COLUMN_PAD = 12
+
+
+@dataclass(frozen=True, kw_only=True)
+class ColumnLayout:
+    """Fixed slots for one camera column. ``image`` is the box the live image
+    is aspect-fitted into; the rest are the right panel's slots, top to
+    bottom. Every rect is ``(x0, y0, x1, y1)``."""
+
+    image: tuple
+    panel: tuple
+    name: tuple
+    error_now: tuple
+    could_change: tuple
+    tilts: tuple  # four rects, N E S W
+    message: tuple
+
+
+def column_layout(x0: int, y: int, col_w: int, limit: int, fs: FontSizes) -> ColumnLayout:
+    """Geometry of one camera column from its left edge *x0*, top *y*, width
+    *col_w* and bottom *limit*. Depends only on those and the font sizes --
+    never on notes, errors or frame state -- so nothing moves when they
+    appear or disappear."""
+    pad = _COLUMN_PAD
+    panel_w = max(int(col_w * PANEL_FRACTION), 60)
+    px1 = x0 + col_w - pad
+    px0 = px1 - panel_w
+    img = (x0 + pad, y, max(px0 - pad, x0 + pad + 1), max(limit, y + 1))
+    ny = y
+    name_h = 2 * (fs.body + 4)
+    err_h = int(fs.metric * 1.6)
+    could_h = int(fs.metric * 2.2)
+    tside = max(panel_w // 4, 18)
+    msg_h = 2 * (fs.body + 6)
+    name = (px0, ny, px1, ny + name_h)
+    ny += name_h + 6
+    err = (px0, ny, px1, ny + err_h)
+    ny += err_h
+    could = (px0, ny, px1, ny + could_h)
+    ny += could_h + 6
+    tilts = tuple((px0 + k * tside, ny, px0 + (k + 1) * tside, ny + tside) for k in range(4))
+    ny += tside + 8
+    msg = (px0, ny, px1, ny + msg_h)
+    return ColumnLayout(image=img, panel=(px0, y, px1, ny + msg_h), name=name, error_now=err,
+                        could_change=could, tilts=tilts, message=msg)

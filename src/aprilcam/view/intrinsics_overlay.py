@@ -1,7 +1,7 @@
 """Pure Pillow composition of the intrinsics live image (sprint 046).
 
 ``compose_camera_image`` turns JPEG bytes plus the camera's view model into a
-PIL image with translucent cell tints, a thick 40/20/40 grid, large compass
+PIL image with translucent cell tints, a thick equal-thirds grid, large compass
 labels and the board outline. No Tk, no cv2, no I/O, so tests spot-check
 pixels directly.
 """

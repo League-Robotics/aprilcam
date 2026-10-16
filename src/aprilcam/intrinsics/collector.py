@@ -49,9 +49,12 @@ MIN_SHIFT_PX = 25.0
 MIN_TILT_DELTA_DEG = 10.0
 #: Views at least this tilted count toward tilt-direction coverage.
 TILTED_MIN_DEG = 15.0
-#: Outer bands are the outer 40 % of each axis (centre band 20 %); coverage is
-#: by board extent -- every region any corner reaches -- not the centroid.
-EDGE_FRACTION = 0.4
+#: Three equal bands per axis (thirds), matching the equal cells the operator
+#: sees on screen. Coverage is by board extent -- any corner reaching a region
+#: counts it -- not the centroid, so the outer third is still easy to reach.
+#: (Was 0.4/0.2/0.4 until 2026-10-16, when the stakeholder asked for equal
+#: regions after a live run.)
+EDGE_FRACTION = 1 / 3
 #: Margin (px) around the board for the sharpness ROI.
 ROI_PAD_PX = 10
 #: Common corners needed to compare two observations of the same board.

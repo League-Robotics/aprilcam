@@ -29,6 +29,7 @@ from aprilcam.view.intrinsics_model import (
     finish_text_lines,
     font_sizes,
     fit_rect,
+    column_layout,
     key_action,
     tile_colour,
 )
@@ -37,6 +38,7 @@ from aprilcam.view.viewer import NoDisplayAvailable, _ensure_tk_library_env, _he
 
 __all__ = ["IntrinsicsController", "Snapshot", "run_intrinsics_gui"]
 
+_NOTICE_SLOTS = 3  # fixed reserve for finish/notice lines above NEXT
 _POLL_INTERVAL_S = 0.22
 _FRAME_INTERVAL_S = 0.22
 _DRAW_INTERVAL_MS = 150
@@ -284,9 +286,9 @@ class _TkShell:
             y = fs.banner + 20
         col_w = w // n
         bottom = h - 10
-        lines = list(snap.notice_lines)
-        bottom -= len(lines) * (fs.body + 8)
-        limit = bottom - fs.next_line * 3 if vm.next_line else bottom - 10
+        lines = list(snap.notice_lines)[-_NOTICE_SLOTS:]
+        bottom -= _NOTICE_SLOTS * (fs.body + 8)  # fixed reserve: columns never jump
+        limit = bottom - fs.next_line * 3  # NEXT reserve is fixed, shown or not
         for i, cam in enumerate(vm.cameras):
             self._draw_camera(cam, i * col_w, y, col_w, fs, limit, snap)
         for k, line in enumerate(lines):
@@ -318,61 +320,45 @@ class _TkShell:
         return photo
 
     def _draw_camera(self, cam, x0: int, y: int, col_w: int, fs, limit: int, snap: Snapshot) -> None:
+        """Paint one column into :func:`column_layout`'s fixed slots. Which
+        notes exist only changes the *content* of the message slot."""
         c = self._canvas
-        pad = 12
-        cx = x0 + col_w // 2
-        c.create_text(cx, y, text=f"{cam.camera}   {cam.views_line}", anchor="n",
-                      fill=colour_for("dim"), font=("Helvetica", -fs.body))
-        y += fs.body + 14
-        c.create_text(cx, y, text=cam.error_now, anchor="n",
+        lay = column_layout(x0, y, col_w, limit, fs)
+        px0, _, px1, _ = lay.panel
+        width = px1 - px0
+        c.create_text(px0, lay.name[1], text=f"{cam.camera}\n{cam.views_line}", anchor="nw",
+                      fill=colour_for("dim"), font=("Helvetica", -fs.body), width=width)
+        c.create_text(px0, lay.error_now[1], text=cam.error_now, anchor="nw",
                       fill=colour_for(cam.error_class), font=("Helvetica", -fs.metric, "bold"),
-                      width=col_w - 2 * pad)
-        y += int(fs.metric * 1.6)
-        c.create_text(cx, y, text=cam.could_change, anchor="n",
+                      width=width)
+        c.create_text(px0, lay.could_change[1], text=cam.could_change, anchor="nw",
                       fill=colour_for(cam.could_change_class),
-                      font=("Helvetica", -fs.metric * 2 // 3, "bold"), width=col_w - 2 * pad)
-        y += int(fs.metric * 2.2)
+                      font=("Helvetica", -fs.metric * 2 // 3, "bold"), width=width)
+        self._draw_tilts(cam, lay.tilts, fs)
         notes = ([cam.reject_note] if cam.reject_note else []) + list(cam.errors)
-        tside = max(min((col_w - 2 * pad) // 3, fs.metric * 3) * 2 // 3, 18)
+        if notes:
+            c.create_text(px0, lay.message[1], text="\n".join(notes), anchor="nw",
+                          fill=colour_for("red"), font=("Helvetica", -fs.body), width=width)
+        ix0, iy0, ix1, iy1 = lay.image
         jpeg = snap.frames.get(cam.camera)
         status = next((s for s in snap.statuses if s.camera == cam.camera), None)
-        if jpeg is not None and status is not None:
-            tilt_h = tside + 10
-            notes_h = len(notes) * (fs.body + 6)
-            area_h = limit - y - tilt_h - notes_h
-            if area_h >= 60:
-                dest = (col_w - 2 * pad, area_h)
-                photo = self._compose(cam.camera, jpeg, status, cam, dest,
-                                      bool(snap.frame_stale.get(cam.camera)), fs)
-                fx0, fy0, fx1, fy1 = fit_rect((photo.width(), photo.height()),
-                                              (x0 + pad, y, x0 + col_w - pad, y + area_h))
-                c.create_image(fx0, fy0, image=photo, anchor="nw")
-                y = fy1 + 8
-                self._draw_tilts(cam, cx, y, tside, fs)
-                y += tilt_h
-                self._draw_notes(notes, cx, y, col_w - 2 * pad, fs)
-                return
-        side = max(min((col_w - 2 * pad) // 3, fs.metric * 3), 20)
-        left = cx - side * 3 // 2
+        if jpeg is not None and status is not None and ix1 - ix0 >= 60 and iy1 - iy0 >= 60:
+            photo = self._compose(cam.camera, jpeg, status, cam, (ix1 - ix0, iy1 - iy0),
+                                  bool(snap.frame_stale.get(cam.camera)), fs)
+            fx0, fy0, _, _ = fit_rect((photo.width(), photo.height()), lay.image)
+            c.create_image(fx0, fy0, image=photo, anchor="nw")
+            return
+        # Fallback: the 3x3 tiles inside the same image rectangle.
+        side = max(min(ix1 - ix0, iy1 - iy0) // 3, 20)
+        left = ix0 + (ix1 - ix0 - side * 3) // 2
+        top = iy0 + (iy1 - iy0 - side * 3) // 2
         for idx, tile in enumerate(cam.cells):
             r, k = divmod(idx, 3)
-            self._tile(left + k * side, y + r * side, side, tile, fs)
-        y += side * 3 + 14
-        tside = max(side * 2 // 3, 18)
-        self._draw_tilts(cam, cx, y, tside, fs)
-        y += tside + 10
-        self._draw_notes(notes, cx, y, col_w - 2 * pad, fs)
+            self._tile(left + k * side, top + r * side, side, tile, fs)
 
-    def _draw_tilts(self, cam, cx: int, y: int, tside: int, fs) -> None:
-        tleft = cx - tside * len(cam.tilts) // 2
-        for k, tile in enumerate(cam.tilts):
-            self._tile(tleft + k * tside, y, tside, tile, fs)
-
-    def _draw_notes(self, notes, cx: int, y: int, width: int, fs) -> None:
-        for note in notes:
-            self._canvas.create_text(cx, y, text=note, anchor="n", fill=colour_for("red"),
-                                     font=("Helvetica", -fs.body), width=width)
-            y += fs.body + 6
+    def _draw_tilts(self, cam, rects, fs) -> None:
+        for (tx0, ty0, tx1, _), tile in zip(rects, cam.tilts):
+            self._tile(tx0, ty0, tx1 - tx0, tile, fs)
 
     def _tile(self, x: int, y: int, side: int, tile, fs) -> None:
         c = self._canvas

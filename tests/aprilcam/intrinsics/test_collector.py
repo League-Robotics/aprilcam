@@ -136,7 +136,7 @@ def test_coverage_by_extent_not_centroid():
     # Board centroid is in C, but its extent reaches the outer bands too.
     assert counts["C"] == 1
     assert sum(1 for n in names if counts[n]) >= 4
-    assert counts["W"] == 1 and counts["E"] == 1
+    assert counts["N"] == 1 and counts["S"] == 1
 
 
 def test_collectors_independent():

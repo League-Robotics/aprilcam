@@ -236,10 +236,10 @@ def test_compose_grid_tint_outline_size():
     outline = (((100.0, 20.0), (140.0, 20.0), (140.0, 70.0), (100.0, 70.0)),)
     img = compose_camera_image(_jpeg((200, 100)), model, outline, (200, 100), (400, 400))
     assert img.size == (400, 200)  # aspect preserved, fit to width
-    # grid lines at 40% / 60%
-    assert img.getpixel((160, 150))[:3] == ImageColor.getrgb(GRID_COLOUR)
-    assert img.getpixel((240, 150))[:3] == ImageColor.getrgb(GRID_COLOUR)
-    assert img.getpixel((300, 80))[:3] == ImageColor.getrgb(GRID_COLOUR)
+    # grid lines at 1/3 / 2/3
+    assert img.getpixel((133, 150))[:3] == ImageColor.getrgb(GRID_COLOUR)
+    assert img.getpixel((267, 150))[:3] == ImageColor.getrgb(GRID_COLOUR)
+    assert img.getpixel((300, 67))[:3] == ImageColor.getrgb(GRID_COLOUR)
     # NW cell good (green-tinted) vs untinted N cell; SE some (amber)
     nw, n, se = img.getpixel((8, 8)), img.getpixel((200, 8)), img.getpixel((392, 192))
     assert nw[1] > nw[0] + 40 and nw[1] > n[1] + 20
@@ -255,9 +255,9 @@ def test_compose_dimmed_and_decode_failure():
     bright = compose_camera_image(_jpeg((100, 100), (200, 200, 200)), model, None, None, (100, 100))
     dim = compose_camera_image(_jpeg((100, 100), (200, 200, 200)), model, None, None, (100, 100),
                                dimmed=True)
-    assert dim.getpixel((10, 10))[0] < bright.getpixel((10, 10))[0]
+    assert dim.getpixel((2, 2))[0] < bright.getpixel((2, 2))[0]
     out = compose_camera_image(b"garbage", model, None, None, (100, 100), fallback=bright)
-    assert out.size == bright.size and out.getpixel((10, 10)) == dim.getpixel((10, 10))
+    assert out.size == bright.size and out.getpixel((2, 2)) == dim.getpixel((2, 2))
     assert compose_camera_image(b"", model, None, None, (100, 100)).size[0] > 0
 
 
@@ -278,3 +278,28 @@ def test_frames_are_keyed_by_the_status_camera_slug_not_the_typed_token():
     assert "arducam-ov9782-usb-camera" in snap.frames
     assert snap.frame_stale["arducam-ov9782-usb-camera"] is False
     assert "4" not in snap.frames
+
+
+def test_column_layout_is_fixed_and_image_is_largest_fit():
+    from aprilcam.view.intrinsics_model import column_layout, fit_rect, font_sizes
+
+    fs = font_sizes(1080, 2)
+    a = column_layout(960, 140, 960, 900, fs)
+    b = column_layout(960, 140, 960, 900, fs)  # no inputs depend on notes
+    assert a == b
+    ix0, iy0, ix1, iy1 = a.image
+    px0, py0, px1, py1 = a.panel
+    assert ix1 < px0 and px1 <= 960 + 960 and abs((px1 - px0) - 0.3 * 960) <= 1
+    assert iy0 == 140 and iy1 == 900  # full column height
+    assert ix0 >= 960 and ix1 > ix0
+    # slots stack top to bottom inside the panel, no overlap
+    slots = [a.name, a.error_now, a.could_change, a.tilts[0], a.message]
+    for lo, hi in zip(slots, slots[1:]):
+        assert lo[3] <= hi[1]
+    assert all(t[2] - t[0] == a.tilts[0][2] - a.tilts[0][0] for t in a.tilts)
+    assert a.message[3] - a.message[1] >= 2 * fs.body
+    # the aspect-fit of a 4:3 frame is the largest one the image box allows
+    fx0, fy0, fx1, fy1 = fit_rect((640, 480), a.image)
+    assert (fx1 - fx0 == ix1 - ix0) or (fy1 - fy0 == iy1 - iy0)
+    # different limit moves nothing in the panel's x geometry
+    assert column_layout(960, 140, 960, 800, fs).panel[0::2] == a.panel[0::2]

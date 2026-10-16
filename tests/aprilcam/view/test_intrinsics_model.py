@@ -111,9 +111,9 @@ def test_grid_rects_tile_exactly(size):
     # columns / rows share boundaries (NW..SE row-major)
     assert r[0][2] == r[1][0] == r[3][2] == r[4][0]
     assert r[2][0] == r[1][2] and r[6][1] == r[3][3]
-    assert abs((r[0][2] - r[0][0]) - 0.4 * w) <= 0.5
-    assert abs((r[1][2] - r[1][0]) - 0.2 * w) <= 1
-    assert abs((r[0][3] - r[0][1]) - 0.4 * h) <= 0.5
+    assert abs((r[0][2] - r[0][0]) - w / 3) <= 1
+    assert abs((r[1][2] - r[1][0]) - w / 3) <= 1
+    assert abs((r[0][3] - r[0][1]) - h / 3) <= 1
 
 
 def test_grid_parity_with_collector():
