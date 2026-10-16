@@ -1,7 +1,7 @@
 ---
 id: '043'
 title: Viewer image scales with the window
-status: ticketing
+status: done
 branch: sprint/043-viewer-image-scales-with-the-window
 use-cases: []
 issues:

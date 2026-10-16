@@ -1,4 +1,4 @@
-"""Fiducial generation: printable AprilTag and ArUco images (UC-21).
+"""Fiducial generation: printable AprilTag and ArUco sheets and images (UC-21).
 
 **Purely offline** — no daemon, no camera, no network. The one
 capability in the system that works on a bare install, which is exactly
@@ -65,6 +65,31 @@ class TagGenerator:
         An unwritable ``out_dir`` fails before generating; nothing is
         partially written.
 
-        Open (UC-21): PDF output for multi-tag sheets, as v1 had.
+        This is the opt-in ``--png`` path; the default deliverable is
+        :meth:`generate_sheet`.
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement TagGenerator.generate")
+
+    def generate_sheet(
+        self,
+        family: TagFamily,
+        ids: tuple[int, ...],
+        *,
+        out_path: Path,
+    ) -> Path:
+        """Write one printable multi-page PDF: one tag per 59 x 102 mm page.
+
+        The default UC-21 deliverable, as v1 had. Each tag is centred with
+        a small quiet zone and a caption beneath naming family and id
+        (``ArUco 4x4 ID: 3`` / ``AprilTag 36h11 ID: 7``). **There is no
+        size parameter**: the tag fills the label page, the operator
+        prints at 100% and measures the result. No position text is ever
+        drawn.
+
+        Every id is validated (``InvalidTagId``) and ``out_path``'s
+        writability checked (``UnwritableOutputPath``) before anything is
+        rendered or written.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement TagGenerator.generate_sheet"
+        )

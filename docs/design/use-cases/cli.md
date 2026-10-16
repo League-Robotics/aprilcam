@@ -652,8 +652,9 @@ cannot fan out the way a one-shot RPC does. Shipped sprint 039, ticket
 **Status:** draft
 **Interfaces:** CLI, Python
 
-**Goal.** The developer generates printable AprilTag and ArUco images for
-building or repairing a physical playfield.
+**Goal.** The developer generates a printable sheet of AprilTag and ArUco tags for
+building or repairing a physical playfield: one PDF, one captioned tag per
+label page.
 
 **Preconditions.** None. **This is a purely local utility — it needs no
 daemon, no camera, and no network.** The one command in this file that
@@ -672,33 +673,42 @@ authority, and no client-side component does pixel work
 importable is not permission to use it outside the daemon.
 
 **Main success path.**
-1. `aprilcam tags generate` with a family, an id or id range, and an
-   output target.
-2. Images are written, ready to print at a known physical size.
+1. `aprilcam tags generate 1-8 -A -o tags.pdf` — an ids spec (`1-8`,
+   `0-3,7`), `-A/--aruco` for ArUco 4x4 (default AprilTag 36h11), and an
+   output path (default `tags.pdf`).
+2. One multi-page PDF is written: one tag per 59 x 102 mm page, centred with
+   a quiet zone, captioned beneath (`ArUco 4x4 ID: 3`, `AprilTag 36h11 ID:
+   7`). No position text. **There is no size parameter** — the operator
+   prints at 100% and measures the result; size is an output of printing.
+3. `--png` instead writes one image per id into the directory given by `-o`
+   (default `tags/`); there `--size-cm` (optional, default 5 cm) and `--dpi`
+   (default 300) set the image's physical size. Both are refused without
+   `--png`.
 
-**Postconditions.** Image files exist. Nothing else changes.
+**Postconditions.** The PDF (or image files) exist. Nothing else changes.
 
 **Failure modes.**
 - Id outside the family's range → error naming the valid range.
 - Unwritable output path → error before generating.
-- Requested physical size unachievable at the target print resolution →
-  warn rather than silently produce an unusable tag.
+- With `--png`, requested physical size unachievable at the target print
+  resolution → warn rather than silently produce an unusable tag.
 
 **Open questions.**
-- PDF output for multi-tag sheets, as v1 had?
+- _Closed (sprint 043):_ PDF output for multi-tag sheets, as v1 had — yes,
+  it is the default deliverable.
 - Is `tags generate` the right name given v1 had both `taggen` and
   `arucogen`? Drafted as one command with a family option.
 
 #### Scenarios
 
 **UC-21.S-1 — Generate the playfield's ArUco set** · _happy path_
-`aprilcam tags generate` for ArUco 4x4 ids 1–10 produces the ten marker
-images `main-playfield` specifies, at a size printable to match the
-surveyed field.
+`aprilcam tags generate 1-10 -A -o tags.pdf` produces a ten-page PDF of
+the ArUco markers `main-playfield` specifies, each captioned with its id;
+printed at 100%, the operator measures the result and records the size.
 
 **UC-21.S-2 — Generate a robot's AprilTag** · _happy path_
-AprilTag 36h11 id 7 is generated for mounting on a robot, matching the
-`size` parameter registered in UC-12.
+AprilTag 36h11 id 7 is generated for mounting on a robot; the printed tag
+is measured and that size registered in UC-12.
 
 **UC-21.S-3 — Id out of range** · _failure path_
 An ArUco 4x4 id beyond the dictionary's range is requested. The command

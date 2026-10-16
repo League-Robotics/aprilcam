@@ -1,8 +1,9 @@
 ---
 id: '002'
 title: Tag generation as a labelled printable PDF
-status: open
-use-cases: [SUC-003]
+status: done
+use-cases:
+- SUC-003
 depends-on: []
 github-issue: ''
 issue: tags-generate-should-produce-a-single-printable-pdf-like-v1.md
@@ -42,17 +43,17 @@ project tracks one).
 
 ## Acceptance Criteria
 
-- [ ] `aprilcam tags generate 1-8 -A -o tags.pdf` writes one PDF with 8
+- [x] `aprilcam tags generate 1-8 -A -o tags.pdf` writes one PDF with 8
       pages, each 59 x 102 mm.
-- [ ] Each page has the tag centred with a quiet zone and a caption
+- [x] Each page has the tag centred with a quiet zone and a caption
       `ArUco 4x4 ID: n` (or `AprilTag 36h11 ID: n`) beneath; no position
       text appears anywhere.
-- [ ] No size parameter is needed or accepted for the PDF path.
-- [ ] `--png` still writes per-id images (with `--size-cm` optional).
-- [ ] An out-of-range id errors naming the valid range and writes
+- [x] No size parameter is needed or accepted for the PDF path.
+- [x] `--png` still writes per-id images (with `--size-cm` optional).
+- [x] An out-of-range id errors naming the valid range and writes
       nothing; an unwritable output path fails before generating.
-- [ ] `fpdf2` is a declared base dependency in `pyproject.toml`.
-- [ ] UC-21 in `docs/design/use-cases/cli.md` and
+- [x] `fpdf2` is a declared base dependency in `pyproject.toml`.
+- [x] UC-21 in `docs/design/use-cases/cli.md` and
       `src/aprilcam/tags/DESIGN.md` describe the printable-sheet
       deliverable, close the "PDF output" open question, and drop the
       required `--size-cm` wording; `cli/DESIGN.md` updated if it

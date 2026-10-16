@@ -1,8 +1,10 @@
 ---
 id: '001'
 title: Viewer image scales with window resize
-status: open
-use-cases: [SUC-001, SUC-002]
+status: done
+use-cases:
+- SUC-001
+- SUC-002
 depends-on: []
 github-issue: ''
 issue: camera-and-playfield-view-image-should-scale-with-the-window.md
@@ -65,28 +67,28 @@ Implement:
 
 ## Acceptance Criteria
 
-- [ ] `_fit_size` (or equivalently named helper) is a pure function
+- [x] `_fit_size` (or equivalently named helper) is a pure function
       with no Tk/display dependency, covered by unit tests: landscape,
       portrait, and square sources; target areas both larger and
       smaller than the source (upscale and downscale); at least one
       degenerate-input case.
-- [ ] Enlarging either view window (`camera view` or `playfield view`)
+- [x] Enlarging either view window (`camera view` or `playfield view`)
       enlarges the displayed image; shrinking it shrinks the image;
       aspect ratio is preserved in both directions (no stretch, no
       crop).
-- [ ] With the tag sidebar present (`playfield view`, non-`bare`), the
+- [x] With the tag sidebar present (`playfield view`, non-`bare`), the
       sidebar's width is unaffected by resizing the window — only the
       image area changes size.
-- [ ] Resizing the window does not itself trigger further, unbounded
+- [x] Resizing the window does not itself trigger further, unbounded
       window growth (no feedback loop).
-- [ ] A resize immediately rescales the currently-displayed frame
+- [x] A resize immediately rescales the currently-displayed frame
       (does not wait for the next streamed frame to catch up).
-- [ ] Initial window width for a typical camera frame stays close to
+- [x] Initial window width for a typical camera frame stays close to
       the existing ~960px-capped behavior.
-- [ ] The bytes passed to `show()` and anything sent to/received from
+- [x] The bytes passed to `show()` and anything sent to/received from
       the daemon are unchanged — no processing beyond on-screen
       display scaling.
-- [ ] `src/aprilcam/view/DESIGN.md` is updated to describe the new
+- [x] `src/aprilcam/view/DESIGN.md` is updated to describe the new
       resize behavior in place of the fixed-`_MAX_DISPLAY_WIDTH`
       description.
 

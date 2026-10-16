@@ -102,12 +102,19 @@ class _FakeTagGenerator:
     generate_returns: Tuple[Path, ...] = ()
     generate_raises: Optional[Exception] = None
     calls: List[tuple] = field(default_factory=list)
+    sheet_calls: List[tuple] = field(default_factory=list)
 
     def generate(self, family, ids, *, size_cm, out_dir, dpi=300):
         self.calls.append((family, ids, size_cm, out_dir, dpi))
         if self.generate_raises is not None:
             raise self.generate_raises
         return self.generate_returns
+
+    def generate_sheet(self, family, ids, *, out_path):
+        self.sheet_calls.append((family, ids, out_path))
+        if self.generate_raises is not None:
+            raise self.generate_raises
+        return out_path
 
 
 def _args(**overrides) -> argparse.Namespace:
@@ -136,11 +143,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _generate_args(**overrides) -> argparse.Namespace:
     base = dict(
-        family="aruco",
         ids="1-10",
-        size_cm=8.0,
-        out="./playfield-tags",
-        dpi=300,
+        aruco=True,
+        output=None,
+        png=False,
+        size_cm=None,
+        dpi=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -524,62 +532,89 @@ def test_parse_ids_rejects_a_non_numeric_part():
 # ---------------------------------------------------------------------------
 
 
-def test_generate_parses_ids_and_calls_tag_generator_with_the_right_arguments(capsys):
-    generator = _FakeTagGenerator(generate_returns=tuple(Path(f"tag-{i}.png") for i in range(1, 11)))
+def test_generate_default_writes_one_pdf_sheet_with_the_whole_id_batch(capsys):
+    generator = _FakeTagGenerator()
+
+    code = tags_cli.cmd_generate(
+        _generate_args(ids="1-8", output="tags.pdf"), tag_generator_factory=lambda: generator
+    )
+
+    assert code == 0
+    assert generator.calls == []  # PNG path untouched
+    assert generator.sheet_calls == [(TagFamily.ARUCO, tuple(range(1, 9)), Path("tags.pdf"))]
+    out = capsys.readouterr().out
+    assert "8" in out and "tags.pdf" in out
+
+
+def test_generate_needs_no_size_for_the_pdf_path():
+    generator = _FakeTagGenerator()
 
     code = tags_cli.cmd_generate(_generate_args(), tag_generator_factory=lambda: generator)
 
     assert code == 0
-    assert len(generator.calls) == 1
-    family, ids, size_cm, out_dir, dpi = generator.calls[0]
-    assert family == TagFamily.ARUCO
-    assert ids == tuple(range(1, 11))
-    assert size_cm == 8.0
-    assert out_dir == Path("./playfield-tags")
-    assert dpi == 300
+    assert generator.sheet_calls[0][2] == Path("tags.pdf")  # default output
+
+
+def test_generate_without_aruco_flag_is_apriltag():
+    generator = _FakeTagGenerator()
+
+    tags_cli.cmd_generate(
+        _generate_args(aruco=False, ids="0-3,7"), tag_generator_factory=lambda: generator
+    )
+
+    family, ids, _ = generator.sheet_calls[0]
+    assert family == TagFamily.APRILTAG
+    assert ids == (0, 1, 2, 3, 7)
 
 
 def test_generate_calls_tag_generator_exactly_once_for_the_whole_batch():
     """SUC-002's 'nothing written for any id in the batch' guarantee is
-    ``TagGenerator``'s, not the CLI's -- the CLI must not loop per-id
-    (module docstring/ticket 028-002)."""
+    ``TagGenerator``'s, not the CLI's -- the CLI must not loop per-id."""
     generator = _FakeTagGenerator()
 
     tags_cli.cmd_generate(_generate_args(ids="1-3,55"), tag_generator_factory=lambda: generator)
 
-    assert len(generator.calls) == 1
-    assert generator.calls[0][1] == (1, 2, 3, 55)
+    assert len(generator.sheet_calls) == 1
+    assert generator.sheet_calls[0][1] == (1, 2, 3, 55)
 
 
-def test_generate_family_choice_needs_no_translation_table():
-    generator = _FakeTagGenerator()
-
-    tags_cli.cmd_generate(
-        _generate_args(family="apriltag"), tag_generator_factory=lambda: generator
-    )
-
-    assert generator.calls[0][0] == TagFamily.APRILTAG
-
-
-def test_generate_dpi_defaults_to_300_and_is_overridable():
-    generator = _FakeTagGenerator()
-
-    tags_cli.cmd_generate(_generate_args(dpi=600), tag_generator_factory=lambda: generator)
-
-    assert generator.calls[0][4] == 600
-
-
-def test_generate_prints_a_confirmation_naming_count_and_out_dir(capsys):
+def test_generate_png_routes_to_per_id_images_with_documented_defaults(capsys):
     generator = _FakeTagGenerator(generate_returns=(Path("a.png"), Path("b.png"), Path("c.png")))
 
     code = tags_cli.cmd_generate(
-        _generate_args(ids="1-3"), tag_generator_factory=lambda: generator
+        _generate_args(ids="1-3", png=True), tag_generator_factory=lambda: generator
     )
 
     assert code == 0
-    out = capsys.readouterr().out
-    assert "3" in out
-    assert "playfield-tags" in out
+    assert generator.sheet_calls == []
+    assert generator.calls == [
+        (TagFamily.ARUCO, (1, 2, 3), tags_cli.DEFAULT_PNG_SIZE_CM, Path("tags"), 300)
+    ]
+    assert "3" in capsys.readouterr().out
+
+
+def test_generate_png_honours_size_cm_dpi_and_output_dir():
+    generator = _FakeTagGenerator()
+
+    tags_cli.cmd_generate(
+        _generate_args(png=True, size_cm=8.0, dpi=600, output="out-dir"),
+        tag_generator_factory=lambda: generator,
+    )
+
+    assert generator.calls[0][2:] == (8.0, Path("out-dir"), 600)
+
+
+@pytest.mark.parametrize("override", [{"size_cm": 8.0}, {"dpi": 600}])
+def test_generate_refuses_size_or_dpi_without_png(override, capsys):
+    generator = _FakeTagGenerator()
+
+    code = tags_cli.cmd_generate(
+        _generate_args(**override), tag_generator_factory=lambda: generator
+    )
+
+    assert code == 1
+    assert "--png" in capsys.readouterr().err
+    assert generator.sheet_calls == [] and generator.calls == []
 
 
 def test_generate_surfaces_invalid_tag_id_via_report_error(capsys):
@@ -600,19 +635,17 @@ def test_generate_surfaces_invalid_tag_id_via_report_error(capsys):
 
 
 def test_generate_surfaces_unwritable_output_path_via_report_error(capsys):
-    """SUC-003: an unwritable ``--out`` surfaces ``UnwritableOutputPath``
-    through ``report_error`` -- stderr, non-zero exit."""
     generator = _FakeTagGenerator(
-        generate_raises=UnwritableOutputPath(Path("/no/such/writable/dir"))
+        generate_raises=UnwritableOutputPath(Path("/no/such/writable/tags.pdf"))
     )
 
     code = tags_cli.cmd_generate(
-        _generate_args(out="/no/such/writable/dir"), tag_generator_factory=lambda: generator
+        _generate_args(output="/no/such/writable/tags.pdf"),
+        tag_generator_factory=lambda: generator,
     )
 
     assert code == 1
-    err = capsys.readouterr().err
-    assert "/no/such/writable/dir" in err
+    assert "/no/such/writable/tags.pdf" in capsys.readouterr().err
 
 
 def test_generate_rejects_a_malformed_ids_spec_without_a_traceback(capsys):
@@ -623,56 +656,43 @@ def test_generate_rejects_a_malformed_ids_spec_without_a_traceback(capsys):
     )
 
     assert code == 1
-    assert "--ids" in capsys.readouterr().err
-    assert generator.calls == []
+    assert "ids" in capsys.readouterr().err
+    assert generator.calls == [] and generator.sheet_calls == []
 
 
 # ---------------------------------------------------------------------------
-# generate -- argparse wiring (ticket 028-002, UC-21)
+# generate -- argparse wiring (UC-21)
 # ---------------------------------------------------------------------------
 
 
-def test_generate_is_wired_with_the_documented_flags():
+def test_generate_is_wired_with_v1_shaped_arguments():
     parser = _build_parser()
-    args = parser.parse_args(
-        [
-            "tags", "generate",
-            "--family", "aruco", "--ids", "1-10",
-            "--size-cm", "8", "--out", "./playfield-tags",
-        ]
-    )
+    args = parser.parse_args(["tags", "generate", "1-8", "-A", "-o", "tags.pdf"])
     assert args.func is tags_cli.cmd_generate
-    assert args.family == "aruco"
-    assert args.ids == "1-10"
-    assert args.size_cm == 8.0
-    assert args.out == "./playfield-tags"
-    assert args.dpi == 300  # default
+    assert args.ids == "1-8"
+    assert args.aruco is True
+    assert args.output == "tags.pdf"
+    assert args.png is False
+    assert args.size_cm is None
 
 
-def test_generate_dpi_is_overridable_on_the_command_line():
-    parser = _build_parser()
-    args = parser.parse_args(
-        [
-            "tags", "generate",
-            "--family", "apriltag", "--ids", "1", "--size-cm", "5",
-            "--out", "out", "--dpi", "600",
-        ]
+def test_generate_needs_only_the_ids():
+    args = _build_parser().parse_args(["tags", "generate", "0-3,7"])
+    assert args.aruco is False
+    assert args.output is None
+    assert args.size_cm is None and args.dpi is None
+
+
+def test_generate_png_flags_parse():
+    args = _build_parser().parse_args(
+        ["tags", "generate", "1", "--png", "--size-cm", "5", "--dpi", "600", "--aruco"]
     )
-    assert args.dpi == 600
+    assert args.png is True and args.size_cm == 5.0 and args.dpi == 600
 
 
-def test_generate_rejects_an_unknown_family():
-    parser = _build_parser()
+def test_generate_requires_ids():
     with pytest.raises(SystemExit):
-        parser.parse_args(
-            ["tags", "generate", "--family", "qr", "--ids", "1", "--size-cm", "5", "--out", "out"]
-        )
-
-
-def test_generate_requires_family_ids_size_cm_and_out():
-    parser = _build_parser()
-    with pytest.raises(SystemExit):
-        parser.parse_args(["tags", "generate"])
+        _build_parser().parse_args(["tags", "generate"])
 
 
 def test_generate_has_no_daemon_or_all_option():
@@ -680,21 +700,9 @@ def test_generate_has_no_daemon_or_all_option():
     or ``--all`` (module docstring, ticket 028-002)."""
     parser = _build_parser()
     with pytest.raises(SystemExit):
-        parser.parse_args(
-            [
-                "tags", "generate",
-                "--family", "aruco", "--ids", "1", "--size-cm", "5", "--out", "out",
-                "--daemon", "pi-field.local",
-            ]
-        )
+        parser.parse_args(["tags", "generate", "1", "--daemon", "pi-field.local"])
     with pytest.raises(SystemExit):
-        parser.parse_args(
-            [
-                "tags", "generate",
-                "--family", "aruco", "--ids", "1", "--size-cm", "5", "--out", "out",
-                "--all",
-            ]
-        )
+        parser.parse_args(["tags", "generate", "1", "--all"])
 
 
 def test_tags_help_shows_generate_alongside_mount(capsys):
@@ -711,10 +719,11 @@ def test_generate_help_does_not_crash_and_documents_its_flags(capsys):
     with pytest.raises(SystemExit):
         parser.parse_args(["tags", "generate", "--help"])
     out = capsys.readouterr().out
-    assert "--family" in out
-    assert "--ids" in out
+    assert "IDS" in out
+    assert "--aruco" in out
+    assert "--output" in out
+    assert "--png" in out
     assert "--size-cm" in out
-    assert "--out" in out
     assert "--dpi" in out
     assert "--daemon" not in out
     assert "--all" not in out

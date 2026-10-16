@@ -194,11 +194,22 @@ rather than re-filtering).
   `cli/camera.py`/`cli/playfield.py` are the boundaries that catch it
   and print the UC-16.S-3/UC-18-worded message.
 - **Frame data handed to `Window.show()` is never mutated for anything
-  but on-screen convenience.** `TkWindow.show` scales an image down to
-  `_MAX_DISPLAY_WIDTH` (960px) purely as screen real estate — never
-  sent back to the daemon, never applied to the underlying bytes, and
-  not "processing" in the raw-means-raw sense (no crop, no color
-  change, no overlay).
+  but on-screen convenience.** `TkWindow` scales the displayed image to
+  fit the current window — up or down, aspect preserved (letterbox, no
+  stretch or crop) — via the pure helper `_fit_size`. This is purely
+  screen real estate: never sent back to the daemon, never applied to
+  the underlying bytes, and not "processing" in the raw-means-raw sense.
+- **Resize-to-fit.** The image lives in a fixed-propagation frame
+  (`pack_propagate(False)`, packed `fill=BOTH, expand=True`) with the
+  label `place`d inside, so the image never dictates the window size —
+  the causal direction is strictly window → area → image, which rules
+  out a grow feedback loop. The initial area size comes from the first
+  frame, capped at `_MAX_DISPLAY_WIDTH` (960px); after that the user
+  owns the size. The last frame's bytes are cached and re-rendered from
+  the area's `<Configure>` event so a resize rescales immediately
+  instead of waiting for the next streamed frame. In sidebar mode the
+  sidebar is packed first with a fixed-width `tk.Text`, so only the
+  image area changes size.
 - **Shutdown is bounded.** Closing the window or the reader thread
   ending with an exception both stop `StreamLoop.run` promptly: the
   stream is closed (`stream.close()` — a daemon-visible unsubscribe

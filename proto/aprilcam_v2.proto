@@ -1267,6 +1267,31 @@ message GetTagStreamResponse {
   StreamEndpoint endpoint = 1;
 }
 
+// The single typed error frame a stream socket sends when the daemon
+// cannot satisfy a subscribe (sprint 043 ticket 003, SUC-004) -- an
+// uncalibrated deskewed request, an unknown or absent camera -- right
+// before it closes the connection, so a client raises the real typed
+// error instead of seeing a silent end of stream.
+//
+// Wire encoding: the frame's payload is the one byte 0x00
+// (`aprilcam.framing.ERROR_FRAME_MARKER`) followed by this message
+// serialized. 0x00 can never begin a valid protobuf message (it would
+// be field number 0), so it cannot be mistaken for a `GetFrameResponse`
+// or `TagFrame` data frame -- and an all-defaults `TagFrame`, which
+// serializes to *zero* bytes, cannot be mistaken for an error either.
+// Successful streams never carry the marker, so they are byte-identical
+// to before.
+message StreamError {
+  // Exception class name: "NotCalibrated", "UnknownCamera",
+  // "CameraNotPresent"; anything else maps to a generic AprilCamError.
+  string kind = 1;
+  string message = 2;
+  // UnknownCamera.requested / CameraNotPresent.slug.
+  string subject = 3;
+  // UnknownCamera.available.
+  repeated string available = 4;
+}
+
 // ---------------------------------------------------------------------------
 // Flat-field gain-map capture (sprint 037 ticket 003, SUC-001..003).
 // Mirrors aprilcam.calibration.interfaces.FlatFieldResult/FlatFieldInfo

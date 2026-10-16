@@ -197,13 +197,25 @@ _DEFAULT_FIRST_FRAME_TIMEOUT_S = 10.0
 #: survives past a :meth:`StreamLoop.run` call returning.
 _READER_THREAD_NAME = "aprilcam-view-stream-reader"
 
-#: Large camera frames (a 4K webcam) are scaled down for the window --
-#: purely a screen-real-estate convenience for :class:`TkWindow`, never
-#: sent back to the daemon and never applied to anything but the
-#: on-screen copy. Not "processing" in the raw-means-raw sense: no
-#: crop, no colour change, no overlay, and the underlying bytes handed
-#: to ``show()`` are untouched.
+#: Cap on the *initial* image-area width (a 4K webcam frame must not
+#: open a huge window). After the first frame the window is
+#: user-resizable and the image is scaled to fit it -- up or down --
+#: purely as an on-screen convenience for :class:`TkWindow`, never sent
+#: back to the daemon and never applied to anything but the on-screen
+#: copy. Not "processing" in the raw-means-raw sense: no crop, no colour
+#: change, no overlay, and the bytes handed to ``show()`` are untouched.
 _MAX_DISPLAY_WIDTH = 960
+
+
+def _fit_size(src_w: int, src_h: int, area_w: int, area_h: int) -> Tuple[int, int]:
+    """Largest ``(w, h)`` with the aspect ratio of ``src_w x src_h`` that
+    fits inside ``area_w x area_h`` (letterbox: never stretch or crop;
+    scales up as well as down). Pure -- no Tk. Degenerate inputs (any
+    dimension <= 0) return ``(1, 1)`` rather than raising."""
+    if src_w <= 0 or src_h <= 0 or area_w <= 0 or area_h <= 0:
+        return (1, 1)
+    scale = min(area_w / src_w, area_h / src_h)
+    return (max(int(src_w * scale), 1), max(int(src_h * scale), 1))
 
 
 class NoDisplayAvailable(Exception):
@@ -580,12 +592,14 @@ class TkWindow(Window):
         image_parent: tk.Misc = self._root
         self._sidebar_text: Optional[tk.Text] = None
         if show_sidebar:
-            image_frame = tk.Frame(self._root)
-            image_frame.pack(side=tk.LEFT)
-            image_parent = image_frame
-
+            # Sidebar is packed first so it keeps its fixed width; the
+            # image frame takes whatever room is left and grows/shrinks.
             sidebar_frame = tk.Frame(self._root)
             sidebar_frame.pack(side=tk.RIGHT, fill=tk.Y)
+            image_frame = tk.Frame(self._root)
+            image_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            image_parent = image_frame
+
             sidebar_text = tk.Text(sidebar_frame, width=48, font=("Courier", 10))
             sidebar_text.pack(fill=tk.BOTH, expand=True)
             sidebar_text.tag_config(_GHOST_TK_TAG, foreground=_GHOST_ROW_COLOR)
@@ -593,12 +607,23 @@ class TkWindow(Window):
             sidebar_text.configure(state=tk.DISABLED)
             self._sidebar_text = sidebar_text
 
-        self._image_label = tk.Label(image_parent, bg="black")
-        self._image_label.pack()
         self._status_var = tk.StringVar(value="")
         tk.Label(
             image_parent, textvariable=self._status_var, fg="#cc8800", anchor="w"
-        ).pack(fill=tk.X)
+        ).pack(side=tk.BOTTOM, fill=tk.X)
+
+        # The image area is a frame with geometry propagation disabled
+        # and the label *placed* (not packed) inside it, so the image's
+        # size never feeds back into the window's size: the causal
+        # direction is strictly window -> area -> image (no grow loop).
+        self._image_area = tk.Frame(image_parent, bg="black", width=1, height=1)
+        self._image_area.pack_propagate(False)
+        self._image_area.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self._image_label = tk.Label(self._image_area, bg="black", borderwidth=0)
+        self._image_label.place(relx=0.5, rely=0.5, anchor="center")
+        self._image_area.bind("<Configure>", self._on_area_configure)
+        self._area_size: Tuple[int, int] = (1, 1)
+        self._last_data: Optional[bytes] = None
 
         # tkinter drops a PhotoImage the instant nothing keeps a Python
         # reference to it, even while the Label is still displaying it
@@ -609,15 +634,37 @@ class TkWindow(Window):
     def _on_close(self) -> None:
         self._closed = True
 
+    def _on_area_configure(self, event: "tk.Event") -> None:
+        # Re-render the cached frame at the new size right away rather
+        # than waiting for the next streamed frame.
+        size = (int(event.width), int(event.height))
+        if size == self._area_size:
+            return
+        self._area_size = size
+        if self._last_data is not None:
+            self._render(self._last_data)
+
     def show(self, data: bytes) -> None:
+        first = self._last_data is None
+        self._last_data = data
+        if first:
+            # Seed the initial window size from the frame (capped at
+            # _MAX_DISPLAY_WIDTH); afterwards the user owns the size.
+            with Image.open(io.BytesIO(data)) as probe:
+                src_w, src_h = probe.size
+            init_w, init_h = _fit_size(
+                src_w, src_h, min(src_w, _MAX_DISPLAY_WIDTH), max(src_h, 1)
+            )
+            self._area_size = (init_w, init_h)
+            self._image_area.configure(width=init_w, height=init_h)
+        self._render(data)
+
+    def _render(self, data: bytes) -> None:
         image: Image.Image = Image.open(io.BytesIO(data))
         image.load()
-        if image.width > _MAX_DISPLAY_WIDTH:
-            scale = _MAX_DISPLAY_WIDTH / image.width
-            image = image.resize(
-                (int(image.width * scale), max(int(image.height * scale), 1)),
-                Image.Resampling.LANCZOS,
-            )
+        w, h = _fit_size(image.width, image.height, *self._area_size)
+        if (w, h) != image.size:
+            image = image.resize((w, h), Image.Resampling.LANCZOS)
         photo = ImageTk.PhotoImage(image)
         self._image_label.configure(image=photo)
         self._photo = photo

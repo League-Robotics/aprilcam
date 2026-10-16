@@ -740,6 +740,45 @@ def test_view_uncalibrated_camera_points_at_camera_calibrate(capsys):
     assert "arducam" in err
 
 
+def test_view_stream_that_raises_not_calibrated_prints_not_calibrated_not_no_frame(capsys):
+    """Sprint 043 ticket 003: a stream whose iteration raises
+    ``NotCalibrated`` (what an error frame now produces client-side)
+    reaches the CLI's ``except NotCalibrated`` through the real
+    ``StreamLoop`` relay, ahead of the first-frame timeout."""
+    from aprilcam.daemon.interfaces import ImageStream
+    from aprilcam.view import viewer
+
+    class _RaisingStream(ImageStream):
+        def __iter__(self):
+            raise NotCalibrated("'arducam' is not calibrated")
+            yield  # pragma: no cover
+
+        def close(self) -> None:
+            pass
+
+    class _Window(viewer.Window):
+        def show(self, data): pass
+        def set_status(self, text): pass
+        def update_tags(self, tags): pass
+        def pump(self): return True
+        def close(self): pass
+
+    def run_view(camera, connected, bare):
+        viewer.StreamLoop(
+            _Window(), _RaisingStream(), lambda f: None,
+            pump_interval=0.01, camera=camera, first_frame_timeout_s=30.0,
+        ).run()
+
+    daemon = _FakeDaemon(cameras=(_camera("arducam", playfield="main-playfield"),))
+    discovery = _FakeDiscovery(daemon=daemon)
+    code = playfield_cli.cmd_view(_args(), discovery_factory=lambda: discovery, run_view=run_view)
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "not calibrated" in err
+    assert "no frame received" not in err
+
+
 def test_view_surfaces_a_typed_error_raised_mid_view(capsys):
     daemon = _FakeDaemon(cameras=(_camera("hd-usb-camera", playfield="main-playfield"),))
     discovery = _FakeDiscovery(daemon=daemon)

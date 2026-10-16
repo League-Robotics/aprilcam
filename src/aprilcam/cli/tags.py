@@ -296,44 +296,77 @@ def _parse_ids(spec: str) -> tuple[int, ...]:
     return tuple(sorted(ids))
 
 
+# Default edge length for ``--png`` when ``--size-cm`` is omitted. 5 cm
+# renders at 591 px at the default 300 dpi, comfortably above the
+# generator's legibility threshold. The PDF path has no size at all.
+DEFAULT_PNG_SIZE_CM = 5.0
+DEFAULT_PNG_DPI = 300
+DEFAULT_PDF_PATH = "tags.pdf"
+DEFAULT_PNG_DIR = "tags"
+
+
 def cmd_generate(
     args: argparse.Namespace,
     *,
     tag_generator_factory: Callable[[], TagGenerator] = TagGenerator,
 ) -> int:
-    """``aprilcam tags generate --family FAMILY --ids SPEC --size-cm CM
-    --out DIR [--dpi DPI]`` (UC-21).
+    """``aprilcam tags generate IDS [-A] [-o PATH] [--png [--size-cm CM]
+    [--dpi DPI]]`` (UC-21).
 
-    Purely offline -- no ``Discovery``, no daemon, no ``-d``/``--daemon``
-    or ``--all`` flag (see the module docstring). ``family`` is already
-    restricted to a valid :class:`TagFamily` value by ``argparse``'s own
-    ``choices=`` (matching ``_tag_from_args``'s reasoning above), so
-    ``TagFamily(args.family)`` always succeeds.
+    Default output is one printable PDF (one tag per label page, captioned
+    with family and id) at ``-o`` (default ``tags.pdf``). ``--png``
+    instead writes one image per id into the directory ``-o`` (default
+    ``tags/``), sized by the optional ``--size-cm`` (default 5 cm) and
+    ``--dpi``. ``--size-cm``/``--dpi`` without ``--png`` are refused: the
+    PDF path takes no size.
 
-    ``TagGenerator`` itself owns whole-batch id validation and
-    output-directory writability checking
-    (``InvalidTagId``/``UnwritableOutputPath``, SUC-002/SUC-003); this
-    calls it once with the whole id tuple -- never looping per-id -- and
-    lets those typed errors flow through
-    :func:`~aprilcam.cli._common.report_error` unchanged.
+    Purely offline -- no ``Discovery``, no daemon (see the module
+    docstring). ``TagGenerator`` owns whole-batch id validation and
+    output writability (``InvalidTagId``/``UnwritableOutputPath``); this
+    calls it once with the whole id tuple and lets those typed errors flow
+    through :func:`~aprilcam.cli._common.report_error` unchanged.
     """
     try:
         ids = _parse_ids(args.ids)
     except ValueError:
-        print(f"error: invalid --ids spec: {args.ids!r}", file=sys.stderr)
+        print(f"error: invalid ids spec: {args.ids!r}", file=sys.stderr)
+        return EXIT_ERROR
+    if not ids:
+        print(f"error: no ids in spec: {args.ids!r}", file=sys.stderr)
         return EXIT_ERROR
 
-    family = TagFamily(args.family)
-    out_dir = Path(args.out)
+    png = bool(getattr(args, "png", False))
+    size_cm = getattr(args, "size_cm", None)
+    dpi = getattr(args, "dpi", None)
+    if not png and (size_cm is not None or dpi is not None):
+        print(
+            "error: --size-cm/--dpi apply only to --png; the PDF takes no "
+            "size (print at 100% and measure the result)",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+
+    family = TagFamily.ARUCO if getattr(args, "aruco", False) else TagFamily.APRILTAG
+    out = getattr(args, "output", None)
 
     try:
-        written = tag_generator_factory().generate(
-            family, ids, size_cm=args.size_cm, out_dir=out_dir, dpi=args.dpi
-        )
+        generator = tag_generator_factory()
+        if png:
+            out_dir = Path(out if out is not None else DEFAULT_PNG_DIR)
+            written = generator.generate(
+                family,
+                ids,
+                size_cm=size_cm if size_cm is not None else DEFAULT_PNG_SIZE_CM,
+                out_dir=out_dir,
+                dpi=dpi if dpi is not None else DEFAULT_PNG_DPI,
+            )
+            print(f"generated {len(written)} {family.value} tag image(s) in {out_dir}")
+        else:
+            out_path = Path(out if out is not None else DEFAULT_PDF_PATH)
+            written_path = generator.generate_sheet(family, ids, out_path=out_path)
+            print(f"wrote {len(ids)} {family.value} tag page(s) to {written_path}")
     except AprilCamError as exc:
         return report_error(exc)
-
-    print(f"generated {len(written)} {family.value} tag image(s) in {out_dir}")
     return EXIT_OK
 
 
@@ -348,7 +381,7 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     operation with no further nouns under it.
     """
     parser = subparsers.add_parser(
-        "tags", help="tag mount registration and marker generation (UC-12, UC-21)"
+        "tags", help="tag mount registration and marker sheets (UC-12, UC-21)"
     )
     parser.set_defaults(func=incomplete_command(parser))
     sub = parser.add_subparsers(dest="tags_command", metavar="<command>")
@@ -406,24 +439,33 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     p_list.set_defaults(func=cmd_list)
 
     p_generate = sub.add_parser(
-        "generate", help="generate printable AprilTag/ArUco marker images (UC-21)"
+        "generate",
+        help="generate a printable PDF of labelled AprilTag/ArUco markers (UC-21)",
     )
-    p_generate.add_argument("--family", choices=families, required=True, help="tag family")
     p_generate.add_argument(
-        "--ids", required=True, metavar="SPEC",
+        "ids", metavar="IDS",
         help="tag id spec: comma-separated ids and/or inclusive ranges, "
-        "e.g. '1-10' or '1-3,55'",
+        "e.g. '1-8' or '0-3,7'",
     )
     p_generate.add_argument(
-        "--size-cm", type=float, required=True, metavar="CM",
-        help="physical edge length the printed tag must have",
+        "-A", "--aruco", action="store_true",
+        help="ArUco 4x4 markers instead of AprilTag 36h11",
     )
     p_generate.add_argument(
-        "--out", required=True, metavar="DIR",
-        help="output directory for the generated PNG images",
+        "-o", "--output", metavar="PATH", default=None,
+        help=f"PDF file to write (default: {DEFAULT_PDF_PATH}); with --png, "
+        f"the directory for the images (default: {DEFAULT_PNG_DIR}/)",
     )
     p_generate.add_argument(
-        "--dpi", type=int, default=300, metavar="DPI",
-        help="print resolution used to size the image in pixels (default: 300)",
+        "--png", action="store_true",
+        help="write one PNG per id instead of a PDF",
+    )
+    p_generate.add_argument(
+        "--size-cm", type=float, default=None, metavar="CM",
+        help=f"--png only: physical edge length (default: {DEFAULT_PNG_SIZE_CM:g})",
+    )
+    p_generate.add_argument(
+        "--dpi", type=int, default=None, metavar="DPI",
+        help=f"--png only: print resolution (default: {DEFAULT_PNG_DPI})",
     )
     p_generate.set_defaults(func=cmd_generate)
