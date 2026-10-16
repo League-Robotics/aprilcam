@@ -1,9 +1,12 @@
 ---
 id: '004'
 title: Solver, good-enough metric, next hint, and status record
-status: open
-use-cases: [SUC-001, SUC-003]
-depends-on: ["003"]
+status: done
+use-cases:
+- SUC-001
+- SUC-003
+depends-on:
+- '003'
 github-issue: ''
 issue: charuco-board-intrinsics-calibration-as-a-daemon-workflow.md
 completes_issue: true
@@ -18,11 +21,11 @@ Implement the solver and the good-enough evaluation, plus the single status reco
 
 ## Acceptance Criteria
 
-- [ ] `LensSolver.solve(views, image_size)` returns a result with camera_matrix, dist_coeffs, rms_px, fx, hfov_deg, and None until >= 6 usable views.
-- [ ] `evaluate(views)` returns residual_px (None below MIN_VIEWS = 12), correction_px, and `good` = rms < 0.6 px and residual < 4 px; half-sample draws are seeded deterministically.
-- [ ] `next_hint(coverage, tilt_dirs, tilted, view_count)` reproduces the prototype rules: <4 views -> hold board high/tilted over centre; missing corner regions first (with a tilt direction), then missing tilt directions, then edges, then more tilted views, else keep sweeping.
-- [ ] `IntrinsicsStatus` (frozen kw_only dataclass in `intrinsics/interfaces.py`, cv2-free) carries every field listed in Architecture Decision 6, including `banner` (`show_board`/`keep_going`/`good_enough`) derived in one place; `IntrinsicsFinishResult` carries installed flag, reason, final status and lens summary.
-- [ ] A plausibility gate (focal length vs frame width, loose band, not the single-view |k1| bounds) rejects an implausible full solve.
+- [x] `LensSolver.solve(views, image_size)` returns a result with camera_matrix, dist_coeffs, rms_px, fx, hfov_deg, and None until >= 6 usable views.
+- [x] `evaluate(views)` returns residual_px (None below MIN_VIEWS = 12), correction_px, and `good` = rms < 0.6 px and residual < 4 px; half-sample draws are seeded deterministically.
+- [x] `next_hint(coverage, tilt_dirs, tilted, view_count)` reproduces the prototype rules: <4 views -> hold board high/tilted over centre; missing corner regions first (with a tilt direction), then missing tilt directions, then edges, then more tilted views, else keep sweeping.
+- [x] `IntrinsicsStatus` (frozen kw_only dataclass in `intrinsics/interfaces.py`, cv2-free) carries every field listed in Architecture Decision 6, including `banner` (`show_board`/`keep_going`/`good_enough`) derived in one place; `IntrinsicsFinishResult` carries installed flag, reason, final status and lens summary.
+- [x] A plausibility gate (focal length vs frame width, loose band, not the single-view |k1| bounds) rejects an implausible full solve.
 
 ## Implementation Plan
 

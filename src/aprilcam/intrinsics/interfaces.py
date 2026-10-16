@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import enum
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 #: Environment variable that overrides the default board spec.
@@ -145,3 +145,95 @@ class CoverageSummary:
     #: Trusted tilted views by direction: keys N, E, S, W.
     tilt_directions: dict
     tilted_count: int
+
+
+# ---- solver results and the one status record -------------------------------
+
+#: Banner states shown to the person holding the board.
+BANNER_SHOW_BOARD = "show_board"
+BANNER_KEEP_GOING = "keep_going"
+BANNER_GOOD_ENOUGH = "good_enough"
+
+#: Session states.
+STATE_COLLECTING = "collecting"
+STATE_FINISHED = "finished"
+STATE_ABORTED = "aborted"
+STATE_FAILED = "failed"
+
+
+def derive_banner(*, board_visible: bool, view_count: int, good: bool) -> str:
+    """The one place the banner is decided; sessions call this, renderers read it."""
+    if good:
+        return BANNER_GOOD_ENOUGH
+    if view_count == 0 and not board_visible:
+        return BANNER_SHOW_BOARD
+    return BANNER_KEEP_GOING
+
+
+@dataclass(frozen=True, kw_only=True)
+class LensSolution:
+    """Result of one ``cv2.calibrateCamera`` solve (k3 fixed)."""
+
+    camera_matrix: tuple[tuple[float, ...], ...]
+    dist_coeffs: tuple[float, ...]
+    image_size: tuple[int, int]
+    rms_px: float
+    fx: float
+    hfov_deg: float
+    view_count: int
+    #: ``None`` when plausible, else why the solve was rejected.
+    plausibility_error: Optional[str] = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class LensEvaluation:
+    """Good-enough verdict for a set of views."""
+
+    solution: LensSolution
+    rms_px: float
+    #: Half-sample mapping residual; ``None`` below MIN_VIEWS.
+    residual_px: Optional[float]
+    #: Size of the undistortion correction vs no lens model.
+    correction_px: float
+    good: bool
+
+
+@dataclass(frozen=True, kw_only=True)
+class IntrinsicsStatus:
+    """The single status record every renderer (TUI, GUI, MCP, CLI) reads."""
+
+    camera: str
+    state: str = STATE_COLLECTING
+    board_spec: Optional[str] = None
+    layout: BoardLayout = BoardLayout.UNKNOWN
+    image_size: Optional[tuple[int, int]] = None
+    board_visible: bool = False
+    view_count: int = 0
+    tilted_count: int = 0
+    #: 3x3 region counts keyed NW, N, NE, W, C, E, SW, S, SE.
+    cell_coverage: dict = field(default_factory=dict)
+    #: Trusted tilted views keyed N, E, S, W.
+    tilt_coverage: dict = field(default_factory=dict)
+    rms_px: Optional[float] = None
+    residual_px: Optional[float] = None
+    correction_px: Optional[float] = None
+    fx: Optional[float] = None
+    hfov_deg: Optional[float] = None
+    good: bool = False
+    banner: str = BANNER_SHOW_BOARD
+    next_hint: Optional[str] = None
+    last_reject: Optional[str] = None
+    errors: tuple[str, ...] = ()
+    started_at: float = 0.0
+    solved_at: Optional[float] = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class IntrinsicsFinishResult:
+    """Outcome of finishing a session: did a lens model get installed."""
+
+    installed: bool
+    reason: Optional[str]
+    status: IntrinsicsStatus
+    #: Summary of the solved lens (matrix, distortion, fx, hfov, rms...), if any.
+    lens: Optional[dict] = None

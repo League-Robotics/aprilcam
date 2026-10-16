@@ -86,6 +86,19 @@ def _mean_shift(a: dict, b: dict) -> Optional[float]:
                           for i in common]))
 
 
+def object_points(spec: BoardSpec, ids: Sequence[int]) -> np.ndarray:
+    """Board-plane (z = 0) positions in metres of ChArUco corner ids.
+
+    The single id -> grid mapping shared by the collector's pose estimate and
+    the solver: corner ``i`` sits at column ``i % (cols-1)``, row
+    ``i // (cols-1)`` of the inner-corner lattice.
+    """
+    inner = spec.cols - 1
+    sq = spec.square_mm / 1000.0
+    return np.array([[((i % inner) + 1) * sq, ((i // inner) + 1) * sq, 0.0]
+                     for i in ids], dtype=np.float64)
+
+
 class ViewCollector:
     """Per-session decision maker over :class:`BoardDetection` records."""
 
@@ -205,11 +218,7 @@ class ViewCollector:
     # ---- pose ---------------------------------------------------------------
 
     def _object_points(self, ids: Sequence[int]) -> np.ndarray:
-        """Board-plane (z = 0) positions in metres of ChArUco corner ids."""
-        inner = self._spec.cols - 1
-        sq = self._spec.square_mm / 1000.0
-        return np.array([[((i % inner) + 1) * sq, ((i // inner) + 1) * sq, 0.0]
-                         for i in ids], dtype=np.float64)
+        return object_points(self._spec, ids)
 
     def _pose(self, board: BoardDetection, w: int, h: int):
         """``(tilt_deg, azimuth_deg, confident)`` from IPPE with a guessed K."""
