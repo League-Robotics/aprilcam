@@ -659,6 +659,8 @@ def _calibration_result_to_proto(result: CalibrationResult) -> aprilcam_v2_pb2.C
         msg.camera_nadir.CopyFrom(_world_point_to_proto(result.camera_nadir))
     msg.notes.extend(result.notes)
     msg.helpful_missing_ids.extend(result.helpful_missing_ids)
+    msg.leave_one_out_ids.extend(i for i, _ in result.leave_one_out_cm)
+    msg.leave_one_out_cm.extend(cm for _, cm in result.leave_one_out_cm)
     return msg
 
 

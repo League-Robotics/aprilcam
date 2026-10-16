@@ -553,6 +553,42 @@ async def test_calibrate_exposes_lens_model_source_and_warning(tmp_path):
     assert structured["lens_warning"] is None
 
 
+async def test_calibrate_exposes_pose_provenance_and_leave_one_out(tmp_path):
+    from aprilcam.types import WorldPoint
+
+    outcome = CalibrationResult(
+        succeeded=True, matched_ids=(1, 2, 3), missing_ids=(), method="pose",
+        confidence="full", corner_count=12, reprojection_error_px=0.3,
+        reprojection_error_cm=0.1, scale_agreement=1.01, angular_spread_deg=40.0,
+        camera_height_cm=120.0, camera_nadir=WorldPoint(1.0, 2.0), camera_tilt_deg=5.0,
+        leave_one_out_worst_id=2, leave_one_out_worst_cm=0.4,
+        leave_one_out_cm=((1, 0.1), (2, 0.4), (3, 0.2)),
+    )
+    server, _ = _build(_FakeDaemon(calibration_result=outcome), tmp_path)
+
+    structured = (await _call(server, "calibrate", {"camera": "c"})).root.structuredContent
+
+    assert structured["method"] == "pose" and structured["confidence"] == "full"
+    assert structured["camera_height_cm"] == 120.0
+    assert structured["camera_nadir"] == {"x": 1.0, "y": 2.0}
+    assert structured["leave_one_out_worst_id"] == 2
+    assert [list(r) for r in structured["leave_one_out_cm"]] == [[1, 0.1], [2, 0.4], [3, 0.2]]
+
+
+async def test_get_calibration_exposes_pose_fields(tmp_path):
+    cal = Calibration(
+        stale=False, calibrated_at=1.0, playfield="f", method="pose", confidence="reduced",
+        camera_height_cm=100.0, camera_nadir_x_cm=1.0, camera_nadir_y_cm=2.0,
+        camera_tilt_deg=3.0, reprojection_error_px=0.2, corner_count=8, scale_agreement=1.0,
+    )
+    server, _ = _build(_FakeDaemon(calibration=cal), tmp_path)
+
+    structured = (await _call(server, "get_calibration", {"camera": "c"})).root.structuredContent["result"]
+
+    assert structured["method"] == "pose" and structured["confidence"] == "reduced"
+    assert structured["camera_nadir_x_cm"] == 1.0 and structured["corner_count"] == 8
+
+
 # ---------------------------------------------------------------------------
 # daemon parameter -- AC: late-binding, per-call override of the session default
 # ---------------------------------------------------------------------------

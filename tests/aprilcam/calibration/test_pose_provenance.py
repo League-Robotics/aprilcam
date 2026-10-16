@@ -84,6 +84,7 @@ def test_calibration_result_proto_round_trip():
         camera_height_cm=100.0, camera_nadir=WorldPoint(1.5, 2.5), camera_tilt_deg=3.0,
         notes=("a", "b"), helpful_missing_ids=(7, 9), leave_one_out_worst_id=4,
         leave_one_out_worst_cm=0.8, layout_extent_ratio=0.5,
+        leave_one_out_cm=((1, 0.25), (4, 0.8)),
     )
     assert calibration_result_from_proto(_calibration_result_to_proto(full)) == full
     bare = CalibrationResult(succeeded=False, matched_ids=(), missing_ids=(1,))

@@ -182,7 +182,8 @@ def add_subparser(sub: "argparse._SubParsersAction") -> None:
     """Wire ``intrinsics`` into ``cli/camera.py``'s ``camera`` subparsers."""
     p = sub.add_parser(
         "intrinsics",
-        help="calibrate lens intrinsics with a ChArUco board (sprint 044)",
+        aliases=["lens"],
+        help="measure the lens model with a ChArUco board (alias: 'camera lens'; sprint 044)",
     )
     p.add_argument("camera", nargs="+", help="camera name(s) (slug or persistent number)")
     p.add_argument("--board", default=None, metavar="SPEC",

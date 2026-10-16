@@ -181,6 +181,10 @@ class CalibrationResult:
     """That marker's leave-one-out residual, in cm."""
     layout_extent_ratio: Optional[float] = None
     """Minor/major extent of the marker layout (low = nearly collinear)."""
+    leave_one_out_cm: Tuple[Tuple[int, float], ...] = ()
+    """Per-marker leave-one-out residual as ``((marker_id, cm), ...)`` sorted
+    by id: how far each marker lands from where the pose fit to all the
+    *others* places it. Empty below 3 markers or on a non-pose result."""
 
 
 @dataclass(frozen=True, kw_only=True)

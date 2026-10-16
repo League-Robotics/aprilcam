@@ -318,6 +318,23 @@ async def test_golden_path_against_a_fake_daemon(tmp_path):
             # sprint 044: which lens model the call applied.
             "lens_model_source": "none",
             "lens_warning": None,
+            # sprint 045: pose provenance, all absent for this fake result.
+            "method": None,
+            "method_reason": None,
+            "confidence": None,
+            "corner_count": None,
+            "reprojection_error_px": None,
+            "scale_agreement": None,
+            "angular_spread_deg": None,
+            "camera_height_cm": None,
+            "camera_nadir": None,
+            "camera_tilt_deg": None,
+            "notes": [],
+            "helpful_missing_ids": [],
+            "leave_one_out_worst_id": None,
+            "leave_one_out_worst_cm": None,
+            "layout_extent_ratio": None,
+            "leave_one_out_cm": [],
         }
 
         # -- perceive again: tags, then a deskewed frame --

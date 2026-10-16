@@ -203,7 +203,7 @@ def test_calibrate_success_reports_no_intrinsics_note_when_not_applicable(capsys
     assert "intrinsics" not in out
 
 
-def test_calibrate_success_with_four_or_fewer_matched_ids_prints_the_dof_caveat(capsys):
+def test_calibrate_success_with_four_or_fewer_matched_ids_no_longer_prints_the_blanket_caveat(capsys):
     daemon = _FakeDaemon(result=_result(matched_ids=(1, 2, 3, 4)))
     discovery = _FakeDiscovery(daemon=daemon)
 
@@ -211,8 +211,8 @@ def test_calibrate_success_with_four_or_fewer_matched_ids_prints_the_dof_caveat(
 
     assert code == 0
     err = capsys.readouterr().err
-    assert "degrees-of-freedom-limited" in err
-    assert "reprojection_error_cm" in err
+    # Sprint 045: replaced by the honest confidence labels.
+    assert "degrees-of-freedom-limited" not in err
 
 
 def test_calibrate_success_with_more_than_four_matched_ids_omits_the_dof_caveat(capsys):
@@ -446,3 +446,126 @@ def test_with_intrinsics_help_documents_the_no_board_fallback():
     calibrate_cli.add_subparser(sub)
     help_text = sub.choices["calibrate"].format_help()
     assert "no-board fallback" in help_text
+
+
+# ---------------------------------------------------------------------------
+# Sprint 045 ticket 007: pose provenance reporting
+# ---------------------------------------------------------------------------
+
+from aprilcam.types import WorldPoint  # noqa: E402
+
+
+def _pose_result(**overrides) -> CalibrationResult:
+    base = dict(
+        succeeded=True,
+        matched_ids=(1, 2, 3, 4, 5),
+        missing_ids=(),
+        reprojection_error_cm=0.12,
+        lens_model_source="measured",
+        method="pose",
+        confidence="full",
+        corner_count=20,
+        reprojection_error_px=0.31,
+        scale_agreement=1.004,
+        angular_spread_deg=48.2,
+        camera_height_cm=150.0,
+        camera_nadir=WorldPoint(3.5, -4.0),
+        camera_tilt_deg=7.5,
+        leave_one_out_worst_id=3,
+        leave_one_out_worst_cm=0.42,
+        leave_one_out_cm=((1, 0.1), (2, 0.2), (3, 0.42)),
+    )
+    base.update(overrides)
+    return CalibrationResult(**base)
+
+
+def _run(result, **argv):
+    daemon = _FakeDaemon(result=result)
+    return calibrate_cli.cmd_calibrate(
+        _args(**argv), discovery_factory=lambda: _FakeDiscovery(daemon=daemon)
+    )
+
+
+def test_pose_success_prints_every_number(capsys):
+    assert _run(_pose_result()) == 0
+    cap = capsys.readouterr()
+    for text in (
+        "method: pose", "confidence: full", "corners used: 20", "0.31 px", "0.12 cm",
+        "scale agreement: 1.004", "angular spread: 48.2 deg", "lens model: measured",
+        "height 150.0 cm", "(3.5, -4.0) cm", "tilt 7.5 deg",
+        "leave-one-out worst: marker 3, 0.42 cm",
+    ):
+        assert text in cap.out, text
+    assert "marker 1:" not in cap.out  # table only with --verbose
+    assert "degrees-of-freedom" not in cap.err
+    assert "warning" not in cap.err
+
+
+def test_pose_success_verbose_prints_the_per_marker_table(capsys):
+    assert _run(_pose_result(), verbose=True) == 0
+    out = capsys.readouterr().out
+    assert "marker 1: 0.10 cm" in out and "marker 3: 0.42 cm" in out
+
+
+def test_reduced_and_helpful_missing_warn_on_stderr(capsys):
+    result = _pose_result(
+        confidence="reduced", notes=("two markers: camera position is poorly constrained",),
+        helpful_missing_ids=(7, 9),
+    )
+    assert _run(result) == 0
+    cap = capsys.readouterr()
+    assert "confidence: reduced" in cap.out
+    assert "warning: calibration confidence is reduced" in cap.err
+    assert "two markers: camera position" in cap.err
+    assert "helpful marker id(s) not detected: 7, 9" in cap.err
+
+
+def test_low_confidence_warns_with_cluster_note(capsys):
+    result = _pose_result(confidence="low", notes=("markers span only 4.0 deg",))
+    assert _run(result) == 0
+    err = capsys.readouterr().err
+    assert "confidence is low" in err and "markers span only 4.0 deg" in err
+
+
+def test_centre_point_fallback_prints_method_and_reason(capsys):
+    result = CalibrationResult(
+        succeeded=True, matched_ids=(1, 2, 3, 4), missing_ids=(),
+        reprojection_error_cm=0.2, method="centre-point",
+        method_reason="no measured lens model", confidence="reduced",
+    )
+    assert _run(result) == 0
+    cap = capsys.readouterr()
+    assert "method: centre-point (no measured lens model)" in cap.out
+    assert "no measured lens model" in cap.err
+    assert "degrees-of-freedom" not in cap.err
+
+
+def test_gate_failure_names_gate_threshold_and_measured_values(capsys):
+    reason = (
+        "pose calibration rejected: corner reprojection rms 2.100 px exceeds the 1.500 px "
+        "acceptance threshold (worst leave-one-out: marker 3, 4.00 cm from where the others place it)"
+    )
+    result = _pose_result(
+        succeeded=False, reason=reason, reprojection_error_px=2.1, confidence=None
+    )
+    assert _run(result) == 1
+    err = capsys.readouterr().err
+    assert "exceeds the 1.500 px acceptance threshold" in err
+    assert "reprojection error: 2.10 px" in err
+    assert "marker 3" in err
+
+
+def test_missing_ids_failure_wording_unchanged(capsys):
+    result = CalibrationResult(succeeded=False, matched_ids=(1,), missing_ids=(2, 5))
+    assert _run(result) == 1
+    assert "missing ArUco id(s): 2, 5" in capsys.readouterr().err
+
+
+def test_camera_lens_alias_parses_like_intrinsics():
+    import aprilcam.cli as cli_module
+
+    parser = cli_module._build_parser()
+    a = parser.parse_args(["camera", "lens", "cam1", "--no-gui"])
+    b = parser.parse_args(["camera", "intrinsics", "cam1", "--no-gui"])
+    assert a.func is b.func
+    assert a.camera == b.camera == ["cam1"] and a.no_gui and b.no_gui

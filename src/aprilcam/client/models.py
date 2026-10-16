@@ -487,6 +487,7 @@ def calibration_result_from_proto(msg: aprilcam_v2_pb2.CalibrationResult) -> Cal
         ),
         notes=tuple(msg.notes),
         helpful_missing_ids=tuple(msg.helpful_missing_ids),
+        leave_one_out_cm=tuple(zip(msg.leave_one_out_ids, msg.leave_one_out_cm)),
     )
 
 

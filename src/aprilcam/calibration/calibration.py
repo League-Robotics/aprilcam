@@ -1575,6 +1575,7 @@ class Calibrator(_CalibratorBase):
             leave_one_out_worst_id=worst[0] if worst else None,
             leave_one_out_worst_cm=worst[1] if worst else None,
             layout_extent_ratio=extent,
+            leave_one_out_cm=tuple(sorted((int(k), float(v)) for k, v in loo.items())),
         )
         label, gate_notes, fail_reason = gates.classify(
             used,

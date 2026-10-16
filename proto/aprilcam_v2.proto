@@ -939,6 +939,10 @@ message CalibrationResult {
   optional int32 leave_one_out_worst_id = 23;
   optional double leave_one_out_worst_cm = 24;
   optional double layout_extent_ratio = 25;
+  // Sprint 045 ticket 007: per-marker leave-one-out residuals, as parallel
+  // arrays (same length, same order).
+  repeated int32 leave_one_out_ids = 26;
+  repeated double leave_one_out_cm = 27;
 }
 
 // A camera's established pixel<->world mapping. Mirrors
