@@ -1,10 +1,12 @@
 ---
 id: 009
 title: Parallax from the pose-derived camera position
-status: open
+status: done
 use-cases:
 - SUC-005
-depends-on: ['005', '006']
+depends-on:
+- '005'
+- '006'
 github-issue: ''
 issue: pose-based-playfield-calibration-with-marker-corners-and-measured-lens.md
 completes_issue: true
@@ -33,19 +35,19 @@ itself is unchanged and stays the fallback for centre-point fields).
 
 ## Acceptance Criteria
 
-- [ ] With a fresh pose calibration, `_camera_geometry_for(slug)` returns the
+- [x] With a fresh pose calibration, `_camera_geometry_for(slug)` returns the
       pose nadir/height even when no `camera_position` is configured.
-- [ ] A stale pose calibration, a centre-point calibration, or none falls
+- [x] A stale pose calibration, a centre-point calibration, or none falls
       back to the configured value, then the sentinel (existing tests keep
       passing).
-- [ ] Camera-2 numbers reproduced: synthetic calibration at 144 cm over
+- [x] Camera-2 numbers reproduced: synthetic calibration at 144 cm over
       nadir (3.47, -2.85); a tag registered with `mount_z` ~11 cm is
       projected to the floor ~5 cm inboard exactly as with the configured
       value (compare against `geometry.project_tag_to_field_plane` with the
       same inputs), end to end through `DetectionEngine`.
-- [ ] The "no camera located" warning no longer fires for a pose-calibrated
+- [x] The "no camera located" warning no longer fires for a pose-calibrated
       camera.
-- [ ] `camera locate` prints the pose-vs-solved comparison when applicable.
+- [x] `camera locate` prints the pose-vs-solved comparison when applicable.
 
 ## Implementation Plan
 

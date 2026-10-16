@@ -2113,6 +2113,57 @@ def test_camera_geometry_for_configured_camera_returns_its_real_nadir_and_height
     assert height_cm == 128.25
 
 
+def _pose_cal(*, method="pose", stale=False):
+
+    return Calibration(
+        stale=stale,
+        calibrated_at=1.0,
+        playfield="main-playfield",
+        homography=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+        matched_ids=(1,),
+        method=method,
+        camera_height_cm=144.0,
+        camera_nadir_x_cm=3.47,
+        camera_nadir_y_cm=-2.85,
+    )
+
+
+def test_camera_geometry_for_precedence_pose_then_config_then_sentinel(service, held_camera):
+    """Sprint 045 ticket 009: fresh pose > configured camera_position >
+    sentinel; stale/centre-point pose calibrations fall through."""
+    _, slug, _ = held_camera
+    pose = (WorldPoint(x=3.47, y=-2.85), 144.0)
+    sentinel = (WorldPoint(x=0.0, y=0.0), 0.0)
+    configured = (WorldPoint(x=1.0, y=2.0), 100.0)
+
+    # Fresh pose, no configured position.
+    service._calibrations[slug] = _pose_cal()
+    assert service._camera_geometry_for(slug) == pose
+    assert service._any_camera_located() is True
+
+    # Fresh pose still wins over a configured position.
+    service.set_camera_config(
+        CameraConfig(
+            name=slug, playfield="main-playfield", settings={},
+            camera_position=CameraPosition(nadir=configured[0], height_cm=configured[1]),
+        )
+    )
+    assert service._camera_geometry_for(slug) == pose
+
+    # Stale pose and centre-point fall back to the configured value.
+    service._calibrations[slug] = _pose_cal(stale=True)
+    assert service._camera_geometry_for(slug) == configured
+    service._calibrations[slug] = _pose_cal(method="centre-point")
+    assert service._camera_geometry_for(slug) == configured
+
+    # ...and without a configured value, to the sentinel.
+    service.set_camera_config(CameraConfig(name=slug, playfield="main-playfield", settings={}))
+    assert service._camera_geometry_for(slug) == sentinel
+    service._calibrations.pop(slug)
+    assert service._camera_geometry_for(slug) == sentinel
+    assert service._any_camera_located() is False
+
+
 # ---------------------------------------------------------------------------
 # _any_camera_located / _mount_z_applied (ticket 030-004, SUC-004) -- pure,
 # hand-picked-geometry unit tests of the two new reads register_tag's

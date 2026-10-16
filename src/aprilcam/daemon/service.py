@@ -1882,7 +1882,7 @@ class DaemonService(Daemon):
             return (
                 f"mount_z={params.mount_z:g} for {tag.family.value} {tag.number} is "
                 "currently inert: no camera this daemon knows about has been "
-                "located yet (CameraConfig.camera_position), so the parallax "
+                "located yet (no fresh pose calibration and no CameraConfig.camera_position), so the parallax "
                 "correction has nowhere to apply -- mount_x/mount_y/mount_yaw_rad "
                 "still apply normally. Ask your operator to run `aprilcam camera "
                 "locate` against the camera(s) that will observe this tag, then "
@@ -1954,6 +1954,15 @@ class DaemonService(Daemon):
         or via ``aprilcam camera locate``, sprint 029 ticket 003)
         exactly like every other camera setting.
 
+        **Sprint 045 ticket 009 (precedence)**: a fresh *pose*
+        calibration (``Calibration.camera_geometry()`` -- method
+        ``"pose"``, not stale, height and nadir set) wins over the
+        configured ``camera_position``: the pose solve measures the
+        camera centre directly from the marker corners, so it is
+        fresher than an operator-asserted or ``camera locate``-solved
+        value. A stale pose calibration, a centre-point calibration, or
+        none yields ``None`` there and the rules below apply unchanged.
+
         A camera with no known configuration at all (``config is
         None``) or one that has never been located (``config.
         camera_position is None``) falls back to the exact pre-029
@@ -1976,13 +1985,18 @@ class DaemonService(Daemon):
         """
         with self._lock:
             config = self._camera_configs.get(slug)
+            calibration = self._calibrations.get(slug)
+        pose = calibration.camera_geometry() if calibration is not None else None
+        if pose is not None:
+            return pose
         if config is None or config.camera_position is None:
             return WorldPoint(x=0.0, y=0.0), 0.0
         return config.camera_position.nadir, config.camera_position.height_cm
 
     def _any_camera_located(self) -> bool:
         """Whether **any** camera this service knows about currently
-        has real, solved geometry rather than :meth:`_camera_geometry_for`'s
+        has real geometry (a fresh pose calibration or a located
+        ``camera_position``, sprint 045 ticket 009) rather than :meth:`_camera_geometry_for`'s
         pre-029 stopgap (ticket 030-004, SUC-004).
 
         Reuses :meth:`_camera_geometry_for` itself, once per configured
@@ -2001,7 +2015,7 @@ class DaemonService(Daemon):
         particular camera is.
         """
         with self._lock:
-            slugs = tuple(self._camera_configs.keys())
+            slugs = tuple({*self._camera_configs.keys(), *self._calibrations.keys()})
         return any(self._camera_geometry_for(slug)[1] > 0.0 for slug in slugs)
 
     def _mount_z_applied(self, mount_z: float) -> bool:

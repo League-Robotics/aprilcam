@@ -1782,6 +1782,56 @@ def test_registered_mount_z_uses_the_injected_camera_geometry_lookup_for_paralla
     assert corrected_record.world.x != pytest.approx(raw_record.world.x)
 
 
+def test_camera_2_pose_geometry_projects_mounted_tag_about_5cm_inboard():
+    """Sprint 045 ticket 009: camera 2 located at 144 cm over nadir
+    (3.47, -2.85) via a synthetic *pose* calibration (geometry resolved
+    through ``Calibration.camera_geometry()``, the rule
+    ``DaemonService._camera_geometry_for`` applies); a tag registered with
+    mount_z ~11 cm lands ~5 cm inboard, equal to
+    ``project_tag_to_field_plane`` with the same inputs."""
+    from dataclasses import replace
+
+    from aprilcam.calibration.geometry import project_tag_to_field_plane
+
+    calibration = replace(
+        _fixture_calibration(),
+        method="pose",
+        stale=False,
+        camera_height_cm=144.0,
+        camera_nadir_x_cm=3.47,
+        camera_nadir_y_cm=-2.85,
+    )
+    geometry = calibration.camera_geometry()
+    assert geometry is not None
+    nadir, height_cm = geometry
+    tag = TagId(family=TagFamily.APRILTAG, number=7)
+    hit = _detection_at(TagFamily.APRILTAG, 7, center_world=(50.0, 37.5), yaw_rad=0.0)
+    mount = MountParameters(mount_z=11.0)
+
+    raw_engine = DetectionEngine(
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]]),
+        calibration_lookup=lambda slug: calibration,
+        confirmation_streak=1,
+    )
+    raw = raw_engine.run_burst("c2-raw", _camera("c2-raw", frames=[_blank_frame()])).tags[0]
+    engine = DetectionEngine(
+        detector_factory=lambda _slug: _ScriptedDetector([[hit]]),
+        calibration_lookup=lambda slug: calibration,
+        mount_lookup=lambda t: mount if t == tag else None,
+        camera_geometry_lookup=lambda slug: calibration.camera_geometry() or (WorldPoint(x=0.0, y=0.0), 0.0),
+        confirmation_streak=1,
+    )
+    corrected = engine.run_burst("c2", _camera("c2", frames=[_blank_frame()])).tags[0]
+
+    expected = project_tag_to_field_plane(
+        raw.world, mount_z_cm=mount.mount_z, camera_ground_position=nadir, camera_height_cm=height_cm
+    )
+    assert corrected.world.x == pytest.approx(expected.x, abs=1e-9)
+    assert corrected.world.y == pytest.approx(expected.y, abs=1e-9)
+    shift = ((corrected.world.x - raw.world.x) ** 2 + (corrected.world.y - raw.world.y) ** 2) ** 0.5
+    assert 3.0 < shift < 7.0
+
+
 def test_default_camera_geometry_lookup_makes_mount_z_inert_against_a_live_camera():
     """The explicitly-provisional stopgap in effect (no
     ``camera_geometry_lookup`` injected): a registered ``mount_z`` has
