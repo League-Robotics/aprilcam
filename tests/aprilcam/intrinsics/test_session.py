@@ -269,3 +269,70 @@ def test_session_fills_and_clears_board_outline():
     assert session.step()
     st = session.status()
     assert st.board_outline is None and not st.board_visible
+
+
+# ---- good-enough hysteresis ---------------------------------------------------
+
+
+def _ev(good, residual=1.0, rms=0.3, plausibility=None):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        good=good, residual_px=residual, rms_px=rms, correction_px=1.0,
+        solution=SimpleNamespace(fx=800.0, hfov_deg=60.0,
+                                 plausibility_error=plausibility))
+
+
+def _latched(session, ev):
+    session._publish_eval(ev)
+    st = session.status()
+    return st.good, st.good_now
+
+
+def test_good_latches_only_on_second_consecutive_pass():
+    s = IntrinsicsSession("cam", SPEC, Feed([]))
+    assert _latched(s, _ev(True)) == (False, True)
+    assert _latched(s, _ev(False, residual=4.5)) == (False, False)
+    assert _latched(s, _ev(True)) == (False, True)   # streak was broken
+    assert _latched(s, _ev(True)) == (True, True)    # third good overall latches
+
+
+def test_latched_good_survives_one_bad_solve():
+    s = IntrinsicsSession("cam", SPEC, Feed([]))
+    _latched(s, _ev(True))
+    _latched(s, _ev(True))
+    assert _latched(s, _ev(False, residual=9.0)) == (True, False)
+    # a mildly-over (not 1.5x) solve never counts toward clearing
+    _latched(s, _ev(False, residual=5.0))
+    _latched(s, _ev(False, residual=5.0))
+    assert s.status().good
+    # a clearly-bad solve followed by a pass resets the clearing streak
+    _latched(s, _ev(False, residual=9.0))
+    _latched(s, _ev(True))
+    assert _latched(s, _ev(False, residual=9.0))[0] is True
+
+
+def test_two_consecutive_clearly_bad_solves_clear_good():
+    s = IntrinsicsSession("cam", SPEC, Feed([]))
+    _latched(s, _ev(True))
+    _latched(s, _ev(True))
+    assert _latched(s, _ev(False, residual=6.5))[0] is True
+    assert _latched(s, _ev(False, residual=6.5)) == (False, False)
+    assert s.status().banner != BANNER_GOOD_ENOUGH
+    # rms and implausibility also count as clearly bad
+    s2 = IntrinsicsSession("cam", SPEC, Feed([]))
+    _latched(s2, _ev(True))
+    _latched(s2, _ev(True))
+    _latched(s2, _ev(False, rms=0.95))
+    assert _latched(s2, _ev(False, plausibility="bad"))[0] is False
+
+
+def test_finish_install_refused_when_latched_good_false(frames):
+    session = IntrinsicsSession("cam", SPEC, Feed(frames))
+    drive(session)
+    session._good_latched = False
+    session._pass_streak = -10  # keep the finish-time solve from latching
+    cb = []
+    result = session.finish(True, install_cb=cb.append)
+    assert not result.installed and not cb
+    assert "not good enough" in result.reason

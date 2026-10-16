@@ -122,6 +122,8 @@ class ViewVerdict:
     tilt_deg: Optional[float] = None
     azimuth_deg: Optional[float] = None
     pose_confident: bool = False
+    #: Human-readable specifics for the reject (e.g. "blurry (0.31 of best)").
+    detail: Optional[str] = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -221,7 +223,11 @@ class IntrinsicsStatus:
     correction_px: Optional[float] = None
     fx: Optional[float] = None
     hfov_deg: Optional[float] = None
+    #: Latched verdict (hysteresis over solves): what the banner, finish and
+    #: ``--install`` use.
     good: bool = False
+    #: Raw verdict of the most recent solve, before hysteresis.
+    good_now: Optional[bool] = None
     banner: str = BANNER_SHOW_BOARD
     next_hint: Optional[str] = None
     last_reject: Optional[str] = None

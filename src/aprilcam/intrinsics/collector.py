@@ -40,9 +40,27 @@ POSE_AMBIGUITY_RATIO = 1.3
 #: Mean corner displacement vs the previous frame above which the board is
 #: moving. 2.5 px was far too strict on real cameras; 12 px works (gotcha 6).
 MAX_MOTION_PX = 12.0
-#: Absolute Laplacian variance does not transfer between sensors, so blur is
-#: judged against this fraction of the camera's own running best (gotcha 5).
-BLUR_FRACTION = 0.45
+#: Sharpness is the contrast-normalised focus measure
+#: ``var(Laplacian(roi)) / var(roi intensity)``: lighting scales both terms
+#: by the same contrast squared, so a dim board at the frame edge scores like
+#: a bright one in the centre (gotcha 5; the raw Laplacian variance rejected
+#: sharp boards at the darker, softer edges as "blurry"). A board is blurry
+#: when its score is below this fraction of the camera's own running
+#: :data:`BLUR_BEST_PERCENTILE` over the last :data:`BLUR_WINDOW` offered
+#: boards. Synthetic experiment (tests/aprilcam/intrinsics/boards.py board,
+#: tilt 25 deg): sharp centre 0.477, sharp corner 0.837 (smaller board, more
+#: edges per pixel), identical at 100 % and 40 % brightness; Gaussian blur
+#: sigma 2 / 2.5 / 3 scores 0.008 / 0.005 / 0.004 (centre) and 0.016 / 0.012 /
+#: 0.009 (corner). Worst sharp-vs-best ratio is 0.477/0.837 = 0.57, worst
+#: blurred ratio is 0.016/0.837 = 0.02, so 0.30 sits well inside the gap.
+BLUR_FRACTION = 0.30
+#: The bar is this percentile of recent scores, not the all-time maximum, so
+#: one lucky frame does not set it.
+BLUR_BEST_PERCENTILE = 80.0
+#: Number of most recent offered boards the percentile is taken over.
+BLUR_WINDOW = 30
+#: No blur rejection until at least this many scores exist.
+BLUR_MIN_SAMPLES = 3
 #: Novel when mean corner shift vs every kept view is at least this...
 MIN_SHIFT_PX = 25.0
 #: ...or the (trusted) tilt differs from every kept view by at least this.
@@ -59,6 +77,8 @@ EDGE_FRACTION = 1 / 3
 ROI_PAD_PX = 10
 #: Common corners needed to compare two observations of the same board.
 MIN_COMMON = 4
+#: Floor on the ROI intensity variance so a flat patch cannot divide by zero.
+_CONTRAST_EPS = 1.0
 
 REGION_NAMES = ("NW", "N", "NE", "W", "C", "E", "SW", "S", "SE")
 
@@ -107,7 +127,7 @@ class ViewCollector:
 
     def __init__(self, spec: BoardSpec) -> None:
         self._spec = spec
-        self._max_sharp = 0.0
+        self._sharp_hist: list[float] = []
         self._prev: list[tuple[np.ndarray, dict]] = []
         self._views: list[KeptView] = []
         self._view_pts: list[dict] = []
@@ -136,10 +156,9 @@ class ViewCollector:
             cen = arr.mean(axis=0)
             moving = self._is_moving(cen, pts)
             sharp = self._sharpness(gray, arr)
-            self._max_sharp = max(self._max_sharp, sharp)
-            blurry = sharp < BLUR_FRACTION * self._max_sharp
+            blur_detail = self._blur_check(sharp)
             cur.append((cen, pts))
-            verdicts.append(self._judge(gray, board, pts, arr, moving, blurry, ts))
+            verdicts.append(self._judge(gray, board, pts, arr, moving, blur_detail, ts))
         self._prev = cur
         return verdicts
 
@@ -168,6 +187,20 @@ class ViewCollector:
         shift = _mean_shift(pts, prev_pts)
         return shift is None or shift > MAX_MOTION_PX
 
+    def _blur_check(self, sharp: float) -> Optional[str]:
+        """Record *sharp*; return a reject detail string if it is blurry."""
+        self._sharp_hist.append(sharp)
+        del self._sharp_hist[:-BLUR_WINDOW]
+        if len(self._sharp_hist) < BLUR_MIN_SAMPLES:
+            return None
+        best = float(np.percentile(self._sharp_hist, BLUR_BEST_PERCENTILE))
+        if best <= 0.0:
+            return None
+        ratio = sharp / best
+        if ratio < BLUR_FRACTION:
+            return f"blurry ({ratio:.2f} of best)"
+        return None
+
     @staticmethod
     def _sharpness(gray, arr: np.ndarray) -> float:
         x0, y0 = np.floor(arr.min(axis=0)).astype(int)
@@ -176,17 +209,20 @@ class ViewCollector:
                    max(0, x0 - ROI_PAD_PX):x1 + ROI_PAD_PX]
         if roi.size == 0:
             return 0.0
-        return float(cv2.Laplacian(roi, cv2.CV_64F).var())
+        lap = float(cv2.Laplacian(roi, cv2.CV_64F).var())
+        contrast = float(roi.astype(np.float64).var())
+        return lap / max(contrast, _CONTRAST_EPS)
 
-    def _judge(self, gray, board, pts, arr, moving, blurry, ts) -> ViewVerdict:
+    def _judge(self, gray, board, pts, arr, moving, blur_detail, ts) -> ViewVerdict:
         n = len(board.ids)
         if n < MIN_CORNERS:
             return ViewVerdict(accepted=False, reason=RejectReason.TOO_FEW_CORNERS,
                                corner_count=n)
         if moving:
             return ViewVerdict(accepted=False, reason=RejectReason.MOVING, corner_count=n)
-        if blurry:
-            return ViewVerdict(accepted=False, reason=RejectReason.BLURRY, corner_count=n)
+        if blur_detail is not None:
+            return ViewVerdict(accepted=False, reason=RejectReason.BLURRY, corner_count=n,
+                               detail=blur_detail)
         h, w = gray.shape[:2]
         pose = self._pose(board, w, h)
         confident = pose is not None and pose[2]

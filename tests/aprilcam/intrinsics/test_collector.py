@@ -156,3 +156,39 @@ def test_no_module_level_state_and_no_frames_kept():
     col = ViewCollector(SPEC)
     _prime(col, render(CEN, 0.5, 35, 90))
     assert not any(hasattr(v, "frame") or hasattr(v, "gray") for v in col.views)
+
+
+def _warm(col, gray, n=4):
+    """Offer *gray* a few times so the sharpness history has samples."""
+    boards = detect(gray)
+    assert len(boards) == 1
+    for i in range(n):
+        v = col.offer(gray, boards, float(i))[0]
+    return v
+
+
+def test_dim_sharp_board_in_corner_accepted_after_bright_centre():
+    col = ViewCollector(SPEC)
+    _warm(col, render(CEN, 0.5, 35, 90))
+    dim = (render((330, 560), 0.7, 30, 200).astype(float) * 0.4).astype("uint8")
+    _warm(col, dim)
+    assert len(col.views) == 2  # the dim corner board was kept, not "blurry"
+
+
+def test_blurred_board_is_rejected_with_ratio_detail():
+    col = ViewCollector(SPEC)
+    sharp = render(CEN, 0.5, 35, 90)
+    _warm(col, sharp)
+    for sigma in (2.0, 3.0):
+        v = _warm(col, cv2.GaussianBlur(sharp, (0, 0), sigma))
+        assert not v.accepted and v.reason is RejectReason.BLURRY
+        assert v.detail.startswith("blurry (") and v.detail.endswith(" of best)")
+
+
+def test_no_blur_rejection_before_three_measurements():
+    col = ViewCollector(SPEC)
+    sharp = render(CEN, 0.5, 35, 90)
+    blurred = cv2.GaussianBlur(sharp, (0, 0), 3.0)
+    boards = detect(blurred)
+    assert col.offer(blurred, boards, 0.0)[0].reason is not RejectReason.BLURRY
+    assert col.offer(blurred, boards, 1.0)[0].reason is not RejectReason.BLURRY

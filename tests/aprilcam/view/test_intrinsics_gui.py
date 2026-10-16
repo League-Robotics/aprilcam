@@ -303,3 +303,40 @@ def test_column_layout_is_fixed_and_image_is_largest_fit():
     assert (fx1 - fx0 == ix1 - ix0) or (fy1 - fy0 == iy1 - iy0)
     # different limit moves nothing in the panel's x geometry
     assert column_layout(960, 140, 960, 800, fs).panel[0::2] == a.panel[0::2]
+
+
+def test_panel_slots_never_overlap_for_longest_strings():
+    from aprilcam.view.intrinsics_model import (
+        LONGEST_COULD_CHANGE, LONGEST_ERROR_NOW, column_layout, fit_font_size,
+        font_sizes, panel_metric_sizes)
+    from aprilcam.view.intrinsics_model import _text_lines
+
+    for screen_w, screen_h, cams in ((1280, 720, 2), (1280, 720, 1), (1920, 1080, 2),
+                                     (800, 600, 2)):
+        fs = font_sizes(screen_h, cams)
+        col_w = screen_w // cams
+        lay = column_layout(0, 120, col_w, screen_h - 150, fs)
+        px0, _, px1, _ = lay.panel
+        err_px, could_px = panel_metric_sizes(px1 - px0 - 4, fs)
+        assert err_px <= fs.metric and could_px <= fs.metric * 2 // 3
+        # the longest strings fit their slot at two lines
+        for text, px, slot in ((LONGEST_ERROR_NOW, err_px, lay.error_now),
+                               (LONGEST_COULD_CHANGE, could_px, lay.could_change)):
+            lines = _text_lines(text, px, px1 - px0 - 4)
+            if screen_w >= 1280:
+                assert lines <= 2
+            assert slot[3] - slot[1] >= lines * px
+        slots = [lay.name, lay.error_now, lay.could_change, lay.tilts[0], lay.message]
+        for lo, hi in zip(slots, slots[1:]):
+            assert lo[3] <= hi[1]
+        assert lay.message[3] <= lay.panel[3]
+
+
+def test_fit_font_size_shrinks_to_fit_and_floors():
+    from aprilcam.view.intrinsics_model import fit_font_size
+
+    text = "x" * 40
+    wide = fit_font_size([text], 2000, 50)
+    narrow = fit_font_size([text], 200, 50)
+    assert wide == 50 and 8 <= narrow < wide
+    assert fit_font_size([text], 1, 50) == 8

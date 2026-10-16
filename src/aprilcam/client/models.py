@@ -593,6 +593,7 @@ def intrinsics_status_from_proto(msg: aprilcam_v2_pb2.IntrinsicsStatus) -> Intri
         fx=opt("fx"),
         hfov_deg=opt("hfov_deg"),
         good=msg.good,
+        good_now=opt("good_now"),
         banner=msg.banner,
         next_hint=opt("next_hint"),
         last_reject=opt("last_reject"),

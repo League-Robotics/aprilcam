@@ -759,7 +759,7 @@ def _intrinsics_status_to_proto(status: IntrinsicsStatus) -> aprilcam_v2_pb2.Int
     for poly in status.board_outline or ():
         msg.board_outline.add().xy.extend(c for pt in poly for c in pt)
     for name in ("board_spec", "rms_px", "residual_px", "correction_px", "fx",
-                 "hfov_deg", "next_hint", "last_reject", "solved_at"):
+                 "hfov_deg", "next_hint", "last_reject", "solved_at", "good_now"):
         value = getattr(status, name)
         if value is not None:
             setattr(msg, name, value)

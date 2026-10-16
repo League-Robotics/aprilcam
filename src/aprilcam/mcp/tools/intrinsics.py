@@ -69,6 +69,7 @@ def _status_to_dict(status: Any) -> dict[str, Any]:
         "fx": _plain(status.fx),
         "hfov_deg": _plain(status.hfov_deg),
         "good": status.good,
+        "good_now": _plain(getattr(status, "good_now", None)),
         "banner": status.banner,
         "next_hint": status.next_hint,
         "last_reject": status.last_reject,
@@ -136,7 +137,9 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         aborted/failed), ``board_visible``, ``view_count``,
         ``tilted_count``, ``cell_coverage`` (3x3 counts keyed NW..SE),
         ``tilt_coverage`` (N/E/S/W), ``rms_px``, ``residual_px``,
-        ``correction_px``, ``fx``, ``hfov_deg``, ``good``,
+        ``correction_px``, ``fx``, ``hfov_deg``, ``good`` (latched: two
+        consecutive passes to set, two clearly bad to clear), ``good_now``
+        (raw verdict of the latest solve),
         ``last_reject`` and ``errors``. Unknown values are null.
 
         Do not stop just because the banner turns green: let the human

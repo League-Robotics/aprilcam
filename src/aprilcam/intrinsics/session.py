@@ -42,7 +42,13 @@ from aprilcam.intrinsics.interfaces import (
     LensEvaluation,
     derive_banner,
 )
-from aprilcam.intrinsics.solver import MIN_SOLVE_VIEWS, LensSolver, next_hint
+from aprilcam.intrinsics.solver import (
+    GOOD_RESIDUAL_PX,
+    GOOD_RMS_PX,
+    MIN_SOLVE_VIEWS,
+    LensSolver,
+    next_hint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +61,13 @@ MAX_READ_FAILURES = 24
 #: How long a finished solver wait blocks before re-checking the stop flag.
 _SOLVER_POLL_S = 0.25
 _JOIN_TIMEOUT_S = 10.0
+
+#: Consecutive passing evaluations needed to latch ``good``.
+GOOD_LATCH_COUNT = 2
+#: Consecutive clearly-bad evaluations needed to clear a latched ``good``.
+GOOD_CLEAR_COUNT = 2
+#: "Clearly bad" is residual/rms beyond this multiple of the good thresholds.
+GOOD_CLEAR_FACTOR = 1.5
 
 RUN_CALIBRATE_NOTE = "installed; run calibrate to apply it"
 
@@ -104,6 +117,9 @@ class IntrinsicsSession:
         self._image_size: Optional[tuple[int, int]] = None
         self._read_failures = 0
         self._solved_count = 0
+        self._good_latched = False
+        self._pass_streak = 0
+        self._bad_streak = 0
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -195,7 +211,8 @@ class IntrinsicsSession:
         reject = None
         if verdicts and not any(v.accepted for v in verdicts):
             first = verdicts[0].reason
-            reject = first.value if first is not None else None
+            reject = (verdicts[0].detail
+                      or (first.value if first is not None else None))
         cov = self._collector.coverage()
         cells = dict(zip(REGION_NAMES, cov.region_counts))
         self._update(
@@ -240,12 +257,37 @@ class IntrinsicsSession:
             self._publish_eval(ev)
         return ev is not None
 
+    def _latch_good(self, ev: LensEvaluation) -> bool:
+        """Hysteresis over successive evaluations (state lives here, not in
+        the pure solver). Latches after :data:`GOOD_LATCH_COUNT` consecutive
+        passes; once latched, clears only after :data:`GOOD_CLEAR_COUNT`
+        consecutive evaluations that are implausible or exceed
+        :data:`GOOD_CLEAR_FACTOR` x the residual / RMS thresholds."""
+        if self._good_latched:
+            clearly_bad = (
+                ev.solution.plausibility_error is not None
+                or (ev.residual_px is not None
+                    and ev.residual_px > GOOD_CLEAR_FACTOR * GOOD_RESIDUAL_PX)
+                or ev.rms_px > GOOD_CLEAR_FACTOR * GOOD_RMS_PX)
+            self._bad_streak = self._bad_streak + 1 if clearly_bad else 0
+            if self._bad_streak >= GOOD_CLEAR_COUNT:
+                self._good_latched = False
+                self._bad_streak = 0
+                self._pass_streak = 0
+        else:
+            self._pass_streak = self._pass_streak + 1 if ev.good else 0
+            if self._pass_streak >= GOOD_LATCH_COUNT:
+                self._good_latched = True
+                self._bad_streak = 0
+        return self._good_latched
+
     def _publish_eval(self, ev: LensEvaluation) -> None:
         sol = ev.solution
+        latched = self._latch_good(ev)
         self._update(
             rms_px=ev.rms_px, residual_px=ev.residual_px,
             correction_px=ev.correction_px, fx=sol.fx, hfov_deg=sol.hfov_deg,
-            good=ev.good, solved_at=self._wall_clock())
+            good=latched, good_now=bool(ev.good), solved_at=self._wall_clock())
 
     # ---- finishing ------------------------------------------------------------
 
@@ -293,7 +335,7 @@ class IntrinsicsSession:
             elif not force:
                 if ev.solution.plausibility_error:
                     refusal = f"implausible lens: {ev.solution.plausibility_error}"
-                elif not ev.good:
+                elif not self.status().good:
                     refusal = ("result is not good enough yet; keep collecting "
                                "views or pass force to install anyway")
             if refusal is not None:

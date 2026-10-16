@@ -1464,6 +1464,9 @@ message IntrinsicsStatus {
   // Sprint 046 ticket 001: one convex hull per detected board, native
   // pixels. Empty means no board visible (decodes to None).
   repeated IntrinsicsPolygon board_outline = 23;
+  // Raw verdict of the latest solve, before hysteresis; `good` (16) is the
+  // latched value. Absent until the first solve.
+  optional bool good_now = 24;
 }
 
 // A flat [x0, y0, x1, y1, ...] list of one polygon's points.

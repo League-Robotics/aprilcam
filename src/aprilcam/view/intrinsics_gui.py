@@ -30,6 +30,7 @@ from aprilcam.view.intrinsics_model import (
     font_sizes,
     fit_rect,
     column_layout,
+    panel_metric_sizes,
     key_action,
     tile_colour,
 )
@@ -326,14 +327,15 @@ class _TkShell:
         lay = column_layout(x0, y, col_w, limit, fs)
         px0, _, px1, _ = lay.panel
         width = px1 - px0
+        err_px, could_px = panel_metric_sizes(width - 4, fs)
         c.create_text(px0, lay.name[1], text=f"{cam.camera}\n{cam.views_line}", anchor="nw",
                       fill=colour_for("dim"), font=("Helvetica", -fs.body), width=width)
         c.create_text(px0, lay.error_now[1], text=cam.error_now, anchor="nw",
-                      fill=colour_for(cam.error_class), font=("Helvetica", -fs.metric, "bold"),
+                      fill=colour_for(cam.error_class), font=("Helvetica", -err_px, "bold"),
                       width=width)
         c.create_text(px0, lay.could_change[1], text=cam.could_change, anchor="nw",
                       fill=colour_for(cam.could_change_class),
-                      font=("Helvetica", -fs.metric * 2 // 3, "bold"), width=width)
+                      font=("Helvetica", -could_px, "bold"), width=width)
         self._draw_tilts(cam, lay.tilts, fs)
         notes = ([cam.reject_note] if cam.reject_note else []) + list(cam.errors)
         if notes:

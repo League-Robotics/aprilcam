@@ -15,6 +15,7 @@ flag stays the sole authority on "good enough".
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
@@ -57,6 +58,10 @@ __all__ = [
     "fit_rect",
     "ColumnLayout",
     "column_layout",
+    "fit_font_size",
+    "panel_metric_sizes",
+    "LONGEST_ERROR_NOW",
+    "LONGEST_COULD_CHANGE",
     "PANEL_FRACTION",
 ]
 
@@ -140,18 +145,18 @@ def build_camera_model(status: IntrinsicsStatus) -> CameraViewModel:
         else:
             error_now = f"error: need {max(0, _MIN_SOLVE_VIEWS - n)} more views"
             error_class = "plain"
-        could, could_class = "could still change by: --", "plain"
+        could, could_class = "could move --", "plain"
     else:
-        error_now = f"error now: {status.rms_px:.2f} px"
+        error_now = f"error now {status.rms_px:.2f} px"
         error_class = "green" if status.good else "yellow"
         if status.residual_px is None:
-            could = f"could still change by: (need {max(0, _MIN_VIEWS - n)} more views)"
+            could = f"could move (need {max(0, _MIN_VIEWS - n)} more views)"
             could_class = "yellow"
         else:
-            could = (f"could still change by: {status.residual_px:.1f} px   "
+            could = (f"could move {status.residual_px:.1f} px "
                      f"(good < {_GOOD_RESIDUAL_PX})")
             if status.correction_px is not None:
-                could += f"      lens correction itself: {status.correction_px:.1f} px"
+                could += f"   lens correction {status.correction_px:.1f} px"
             could_class = "green" if status.residual_px < _GOOD_RESIDUAL_PX else "yellow"
     banner = status.banner if status.banner in BANNER_TEXT else BANNER_SHOW_BOARD
     return CameraViewModel(
@@ -479,6 +484,45 @@ class ColumnLayout:
     message: tuple
 
 
+#: Longest strings the two metric slots can hold (``build_camera_model``).
+LONGEST_ERROR_NOW = "error: need 6 more views"
+LONGEST_COULD_CHANGE = "could move 99.9 px (good < 4)   lens correction 99.9 px"
+#: Metric slots are sized for this many wrapped lines.
+METRIC_MAX_LINES = 2
+#: Average glyph width / font size for bold Helvetica, rounded up so the
+#: estimate errs on "too wide" (word-wrap waste is covered by _WRAP_SLACK).
+_CHAR_W_EM = 0.62
+_WRAP_SLACK = 1.15
+_MIN_FONT_PX = 8
+
+
+def _text_lines(text: str, size: int, width: int) -> int:
+    """Estimated wrapped line count of *text* at *size* px in *width* px."""
+    if width <= 0:
+        return 10**6
+    return max(1, math.ceil(len(text) * size * _CHAR_W_EM * _WRAP_SLACK / width))
+
+
+def fit_font_size(texts: Sequence[str], width: int, max_size: int,
+                  max_lines: int = METRIC_MAX_LINES, min_size: int = _MIN_FONT_PX) -> int:
+    """Largest font size (px, <= *max_size*) at which every text wraps to at
+    most *max_lines* lines in *width* px, by a pure width estimate (so it is
+    testable without a display). Never below *min_size*."""
+    for size in range(max(int(max_size), min_size), min_size, -1):
+        if all(_text_lines(t, size, width) <= max_lines for t in texts):
+            return size
+    return min_size
+
+
+def panel_metric_sizes(panel_w: int, fs: FontSizes) -> tuple:
+    """``(error_now_px, could_change_px)`` fonts for a panel *panel_w* wide:
+    the largest sizes at which the longest expected strings take at most two
+    lines. ``could_change`` never exceeds two thirds of the metric tier."""
+    err = fit_font_size([LONGEST_ERROR_NOW], panel_w, fs.metric)
+    could = fit_font_size([LONGEST_COULD_CHANGE], panel_w, fs.metric * 2 // 3)
+    return err, could
+
+
 def column_layout(x0: int, y: int, col_w: int, limit: int, fs: FontSizes) -> ColumnLayout:
     """Geometry of one camera column from its left edge *x0*, top *y*, width
     *col_w* and bottom *limit*. Depends only on those and the font sizes --
@@ -491,8 +535,15 @@ def column_layout(x0: int, y: int, col_w: int, limit: int, fs: FontSizes) -> Col
     img = (x0 + pad, y, max(px0 - pad, x0 + pad + 1), max(limit, y + 1))
     ny = y
     name_h = 2 * (fs.body + 4)
-    err_h = int(fs.metric * 1.6)
-    could_h = int(fs.metric * 2.2)
+    err_px, could_px = panel_metric_sizes(panel_w - 4, fs)
+    # Each slot holds the lines it can wrap to (two) at its own font, plus
+    # leading, so a wrapped second line can never run into the slot below.
+    # (A panel too narrow even at the minimum font gets the extra lines too.)
+    pw = panel_w - 4
+    err_lines = max(METRIC_MAX_LINES, _text_lines(LONGEST_ERROR_NOW, err_px, pw))
+    could_lines = max(METRIC_MAX_LINES, _text_lines(LONGEST_COULD_CHANGE, could_px, pw))
+    err_h = int(err_lines * err_px * 1.3) + 4
+    could_h = int(could_lines * could_px * 1.3) + 4
     tside = max(panel_w // 4, 18)
     msg_h = 2 * (fs.body + 6)
     name = (px0, ny, px1, ny + name_h)

@@ -100,6 +100,18 @@ frames; an unpolled session auto-aborts after 120 s.
    reachable by turning the target sideways). Extent-based counting still
    makes the outer third easy to reach.
 
+**Update 2026-10-16 (blur gate).** The raw Laplacian variance judged against
+the all-time maximum rejected sharp boards at the bottom edge of camera 4 as
+"blurry": edge frames are darker (contrast squared drives the variance) and
+optically softer, while the best was set by one bright, close, central view.
+The gate now uses the contrast-normalised measure
+`var(Laplacian(roi)) / var(roi intensity)` (lighting cancels exactly: 0.477
+at 100 % and at 40 % brightness), compared with `BLUR_FRACTION = 0.30` of the
+80th percentile of the last 30 offered boards (no rejection before 3
+samples). Synthetic: sharp 0.48 (centre) / 0.84 (corner, smaller board);
+Gaussian sigma 2-3 px: 0.004-0.016. The reject reason carries the ratio
+("blurry (0.31 of best)").
+
 ## "Good enough" -- the metric that finally let the stakeholder stop
 
 Successive-solve convergence and a pose checklist both kept the
@@ -112,6 +124,13 @@ take the max residual. Good when < 4 px (~3 mm) and rms < 0.6 px. Show
 next to it the size of the correction itself vs no lens model -- for
 cameras 2/4 the correction (~3 px) equals its own uncertainty, i.e. those
 lenses barely need one; camera 3's does.
+
+**Update 2026-10-16 (latched).** The half-sample residual is noisy at low
+view counts and the banner flapped GOOD / KEEP GOING on camera 2. The session
+now latches `good` after two consecutive passing solves and clears it only
+after two consecutive solves that are implausible or exceed 1.5x the residual
+(6 px) or rms (0.9 px) thresholds. The raw per-solve verdict stays visible as
+`good_now`; `good` (banner, finish, `--install`) is the latched value.
 
 Display-wise: fullscreen Tk, fonts scaled from screen height (banner
 H/9), one plain-language NEXT line from the biggest coverage gap, 3x3

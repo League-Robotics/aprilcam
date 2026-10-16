@@ -33,7 +33,7 @@ def test_show_board_banner():
     assert m.banner_text == "SHOW ME THE BOARD" and m.banner_class == "dim"
     c = m.cameras[0]
     assert c.error_now == "error: need 6 more views"
-    assert c.could_change == "could still change by: --"
+    assert c.could_change == "could move --"
     assert all(t.level == "none" for t in c.cells)
 
 
@@ -41,7 +41,7 @@ def test_keep_going_tiles_and_strings():
     m = build_view_model([keep()])
     assert m.banner_text == "KEEP GOING" and m.banner_class == "yellow"
     c = m.cameras[0]
-    assert c.error_now == "error now: 0.80 px"
+    assert c.error_now == "error now 0.80 px"
     assert "need 4 more views" in c.could_change
     assert [t.level for t in c.cells][:5] == ["good", "some", "none", "none", "good"]
     assert [t.name for t in c.tilts] == ["N", "E", "S", "W"]
@@ -54,8 +54,8 @@ def test_good_enough():
     m = build_view_model([good()])
     assert m.banner_text == "GOOD ENOUGH" and m.banner_class == "green" and m.all_good
     c = m.cameras[0]
-    assert c.could_change.startswith("could still change by: 2.5 px")
-    assert "lens correction itself: 9.0 px" in c.could_change
+    assert c.could_change.startswith("could move 2.5 px")
+    assert "lens correction 9.0 px" in c.could_change
     assert c.could_change_class == "green" and c.error_class == "green"
     assert "Press Enter" in m.next_line
 
