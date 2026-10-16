@@ -1,9 +1,14 @@
 ---
 id: '003'
 title: 'GUI: live image per column with grid, labels, outline and tint'
-status: open
-use-cases: [SUC-001, SUC-002, SUC-003]
-depends-on: ['001', '002']
+status: done
+use-cases:
+- SUC-001
+- SUC-002
+- SUC-003
+depends-on:
+- '001'
+- '002'
 github-issue: ''
 issue: intrinsics-gui-shows-the-live-camera-image-with-a-labelled-coverage-grid.md
 completes_issue: true
@@ -50,15 +55,15 @@ Files: `src/aprilcam/view/intrinsics_gui.py` (and optional overlay module),
 
 ## Acceptance Criteria
 
-- [ ] Poller fetches frames at about 4-5 fps per camera without slowing status
+- [x] Poller fetches frames at about 4-5 fps per camera without slowing status
       polling (rate limit tested with a fake clock).
-- [ ] Composed image on a synthetic PIL image has: grid lines at the 40/20/40
+- [x] Composed image on a synthetic PIL image has: grid lines at the 40/20/40
       positions, tinted cells matching tile levels, outline pixels where
       expected (spot-check pixel colours), correct output size/aspect.
-- [ ] Frame fetch failure keeps the last image and marks it dimmed; recovery
+- [x] Frame fetch failure keeps the last image and marks it dimmed; recovery
       undims; decode failure does not raise.
-- [ ] Tilt tiles remain visible next to the image; existing GUI tests pass.
-- [ ] No cv2 in `view/`; no-cv2 test passes; no display needed by any test.
+- [x] Tilt tiles remain visible next to the image; existing GUI tests pass.
+- [x] No cv2 in `view/`; no-cv2 test passes; no display needed by any test.
 
 ## Testing
 

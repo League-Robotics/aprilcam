@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import ast
+import io
+import types
 from pathlib import Path
 
 import pytest
@@ -17,6 +19,14 @@ from aprilcam.view.intrinsics_model import (
 from aprilcam.view.viewer import NoDisplayAvailable
 
 
+def _jpeg(size=(160, 90), colour=(40, 40, 40)):
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", size, colour).save(buf, "JPEG")
+    return buf.getvalue()
+
+
 def _st(cam, good=False):
     return IntrinsicsStatus(camera=cam, good=good, view_count=20, rms_px=0.5,
                             banner=BANNER_GOOD_ENOUGH if good else BANNER_KEEP_GOING)
@@ -26,6 +36,14 @@ class Daemon:
     def __init__(self, good=(), refuse=False, poll_raises=None):
         self.good, self.refuse, self.poll_raises = set(good), refuse, poll_raises
         self.finished, self.aborted = [], []
+
+    frame_raises = None
+
+    def get_frame(self, cam, deskewed=False, encoding="jpeg"):
+        self.frame_calls = getattr(self, "frame_calls", 0) + 1
+        if self.frame_raises:
+            raise self.frame_raises
+        return types.SimpleNamespace(data=_jpeg(), width=160, height=90)
 
     def get_intrinsics_status(self, cam):
         if self.poll_raises:
@@ -153,3 +171,91 @@ def test_no_cv2_import():
     mods = [n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
     mods += [a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names]
     assert not any(m and m.split(".")[0] == "cv2" for m in mods)
+
+
+# -- sprint 046-003: frames + overlay ---------------------------------------
+class _Clock:
+    def __init__(self):
+        self.t = 100.0
+
+    def __call__(self):
+        return self.t
+
+
+def test_frame_rate_limit_and_snapshot():
+    clk = _Clock()
+    d = Daemon()
+    c = gui.IntrinsicsController(d, ["a"], install=False, clock=clk)
+    c.step()
+    c.step()  # same instant: no second fetch
+    assert d.frame_calls == 1
+    clk.t += 0.1
+    c.step()
+    assert d.frame_calls == 1
+    clk.t += 0.13
+    c.step()
+    assert d.frame_calls == 2
+    snap = c.snapshot()
+    assert snap.frames["a"].startswith(b"\xff\xd8") and snap.frame_stale["a"] is False
+    assert snap.statuses  # status polling unaffected
+
+
+def test_frame_failure_keeps_last_and_recovers():
+    clk = _Clock()
+    d = Daemon()
+    c = gui.IntrinsicsController(d, ["a"], install=False, clock=clk)
+    c.step()
+    good = c.snapshot().frames["a"]
+    d.frame_raises = RuntimeError("camera busy")
+    clk.t += 1
+    c.step()
+    snap = c.snapshot()
+    assert snap.frames["a"] == good and snap.frame_stale["a"] is True
+    assert snap.statuses and "camera busy" in snap.error
+    d.frame_raises = None
+    clk.t += 1
+    c.step()
+    snap = c.snapshot()
+    assert snap.frame_stale["a"] is False and snap.error is None
+
+
+def _model(levels):
+    from aprilcam.view.intrinsics_model import build_camera_model
+
+    counts = {n: v for n, v in zip(("NW", "N", "NE", "W", "C", "E", "SW", "S", "SE"), levels)}
+    return build_camera_model(IntrinsicsStatus(camera="a", good=False, view_count=3,
+                                               cell_coverage=counts))
+
+
+def test_compose_grid_tint_outline_size():
+    from aprilcam.view.intrinsics_overlay import (
+        GRID_COLOUR, OUTLINE_COLOUR, compose_camera_image)
+    from PIL import ImageColor
+
+    model = _model([2, 0, 0, 0, 0, 0, 0, 0, 1])
+    outline = (((100.0, 20.0), (140.0, 20.0), (140.0, 70.0), (100.0, 70.0)),)
+    img = compose_camera_image(_jpeg((200, 100)), model, outline, (200, 100), (400, 400))
+    assert img.size == (400, 200)  # aspect preserved, fit to width
+    # grid lines at 40% / 60%
+    assert img.getpixel((160, 150))[:3] == ImageColor.getrgb(GRID_COLOUR)
+    assert img.getpixel((240, 150))[:3] == ImageColor.getrgb(GRID_COLOUR)
+    assert img.getpixel((300, 80))[:3] == ImageColor.getrgb(GRID_COLOUR)
+    # NW cell good (green-tinted) vs untinted N cell; SE some (amber)
+    nw, n, se = img.getpixel((8, 8)), img.getpixel((200, 8)), img.getpixel((392, 192))
+    assert nw[1] > nw[0] + 40 and nw[1] > n[1] + 20
+    assert se[0] > se[2] + 40
+    # outline top edge: x 100..140 native -> 200..280, y 20 -> 40
+    assert img.getpixel((250, 40))[:3] == ImageColor.getrgb(OUTLINE_COLOUR)
+
+
+def test_compose_dimmed_and_decode_failure():
+    from aprilcam.view.intrinsics_overlay import compose_camera_image
+
+    model = _model([0] * 9)
+    bright = compose_camera_image(_jpeg((100, 100), (200, 200, 200)), model, None, None, (100, 100))
+    dim = compose_camera_image(_jpeg((100, 100), (200, 200, 200)), model, None, None, (100, 100),
+                               dimmed=True)
+    assert dim.getpixel((10, 10))[0] < bright.getpixel((10, 10))[0]
+    out = compose_camera_image(b"garbage", model, None, None, (100, 100), fallback=bright)
+    assert out.size == bright.size and out.getpixel((10, 10)) == dim.getpixel((10, 10))
+    assert compose_camera_image(b"", model, None, None, (100, 100)).size[0] > 0
