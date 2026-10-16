@@ -84,6 +84,13 @@ import grpc
 
 from aprilcam.calibration.calibration import Calibration
 from aprilcam.calibration.interfaces import CalibrationResult, FlatFieldInfo, FlatFieldResult
+from aprilcam.intrinsics.interfaces import (
+    IntrinsicsError,
+    IntrinsicsFinishResult,
+    IntrinsicsSessionActive,
+    IntrinsicsStatus,
+    NoIntrinsicsSession,
+)
 from aprilcam.config.interfaces import CameraConfig, CameraPosition, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import Daemon, DaemonStatus
@@ -175,6 +182,11 @@ _STATUS_CODES = {
     # family as NoPlayfieldLinked, raised before any capture burst is
     # taken.
     NoFieldMask: grpc.StatusCode.FAILED_PRECONDITION,
+    # Intrinsics sessions (sprint 044 ticket 006). Order matters: the
+    # specific subtypes precede the IntrinsicsError base.
+    IntrinsicsSessionActive: grpc.StatusCode.ALREADY_EXISTS,
+    NoIntrinsicsSession: grpc.StatusCode.NOT_FOUND,
+    IntrinsicsError: grpc.StatusCode.FAILED_PRECONDITION,
     # A put_annotation/replace_layer request exceeding the fixed
     # per-layer count or per-shape point bound (ticket 031-010) --
     # RESOURCE_EXHAUSTED matches gRPC's own "quota exceeded" status
@@ -650,6 +662,53 @@ def _flatfield_result_to_proto(result: FlatFieldResult) -> aprilcam_v2_pb2.FlatF
     return msg
 
 
+_CELL_ORDER = ("NW", "N", "NE", "W", "C", "E", "SW", "S", "SE")
+_TILT_ORDER = ("N", "E", "S", "W")
+
+
+def _intrinsics_status_to_proto(status: IntrinsicsStatus) -> aprilcam_v2_pb2.IntrinsicsStatus:
+    """Python -> proto for every intrinsics RPC. ``None`` optionals stay
+    unset; the coverage dicts flatten to fixed-order repeated fields
+    (empty dict <-> empty list)."""
+    msg = aprilcam_v2_pb2.IntrinsicsStatus(
+        camera=status.camera,
+        state=status.state,
+        layout=getattr(status.layout, "value", str(status.layout)),
+        board_visible=status.board_visible,
+        view_count=status.view_count,
+        tilted_count=status.tilted_count,
+        good=status.good,
+        banner=status.banner,
+        errors=list(status.errors),
+        started_at=status.started_at,
+    )
+    if status.image_size is not None:
+        msg.image_size.extend(status.image_size)
+    if status.cell_coverage:
+        msg.cell_coverage.extend(status.cell_coverage.get(k, 0) for k in _CELL_ORDER)
+    if status.tilt_coverage:
+        msg.tilt_coverage.extend(status.tilt_coverage.get(k, 0) for k in _TILT_ORDER)
+    for name in ("board_spec", "rms_px", "residual_px", "correction_px", "fx",
+                 "hfov_deg", "next_hint", "last_reject", "solved_at"):
+        value = getattr(status, name)
+        if value is not None:
+            setattr(msg, name, value)
+    return msg
+
+
+def _intrinsics_finish_to_proto(
+    result: IntrinsicsFinishResult,
+) -> aprilcam_v2_pb2.FinishIntrinsicsResponse:
+    msg = aprilcam_v2_pb2.FinishIntrinsicsResponse(
+        installed=result.installed, status=_intrinsics_status_to_proto(result.status)
+    )
+    if result.reason is not None:
+        msg.reason = result.reason
+    if result.lens is not None:
+        msg.lens_json = json.dumps(result.lens)
+    return msg
+
+
 def _flatfield_info_to_proto(info: FlatFieldInfo) -> aprilcam_v2_pb2.FlatFieldInfo:
     """Python -> proto, for a ``GetFlatField`` response. ``stale`` is
     plain (not ``HasField``-guarded), mirroring ``Calibration.stale``;
@@ -857,6 +916,8 @@ def _abort(context: grpc.ServicerContext, exc: Exception) -> None:
         elif isinstance(exc, NoPlayfieldLinked):
             metadata.append(("aprilcam-camera", exc.camera))
         elif isinstance(exc, NoFieldMask):
+            metadata.append(("aprilcam-camera", exc.camera))
+        elif isinstance(exc, (IntrinsicsSessionActive, NoIntrinsicsSession)):
             metadata.append(("aprilcam-camera", exc.camera))
         elif isinstance(exc, AnnotationLimitExceeded):
             metadata.append(("aprilcam-kind", exc.kind))
@@ -1222,6 +1283,39 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
             _abort(context, exc)
             return aprilcam_v2_pb2.ClearFlatFieldResponse()
         return aprilcam_v2_pb2.ClearFlatFieldResponse()
+
+    def StartIntrinsics(self, request, context):  # noqa: N802
+        board = request.board if request.HasField("board") else None
+        try:
+            status = self._service.start_intrinsics(request.camera, board)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.StartIntrinsicsResponse()
+        return aprilcam_v2_pb2.StartIntrinsicsResponse(status=_intrinsics_status_to_proto(status))
+
+    def GetIntrinsicsStatus(self, request, context):  # noqa: N802
+        try:
+            status = self._service.get_intrinsics_status(request.camera)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.GetIntrinsicsStatusResponse()
+        return aprilcam_v2_pb2.GetIntrinsicsStatusResponse(status=_intrinsics_status_to_proto(status))
+
+    def FinishIntrinsics(self, request, context):  # noqa: N802
+        try:
+            result = self._service.finish_intrinsics(request.camera, request.install, request.force)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.FinishIntrinsicsResponse()
+        return _intrinsics_finish_to_proto(result)
+
+    def AbortIntrinsics(self, request, context):  # noqa: N802
+        try:
+            status = self._service.abort_intrinsics(request.camera)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.AbortIntrinsicsResponse()
+        return aprilcam_v2_pb2.AbortIntrinsicsResponse(status=_intrinsics_status_to_proto(status))
 
 
 class _GrpcListener(ControlPlaneListener):

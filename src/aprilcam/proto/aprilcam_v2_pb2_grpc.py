@@ -188,6 +188,26 @@ class AprilCamV2Stub(object):
                 request_serializer=aprilcam__v2__pb2.ClearFlatFieldRequest.SerializeToString,
                 response_deserializer=aprilcam__v2__pb2.ClearFlatFieldResponse.FromString,
                 _registered_method=True)
+        self.StartIntrinsics = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/StartIntrinsics',
+                request_serializer=aprilcam__v2__pb2.StartIntrinsicsRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.StartIntrinsicsResponse.FromString,
+                _registered_method=True)
+        self.GetIntrinsicsStatus = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/GetIntrinsicsStatus',
+                request_serializer=aprilcam__v2__pb2.GetIntrinsicsStatusRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.GetIntrinsicsStatusResponse.FromString,
+                _registered_method=True)
+        self.FinishIntrinsics = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/FinishIntrinsics',
+                request_serializer=aprilcam__v2__pb2.FinishIntrinsicsRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.FinishIntrinsicsResponse.FromString,
+                _registered_method=True)
+        self.AbortIntrinsics = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/AbortIntrinsics',
+                request_serializer=aprilcam__v2__pb2.AbortIntrinsicsRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.AbortIntrinsicsResponse.FromString,
+                _registered_method=True)
 
 
 class AprilCamV2Servicer(object):
@@ -511,6 +531,36 @@ class AprilCamV2Servicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def StartIntrinsics(self, request, context):
+        """ChArUco-board intrinsics calibration (sprint 044 ticket 006). A
+        session lives in the daemon; clients start it, poll its status,
+        then finish (optionally installing the solved lens model) or abort.
+        `IntrinsicsSessionActive` -> `ALREADY_EXISTS`, `NoIntrinsicsSession`
+        -> `NOT_FOUND`, an unknown camera -> `NOT_FOUND`, an unreadable
+        (not present) camera -> `FAILED_PRECONDITION`.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetIntrinsicsStatus(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def FinishIntrinsics(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def AbortIntrinsics(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_AprilCamV2Servicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -663,6 +713,26 @@ def add_AprilCamV2Servicer_to_server(servicer, server):
                     servicer.ClearFlatField,
                     request_deserializer=aprilcam__v2__pb2.ClearFlatFieldRequest.FromString,
                     response_serializer=aprilcam__v2__pb2.ClearFlatFieldResponse.SerializeToString,
+            ),
+            'StartIntrinsics': grpc.unary_unary_rpc_method_handler(
+                    servicer.StartIntrinsics,
+                    request_deserializer=aprilcam__v2__pb2.StartIntrinsicsRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.StartIntrinsicsResponse.SerializeToString,
+            ),
+            'GetIntrinsicsStatus': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetIntrinsicsStatus,
+                    request_deserializer=aprilcam__v2__pb2.GetIntrinsicsStatusRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.GetIntrinsicsStatusResponse.SerializeToString,
+            ),
+            'FinishIntrinsics': grpc.unary_unary_rpc_method_handler(
+                    servicer.FinishIntrinsics,
+                    request_deserializer=aprilcam__v2__pb2.FinishIntrinsicsRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.FinishIntrinsicsResponse.SerializeToString,
+            ),
+            'AbortIntrinsics': grpc.unary_unary_rpc_method_handler(
+                    servicer.AbortIntrinsics,
+                    request_deserializer=aprilcam__v2__pb2.AbortIntrinsicsRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.AbortIntrinsicsResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1479,6 +1549,114 @@ class AprilCamV2(object):
             '/aprilcam.v2.AprilCamV2/ClearFlatField',
             aprilcam__v2__pb2.ClearFlatFieldRequest.SerializeToString,
             aprilcam__v2__pb2.ClearFlatFieldResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def StartIntrinsics(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/StartIntrinsics',
+            aprilcam__v2__pb2.StartIntrinsicsRequest.SerializeToString,
+            aprilcam__v2__pb2.StartIntrinsicsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetIntrinsicsStatus(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/GetIntrinsicsStatus',
+            aprilcam__v2__pb2.GetIntrinsicsStatusRequest.SerializeToString,
+            aprilcam__v2__pb2.GetIntrinsicsStatusResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def FinishIntrinsics(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/FinishIntrinsics',
+            aprilcam__v2__pb2.FinishIntrinsicsRequest.SerializeToString,
+            aprilcam__v2__pb2.FinishIntrinsicsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def AbortIntrinsics(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/AbortIntrinsics',
+            aprilcam__v2__pb2.AbortIntrinsicsRequest.SerializeToString,
+            aprilcam__v2__pb2.AbortIntrinsicsResponse.FromString,
             options,
             channel_credentials,
             insecure,

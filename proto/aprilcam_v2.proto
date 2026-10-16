@@ -459,6 +459,17 @@ service AprilCamV2 {
   // (SUC-003). Clearing an already-clear camera is a no-op, never an
   // error.
   rpc ClearFlatField (ClearFlatFieldRequest) returns (ClearFlatFieldResponse);
+
+  // ChArUco-board intrinsics calibration (sprint 044 ticket 006). A
+  // session lives in the daemon; clients start it, poll its status,
+  // then finish (optionally installing the solved lens model) or abort.
+  // `IntrinsicsSessionActive` -> `ALREADY_EXISTS`, `NoIntrinsicsSession`
+  // -> `NOT_FOUND`, an unknown camera -> `NOT_FOUND`, an unreadable
+  // (not present) camera -> `FAILED_PRECONDITION`.
+  rpc StartIntrinsics (StartIntrinsicsRequest) returns (StartIntrinsicsResponse);
+  rpc GetIntrinsicsStatus (GetIntrinsicsStatusRequest) returns (GetIntrinsicsStatusResponse);
+  rpc FinishIntrinsics (FinishIntrinsicsRequest) returns (FinishIntrinsicsResponse);
+  rpc AbortIntrinsics (AbortIntrinsicsRequest) returns (AbortIntrinsicsResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -1309,3 +1320,81 @@ message ClearFlatFieldRequest {
 }
 
 message ClearFlatFieldResponse {}
+
+// ---------------------------------------------------------------------------
+// ChArUco intrinsics calibration (sprint 044 ticket 006).
+// Mirrors aprilcam.intrinsics.interfaces.IntrinsicsStatus /
+// IntrinsicsFinishResult field-for-field. Purely additive: no existing
+// field is renumbered or removed, so PROTOCOL_VERSION is not bumped.
+// ---------------------------------------------------------------------------
+
+message IntrinsicsStatus {
+  string camera = 1;
+  string state = 2;
+  optional string board_spec = 3;
+  // BoardLayout value: "unknown" | "current" | "legacy".
+  string layout = 4;
+  // [width, height]; empty means unknown (never a fabricated 0x0).
+  repeated int32 image_size = 5;
+  bool board_visible = 6;
+  int32 view_count = 7;
+  int32 tilted_count = 8;
+  // 3x3 region counts, row-major NW, N, NE, W, C, E, SW, S, SE. Empty
+  // means the status carried no coverage tally yet.
+  repeated int32 cell_coverage = 9;
+  // Trusted tilted views in N, E, S, W order; empty likewise.
+  repeated int32 tilt_coverage = 10;
+  optional double rms_px = 11;
+  optional double residual_px = 12;
+  optional double correction_px = 13;
+  optional double fx = 14;
+  optional double hfov_deg = 15;
+  bool good = 16;
+  string banner = 17;
+  optional string next_hint = 18;
+  optional string last_reject = 19;
+  repeated string errors = 20;
+  double started_at = 21;
+  optional double solved_at = 22;
+}
+
+message StartIntrinsicsRequest {
+  string camera = 1;
+  // Absent means "environment variable, then built-in default".
+  optional string board = 2;
+}
+
+message StartIntrinsicsResponse {
+  IntrinsicsStatus status = 1;
+}
+
+message GetIntrinsicsStatusRequest {
+  string camera = 1;
+}
+
+message GetIntrinsicsStatusResponse {
+  IntrinsicsStatus status = 1;
+}
+
+message FinishIntrinsicsRequest {
+  string camera = 1;
+  bool install = 2;
+  bool force = 3;
+}
+
+message FinishIntrinsicsResponse {
+  bool installed = 1;
+  optional string reason = 2;
+  IntrinsicsStatus status = 3;
+  // The free-form lens summary dict (matrix, distortion, fx, hfov, ...)
+  // as a JSON document; absent when no lens was solved.
+  optional string lens_json = 4;
+}
+
+message AbortIntrinsicsRequest {
+  string camera = 1;
+}
+
+message AbortIntrinsicsResponse {
+  IntrinsicsStatus status = 1;
+}

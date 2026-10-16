@@ -38,6 +38,7 @@ import json
 from typing import Dict, Optional, Tuple
 
 from aprilcam.calibration.interfaces import Calibration, CalibrationResult, FlatFieldInfo, FlatFieldResult
+from aprilcam.intrinsics.interfaces import BoardLayout, IntrinsicsFinishResult, IntrinsicsStatus
 from aprilcam.config.interfaces import CameraConfig, CameraPosition, Feature
 from aprilcam.config.loader import PlayfieldDefinition, PlayfieldFeatureEntry
 from aprilcam.daemon.interfaces import DaemonStatus, MountRegistration
@@ -79,6 +80,8 @@ __all__ = [
     "features_from_proto",
     "flatfield_info_from_proto",
     "flatfield_result_from_proto",
+    "intrinsics_status_from_proto",
+    "intrinsics_finish_from_proto",
     "image_frame_from_proto",
     "mount_parameters_from_proto",
     "playfield_definition_from_proto",
@@ -501,6 +504,56 @@ def flatfield_result_from_proto(msg: aprilcam_v2_pb2.FlatFieldResult) -> FlatFie
         reason=msg.reason if msg.HasField("reason") else None,
         forced_checks=tuple(msg.forced_checks),
         gain=None,
+    )
+
+
+_CELL_ORDER = ("NW", "N", "NE", "W", "C", "E", "SW", "S", "SE")
+_TILT_ORDER = ("N", "E", "S", "W")
+
+
+def intrinsics_status_from_proto(msg: aprilcam_v2_pb2.IntrinsicsStatus) -> IntrinsicsStatus:
+    """Mirror of ``daemon/rpc.py``'s ``_intrinsics_status_to_proto`` (sprint
+    044 ticket 006). Optionals round-trip through ``HasField()``; an empty
+    repeated coverage/size field decodes to the empty dict / ``None``."""
+
+    def opt(name: str):
+        return getattr(msg, name) if msg.HasField(name) else None
+
+    return IntrinsicsStatus(
+        camera=msg.camera,
+        state=msg.state,
+        board_spec=opt("board_spec"),
+        layout=BoardLayout(msg.layout),
+        image_size=tuple(msg.image_size) if msg.image_size else None,
+        board_visible=msg.board_visible,
+        view_count=msg.view_count,
+        tilted_count=msg.tilted_count,
+        cell_coverage=dict(zip(_CELL_ORDER, msg.cell_coverage)) if msg.cell_coverage else {},
+        tilt_coverage=dict(zip(_TILT_ORDER, msg.tilt_coverage)) if msg.tilt_coverage else {},
+        rms_px=opt("rms_px"),
+        residual_px=opt("residual_px"),
+        correction_px=opt("correction_px"),
+        fx=opt("fx"),
+        hfov_deg=opt("hfov_deg"),
+        good=msg.good,
+        banner=msg.banner,
+        next_hint=opt("next_hint"),
+        last_reject=opt("last_reject"),
+        errors=tuple(msg.errors),
+        started_at=msg.started_at,
+        solved_at=opt("solved_at"),
+    )
+
+
+def intrinsics_finish_from_proto(
+    msg: aprilcam_v2_pb2.FinishIntrinsicsResponse,
+) -> IntrinsicsFinishResult:
+    """Mirror of ``daemon/rpc.py``'s ``_intrinsics_finish_to_proto``."""
+    return IntrinsicsFinishResult(
+        installed=msg.installed,
+        reason=msg.reason if msg.HasField("reason") else None,
+        status=intrinsics_status_from_proto(msg.status),
+        lens=json.loads(msg.lens_json) if msg.HasField("lens_json") else None,
     )
 
 
