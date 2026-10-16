@@ -1,7 +1,7 @@
 ---
 id: '001'
 title: 'Daemon and wire: board_outline on IntrinsicsStatus'
-status: in-progress
+status: done
 use-cases:
 - SUC-001
 depends-on: []
@@ -44,13 +44,13 @@ Testing plan: follow sprint 044 ticket 006 round-trip style; session tests drive
 
 ## Acceptance Criteria
 
-- [ ] `IntrinsicsStatus.board_outline` exists, defaults to `None`.
-- [ ] Session fills it with one hull per detected board each step and clears it
+- [x] `IntrinsicsStatus.board_outline` exists, defaults to `None`.
+- [x] Session fills it with one hull per detected board each step and clears it
       when no board is visible.
-- [ ] Python -> proto -> client round trip preserves polygons exactly, and
+- [x] Python -> proto -> client round trip preserves polygons exactly, and
       preserves `None` (empty) as `None`.
-- [ ] MCP status dict includes `board_outline`.
-- [ ] Existing intrinsics proto/session/MCP tests still pass; no cv2 import
+- [x] MCP status dict includes `board_outline`.
+- [x] Existing intrinsics proto/session/MCP tests still pass; no cv2 import
       added to `client/`, `view/`, or `mcp/`.
 
 ## Testing
