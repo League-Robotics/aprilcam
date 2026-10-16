@@ -97,3 +97,51 @@ class BoardDetectorBase:
     @property
     def layout(self) -> BoardLayout:
         raise NotImplementedError("BoardDetectorBase.layout")
+
+
+class RejectReason(str, enum.Enum):
+    """Machine-readable reason a detected board was not kept as a view."""
+
+    MOVING = "moving"
+    BLURRY = "blurry"
+    NOT_NOVEL = "not_novel"
+    AMBIGUOUS_POSE = "ambiguous_pose"
+    TOO_FEW_CORNERS = "too_few_corners"
+
+
+@dataclass(frozen=True, kw_only=True)
+class ViewVerdict:
+    """Collector decision for one board in one frame."""
+
+    accepted: bool
+    reason: Optional[RejectReason] = None
+    corner_count: int = 0
+    #: Degrees from fronto-parallel; ``None`` unless the pose is trusted.
+    tilt_deg: Optional[float] = None
+    azimuth_deg: Optional[float] = None
+    pose_confident: bool = False
+
+
+@dataclass(frozen=True, kw_only=True)
+class KeptView:
+    """An accepted view: per-view corner data only, never a frame."""
+
+    corners: tuple[tuple[float, float], ...]
+    ids: tuple[int, ...]
+    tilt_deg: Optional[float]
+    azimuth_deg: Optional[float]
+    #: Board extent in pixels: (x_min, y_min, x_max, y_max).
+    extent: tuple[float, float, float, float]
+    timestamp: float
+
+
+@dataclass(frozen=True, kw_only=True)
+class CoverageSummary:
+    """Region and tilt-direction tallies over the kept views."""
+
+    view_count: int
+    #: 3x3 grid counts, row-major in NW, N, NE, W, C, E, SW, S, SE order.
+    region_counts: tuple[int, ...]
+    #: Trusted tilted views by direction: keys N, E, S, W.
+    tilt_directions: dict
+    tilted_count: int
