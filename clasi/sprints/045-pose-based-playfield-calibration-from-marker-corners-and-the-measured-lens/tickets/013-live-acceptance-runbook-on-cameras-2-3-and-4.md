@@ -25,7 +25,7 @@ results, in the style of sprint 044 ticket 012
 pre-flight (hardware-free) part; the live part is run by the stakeholder on
 cameras 2, 3 and 4 and results are recorded in the ticket afterwards. This
 ticket also owns confirming or correcting the planned defaults (Open
-Questions 1-4) against reality and retuning thresholds in `gates.py` if the
+Questions 2-4; 1 is resolved by detection, 2 is answered for the main field at 46 mm) against reality and retuning thresholds in `gates.py` if the
 numbers demand it.
 
 Runbook contents (each step lists the command, expected output, and a
@@ -33,6 +33,15 @@ pass/fail field):
 1. Pre-flight: lens model installed for each camera at the running
    resolution (`camera list` shows `lens: measured`); definition has sizes;
    the daemon runs this branch.
+2a. **Main field, cameras 2 and 3 (10 markers, 46 mm, mixed
+   orientations):** `camera calibrate` on each; expect `method: pose`, rms
+   corner reprojection within the gate, no marker flagged by the leave-one-out
+   residual (reference worst 0.75 cm), and derived world positions of the ten
+   markers within 0.5 cm of the centre-point solve's (which fits to 0.23 cm
+   rms on the corrected definition with the camera-2 legacy lens). Pass
+   criterion is "at least as good as centre-point". As a negative check,
+   temporarily swap the positions of ids 9 and 10 in a scratch definition: the
+   calibrate result must name a marker via the leave-one-out residual.
 2. **Camera 3, secondary field (four corner markers):** `camera calibrate 3`;
    expect `method: pose`, 16 corners, px and cm error, scale agreement within
    threshold, `lens model: measured`, height and nadir plausible (tape-check
@@ -67,7 +76,9 @@ pass/fail field):
       recorded.
 - [ ] Live results table filled in by the stakeholder; thresholds/defaults
       adjusted and documented, or confirmed unchanged.
-- [ ] Open Questions 1-4 each marked answered (with the value) or "default
+- [ ] Main-field acceptance (step 2a) recorded for cameras 2 and 3: rms,
+      worst leave-one-out, and the ten-marker comparison to centre-point.
+- [ ] Open Questions 2-4 each marked answered (with the value) or "default
       kept".
 
 ## Implementation Plan

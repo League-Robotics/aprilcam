@@ -48,8 +48,10 @@ pin subpixel for calibration bursts.
 - [ ] `_detect_averaged` output unchanged for every existing test.
 - [ ] Synthetic test: markers rendered with `cv2.aruco.generateImageMarker`,
       warped by a known homography, recovered corners within 0.3 px of truth
-      (and in the right TL/TR/BR/BL order after a 90 degree marker rotation
-      is NOT silently renumbered -- the order is the marker's own).
+      (and the corner order is the marker's own TL/TR/BR/BL: a marker rendered
+      rotated by 90 or 180 degrees, e.g. upside down, is NOT silently
+      renumbered -- the pose solve (ticket 004) resolves the orientation
+      from that order, so it must be preserved exactly).
 - [ ] Noise across frames reduces `corner_spread_px` as expected (jittered
       sub-pixel shifts averaged).
 

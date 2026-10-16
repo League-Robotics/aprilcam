@@ -20,7 +20,9 @@ completes_issue: true
 Make the numbers visible to people and agents. `aprilcam camera calibrate`
 prints method, confidence, corner count, corner reprojection error in px and
 cm, the scale-agreement figure, angular spread, `lens model: measured`, and the
-derived camera height / nadir / tilt; warnings (`reduced`, `low`, helpful
+derived camera height / nadir / tilt, and the per-marker leave-one-out
+residual (worst marker id and cm, plus the full per-marker table with
+`--verbose` or equivalent) so a disagreeing marker is named; warnings (`reduced`, `low`, helpful
 markers missing, fallback reason) go to stderr like other caveats. The MCP
 `calibrate` and `get_calibration` tools return the same fields; `camera list`
 shows method and confidence next to the calibrated flag. The existing blanket
@@ -35,10 +37,11 @@ model" / "field calibration" wording in new output.
 ## Acceptance Criteria
 
 - [ ] CLI success output for a pose calibration lists every number named
-      above; for centre-point it prints `method: centre-point (<reason>)`.
+      above, including the worst leave-one-out marker; for centre-point it prints `method: centre-point (<reason>)`.
 - [ ] CLI failure output names the failing gate, its threshold and the
       measured value; `missing_ids` wording unchanged.
-- [ ] MCP `calibrate`/`get_calibration` expose the fields (documented in the
+- [ ] MCP `calibrate`/`get_calibration` expose the fields (leave-one-out
+      residuals included, per marker) (documented in the
       tool docstrings, which are the agent-facing contract).
 - [ ] `camera list` shows e.g. `calibrated (pose, full)` / `(centre-point)`.
 - [ ] `aprilcam camera lens` behaves identically to `camera intrinsics`.

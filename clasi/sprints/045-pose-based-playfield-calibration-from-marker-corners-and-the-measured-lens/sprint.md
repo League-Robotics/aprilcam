@@ -32,10 +32,13 @@ In priority order:
    nadir point, tilt), stored as provenance. Without a measured lens model,
    fall back to today's centre-point homography and say so in the result.
 2. **Definition carries marker size and policy.** `aruco_tags` entries gain
-   a printed `size_mm` (per entry or field default) and the definition states
-   which markers are *required* vs *helpful*. Honest gates replace a point
-   count: corner reprojection error (px and cm), agreement between marker
-   print size and surveyed spacing, minimum angular spread of used corners.
+   a printed `size_mm` (per entry, or the field-level `playfield.marker_size_mm`
+   default; main field = 46 mm) and the definition states
+   which markers are *required* vs *helpful*. Marker orientation is *detected* from the corner order, never declared.
+   Honest gates replace a point count: corner reprojection error (px and cm),
+   agreement between marker print size and surveyed spacing, minimum angular
+   spread of used corners, and a per-marker leave-one-out residual that names
+   a marker disagreeing with the rest.
    Degrade with a label (all markers best; two or more with a note; one
    marker = pose-only, low confidence). Definitions without size/policy keep
    today's behaviour.
@@ -164,8 +167,8 @@ What this sprint changes, by module:
 
 | Module | Responsibility after this sprint |
 |---|---|
-| `config` (loader + interfaces) | Definition schema: per-marker `size_mm`, `rotation_deg`, `policy`; field `default_marker_size_mm`; optional `calibration_target` (ChArUco spec + placement). Pure data + validation, cv2-free. |
-| `calibration/pose.py` (new, cv2) | Planar pose solve: marker corner object points from the definition, undistort, IPPE + LM refinement, ambiguity check; derives homography, camera position (height, nadir, tilt) and raw metrics. No policy. |
+| `config` (loader + interfaces) | Definition schema: per-marker `size_mm` and `policy`; field-level `playfield.marker_size_mm` default (no orientation key); optional `calibration_target` (ChArUco spec + placement). Pure data + validation, cv2-free. |
+| `calibration/pose.py` (new, cv2) | Planar pose solve: marker corner object points from the definition, per-marker in-plane rotation detected from the corner order, undistort, IPPE + LM refinement, ambiguity check, leave-one-out residuals; derives homography, camera position (height, nadir, tilt) and raw metrics. No policy. |
 | `calibration/gates.py` (new, numpy only) | Pure decision logic: gate thresholds as named constants, angular spread, scale agreement, degradation label and notes from (matched set, policy, metrics). |
 | `calibration/calibration.py` | `Calibrator` orchestrates: capture, detect corners, choose pose-vs-centre-point strategy, apply policy + gates, build `Calibration`. Loses the ~400-line estimator. |
 | `calibration/interfaces.py` | `CalibrationResult`/`Calibration` gain additive method/confidence/pose/metric fields; intrinsics fields removed from the result. cv2-free. |
@@ -175,7 +178,7 @@ What this sprint changes, by module:
 
 ```mermaid
 flowchart LR
-    DEF["config: PlayfieldDefinition\n(size_mm, rotation, policy,\ncalibration_target)"] --> CAL
+    DEF["config: PlayfieldDefinition\n(size_mm, policy,\ncalibration_target)"] --> CAL
     LENS["calibration/lens\n(LensStore, measured model)"] -->|"get_lens_model"| CAL
     DET["vision/detector\n(ArUco corners)"] --> CAL
     CAL["calibration.Calibrator\n(orchestrate, build Calibration)"] --> POSE["calibration/pose\n(IPPE + LM, derive H and camera pos)"]
@@ -222,14 +225,13 @@ erDiagram
     PLAYFIELD_DEFINITION ||--o{ ARUCO_ENTRY : "aruco_tags"
     PLAYFIELD_DEFINITION ||--o| CALIBRATION_TARGET : "optional"
     PLAYFIELD_DEFINITION {
-        float default_marker_size_mm "optional"
+        float marker_size_mm "optional field-level default (playfield block)"
     }
     ARUCO_ENTRY {
         int id
         float x_y_cm
         float height_cm "0 = on field plane"
         float size_mm "optional, falls back to default"
-        float rotation_deg "optional, default 0"
         string policy "required|helpful, optional"
     }
     CALIBRATION_TARGET {
@@ -259,9 +261,17 @@ exactly.
 
 - **Solve by pose.** For each matched marker with a known size: four
   field-frame corner positions = surveyed centre plus the marker's half-size
-  offsets, rotated by `rotation_deg` (0 = marker upright, its top edge toward
-  north). Detected corners (multi-frame averaged, ArUco order TL, TR, BR, BL)
-  are the image points. IPPE on undistorted points gives the starting pose;
+  offsets in the marker's own frame, in ArUco order TL, TR, BR, BL. **The
+  marker's orientation is detected, not declared:** markers are printed and
+  mounted at arbitrary 90-degree rotations (main field: 1, 2, 3 upright, 4
+  about +90, 8 about -90, 5, 6, 7, 9, 10 upside down). Detected corners
+  (multi-frame averaged, in the marker's own TL, TR, BR, BL order) are
+  matched to the object points under each of the 4 possible 90-degree
+  rotations of the marker's object points; the rotation with the smallest
+  residual (against an approximate pose from the other markers or a
+  homography seeded from the surveyed centres) is taken per marker, and the
+  winner/runner-up residual ratio is recorded. The rotation is a derived
+  value, reported per marker, never an input. IPPE on undistorted points gives the starting pose;
   Levenberg-Marquardt refines against the *raw* corners through the lens
   (so reported px error is honest, in pixels the camera actually produced).
   Output: rotation/translation of the field plane, from which
@@ -276,7 +286,10 @@ exactly.
   `low` ("pose-only, low confidence") and still stored; 0 or required missing
   -> failure.
 - **Gates (all reported on success and failure):** corner reprojection RMS in
-  px and in cm; scale agreement (per-marker camera distance from its own
+  px and in cm; **per-marker leave-one-out residual** (each marker's centre
+  predicted by the pose fit to the *other* markers, in cm; the worst marker is
+  named, so a misplaced or mis-surveyed marker is identified instead of
+  failing with one aggregate number; N/A with fewer than 3 markers); scale agreement (per-marker camera distance from its own
   print size vs. distance implied by the global pose, median ratio, N/A with
   fewer than 2 markers); angular spread (max angle between viewing rays of any
   two used corners); IPPE ambiguity ratio. Thresholds are named constants in
@@ -311,12 +324,20 @@ reference.
 the pose adds provenance fields next to it. Alternative (store the pose and
 recompute H on load) rejected: two sources of truth for the same mapping.
 
-**Decision 3 -- Marker rotation is part of the schema (`rotation_deg`,
-default 0).** Context: the centre-point solve never needed marker orientation;
-corners do. A wrong assumption shows up immediately as a large reprojection
-error rather than a silent bias, which is the safe failure. Alternative
-(infer orientation from the data) rejected as under-constrained for one
-marker and hiding a definition error.
+**Decision 3 (revised 2026-10-16) -- Marker orientation is detected, never
+declared; there is no `rotation_deg` in the marker schema.** Context: the
+main field's markers are physically printed/mounted at mixed 90-degree
+rotations (upright, +90, -90, upside down), so a per-field or default
+rotation cannot be right and a per-marker declaration would be one more thing
+to get wrong. Corner order from the detector is in the marker's own frame, so
+the 4 candidate 90-degree rotations of the marker's object points are
+exhaustively tried and the smallest-residual one wins. Alternatives: declare
+`rotation_deg` (rejected: stakeholder fact above, plus manual upkeep);
+infer from a single marker alone (the fit is still well posed for one marker
+only if the 4 candidates give clearly different residuals -- the
+winner/runner-up ratio is reported, and a poor ratio caps confidence at
+`low`). Consequences: an unorientable marker degrades confidence rather than
+silently biasing the pose; the chosen rotation per marker is reported.
 
 **Decision 4 -- The pose path requires a `measured` lens at the frame size.**
 Context: the `estimated` source is the non-physical fx/k1-ridge fit this
@@ -346,7 +367,7 @@ edit away and the decision logic is testable without OpenCV.
 
 ### Migration Concerns
 
-- Existing definitions (no `size_mm`, `rotation_deg`, `policy`,
+- Existing definitions (no `size_mm`, `marker_size_mm`, `policy`,
   `calibration_target`) load and behave identically (centre-point, all
   required). Every shipping playfield file is covered by a loader test.
 - Existing `calibration.json` files load unchanged; new fields are optional
@@ -365,19 +386,20 @@ edit away and the decision logic is testable without OpenCV.
 
 ### Open Questions (planned defaults let the sprint proceed unanswered)
 
-1. **Marker orientation on the physical fields.** Default: `rotation_deg = 0`
-   (marker upright, top edge toward north), overridable per entry; a wrong
-   guess fails the reprojection gate loudly. Stakeholder to confirm how the
-   secondary-field markers are actually printed/mounted (ticket 013).
-2. **Marker size semantics.** Default: `size_mm` is the outer side of the
-   black square (excluding the white margin), the OpenCV convention.
-   Secondary-field markers' printed size to be supplied for the shipping JSON;
-   until then the shipping file gains no size and stays centre-point.
+1. ~~Marker orientation on the physical fields.~~ **Resolved 2026-10-16:
+   orientation is detected from the corner order (best of the 4 rotations by
+   residual), never declared; `rotation_deg` is removed from the schema.**
+2. **Marker size.** `size_mm` is the outer side of the black square
+   (excluding the white margin), the OpenCV convention. **Resolved for the
+   main field: 46 mm** (`playfield.marker_size_mm`, already in
+   `main-playfield.json`). **Still open for the secondary field**; planned
+   default: it stays on the centre-point path until a size is supplied.
 3. **Gate thresholds.** Defaults: RMS corner error <= 1.5 px and <= 1.0 cm
    (the existing cm threshold); scale agreement within 5 %; angular spread >=
    10 degrees; IPPE ambiguity ratio >= 1.3 (borrowed from the collector), else
-   confidence capped at `low`. Tuned on synthetic noise in tickets 004/006,
-   confirmed live in 013.
+   confidence capped at `low`. Plus a per-marker leave-one-out gate (default: worst marker <= 2 cm,
+   provisional; live reference: corrected main field 0.75 cm worst, 0.23 cm
+   rms). Tuned on synthetic noise in tickets 004/006, confirmed live in 013.
 4. **Pose vs configured `camera_position` precedence.** Default: pose wins
    when fresh; configured is the fallback (Decision 5). If both exist and
    differ by more than 5 cm, `camera locate` prints the comparison.
@@ -425,8 +447,34 @@ recorded `passed`).
   small markers -- 5 % default, tunable; (3) sign-convention errors (north-up,
   single y-flip, rotation direction) -- guilty until proven innocent, pinned
   by ticket 004 tests against known synthetic geometry; (4) removing
-  `estimate_intrinsics` is breaking -- announced; (5) physical marker
-  orientation unknown -- Open Question 1.
+  `estimate_intrinsics` is breaking -- announced; (5) marker orientation is mixed on real fields -- resolved by detection
+  (Decision 3), pinned by a four-rotation plus upside-down synthetic test.
+
+## Revision 2026-10-16: marker size, detected orientation, per-marker gate
+
+Stakeholder facts and an out-of-process check of the main playfield (camera
+2: all ten ArUco markers plus the centre tag detected) changed the plan:
+
+- Main-field marker size is 46 mm; the key is the field-level
+  `playfield.marker_size_mm` (replaces the planned `default_marker_size_mm`);
+  per-marker `size_mm` overrides it. Secondary size still unknown.
+- Marker orientation is mixed (1, 2, 3 upright; 4 about +90; 8 about -90;
+  5, 6, 7, 9, 10 upside down), so `rotation_deg` is removed from the schema
+  and orientation is detected in the pose solve (Decision 3, Open Question 1).
+- Ids 9 and 10 were physically swapped relative to the old definition; the
+  definition is corrected. Worked example for a new per-marker leave-one-out
+  gate: 30 cm rms before, 0.23 cm rms / 0.75 cm worst leave-one-out after.
+- Acceptance on the main field is "at least as good as the centre-point
+  solve" (0.23 cm rms with the camera-2 legacy lens), checked on cameras 2
+  and 3 in ticket 013.
+- Scoped re-review: the change is confined to `config` (one key removed, one
+  renamed) and `pose.py`/`gates.py` (rotation detection, leave-one-out); no
+  new module, dependency edge or diagram change. Verdict stays APPROVE WITH
+  CHANGES.
+
+Affected tickets: 001, 002, 003, 004, 006, 007, 012, 013 (010/011 unchanged:
+the ChArUco `calibration_target` placement rotation is the board's, not a
+marker's).
 
 ## Use Cases
 
@@ -447,6 +495,10 @@ Parent: UC-04, UC-15
   spread, and `lens model: measured`.
 - **Acceptance Criteria**:
   - [ ] Four-marker secondary field uses 16 corners and passes the gate.
+  - [ ] Main field (10 markers, mixed orientations, 46 mm): fits at least as
+        well as the centre-point solve (rms within gate; derived world
+        positions of the ten markers within 0.5 cm of the centre-point
+        solve's; reference 0.23 cm rms).
   - [ ] CLI/MCP/`get_calibration` show all numbers.
 
 ### SUC-002: Author a definition with marker size and policy
@@ -455,8 +507,9 @@ Parent: UC-02
 - **Actor**: Field author
 - **Preconditions**: Surveyed field.
 - **Main Flow**:
-  1. Author adds `default_marker_size_mm` and/or per-entry `size_mm`,
-     `rotation_deg`, and `policy: required|helpful`.
+  1. Author adds `playfield.marker_size_mm` and/or per-entry `size_mm`, and
+     `policy: required|helpful` (no orientation key: marker rotation is
+     detected).
   2. Definition loads, round-trips, and pushes over the wire.
 - **Postconditions**: Daemon holds the richer definition.
 - **Acceptance Criteria**:
@@ -477,6 +530,10 @@ Parent: UC-04
   - [ ] Two-marker diagonal calibrates with a warning.
   - [ ] One marker calibrates, flagged low confidence.
   - [ ] All-required definition fails exactly as today when one is covered.
+  - [ ] A marker that disagrees with the rest is named by its leave-one-out
+        residual (worked example: ids 9/10 swapped = 30 cm rms with the old
+        definition, 0.23 cm rms and 0.75 cm worst leave-one-out with the
+        corrected one).
 
 ### SUC-004: Explicit centre-point fallback
 Parent: UC-04, UC-15
@@ -557,7 +614,7 @@ Before tickets can be created, all of the following must be true:
 
 | # | Title | Depends On |
 |---|-------|------------|
-| 001 | Definition schema: marker size, rotation and required/helpful policy | - |
+| 001 | Definition schema: marker size and required/helpful policy | - |
 | 002 | Definition schema on the wire: proto, rpc and client models | 001 |
 | 003 | Marker corner detection and multi-frame averaging in the Calibrator | 001 |
 | 004 | Planar pose solve and gates: calibration/pose.py and gates.py | 001, 003 |

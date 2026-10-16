@@ -31,8 +31,8 @@ has design docs enabled).
   position, injected target observer, removal of the estimator section, and
   the sign-convention list. Refresh "Last reviewed" and the file-size claims.
 - `src/aprilcam/config/DESIGN.md`: definition schema (`size_mm`,
-  `rotation_deg`, `policy`, `default_marker_size_mm`, `calibration_target`),
-  defaults and validation.
+  `policy`, `playfield.marker_size_mm`, `calibration_target`), defaults and
+  validation; state that marker orientation is detected, not declared.
 - `src/aprilcam/intrinsics/DESIGN.md`: `target.py` and the new
   `intrinsics -> config` edge.
 - `docs/design/use-cases/daemon.md` UC-04: the "all fiducials or fail" rule
@@ -48,10 +48,17 @@ has design docs enabled).
   cameras, and how to author a sized definition; append a pointer to
   `2026-09-04-secondary-playfield-resurvey-and-lens-model.md` noting that the
   extra markers' original motivation is superseded.
-- Playfield JSON: if the stakeholder has supplied the secondary-field marker
-  size and orientation (Open Questions 1-2), add `default_marker_size_mm` /
-  `rotation_deg` to `config/aprilcam/playfields/secondary-playfield.json`;
-  otherwise leave it and document how.
+- Playfield JSON: `main-playfield.json` already carries
+  `playfield.marker_size_mm: 46` (do not re-add). If the stakeholder has
+  supplied the secondary-field marker size (Open Question 2), add
+  `marker_size_mm` to the `playfield` block of
+  `config/aprilcam/playfields/secondary-playfield.json`; otherwise leave it
+  and document that the secondary field stays on the centre-point path.
+- Knowledge entry also records: orientation detection by best-of-4 rotation
+  residual, the 2026-10-16 main-field facts (46 mm; orientations 1-3 upright,
+  4 +90, 8 -90, 5/6/7/9/10 upside down), and the 9/10 swap as the worked
+  example for the leave-one-out gate (30 cm rms before, 0.23 cm rms and
+  0.75 cm worst leave-one-out after).
 - Record the deferred tag-free table-edge option (issue's "Explored and
   deferred") in the knowledge base so it is not rediscovered.
 - Terminology: user-facing text says "lens model" and "field calibration".

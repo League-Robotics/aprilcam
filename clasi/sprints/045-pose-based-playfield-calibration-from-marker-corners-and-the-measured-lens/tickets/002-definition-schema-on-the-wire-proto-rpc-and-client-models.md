@@ -16,15 +16,15 @@ completes_issue: true
 ## Description
 
 Carry the ticket-001 schema over the wire so a pushed definition keeps its
-marker sizes, rotations and policies (the CLI loads a file client-side and
+marker sizes and policies (the CLI loads a file client-side and
 pushes it with `SetPlayfield`; the daemon rebuilds the definition in
 `daemon/rpc.py`). Without this, a definition would silently lose `size_mm` in
 transit and every field would fall back to centre-point.
 
 Additive proto fields (follow sprint 044 tickets 006 and 010):
-`PlayfieldFeatureEntry`: `optional double size_mm`, `optional double
-rotation_deg`, `optional string policy`; `PlayfieldDefinition`: `optional
-double default_marker_size_mm`. Absence encodes "unset" (use `optional` so
+`PlayfieldFeatureEntry`: `optional double size_mm`, `optional string
+policy`; `PlayfieldDefinition`: `optional double marker_size_mm` (mirrors
+`playfield.marker_size_mm`). No rotation field: orientation is detected. Absence encodes "unset" (use `optional` so
 `HasField` distinguishes 0/unset where it matters).
 
 ## Acceptance Criteria
@@ -35,7 +35,7 @@ double default_marker_size_mm`. Absence encodes "unset" (use `optional` so
       committed).
 - [ ] `daemon/rpc.py` `_playfield_*` conversions and
       `client/models.py` / `client/daemon_client.py` `set_playfield` /
-      `get_playfield` round-trip all four fields.
+      `get_playfield` round-trip all three fields.
 - [ ] A definition with no new keys produces a message with none of the new
       fields set, and an old daemon/new client (or reverse) interoperates.
 - [ ] `get_playfield` returns the stored sizes/policies (readable by

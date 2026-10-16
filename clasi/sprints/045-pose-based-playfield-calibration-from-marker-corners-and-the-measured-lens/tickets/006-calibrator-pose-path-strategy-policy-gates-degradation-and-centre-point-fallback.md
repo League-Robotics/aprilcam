@@ -37,7 +37,10 @@ Flow after capture and `_detect_markers`:
    No policy anywhere = all required = today.
 3. **Solve and gates** (pose path): matched on-plane markers' corners ->
    `solve_planar_pose`; evaluate reprojection (px and cm), scale agreement,
-   angular spread, ambiguity via `gates.py`. A gate failure returns
+   angular spread, ambiguity, and the per-marker leave-one-out residual via
+   `gates.py`. Marker orientation is detected per marker inside the solve
+   (ticket 004); no rotation comes from the definition. A leave-one-out
+   failure's `reason` names the worst marker id and its cm residual. A gate failure returns
    `succeeded=False` with the measured numbers and a `reason` naming the gate
    and threshold; nothing is stored and the previous calibration survives.
 4. **Degradation.** `full` / `reduced` (>= 2 matched, note) / `low` (exactly 1
@@ -65,9 +68,14 @@ continues to take the old branch; the pose path is not entered in that case.
       centre-point path, `method_reason` set, results numerically identical
       to the pre-sprint implementation (existing tests unchanged and green).
 - [ ] Each gate failing in isolation (inflated corner noise, wrong
-      `size_mm`, markers clustered in one image corner, wrong
-      `rotation_deg`) is rejected with the right reason and the numbers
+      `size_mm`, markers clustered in one image corner, one marker's
+      surveyed position displaced / two markers swapped) is rejected with the right reason and the numbers
       reported.
+- [ ] Mixed-orientation markers (all four rotations incl. upside down) in
+      the definition-driven synthetic scene calibrate with `method: pose`
+      and the same result as upright.
+- [ ] A swapped/misplaced marker (e.g. 9 and 10 exchanged) fails the
+      leave-one-out gate naming the marker, not just an aggregate rms.
 - [ ] Derived homography agrees with the centre-point homography on the same
       synthetic data to < 0.2 cm over the field (no-distortion case).
 
