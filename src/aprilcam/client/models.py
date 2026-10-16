@@ -311,6 +311,8 @@ def _playfield_feature_entry_from_proto(
         tag_id=msg.id if msg.HasField("id") else None,
         colour=msg.colour if msg.HasField("colour") else None,
         height_cm=msg.height_cm,
+        size_mm=msg.size_mm if msg.HasField("size_mm") else None,
+        policy=msg.policy if msg.HasField("policy") else None,
     )
 
 
@@ -330,6 +332,7 @@ def playfield_definition_from_proto(msg: aprilcam_v2_pb2.PlayfieldDefinition) ->
         aruco_tags=tuple(_playfield_feature_entry_from_proto(e) for e in msg.aruco_tags),
         rectangles=tuple(_playfield_feature_entry_from_proto(e) for e in msg.rectangles),
         dots=tuple(_playfield_feature_entry_from_proto(e) for e in msg.dots),
+        marker_size_mm_default=msg.marker_size_mm if msg.HasField("marker_size_mm") else None,
     )
 
 

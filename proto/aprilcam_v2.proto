@@ -776,6 +776,13 @@ message PlayfieldFeatureEntry {
   // aprilcam.config.interfaces.Feature.height_cm's own `float = 0.0`
   // (never Optional[float]) shape.
   double height_cm = 6;
+  // Mirrors aprilcam.config.loader.PlayfieldFeatureEntry.size_mm (sprint
+  // 045): this marker's physical side length, mm. Absent = use the
+  // definition's marker_size_mm default.
+  optional double size_mm = 7;
+  // Mirrors aprilcam.config.loader.PlayfieldFeatureEntry.policy (sprint
+  // 045): "required" or "helpful". Absent = "required".
+  optional string policy = 8;
 }
 
 // A whole playfield definition document. Mirrors aprilcam.config.
@@ -788,6 +795,10 @@ message PlayfieldDefinition {
   repeated PlayfieldFeatureEntry aruco_tags = 5;
   repeated PlayfieldFeatureEntry rectangles = 6;
   repeated PlayfieldFeatureEntry dots = 7;
+  // Mirrors aprilcam.config.loader.PlayfieldDefinition.
+  // marker_size_mm_default (sprint 045): the field-level default marker
+  // size, mm, from playfield.marker_size_mm. Absent = not declared.
+  optional double marker_size_mm = 8;
 }
 
 // A playfield the daemon knows about, as served. Mirrors aprilcam.

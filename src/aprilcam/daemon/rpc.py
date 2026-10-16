@@ -431,6 +431,10 @@ def _playfield_feature_entry_to_proto(
     )
     if entry.tag_id is not None:
         msg.id = entry.tag_id
+    if entry.size_mm is not None:
+        msg.size_mm = entry.size_mm
+    if entry.policy is not None:
+        msg.policy = entry.policy
     if entry.colour is not None:
         msg.colour = entry.colour
     return msg
@@ -446,6 +450,8 @@ def _playfield_feature_entry_from_proto(
         tag_id=msg.id if msg.HasField("id") else None,
         colour=msg.colour if msg.HasField("colour") else None,
         height_cm=msg.height_cm,
+        size_mm=msg.size_mm if msg.HasField("size_mm") else None,
+        policy=msg.policy if msg.HasField("policy") else None,
     )
 
 
@@ -456,7 +462,7 @@ def _playfield_definition_to_proto(definition: PlayfieldDefinition) -> aprilcam_
     docstring and ``aprilcam_v2.proto``'s header comment for why this
     is not built from the more abstract ``features()``/
     ``required_aruco_ids()`` view)."""
-    return aprilcam_v2_pb2.PlayfieldDefinition(
+    msg = aprilcam_v2_pb2.PlayfieldDefinition(
         name=definition.name,
         width_cm=definition.width_cm,
         height_cm=definition.height_cm,
@@ -465,6 +471,9 @@ def _playfield_definition_to_proto(definition: PlayfieldDefinition) -> aprilcam_
         rectangles=[_playfield_feature_entry_to_proto(e) for e in definition.rectangles],
         dots=[_playfield_feature_entry_to_proto(e) for e in definition.dots],
     )
+    if definition.marker_size_mm_default is not None:
+        msg.marker_size_mm = definition.marker_size_mm_default
+    return msg
 
 
 def _playfield_definition_from_proto(msg: aprilcam_v2_pb2.PlayfieldDefinition) -> PlayfieldDefinition:
@@ -480,6 +489,7 @@ def _playfield_definition_from_proto(msg: aprilcam_v2_pb2.PlayfieldDefinition) -
         aruco_tags=tuple(_playfield_feature_entry_from_proto(e) for e in msg.aruco_tags),
         rectangles=tuple(_playfield_feature_entry_from_proto(e) for e in msg.rectangles),
         dots=tuple(_playfield_feature_entry_from_proto(e) for e in msg.dots),
+        marker_size_mm_default=msg.marker_size_mm if msg.HasField("marker_size_mm") else None,
     )
 
 
