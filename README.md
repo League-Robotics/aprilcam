@@ -115,10 +115,29 @@ aprilcam arucogen   # Generate 4x4 ArUco marker images
 aprilcam cameras    # List available cameras
 ```
 
+### Field calibration
+
+```
+aprilcam camera calibrate <camera> [--verbose] [-d HOST]
+```
+
+Calibrates a camera against its linked playfield, inside the daemon. When the
+camera has a measured lens model (below) and the playfield definition gives
+marker sizes, it solves the camera's pose from the four corners of every
+marker, derives the pixel-to-field mapping from it, and prints the method,
+confidence (`full`, `reduced`, `low`), corner count, reprojection error in px
+and cm, scale agreement, angular spread, the camera's height, position and
+tilt, and the worst leave-one-out marker (`--verbose` lists every marker).
+Without a measured lens model or marker sizes it falls back to a fit of the
+marker centres and says why. In a definition each `aruco_tags` entry may carry
+`size_mm` and `policy` (`required`, the default, or `helpful`);
+`playfield.marker_size_mm` sets a default size; marker orientation is detected,
+not declared. See `docs/knowledge/2026-10-16-pose-based-field-calibration.md`.
+
 ### Lens (intrinsics) calibration
 
 ```
-aprilcam camera intrinsics <camera...> [--board SPEC] [--install] [--no-gui] [-d HOST]
+aprilcam camera intrinsics <camera...>   # alias: aprilcam camera lens [--board SPEC] [--install] [--no-gui] [-d HOST]
 ```
 
 Measures each camera's lens from a printed ChArUco board, inside the daemon,

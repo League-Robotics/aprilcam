@@ -95,3 +95,11 @@ The fitted k1 of -0.30 is still stronger than the plumb-line estimate
 (-0.12); it absorbs mid-edge marker placement error. World coordinates
 are within ~1 cm of the survey regardless, but an honest lens fit needs
 accurately surveyed markers 4-7 or a centre marker added to the definition.
+
+## Update, sprint 045 (2026-10-16)
+
+The motivation for the extra edge-middle markers (averaging away lens
+distortion the homography cannot model) is superseded: with a measured lens
+model, field calibration solves the camera pose from marker corners instead,
+and the single-view estimator mentioned above is gone. See
+`2026-10-16-pose-based-field-calibration.md`.

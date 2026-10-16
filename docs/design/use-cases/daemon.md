@@ -413,9 +413,13 @@ succeeded — after which pixel positions can become world positions.
 2. Daemon detects ArUco markers across multiple averaged frames.
 3. Daemon matches detected ids to surveyed coordinates from the pushed
    definition — ArUco 1 → (−67, 44.65), and so on.
-4. Daemon computes the homography, augments it with all surveyed markers
-   it found, and records static markers so later deskew does not require
-   the corners to stay visible.
+4. Daemon solves the field calibration. When the camera has a measured
+   lens model (UC-30) and the definition gives marker sizes, it solves
+   the camera's planar pose from the four corners of every matched
+   marker and derives the homography from it (also recording the camera's
+   height and position over the field); otherwise it fits the marker
+   centres as before and says why. It records static markers so later
+   deskew does not require the corners to stay visible.
 5. Daemon reports **explicit success or failure**. On success the client
    can fetch the resulting homography and inspect it — informational,
    not something the client needs in order to work.
@@ -424,19 +428,35 @@ succeeded — after which pixel positions can become world positions.
 World-coordinate queries and the deskewed view are available. Position
 answers are now in cm rather than pixels.
 
-**Acceptance rule — all specified fiducials must be seen.** The
-playfield definition is the authority on what the camera must find.
-Calibration succeeds only when **every ArUco fiducial the definition
-specifies is detected**. For `main-playfield` that is all 10 —
-perimeter 1–8 plus internal 9 and 10. Seeing 9 of 10 is a **failure**,
-not a degraded success. There is no partial calibration and no
-best-effort solve: an incomplete view means the camera cannot see the
-field it claims to be looking at, and any homography from it would be
-silently wrong somewhere.
+**Acceptance rule — per-marker policy (sprint 045).** The playfield
+definition is the authority on what the camera must find, marker by
+marker. Each marker is `required` (the default when unspecified) or
+`helpful`. Calibration succeeds only when **every `required` marker is
+detected**; a `helpful` marker that is missing is reported but never
+fails the attempt. A definition that leaves every marker `required`
+behaves exactly as the old rule did: `main-playfield`'s 10 markers, all
+needed, 9 of 10 is a **failure**. There is still no partially stored
+result — a failed attempt stores nothing — but a *successful* solve now
+carries a confidence label so a thin view is honest about itself:
+
+- **full** — three or more markers in a spread layout, every quality gate
+  passed.
+- **reduced** — exactly two markers: it calibrates, with a warning.
+- **low** — one marker, an ambiguous rotation, or a weak layout
+  (near-collinear or tightly clustered): it calibrates, flagged low.
+- **fail** — corner fit, scale agreement or the leave-one-out check (one
+  marker disagreeing with all the others, which is how a mis-surveyed or
+  swapped marker shows up) exceeds its limit: no calibration, the failing
+  gate named.
+
+Markers raised above the field plane are never used in the solve.
 
 **Failure modes.**
-- Any specified fiducial not detected → explicit failure naming exactly
+- Any `required` fiducial not detected → explicit failure naming exactly
   which ids are missing. No calibration stored.
+- A quality gate fails → explicit failure naming the gate and, where it
+  applies, the marker the others disagree with most. No calibration
+  stored.
 - Detected ids not in the definition (a stray marker on the field) →
   ignored, reported.
 - Degenerate geometry (markers near-collinear, or a physically
@@ -445,7 +465,9 @@ silently wrong somewhere.
   now wrong; flagged stale rather than silently trusted.
 
 **Open questions.**
-- What is the acceptance threshold *beyond* completeness? All fiducials
+- (Resolved, sprint 045: the gates in `calibration/gates.py` are the
+  threshold beyond completeness; values are provisional until confirmed
+  live.) What is the acceptance threshold *beyond* completeness? All fiducials
   found is necessary; is it sufficient, or is there also a maximum
   reprojection error in cm? A complete-but-sloppy solve is still a bad
   solve.
@@ -470,9 +492,36 @@ missing. No calibration is stored; a previously good calibration is left
 as it was. The developer moves the robot and retries.
 
 **UC-04.S-3 — Camera badly aimed** · _failure path_
-Camera aimed so only ArUco 1 and 2 are in frame. Calibration fails
-explicitly, naming the eight missing ids rather than only reporting a
-count.
+Camera aimed so only ArUco 1 and 2 are in frame. With every marker
+`required`, calibration fails explicitly, naming the eight missing ids
+rather than only reporting a count.
+
+**UC-04.S-4 — Helpful marker missing** · _degraded path_
+In a definition where ArUco 9 and 10 are marked `helpful`, a robot
+covers 9. Calibration succeeds from the other markers, reports 9 as a
+helpful marker not seen, and stores the result.
+
+**UC-04.S-5 — Two markers calibrate with a warning** · _degraded path_
+A definition lists only two markers and both are in view. Calibration
+succeeds with `reduced` confidence and says so; the result is usable but
+not as well constrained as three or more.
+
+**UC-04.S-6 — One marker, or a poor layout, is flagged low** · _degraded path_
+A one-marker definition, or three markers in a row, calibrates but with
+`low` confidence and a note naming the weakness. A caller can then
+decide whether the accuracy is enough.
+
+**UC-04.S-7 — A swapped marker is named** · _failure path_
+Two reprinted markers were placed in each other's spots. The leave-one-out
+check fails the attempt, names the marker the others disagree with most,
+and reports how far in cm; nothing is stored. Swapping them back
+calibrates to a fraction of a centimetre.
+
+**UC-04.S-8 — No measured lens, or no marker size** · _fallback path_
+The camera has no measured lens model (UC-30), or the definition gives no
+marker size. Calibration falls back to the centre-point fit over the
+required markers, succeeds under the old 1 cm limit, and states the
+reason it did not use the pose solve.
 
 ---
 
@@ -990,6 +1039,10 @@ turns an observed tag pose into the robot's pose.
    pose.
 4. Subsequent queries and streams report **the robot's** position and
    heading.
+
+The projection needs the camera's height and position over the field. A
+camera with a fresh pose calibration (UC-04) supplies them itself; failing
+that, the configured camera position (from `camera locate`) is used.
 
 **Postconditions.** Per-tag parameters held by the daemon and applied
 per frame. Calibration itself stays robot-agnostic — these are runtime

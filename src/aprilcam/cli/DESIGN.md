@@ -1,6 +1,6 @@
 # cli/
 
-**Owner:** Eric Busboom · **Last reviewed:** 2026-08-21 · **Status:** stable
+**Owner:** Eric Busboom · **Last reviewed:** 2026-10-16 · **Status:** stable
 
 ---
 
@@ -42,7 +42,7 @@ presentation.
 | `__init__.py` | 160 | `main()` — the single dispatch seam. Builds the top-level parser, wires every subcommand module's `add_subparser`, resets `SIGPIPE` to default disposition, and is the one place `BrokenPipeError` is caught. |
 | `_common.py` | 257 | Shared plumbing: `EXIT_OK`/`EXIT_ERROR`, `add_daemon_option`/`add_all_option` (the `-d`/`--all` flags), `incomplete_command` (a subparser-tree default), `report_error`, `format_camera_row`/`print_cameras`/`print_probe_report`, `fan_out`, `resolve_playfield_camera`. |
 | `camera.py` | 521 | `camera list\|probe\|image\|tags\|config\|view` — camera-addressed commands. Also wires in `calibrate.py` and `locate.py` as sub-subcommands of its own `camera` subparser tree. |
-| `calibrate.py` | 146 | `camera calibrate` — a pure RPC orchestrator around the `Calibrate` RPC; grouped under `camera` but kept in its own file. |
+| `calibrate.py` | ~210 | `camera calibrate [--verbose]` — a pure RPC orchestrator around the `Calibrate` RPC; grouped under `camera` but kept in its own file. Prints the matched ids, `lens model:` line, then (sprint 045) `method`, `confidence`, corners used, reprojection error in px and cm, scale agreement, angular spread, camera height/nadir/tilt and the worst leave-one-out marker; caveats (`reduced`/`low`, centre-point fallback reason, helpful markers not seen) go to stderr, `--verbose` adds the per-marker leave-one-out table, and a failed pose attempt prints its measurements before the reason. `--with-intrinsics` was removed in sprint 045. `camera list` shows `calibrated (pose, full)`; `camera lens` aliases `camera intrinsics`; `locate.py` prints the pose-vs-locate comparison note. |
 | `flatfield.py` | ~130 (sprint 037) | `camera flatfield` — a pure RPC orchestrator around `CaptureFlatField`/`GetFlatField`/`ClearFlatField`; grouped under `camera`, same one-file shape as `calibrate.py`. |
 | `locate.py` | 431 | `camera locate` — solves camera ground nadir/height from surveyed AprilTag references. The one file in this package with a client-side geometry dependency (§3). |
 | `daemon.py` | 313 | `daemon start\|stop\|restart\|status\|list` — process lifecycle (local-only) plus remote status/discovery. |

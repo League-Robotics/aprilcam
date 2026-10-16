@@ -1,6 +1,6 @@
 # config/
 
-**Owner:** Eric Busboom · **Last reviewed:** 2026-08-21 · **Status:** stable
+**Owner:** Eric Busboom · **Last reviewed:** 2026-10-16 · **Status:** stable
 
 ---
 
@@ -110,6 +110,7 @@ module — `configuration.md` §1 states logs go to stderr only, and
   corner order by the pose solve, never declared; a stray `rotation_deg` is
   ignored like any other unknown key. Elevated entries (`height_cm > 0`) are
   excluded from pose use.
+- **Defaults and who uses these keys (sprint 045).** Every new key is optional and omitted from `to_dict` when unset, so older documents round-trip byte-identical; unspecified `policy` means `required`, which reproduces the old "every listed marker" rule. `main-playfield.json` carries `playfield.marker_size_mm: 46`; `secondary-playfield.json` deliberately carries none (its marker size is unknown), so that field calibrates on the centre-point path. The keys are consumed by `calibration/` (pose solve, policy) and, over the wire, by `daemon/rpc.py` and `client/`; user-facing text calls the result "field calibration". See `docs/knowledge/2026-10-16-pose-based-field-calibration.md` for authoring a sized definition.
 - **Calibration target (sprint 045 ticket 010).** The definition may carry
   `calibration_target`: `kind` (`"charuco"`), `board` (sprint 044 spec
   `COLSxROWS:SQUARE_MM:MARKER_MM:DICT`), `centre_x_cm`/`centre_y_cm`

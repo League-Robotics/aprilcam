@@ -1,7 +1,7 @@
 ---
 id: '012'
 title: 'Documentation: calibration and config DESIGN.md, use cases and knowledge base'
-status: open
+status: done
 use-cases:
 - SUC-001
 - SUC-002
@@ -10,7 +10,18 @@ use-cases:
 - SUC-005
 - SUC-006
 - SUC-007
-depends-on: ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011']
+depends-on:
+- '001'
+- '002'
+- '003'
+- '004'
+- '005'
+- '006'
+- '007'
+- 008
+- 009
+- '010'
+- '011'
 github-issue: ''
 issue: pose-based-playfield-calibration-with-marker-corners-and-measured-lens.md
 completes_issue: true
@@ -65,11 +76,11 @@ has design docs enabled).
 
 ## Acceptance Criteria
 
-- [ ] Every item above done; no doc still describes `--with-intrinsics` as
+- [x] Every item above done; no doc still describes `--with-intrinsics` as
       current behaviour.
-- [ ] `uv run pytest tests/test_usecases_index.py` passes.
-- [ ] `validate_design` (CLASI) reports no new findings, if available.
-- [ ] Knowledge-base entry added and linked from the calibration DESIGN.md.
+- [x] `uv run pytest tests/test_usecases_index.py` passes.
+- [x] `validate_design` (CLASI) reports no new findings, if available.
+- [x] Knowledge-base entry added and linked from the calibration DESIGN.md.
 
 ## Implementation Plan
 

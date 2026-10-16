@@ -1,6 +1,6 @@
 # mcp/
 
-**Owner:** Eric Busboom · **Last reviewed:** 2026-08-21 · **Status:** stable
+**Owner:** Eric Busboom · **Last reviewed:** 2026-10-16 · **Status:** stable
 
 ---
 
@@ -111,6 +111,7 @@ locals.
   would pull `cv2` into `mcp/` transitively, violating the "cv2 absent
   from sys.modules after importing every mcp/ module" success
   criterion even though no tool here ever touches a camera.
+- **Pose provenance in the MCP results (sprint 045).** `calibrate` and `get_calibration` return `method`, `method_reason`, `confidence`, `corner_count`, `reprojection_error_px`, `scale_agreement`, `angular_spread_deg`, camera height/nadir/tilt, `notes`, `helpful_missing_ids` and the worst leave-one-out id/value, plus per-camera `calibration_method`/`calibration_confidence` in the camera listing, all as plain JSON from the cv2-free interface types. `with_intrinsics` no longer exists. An agent should treat `reduced`/`low` as a prompt to add or uncover markers.
 - **`capture_flatfield`/`get_flatfield`/`clear_flatfield` (sprint 037)
   follow the identical rule**, using `calibration.interfaces.FlatFieldResult`/
   `FlatFieldInfo` — never `calibration.flatfield.FlatFieldCapturer`'s

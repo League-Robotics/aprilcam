@@ -1,6 +1,6 @@
 # intrinsics/
 
-**Owner:** Eric Busboom · **Last reviewed:** 2026-10-15 · **Status:** stable (sprint 044)
+**Owner:** Eric Busboom · **Last reviewed:** 2026-10-16 · **Status:** stable (sprint 044)
 
 ---
 
