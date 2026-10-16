@@ -65,3 +65,7 @@ A bump is almost never a pure rotation; it is a translation. So:
 - The existing `compute_drift_cm` hook and the pose-based reprojection
   check above are the places this lives; this item defines what "bumped"
   means and which marker is the authority.
+
+See also `datum-tag-defines-the-playfield-frame.md` (2026-10-16): the datum
+tag is the authority this item checks against; "bumped" means the datum no
+longer reads (0, 0, 0°) through the stored mapping.
