@@ -1,8 +1,10 @@
 ---
 id: '001'
 title: Per-camera lens store and Calibrator carry-forward with legacy fallback
-status: open
-use-cases: [SUC-004, SUC-005]
+status: done
+use-cases:
+- SUC-004
+- SUC-005
 depends-on: []
 github-issue: ''
 issue: charuco-board-intrinsics-calibration-as-a-daemon-workflow.md
@@ -18,15 +20,15 @@ Move the lens model out of per-playfield `calibration.json` into a per-camera st
 
 ## Acceptance Criteria
 
-- [ ] `calibration/lens.py` defines `LensModel` (camera_matrix, dist_coeffs, image_size, source, board_spec, views, rms_px, residual_px, correction_px, installed_at) and `LensStore` persisting `<state_dir>/cameras/<slug>/intrinsics.json` atomically (tmp+fsync+`os.replace`); corrupt/missing file tolerated (warning, treated as absent).
-- [ ] `LensModel`/provenance value types that clients will need live in a cv2-free module (`calibration/interfaces.py` additions or `lens.py` itself, which must not import cv2).
-- [ ] `LensStore.get(slug, image_size)` returns the measured model only when image size matches; a mismatch returns None and a reason the caller can surface.
-- [ ] `Calibrator` gains an optional `get_lens_model` constructor argument. Carry-forward order: store model (size-matched) > prior calibration's embedded matrix > none. Behaviour is unchanged when the argument is absent.
-- [ ] `Calibration` gains additive `lens_source` ('measured'|'estimated'|'legacy'), persisted in `calibration.json`; files without it that carry a matrix read back as 'legacy'; `to_dict`/`from_dict` round-trip old and new files.
-- [ ] `CalibrationResult` gains `lens_model_source` ('measured'|'estimated'|'legacy'|'none') populated by `calibrate` (reporting in CLI/MCP is ticket 010).
-- [ ] `estimate_intrinsics=True` is refused with an explicit failure result naming the installed measured model while one is installed (sprint.md Open Question 2).
-- [ ] A failed `calibrate` or a playfield change does not touch `intrinsics.json`.
-- [ ] `tests/test_no_cv2_in_client_modules.py` still passes.
+- [x] `calibration/lens.py` defines `LensModel` (camera_matrix, dist_coeffs, image_size, source, board_spec, views, rms_px, residual_px, correction_px, installed_at) and `LensStore` persisting `<state_dir>/cameras/<slug>/intrinsics.json` atomically (tmp+fsync+`os.replace`); corrupt/missing file tolerated (warning, treated as absent).
+- [x] `LensModel`/provenance value types that clients will need live in a cv2-free module (`calibration/interfaces.py` additions or `lens.py` itself, which must not import cv2).
+- [x] `LensStore.get(slug, image_size)` returns the measured model only when image size matches; a mismatch returns None and a reason the caller can surface.
+- [x] `Calibrator` gains an optional `get_lens_model` constructor argument. Carry-forward order: store model (size-matched) > prior calibration's embedded matrix > none. Behaviour is unchanged when the argument is absent.
+- [x] `Calibration` gains additive `lens_source` ('measured'|'estimated'|'legacy'), persisted in `calibration.json`; files without it that carry a matrix read back as 'legacy'; `to_dict`/`from_dict` round-trip old and new files.
+- [x] `CalibrationResult` gains `lens_model_source` ('measured'|'estimated'|'legacy'|'none') populated by `calibrate` (reporting in CLI/MCP is ticket 010).
+- [x] `estimate_intrinsics=True` is refused with an explicit failure result naming the installed measured model while one is installed (sprint.md Open Question 2).
+- [x] A failed `calibrate` or a playfield change does not touch `intrinsics.json`.
+- [x] `tests/test_no_cv2_in_client_modules.py` still passes.
 
 ## Implementation Plan
 

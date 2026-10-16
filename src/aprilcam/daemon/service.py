@@ -108,6 +108,7 @@ from aprilcam.calibration.calibration import Calibration, Calibrator
 from aprilcam.calibration.deskew import Deskewer
 from aprilcam.calibration.flatfield import FlatFieldCapturer
 from aprilcam.calibration.interfaces import CalibrationResult, FlatFieldInfo, FlatFieldResult
+from aprilcam.calibration.lens import LensStore
 from aprilcam.camera.backends import (
     CaptureBackend,
     ControlBackend,
@@ -670,6 +671,7 @@ class DaemonService(Daemon):
         # never restarted).
         self._image_stream_producers: Dict[Tuple[str, bool], ImageStreamProducer] = {}
         self._lock = threading.Lock()
+        self._lens_store = LensStore(self._directories.state_dir)
         self._calibrator = calibrator if calibrator is not None else Calibrator(
             get_camera_config=self._camera_config_for_calibration,
             get_playfield=self._playfield_for_calibration,
@@ -687,6 +689,10 @@ class DaemonService(Daemon):
             # get_prior_calibration docstring for the full story and the
             # test that specifically exercises the restart path.
             get_prior_calibration=self.get_calibration,
+            # Sprint 044: the per-camera lens store is consulted before
+            # the prior calibration's embedded lens. Read-only here --
+            # nothing in calibrate()/set_playfield() ever writes it.
+            get_lens_model=self._lens_store.get_lens_model,
         )
         self._calibrations: Dict[str, Calibration] = {}
         self._load_calibrations()

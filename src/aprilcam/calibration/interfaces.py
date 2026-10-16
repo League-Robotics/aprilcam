@@ -111,6 +111,11 @@ class CalibrationResult:
     than left to guess. ``None`` under the same condition as
     :attr:`intrinsics_mode`.
     """
+    lens_model_source: Optional[str] = None
+    """Which lens model this call applied (sprint 044): ``"measured"``
+    (per-camera lens store), ``"estimated"``, ``"legacy"`` (embedded in a
+    pre-sprint-044 calibration) or ``"none"``. ``None`` when the attempt
+    failed before the lens decision was made."""
 
 
 @dataclass(frozen=True, kw_only=True)

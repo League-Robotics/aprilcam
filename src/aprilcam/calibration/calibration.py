@@ -138,6 +138,13 @@ from aprilcam.calibration import distortion, geometry
 from aprilcam.calibration.interfaces import Calibration as _CalibrationBase
 from aprilcam.calibration.interfaces import CalibrationResult
 from aprilcam.calibration.interfaces import Calibrator as _CalibratorBase
+from aprilcam.calibration.lens import (
+    LENS_SOURCE_ESTIMATED,
+    LENS_SOURCE_LEGACY,
+    LENS_SOURCE_MEASURED,
+    LENS_SOURCE_NONE,
+    LensModel,
+)
 from aprilcam.config.interfaces import CameraConfig
 from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitionIface
 from aprilcam.config.loader import PlayfieldDefinition as _ConcretePlayfieldDefinition
@@ -320,6 +327,10 @@ FrameSource = Callable[[str], Sequence[np.ndarray]]
 DetectorFactory = Callable[[], TagDetector]
 CalibrationLookup = Callable[[str], Optional["Calibration"]]
 
+#: ``(camera_slug, (width, height)) -> LensModel | None`` -- the per-camera
+#: lens store's size-matched lookup (sprint 044); see ``calibration.lens``.
+LensLookup = Callable[[str, Tuple[int, int]], Optional[LensModel]]
+
 
 def _default_detector_factory() -> TagDetector:
     return TagDetector()
@@ -382,6 +393,19 @@ class Calibration(_CalibrationBase):
     length OpenCV's distortion model accepts round-trips here
     unchanged. ``None`` means "no lens model" -- see the class
     docstring."""
+    lens_source: Optional[str] = None
+    """Provenance of the embedded lens: ``'measured'`` (from the
+    per-camera lens store), ``'estimated'`` (``estimate_intrinsics``) or
+    ``'legacy'`` (carried from a pre-sprint-044 file). ``None`` when no
+    lens is embedded. :meth:`from_dict` infers ``'legacy'`` for an old
+    file with a matrix and no ``lens_source``."""
+
+    def __post_init__(self) -> None:
+        # A lens with no recorded provenance can only be pre-sprint-044
+        # data: normalize it to 'legacy' so construction, to_dict and
+        # from_dict all agree (and round-trip equal).
+        if self.lens_source is None and self.camera_matrix is not None:
+            object.__setattr__(self, "lens_source", LENS_SOURCE_LEGACY)
 
     def to_world(self, pixel: PixelPoint) -> WorldPoint:
         if self._has_intrinsics():
@@ -442,6 +466,8 @@ class Calibration(_CalibrationBase):
             data["camera_matrix"] = [list(row) for row in self.camera_matrix]
         if self.dist_coeffs is not None:
             data["dist_coeffs"] = list(self.dist_coeffs)
+        if self.lens_source is not None:
+            data["lens_source"] = self.lens_source
         return data
 
     @classmethod
@@ -461,7 +487,11 @@ class Calibration(_CalibrationBase):
         homography_raw = data["homography"]
         camera_matrix_raw = data.get("camera_matrix")
         dist_coeffs_raw = data.get("dist_coeffs")
+        lens_source_raw = data.get("lens_source")
+        if lens_source_raw is None and camera_matrix_raw is not None:
+            lens_source_raw = LENS_SOURCE_LEGACY
         return cls(
+            lens_source=str(lens_source_raw) if lens_source_raw is not None else None,
             stale=bool(data.get("stale", False)),
             calibrated_at=float(data["calibrated_at"]),
             playfield=str(data["playfield"]),
@@ -1078,7 +1108,9 @@ class Calibrator(_CalibratorBase):
         pipeline_config: Optional[PipelineConfig] = None,
         max_reprojection_error_cm: float = MAX_REPROJECTION_ERROR_CM,
         get_prior_calibration: Optional[CalibrationLookup] = None,
+        get_lens_model: Optional[LensLookup] = None,
     ) -> None:
+        self._get_lens_model = get_lens_model
         self._get_camera_config = get_camera_config
         self._get_playfield = get_playfield
         self._capture_frames = capture_frames
@@ -1184,6 +1216,32 @@ class Calibrator(_CalibratorBase):
         if not frames:
             raise RuntimeError(f"no frames available from camera {camera_slug!r}")
 
+        first_frame = frames[0]
+        image_size = (int(first_frame.shape[1]), int(first_frame.shape[0]))
+        # The lens store's size-matched model (sprint 044): the first
+        # source in the carry-forward order, and what makes
+        # estimate_intrinsics refuse to silently replace a measured lens.
+        stored_lens = (
+            self._get_lens_model(camera_slug, image_size)
+            if self._get_lens_model is not None
+            else None
+        )
+        if estimate_intrinsics and stored_lens is not None:
+            return CalibrationResult(
+                succeeded=False,
+                matched_ids=(),
+                missing_ids=(),
+                intrinsics_estimated=False,
+                lens_model_source=LENS_SOURCE_MEASURED,
+                reason=(
+                    f"estimate_intrinsics refused: camera {camera_slug!r} has a measured "
+                    f"lens model installed ({stored_lens.image_size[0]}x"
+                    f"{stored_lens.image_size[1]}, {stored_lens.views} views); a ChArUco "
+                    f"measurement is better than a field estimate. Remove or re-measure "
+                    f"the installed lens model instead."
+                ),
+            )
+
         detected = self._detect_averaged(frames)
         aruco_detected = detected.get(TagFamily.ARUCO, {})
         april_detected = detected.get(TagFamily.APRILTAG, {})
@@ -1245,9 +1303,6 @@ class Calibrator(_CalibratorBase):
             elevated_count = int(np.count_nonzero(heights > 0.0))
             z_spread_cm = float(heights.max() - heights.min()) if len(heights) else 0.0
 
-            first_frame = frames[0]
-            image_size = (int(first_frame.shape[1]), int(first_frame.shape[0]))
-
             fit = _estimate_intrinsics(
                 object_points,
                 image_points,
@@ -1285,6 +1340,7 @@ class Calibrator(_CalibratorBase):
             camera_matrix = fit.camera_matrix
             dist_coeffs = fit.dist_coeffs
             intrinsics_estimated = True
+            lens_source: Optional[str] = LENS_SOURCE_ESTIMATED
             intrinsics_mode = fit.mode
             elevated_features_used = fit.elevated_feature_count
         else:
@@ -1300,12 +1356,25 @@ class Calibrator(_CalibratorBase):
             # ``self._get_prior_calibration``, not ``self.
             # get_calibration`` directly -- see that attribute's
             # docstring for why (the restart carry-forward bug fix).
-            prior = self._get_prior_calibration(camera_slug)
-            camera_matrix = prior.camera_matrix if prior is not None else None
-            dist_coeffs = prior.dist_coeffs if prior is not None else None
+            if stored_lens is not None:
+                camera_matrix = stored_lens.camera_matrix
+                dist_coeffs = stored_lens.dist_coeffs
+                lens_source = LENS_SOURCE_MEASURED
+            else:
+                prior = self._get_prior_calibration(camera_slug)
+                camera_matrix = prior.camera_matrix if prior is not None else None
+                dist_coeffs = prior.dist_coeffs if prior is not None else None
+                lens_source = (
+                    (prior.lens_source or LENS_SOURCE_LEGACY)
+                    if prior is not None and camera_matrix is not None
+                    else None
+                )
             intrinsics_estimated = False
 
         intrinsics_known = camera_matrix is not None and dist_coeffs is not None
+        if not intrinsics_known:
+            lens_source = None
+        lens_model_source = lens_source if lens_source is not None else LENS_SOURCE_NONE
 
         # Undistort-before-solve (Design Rationale Decision 1): when
         # this camera's lens model is known, every detected marker
@@ -1351,6 +1420,7 @@ class Calibrator(_CalibratorBase):
                 missing_ids=(),
                 reason=degenerate,
                 intrinsics_estimated=intrinsics_estimated,
+                lens_model_source=lens_model_source,
                 intrinsics_mode=intrinsics_mode,
                 elevated_features_used=elevated_features_used,
             )
@@ -1363,6 +1433,7 @@ class Calibrator(_CalibratorBase):
                 missing_ids=(),
                 reason="homography solve failed: singular or ill-conditioned matrix",
                 intrinsics_estimated=intrinsics_estimated,
+                lens_model_source=lens_model_source,
                 intrinsics_mode=intrinsics_mode,
                 elevated_features_used=elevated_features_used,
             )
@@ -1388,6 +1459,7 @@ class Calibrator(_CalibratorBase):
                     f"{self._max_reprojection_error_cm:.3f} cm acceptance threshold"
                 ),
                 intrinsics_estimated=intrinsics_estimated,
+                lens_model_source=lens_model_source,
                 intrinsics_mode=intrinsics_mode,
                 elevated_features_used=elevated_features_used,
             )
@@ -1401,6 +1473,7 @@ class Calibrator(_CalibratorBase):
             reprojection_error_cm=rms,
             camera_matrix=camera_matrix,
             dist_coeffs=dist_coeffs,
+            lens_source=lens_source,
         )
         with self._lock:
             self._calibrations[camera_slug] = calibration
@@ -1411,6 +1484,7 @@ class Calibrator(_CalibratorBase):
             missing_ids=(),
             reprojection_error_cm=rms,
             intrinsics_estimated=intrinsics_estimated,
+                lens_model_source=lens_model_source,
             intrinsics_mode=intrinsics_mode,
             elevated_features_used=elevated_features_used,
         )
