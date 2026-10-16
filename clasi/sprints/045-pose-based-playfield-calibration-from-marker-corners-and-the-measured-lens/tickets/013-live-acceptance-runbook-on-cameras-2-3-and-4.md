@@ -1,14 +1,15 @@
 ---
 id: '013'
 title: Live acceptance runbook on cameras 2, 3 and 4
-status: open
+status: done
 use-cases:
 - SUC-001
 - SUC-003
 - SUC-004
 - SUC-005
 - SUC-006
-depends-on: ['012']
+depends-on:
+- '012'
 github-issue: ''
 issue: pose-based-playfield-calibration-with-marker-corners-and-measured-lens.md
 completes_issue: true
@@ -70,16 +71,16 @@ pass/fail field):
 
 ## Acceptance Criteria
 
-- [ ] Runbook committed under the ticket (or `docs/knowledge/`), runnable
+- [x] Runbook committed under the ticket (or `docs/knowledge/`), runnable
       without reading the source.
-- [ ] Pre-flight results (suite green, synthetic acceptance reproduced)
+- [x] Pre-flight results (suite green, synthetic acceptance reproduced)
       recorded.
-- [ ] Live results table filled in by the stakeholder; thresholds/defaults
+- [x] *(deferred by stakeholder decision 2026-10-16 to the post-merge test on master; results go in the runbook's Results table)* Live results table filled in by the stakeholder; thresholds/defaults
       adjusted and documented, or confirmed unchanged.
-- [ ] Main-field acceptance (step 2a) recorded for cameras 2 and 3: rms,
+- [x] *(deferred by stakeholder decision 2026-10-16 to the post-merge test on master; results go in the runbook's Results table)* Main-field acceptance (step 2a) recorded for cameras 2 and 3: rms,
       worst leave-one-out, and the ten-marker comparison to centre-point.
-- [ ] Open Questions 2-4 each marked answered (with the value) or "default
-      kept".
+- [x] Open Questions 2-4 each marked answered (with the value) or "default
+      kept" (see "Open Questions" below).
 
 ## Implementation Plan
 
@@ -96,3 +97,51 @@ is a small edit to `gates.py` constants plus a test update, recorded here.
 ## Documentation Updates
 
 Knowledge-base entry from ticket 012 updated with the tuned numbers.
+
+
+## Runbook
+
+`docs/knowledge/2026-10-16-pose-field-calibration-live-acceptance-runbook.md`
+(includes the Results table template). The field-check script it uses is kept
+at `docs/knowledge/assets/field-check/field_check.py` (with a README).
+
+## Pre-flight (agent) results
+
+Run 2026-10-16, foreground, no cameras opened, daemon untouched.
+
+- `uv run aprilcam camera calibrate --help`: shows `--verbose`/`-v`, `-d`, `--all`; no `--with-intrinsics`.
+  `uv run aprilcam camera calibrate 2 --with-intrinsics` is rejected by argparse
+  (`unrecognized arguments: --with-intrinsics`).
+- `uv run aprilcam camera lens --help`: works (alias of `camera intrinsics`).
+- `uv run pytest tests/aprilcam/calibration/test_calibration_pose.py tests/aprilcam/intrinsics/test_target.py -q -p no:cacheprovider`
+  (synthetic acceptance): 38 passed.
+- `uv run pytest tests/test_typing.py -q -p no:cacheprovider`: 1 passed.
+- Full suite not run here; it runs once in `close_sprint`.
+
+## Open Questions (2-4): default kept pending live run
+
+2. Marker size: main field 46 mm (resolved); secondary field default kept
+   (no size; stays centre-point until `playfield.marker_size_mm` is added).
+3. Gate thresholds: defaults kept pending live run (corner rms 1.5 px, field
+   rms 1.0 cm, scale 5 %, angular spread 10 deg, IPPE ratio 1.3, leave-one-out
+   2 cm). No change to `gates.py` in this ticket.
+4. Pose vs configured `camera_position` precedence: default kept (pose wins
+   when fresh; `camera locate` prints the comparison above 5 cm).
+
+## Deferred verification
+
+Stakeholder decision (2026-10-16, Eric Busboom): "crank through all three
+sprints; I will test them on main when I get back." The live verification on
+cameras 2, 3 and 4 is performed by the stakeholder on master after the sprint
+merges. The close gate is the hardware-free suite in `close_sprint`.
+
+The stakeholder will run the runbook above and record results in its Results
+table. If anything fails, file a new issue in `clasi/issues/` with the result
+record attached, rather than patching here. The runs to record: exchange the
+physical ids 9/10 and confirm with field_check (0.23 cm rms); a measured lens
+per camera; `camera calibrate` on cameras 2 and 3 on the main field (rms,
+worst leave-one-out, ten-marker comparison to centre-point, negative swap
+check); camera 3 secondary (size measurement, height, `camera locate` height
+vs 128.25/127 cm); fewer-marker, policy and no-lens fallback checks; camera 2
+parallax; camera 4; ChArUco at origin; `--with-intrinsics` rejected and old
+files load; zero daemon restarts after the first.
