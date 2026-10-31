@@ -79,3 +79,14 @@ to show is the datum's corner residual and size agreement).
   consumers of world coordinates are listed and checked in the runbook.
 - Hardware-free tests on synthetic layouts at several board orientations;
   live runbook on the main field.
+
+## Stop-gap applied 2026-10-17
+
+`main-playfield.json`'s `aruco_tags` section was rotated 180° (x, y
+negated; cardinals and slugs flipped) so the surveyed marker frame agrees
+with AprilTag 1's top edge and with the rectangle/dot survey, which were
+already in the datum frame. After recalibrating camera 4, AprilTag 1 reads
+(0.2, 0.3) cm at +1.5°; the residual is the datum re-anchoring this issue
+still owes. Camera 2 could not be recalibrated on the spot (ArUco 1, now the
+south-east corner, not detected) and holds a stale calibration in the old
+frame until it is.
