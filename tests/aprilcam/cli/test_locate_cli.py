@@ -25,6 +25,7 @@ from typing import Dict, List, Optional, Tuple
 
 import pytest
 
+from aprilcam.cli._common import add_daemon_option
 from aprilcam.cli import camera as camera_cli
 from aprilcam.cli import daemon as daemon_cli
 from aprilcam.cli import locate as locate_cli
@@ -751,6 +752,7 @@ def test_locate_reports_but_does_not_crash_if_the_live_push_fails_after_the_disk
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aprilcam")
+    add_daemon_option(parser)
     parser.set_defaults(func=None)
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
     daemon_cli.add_subparser(subparsers)

@@ -222,7 +222,7 @@ as a dropped measurement.
 
 Every capability below is reachable identically from the CLI, from the
 Python client library (`aprilcam.client.discovery.Discovery().connect()`
-returns a `Daemon`), and from the MCP server (`aprilcam mcp [-d HOST]`)
+returns a `Daemon`), and from the MCP server (`aprilcam [-d HOST] mcp`)
 — an MCP tool call for each CLI command below, same behaviour, same
 world-frame and staleness rules as everywhere else in this guide —
 **except `camera locate`, marked below, which is CLI-only** (§6).

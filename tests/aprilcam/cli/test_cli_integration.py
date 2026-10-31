@@ -196,7 +196,7 @@ def test_daemon_and_camera_round_trip_against_real_hardware(tmp_path, isolated_e
     # -- UC-13.S-4: a remote start refuses and starts nothing at all,
     #    checked *before* any local daemon exists so "nothing is
     #    started anywhere" is unambiguous -----------------------------
-    result = _run(bin_path, "daemon", "start", "-d", "pi-field.local", env=env)
+    result = _run(bin_path, "-d", "pi-field.local", "daemon", "start", env=env)
     assert result.returncode == 1
     assert b"SSH" in result.stderr
     assert b"local-only" in result.stderr

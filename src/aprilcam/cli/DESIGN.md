@@ -49,7 +49,7 @@ presentation.
 | `playfield.py` | 688 | `playfield list\|config\|image\|view\|annotations\|where` — playfield-addressed commands, including client-side camera resolution for the ones that need a camera but name none. |
 | `tags.py` | 429 | `tags mount register\|clear\|list` (mobile-tag mount registry, daemon-backed) and `tags generate` (offline AprilTag/ArUco printable PDF sheet, or per-id PNGs with `--png`; no daemon). |
 | `guide.py` | 75 | `guide [name]` — prints a packaged usage guide. Deliberately makes no daemon connection at all (§3). |
-| `mcp.py` | 54 | `mcp [-d HOST]` — starts the MCP stdio server; passes `-d` through as the server's connection-manager default and blocks for the process lifetime. |
+| `mcp.py` | 54 | `[-d HOST] mcp` — starts the MCP stdio server; passes `-d` through as the server's connection-manager default and blocks for the process lifetime. |
 
 Total: ~3,230 lines across 10 modules (no `interfaces.py` — see §5).
 
@@ -239,9 +239,11 @@ shape `playfield.py` uses at the top level.
 
 ## 4. Design
 
-**Argument parsing conventions.** Every daemon-targeting command
-accepts `-d`/`--daemon HOST` via `_common.add_daemon_option`; omitted
-means the local daemon. `-h` is reserved for `--help` everywhere,
+**Argument parsing conventions.** `-d`/`--daemon HOST` is a root
+option, added once to the top-level parser via
+`_common.add_daemon_option` (`aprilcam -d HOST camera list`), never to
+a subcommand; omitted means `APRILCAM_DAEMON_HOST`, else the local
+daemon. Commands that never talk to a daemon ignore it. `-h` is reserved for `--help` everywhere,
 which is exactly why the daemon flag is `-d` and not something that
 would collide. Fan-out-eligible commands additionally get `--all` via
 `_common.add_all_option`; commands the fan-out table excludes simply
@@ -335,7 +337,7 @@ with the deferred spelling and the reasoning recorded directly in
 
 ### `camera intrinsics` (sprint 044)
 
-`aprilcam camera intrinsics <camera...> [--board SPEC] [--install] [--no-gui] [-d HOST]` (`cli/intrinsics.py`). The board spec resolves request (`--board`) > env `APRILCAM_CHARUCO_BOARD` > default `5x7:37:28:DICT_5X5_100`. With a display it opens the fullscreen Tk GUI (`view/intrinsics_gui.py`, driven by the pure `view/intrinsics_model.py`); `--no-gui` (and any session with no display, e.g. over SSH) uses a text-mode status loop. The GUI never auto-quits on green; Enter installs the good cameras, Esc aborts. Exit code 0 only when every camera ended installed. `--install` installs good cameras on finish without the prompt. `camera list` rows gain `lens=<source>` and `lens-pending`; `camera calibrate` prints the lens model it carried forward.
+`aprilcam [-d HOST] camera intrinsics <camera...> [--board SPEC] [--install] [--no-gui]` (`cli/intrinsics.py`). The board spec resolves request (`--board`) > env `APRILCAM_CHARUCO_BOARD` > default `5x7:37:28:DICT_5X5_100`. With a display it opens the fullscreen Tk GUI (`view/intrinsics_gui.py`, driven by the pure `view/intrinsics_model.py`); `--no-gui` (and any session with no display, e.g. over SSH) uses a text-mode status loop. The GUI never auto-quits on green; Enter installs the good cameras, Esc aborts. Exit code 0 only when every camera ended installed. `--install` installs good cameras on finish without the prompt. `camera list` rows gain `lens=<source>` and `lens-pending`; `camera calibrate` prints the lens model it carried forward.
 
 ## 5. Interfaces
 
@@ -344,17 +346,18 @@ with the deferred spelling and the reasoning recorded directly in
 The `aprilcam` command, one subcommand tree per noun:
 
 ```
+aprilcam [-d HOST] <command> ...     # -d is a root option, before the command
 aprilcam daemon   start|stop|restart|status|list
 aprilcam camera   list|probe|image|tags|config|view|calibrate|flatfield|locate
 aprilcam playfield list|config|image|view|annotations|where
 aprilcam tags     mount register|clear|list | generate
 aprilcam guide    [name]
-aprilcam mcp      [-d HOST]
+aprilcam [-d HOST] mcp
 ```
 
 Conventions shared across the whole surface (detailed in §4 and in
 `docs/design/use-cases/cli.md`'s "Global conventions" section, not
-repeated here): `-d`/`--daemon HOST` targeting (omitted = local);
+repeated here): root-level `-d`/`--daemon HOST` targeting (omitted = local);
 `--all` fan-out on read-only commands only; a camera is addressable by
 persistent registry number or slug; `playfield`-addressed commands
 that need a camera resolve it client-side rather than taking a

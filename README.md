@@ -115,10 +115,19 @@ aprilcam arucogen   # Generate 4x4 ArUco marker images
 aprilcam cameras    # List available cameras
 ```
 
+Every command talks to the local daemon unless told otherwise. To target
+another host, put `-d HOST` **before** the command, or set
+`APRILCAM_DAEMON_HOST`:
+
+```
+aprilcam -d buzzkill.home camera list
+aprilcam -d buzzkill.home camera image 3 -o frame.jpg
+```
+
 ### Field calibration
 
 ```
-aprilcam camera calibrate <camera> [--verbose] [-d HOST]
+aprilcam [-d HOST] camera calibrate <camera> [--verbose]
 ```
 
 Calibrates a camera against its linked playfield, inside the daemon. When the
@@ -137,7 +146,7 @@ not declared. See `docs/knowledge/2026-10-16-pose-based-field-calibration.md`.
 ### Lens (intrinsics) calibration
 
 ```
-aprilcam camera intrinsics <camera...>   # alias: aprilcam camera lens [--board SPEC] [--install] [--no-gui] [-d HOST]
+aprilcam camera intrinsics <camera...>   # alias: aprilcam camera lens [--board SPEC] [--install] [--no-gui]
 ```
 
 Measures each camera's lens from a printed ChArUco board, inside the daemon,

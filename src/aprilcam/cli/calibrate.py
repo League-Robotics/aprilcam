@@ -39,7 +39,7 @@ import argparse
 import sys
 from typing import Callable
 
-from aprilcam.cli._common import EXIT_ERROR, EXIT_OK, add_all_option, add_daemon_option, report_error
+from aprilcam.cli._common import EXIT_ERROR, EXIT_OK, add_all_option, report_error
 from aprilcam.client.discovery import Discovery
 from aprilcam.errors import AprilCamError
 
@@ -49,7 +49,7 @@ __all__ = ["add_subparser", "cmd_calibrate"]
 def cmd_calibrate(
     args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
 ) -> int:
-    """``aprilcam camera calibrate <camera> [-d HOST]``.
+    """``aprilcam camera calibrate <camera>``.
 
     ``--all`` is refused up front, before any connection is attempted --
     calibration is single-daemon by the fan-out rule (UC-15.S-4), the
@@ -206,6 +206,5 @@ def add_subparser(sub: "argparse._SubParsersAction") -> None:
         default=False,
         help="also print the per-marker leave-one-out residual table",
     )
-    add_daemon_option(p_calibrate)
     add_all_option(p_calibrate, note=" (refused -- calibration is single-target)")
     p_calibrate.set_defaults(func=cmd_calibrate)

@@ -84,7 +84,6 @@ from aprilcam.cli._common import (
     EXIT_ERROR,
     EXIT_OK,
     add_all_option,
-    add_daemon_option,
     fan_out,
     incomplete_command,
     print_cameras,
@@ -117,7 +116,7 @@ __all__ = [
 def cmd_list(
     args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
 ) -> int:
-    """``aprilcam camera list [-d HOST] [--all]``."""
+    """``aprilcam camera list [--all]``."""
     discovery = discovery_factory()
     if args.all:
         def render(label: str, cameras) -> None:
@@ -137,7 +136,7 @@ def cmd_list(
 def cmd_probe(
     args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
 ) -> int:
-    """``aprilcam camera probe [-d HOST] [--all]``."""
+    """``aprilcam camera probe [--all]``."""
     discovery = discovery_factory()
     if args.all:
         def render(label: str, report) -> None:
@@ -204,7 +203,7 @@ def _cmd_image_all(
 def cmd_image(
     args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
 ) -> int:
-    """``aprilcam camera image <camera> [-o FILE | --base64] [-d HOST]
+    """``aprilcam camera image <camera> [-o FILE | --base64]
     [--all] [--encoding jpeg|png] [--force]``."""
     if args.all:
         return _cmd_image_all(args, discovery_factory)
@@ -404,7 +403,7 @@ def _cmd_tags_follow(args: argparse.Namespace, discovery: Discovery) -> int:
 def cmd_tags(
     args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
 ) -> int:
-    """``aprilcam camera tags <camera> [-d HOST] [--all] [--follow] [--json]``.
+    """``aprilcam camera tags <camera> [--all] [--follow] [--json]``.
 
     ``--follow``/``--json`` are sprint 039 ticket 005 additions -- see
     this module's docstring and ``_cmd_tags_follow`` for the design.
@@ -449,10 +448,10 @@ def cmd_config(
     discovery_factory: Callable[[], Discovery] = Discovery,
     loader_factory: Callable[[], ConfigLoader] = JsonConfigLoader,
 ) -> int:
-    """``aprilcam camera config <file> [-d HOST]`` pushes a whole
+    """``aprilcam camera config <file>`` pushes a whole
     ``CameraConfig`` document (ticket 022-001; real hardware settings
     apply ticket 023-001). ``aprilcam camera config <camera> --reset
-    [-d HOST]`` (ticket 023-004) discards any live override and
+   `` (ticket 023-004) discards any live override and
     re-applies whatever is installed at `config_dir/cameras/<slug>/
     config.json` -- or the blank introspected-plus-blank template when
     nothing is installed -- with no daemon restart (sprint.md Decision
@@ -520,7 +519,7 @@ def cmd_view(
     discovery_factory: Callable[[], Discovery] = Discovery,
     run_view: Callable[[str, Daemon], None] = viewer.run_raw_view,
 ) -> int:
-    """``aprilcam camera view <camera> [-d HOST]`` (UC-16, ticket
+    """``aprilcam camera view <camera>`` (UC-16, ticket
     022-002).
 
     Opens a poll-driven window (``view/viewer.py``) showing *camera*'s
@@ -604,18 +603,15 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     sub = parser.add_subparsers(dest="camera_command", metavar="<command>")
 
     p_list = sub.add_parser("list", help="list cameras on a daemon")
-    add_daemon_option(p_list)
     add_all_option(p_list)
     p_list.set_defaults(func=cmd_list)
 
     p_probe = sub.add_parser("probe", help="force a deep camera re-probe")
-    add_daemon_option(p_probe)
     add_all_option(p_probe)
     p_probe.set_defaults(func=cmd_probe)
 
     p_image = sub.add_parser("image", help="capture one raw frame")
     p_image.add_argument("camera", help="camera name (slug)")
-    add_daemon_option(p_image)
     add_all_option(p_image, note=" (--base64 destination only)")
     output_group = p_image.add_mutually_exclusive_group()
     output_group.add_argument(
@@ -639,7 +635,6 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
 
     p_tags = sub.add_parser("tags", help="list currently detected tags")
     p_tags.add_argument("camera", help="camera name (slug or persistent number)")
-    add_daemon_option(p_tags)
     add_all_option(p_tags, note=" (refused with --follow -- a stream cannot fan out)")
     p_tags.add_argument(
         "--follow",
@@ -667,7 +662,6 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
         help="path to a camera config JSON file to push; with --reset/--dump, the "
         "camera name (slug or persistent number) instead",
     )
-    add_daemon_option(p_config)
     mode_group = p_config.add_mutually_exclusive_group()
     mode_group.add_argument(
         "--reset",
@@ -688,7 +682,6 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
         "view", help="open a live raw-video window (UC-16 -- 'raw means raw', no --all)"
     )
     p_view.add_argument("camera", help="camera name (slug or persistent number)")
-    add_daemon_option(p_view)
     add_all_option(p_view, note=" (refused -- viewing is single-target)")
     p_view.set_defaults(func=cmd_view)
 

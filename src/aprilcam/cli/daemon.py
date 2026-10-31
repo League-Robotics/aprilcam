@@ -42,7 +42,7 @@ daemon anyway. Recorded here as a scope decision, not an oversight.
 Sprint 028 (ticket 005) adds ``daemon list``, resolving that gap now
 that ``Discovery.find_all()`` is real (ticket 004). It is the first
 command in this file with no single-target meaning at all -- that is
-what ``daemon status -d HOST`` already does -- so, unlike ``mount
+what ``-d HOST daemon status`` already does -- so, unlike ``mount
 list``'s default-single/opt-in-``--all`` shape, it takes no
 ``-d``/``--all`` flags whatsoever: listing daemons is inherently
 "every daemon". It reuses ``cli/_common.py``'s ``fan_out()``
@@ -72,7 +72,6 @@ from typing import Callable
 
 from aprilcam.cli._common import (
     EXIT_OK,
-    add_daemon_option,
     fan_out,
     format_camera_row,
     incomplete_command,
@@ -211,7 +210,7 @@ def cmd_status(
     lifecycle_factory: Callable[[], DaemonLifecycle] = DaemonLifecycle,
     discovery_factory: Callable[[], Discovery] = Discovery,
 ) -> int:
-    """``aprilcam daemon status [-d HOST]``. See the module docstring
+    """``aprilcam daemon status``. See the module docstring
     for the local-process-view vs. remote-RPC-view split."""
     try:
         if args.daemon is None:
@@ -283,17 +282,14 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     sub = parser.add_subparsers(dest="daemon_command", metavar="<command>")
 
     p_start = sub.add_parser("start", help="start the local daemon")
-    add_daemon_option(p_start)
     p_start.set_defaults(func=cmd_start)
 
     p_stop = sub.add_parser("stop", help="stop the local daemon")
-    add_daemon_option(p_stop)
     p_stop.set_defaults(func=cmd_stop)
 
     p_restart = sub.add_parser(
         "restart", help="stop then start the local daemon"
     )
-    add_daemon_option(p_restart)
     p_restart.set_defaults(func=cmd_restart)
 
     p_status = sub.add_parser(
@@ -304,7 +300,6 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
             "remote RPC view only, no local scan)"
         ),
     )
-    add_daemon_option(p_status)
     p_status.set_defaults(func=cmd_status)
 
     p_list = sub.add_parser(

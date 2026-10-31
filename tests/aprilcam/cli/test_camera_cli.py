@@ -39,6 +39,7 @@ from aprilcam.types import (
     WorldPoint,
 )
 from aprilcam.view.viewer import FirstFrameTimeout, NoDisplayAvailable
+from aprilcam.cli._common import add_daemon_option
 
 
 def _camera(name: str = "arducam-ov9782-usb-camera", number: int = 1, **overrides) -> CameraState:
@@ -954,6 +955,7 @@ def test_tags_one_shot_json_emits_a_single_json_object(capsys):
 
 def _build_parser() -> argparse.ArgumentParser:
     top = argparse.ArgumentParser(prog="aprilcam")
+    add_daemon_option(top)
     top.set_defaults(func=None)
     subparsers = top.add_subparsers(dest="command")
     camera_cli.add_subparser(subparsers)

@@ -50,6 +50,7 @@ from aprilcam.types import (
     WorldPoint,
 )
 from aprilcam.view.viewer import FirstFrameTimeout, NoDisplayAvailable
+from aprilcam.cli._common import add_daemon_option
 
 
 def _definition(name: str = "main-playfield") -> PlayfieldDefinition:
@@ -1066,6 +1067,7 @@ def test_annotations_style_default_does_not_affect_shape_formatting():
 
 def _build_parser() -> argparse.ArgumentParser:
     top = argparse.ArgumentParser(prog="aprilcam")
+    add_daemon_option(top)
     top.set_defaults(func=None)
     subparsers = top.add_subparsers(dest="command")
     playfield_cli.add_subparser(subparsers)

@@ -46,17 +46,19 @@ T = TypeVar("T")
 
 
 def add_daemon_option(parser: argparse.ArgumentParser) -> None:
-    """``-d``/``--daemon HOST`` -- every daemon-talking command's target
-    flag (``cli.md``'s "Daemon targeting" convention: omitted means
-    local). Deliberately not ``-h``, which stays ``--help`` everywhere
-    -- including here, so ``camera list -h`` prints help rather than
-    erroring about a missing hostname."""
+    """``-d``/``--daemon HOST`` -- the daemon every subcommand targets.
+    Added once, to the root parser (``aprilcam -d HOST camera list``),
+    never to a subcommand: a subcommand-level copy would also shadow the
+    root value with its own ``None`` default. Omitted means
+    ``APRILCAM_DAEMON_HOST``, else local. Deliberately not ``-h``, which
+    stays ``--help`` everywhere."""
     parser.add_argument(
         "-d",
         "--daemon",
         metavar="HOST",
         default=None,
-        help="target daemon (default: the local daemon)",
+        help="target daemon HOST[:PORT] for any command "
+        "(default: $APRILCAM_DAEMON_HOST, else the local daemon)",
     )
 
 

@@ -1,4 +1,4 @@
-"""``aprilcam mcp [-d HOST]`` -- starts the MCP stdio server (ticket
+"""``aprilcam mcp`` -- starts the MCP stdio server (ticket
 026-001, UC-22).
 
 Thin argv-to-server shell, the same shape as every other ``cli/``
@@ -46,7 +46,7 @@ from __future__ import annotations
 import argparse
 from typing import TYPE_CHECKING, Callable, Optional
 
-from aprilcam.cli._common import add_daemon_option, report_error
+from aprilcam.cli._common import report_error
 from aprilcam.errors import AprilCamError, MissingOptionalDependency
 
 if TYPE_CHECKING:
@@ -110,7 +110,7 @@ def cmd_mcp(
     *,
     server_factory: Optional[Callable[..., "FastMCP"]] = None,
 ) -> int:
-    """``aprilcam mcp [-d HOST]``. Builds the server and serves it over
+    """``aprilcam mcp``. Builds the server and serves it over
     stdio. ``FastMCP.run()`` blocks for the life of the process -- this
     only returns once the transport closes (the agent disconnects, or
     the process receives a signal), so a successful run has no
@@ -136,10 +136,9 @@ def cmd_mcp(
 
 
 def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
-    """Wire ``aprilcam mcp [-d HOST]`` into the top-level parser."""
+    """Wire ``aprilcam mcp`` into the top-level parser."""
     parser = subparsers.add_parser(
         "mcp",
         help="run the MCP stdio server for AI agents (UC-22)",
     )
-    add_daemon_option(parser)
     parser.set_defaults(func=cmd_mcp)

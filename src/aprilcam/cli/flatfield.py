@@ -46,7 +46,7 @@ import argparse
 import sys
 from typing import Callable
 
-from aprilcam.cli._common import EXIT_ERROR, EXIT_OK, add_all_option, add_daemon_option, report_error
+from aprilcam.cli._common import EXIT_ERROR, EXIT_OK, add_all_option, report_error
 from aprilcam.client.discovery import Discovery
 from aprilcam.errors import AprilCamError
 
@@ -89,7 +89,7 @@ def _print_result(camera: str, result, *, dry_run: bool) -> None:
 def cmd_flatfield(
     args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
 ) -> int:
-    """``aprilcam camera flatfield <camera> [-d HOST] [--exposure N]
+    """``aprilcam camera flatfield <camera> [--exposure N]
     [--frames K] [--force] [--dry-run] [--clear]``.
 
     ``--all`` is refused up front, before any connection is attempted --
@@ -191,6 +191,5 @@ def add_subparser(sub: "argparse._SubParsersAction") -> None:
         help="delete this camera's stored gain map and metadata sidecar instead of "
         "capturing a new one (refused together with any capture-only flag)",
     )
-    add_daemon_option(p_flatfield)
     add_all_option(p_flatfield, note=" (refused -- flat-field capture is single-target)")
     p_flatfield.set_defaults(func=cmd_flatfield)

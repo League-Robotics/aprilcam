@@ -54,7 +54,7 @@ class ConnectionManager:
     Parameters
     ----------
     default_host:
-        The session default target — ``aprilcam mcp -d HOST``'s value,
+        The session default target — ``aprilcam -d HOST mcp``'s value,
         or ``None`` for the local daemon. Any call's own explicit
         *host* argument overrides this for that one call, matching
         every other adapter's flag > per-call argument precedence

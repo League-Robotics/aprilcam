@@ -34,6 +34,7 @@ import pytest
 from aprilcam.cli import main as cli_main
 from aprilcam.cli import mcp as mcp_cli
 from aprilcam.errors import MissingOptionalDependency
+from aprilcam.cli._common import add_daemon_option
 
 
 def _args(*, daemon: Optional[str] = None) -> argparse.Namespace:
@@ -97,15 +98,16 @@ def test_cmd_mcp_serves_over_stdio():
 
 def _build_parser() -> argparse.ArgumentParser:
     top = argparse.ArgumentParser(prog="aprilcam")
+    add_daemon_option(top)
     top.set_defaults(func=None)
     subparsers = top.add_subparsers(dest="command")
     mcp_cli.add_subparser(subparsers)
     return top
 
 
-def test_mcp_accepts_the_daemon_flag_without_erroring_at_parse_time():
+def test_mcp_accepts_the_root_daemon_flag_without_erroring_at_parse_time():
     parser = _build_parser()
-    args = parser.parse_args(["mcp", "-d", "pi-field.local"])
+    args = parser.parse_args(["-d", "pi-field.local", "mcp"])
     assert args.daemon == "pi-field.local"
     assert args.func is mcp_cli.cmd_mcp
 
@@ -137,7 +139,20 @@ def test_mcp_subcommand_help_describes_the_mcp_server(capsys):
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
     assert "usage: aprilcam mcp" in out
-    assert "-d" in out or "--daemon" in out
+
+
+def test_daemon_flag_is_on_the_root_not_on_subcommands(capsys):
+    """-d targets a daemon for every command, so it lives on the root
+    parser once: ``aprilcam -d HOST mcp``, never ``aprilcam mcp -d HOST``."""
+    with pytest.raises(SystemExit):
+        cli_main(["--help"])
+    assert "--daemon" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        cli_main(["mcp", "-h"])
+    assert "--daemon" not in capsys.readouterr().out
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main(["camera", "list", "-d", "pi-field.local"])
+    assert excinfo.value.code == 2
 
 
 # ---------------------------------------------------------------------------

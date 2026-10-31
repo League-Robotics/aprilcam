@@ -143,7 +143,7 @@ concern belongs to the daemon and is "not reimplemented here."
 **Connection management.** `ConnectionManager.call(fn, host=...)`
 resolves a `Daemon` for the target (explicit per-call `host` argument
 wins, falling back to the server's session default —
-`aprilcam mcp -d HOST`, or local), invokes `fn` against it, and on a
+`aprilcam -d HOST mcp`, or local), invokes `fn` against it, and on a
 `ConnectionFailed` evicts only that target's cache entry before
 re-raising. This is the one place a failed RPC triggers self-healing;
 every tool function routes through it rather than holding a connection

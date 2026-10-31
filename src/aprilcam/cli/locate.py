@@ -60,7 +60,6 @@ from aprilcam.cli._common import (
     EXIT_ERROR,
     EXIT_OK,
     add_all_option,
-    add_daemon_option,
     report_error,
 )
 from aprilcam.client.discovery import Discovery
@@ -185,7 +184,7 @@ def cmd_locate(
     directories_factory: Callable[[], Directories] = SystemDirectories,
 ) -> int:
     """``aprilcam camera locate <camera> --reference TAG:SLUG:HEIGHT_CM
-    [--reference ...] [-d HOST] [--dry-run] [--force]``.
+    [--reference ...] [--dry-run] [--force]``.
 
     See the module docstring for the overall design; see sprint 029's
     sprint.md Main Flow (SUC-003) for the numbered steps this function
@@ -450,7 +449,6 @@ def add_subparser(sub: "argparse._SubParsersAction") -> None:
         "in cm, colon-separated (e.g. 15:dot-northeast-orange:17.2). Repeatable; "
         "at least 2 required, 3+ recommended for redundancy.",
     )
-    add_daemon_option(p_locate)
     add_all_option(p_locate, note=" (refused -- locate is single-target)")
     p_locate.add_argument(
         "--dry-run",

@@ -124,7 +124,6 @@ from aprilcam.cli._common import (
     EXIT_ERROR,
     EXIT_OK,
     add_all_option,
-    add_daemon_option,
     fan_out,
     incomplete_command,
     report_error,
@@ -163,7 +162,7 @@ def cmd_config(
     discovery_factory: Callable[[], Discovery] = Discovery,
     loader_factory: Callable[[], ConfigLoader] = JsonConfigLoader,
 ) -> int:
-    """``aprilcam playfield config <file> [-d HOST]`` pushes a playfield
+    """``aprilcam playfield config <file>`` pushes a playfield
     definition document. ``aprilcam playfield config <name> --dump [-d
     HOST]`` (ticket 023-005, UC-24) prints the live document instead,
     via the already-existing ``GetPlayfield`` RPC -- the module
@@ -222,7 +221,7 @@ def cmd_image(
     args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
 ) -> int:
     """``aprilcam playfield image [--camera CAMERA] [-o FILE | --base64]
-    [-d HOST] [--encoding jpeg|png] [--force]`` (UC-06, UC-19).
+    [--encoding jpeg|png] [--force]`` (UC-06, UC-19).
 
     No camera positional -- resolved via ``--camera`` or, when omitted,
     ``cli._common.resolve_playfield_camera`` (module docstring). An
@@ -284,7 +283,7 @@ def cmd_view(
     discovery_factory: Callable[[], Discovery] = Discovery,
     run_view: Callable[..., None] = viewer.run_playfield_view,
 ) -> int:
-    """``aprilcam playfield view [CAMERA] [--bare] [-d HOST]``
+    """``aprilcam playfield view [CAMERA] [--bare]``
     (UC-18, ticket 022-006; ``--bare`` added sprint 032 ticket 003;
     ``CAMERA`` positional added out-of-process 2026-08-23 -- ``--camera``
     remains as a compatibility alias).
@@ -470,7 +469,7 @@ def _print_playfields(playfields: Tuple[Playfield, ...]) -> None:
 def cmd_list(
     args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
 ) -> int:
-    """``aprilcam playfield list [-d HOST] [--all]``.
+    """``aprilcam playfield list [--all]``.
 
     The playfield counterpart to ``camera list``: what definitions does
     this daemon actually hold right now? Finding none is an **empty
@@ -500,10 +499,10 @@ def cmd_list(
 def cmd_annotations(
     args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
 ) -> int:
-    """``aprilcam playfield annotations <playfield> [-d HOST] [--all]``
+    """``aprilcam playfield annotations <playfield> [--all]``
     (UC-28, ticket 024-004) lists the current annotation set.
     ``aprilcam playfield annotations <playfield> --clear [--layer
-    NAME] [-d HOST]`` clears one layer or everything instead -- the
+    NAME]`` clears one layer or everything instead -- the
     same ``--dump``-style "flag on the noun picks the RPC" shape
     ``cmd_config`` uses, per the module docstring above.
 
@@ -589,7 +588,7 @@ def _print_features(features: Tuple[Feature, ...]) -> None:
 def cmd_where(
     args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
 ) -> int:
-    """``aprilcam playfield where <playfield> <query> [-d HOST]
+    """``aprilcam playfield where <playfield> <query>
     [--all]`` (ticket 025-002, UC-08) -- "where is the blue dot,"
     answered entirely from the named playfield's surveyed definition via
     ``Daemon.find_feature``: no camera opened, no calibration required.
@@ -633,7 +632,6 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     p_list = sub.add_parser(
         "list", help="list the playfield definitions this daemon holds"
     )
-    add_daemon_option(p_list)
     add_all_option(p_list)
     p_list.set_defaults(func=cmd_list)
 
@@ -645,7 +643,6 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
         help="path to a playfield definition JSON file to push; with --dump, the "
         "playfield name instead",
     )
-    add_daemon_option(p_config)
     p_config.add_argument(
         "--dump",
         action="store_true",
@@ -663,7 +660,6 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
         help="camera name (slug or persistent number) -- resolved automatically "
         "when omitted and exactly one camera is linked to a playfield",
     )
-    add_daemon_option(p_image)
     output_group = p_image.add_mutually_exclusive_group()
     output_group.add_argument(
         "-o", "--output", metavar="FILE", default=None, help="write the frame to FILE"
@@ -701,7 +697,6 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
         metavar="CAMERA",
         help="compatibility alias for the camera positional",
     )
-    add_daemon_option(p_view)
     add_all_option(p_view, note=" (refused -- viewing is single-target)")
     p_view.add_argument(
         "--bare",
@@ -717,7 +712,6 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
         help="list or clear the daemon-held annotation store (UC-28, list/clear only)",
     )
     p_annotations.add_argument("playfield", help="playfield name")
-    add_daemon_option(p_annotations)
     add_all_option(p_annotations, note=" (list only -- refused with --clear)")
     p_annotations.add_argument(
         "--clear",
@@ -739,6 +733,5 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     )
     p_where.add_argument("playfield", help="playfield name")
     p_where.add_argument("query", help="free-text query, e.g. 'the blue dot' (quote multi-word queries)")
-    add_daemon_option(p_where)
     add_all_option(p_where)
     p_where.set_defaults(func=cmd_where)

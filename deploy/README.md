@@ -166,7 +166,7 @@ Then, from the dev machine (or any host on the same LAN):
 
 ```bash
 aprilcam daemon list                          # vidar's daemon discoverable by name
-aprilcam camera list -d vidar.local           # both CSI cameras usable
+aprilcam -d vidar.local camera list            # both CSI cameras usable
 ```
 
 ## Step 6 -- Reboot persistence

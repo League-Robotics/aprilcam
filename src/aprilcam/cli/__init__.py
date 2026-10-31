@@ -38,6 +38,7 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import Optional, Sequence
 
 from aprilcam.cli import camera, config, daemon, guide, mcp, playfield, tags
+from aprilcam.cli._common import add_daemon_option
 
 
 def _package_version() -> str:
@@ -89,6 +90,10 @@ def _build_parser() -> argparse.ArgumentParser:
         action="version",
         version=f"aprilcam {_package_version()}",
     )
+    # Once, here, for every subcommand: `aprilcam -d HOST camera list`.
+    # Commands that never talk to a daemon (guide, config, tags generate,
+    # daemon list) ignore it.
+    add_daemon_option(parser)
     parser.set_defaults(func=None)
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
     daemon.add_subparser(subparsers)

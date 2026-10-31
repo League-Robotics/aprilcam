@@ -701,7 +701,7 @@ class DaemonStatus:
     a process-table scan has no meaning against a remote host. The one
     call site that ever populates this with a real scan result is
     ``client.lifecycle.DaemonLifecycle.status()`` -- the *local* process
-    view -- which is exactly why ``daemon status -d HOST`` and ``daemon
+    view -- which is exactly why ``-d HOST daemon status`` and ``daemon
     list`` (both RPC-only) always report this field empty, structurally,
     with no special-casing needed at either call site.
     """

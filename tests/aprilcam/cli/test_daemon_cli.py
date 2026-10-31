@@ -30,6 +30,7 @@ import pytest
 from aprilcam.cli import daemon as daemon_cli
 from aprilcam.errors import AlreadyRunning, ConnectionFailed, DiscoveryFailed
 from aprilcam.types import CameraState
+from aprilcam.cli._common import add_daemon_option
 
 
 def _args(*, daemon: Optional[str] = None) -> argparse.Namespace:
@@ -521,6 +522,7 @@ def test_list_reports_discovery_failed_visibly_distinct_from_empty(capsys):
 
 def _build_parser() -> argparse.ArgumentParser:
     top = argparse.ArgumentParser(prog="aprilcam")
+    add_daemon_option(top)
     top.set_defaults(func=None)
     subparsers = top.add_subparsers(dest="command")
     daemon_cli.add_subparser(subparsers)
@@ -537,9 +539,9 @@ def test_daemon_alone_prints_help_and_fails(capsys):
     assert "usage: aprilcam daemon" in capsys.readouterr().out
 
 
-def test_daemon_start_accepts_the_daemon_flag_without_erroring_at_parse_time():
+def test_daemon_start_accepts_the_root_daemon_flag_without_erroring_at_parse_time():
     parser = _build_parser()
-    args = parser.parse_args(["daemon", "start", "-d", "pi-field.local"])
+    args = parser.parse_args(["-d", "pi-field.local", "daemon", "start"])
     assert args.daemon == "pi-field.local"
     assert args.func is daemon_cli.cmd_start
 
@@ -552,15 +554,12 @@ def test_daemon_list_help_flag_is_still_help_not_daemon_target():
 
 
 def test_daemon_list_subcommand_is_wired_with_no_daemon_or_all_attribute():
-    """``daemon list`` takes no ``-d``/``--all`` -- unlike every other
-    subparser in this file, it never calls ``add_daemon_option``, so a
-    parsed namespace carries no ``.daemon`` attribute at all (argparse
-    only creates an attribute for a flag actually added to that
-    subparser)."""
+    """``daemon list`` takes no ``--all`` of its own; ``.daemon`` exists
+    only because ``-d`` is a root option, and ``cmd_list`` ignores it."""
     parser = _build_parser()
     args = parser.parse_args(["daemon", "list"])
     assert args.func is daemon_cli.cmd_list
-    assert not hasattr(args, "daemon")
+    assert args.daemon is None
     assert not hasattr(args, "all")
 
 

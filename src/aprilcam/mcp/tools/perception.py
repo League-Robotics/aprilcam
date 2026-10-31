@@ -26,7 +26,7 @@ FastMCP's schema introspection needs (ticket 001's handoff note; see
 
 Every tool takes an optional ``daemon`` parameter -- a per-call target
 host that overrides this server's session default
-(``aprilcam mcp -d HOST``), via the exact same precedence
+(``aprilcam -d HOST mcp``), via the exact same precedence
 ``ConnectionManager``/``Discovery.connect`` already implement (ticket
 001; sprint.md's Design Rationale, "a session default, plus an optional
 per-tool-call daemon parameter"). No tool below re-derives that

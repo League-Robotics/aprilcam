@@ -29,6 +29,7 @@ from aprilcam.cli import tags as tags_cli
 from aprilcam.daemon.interfaces import MountRegistration
 from aprilcam.errors import ConnectionFailed, InvalidTagId, NotCalibrated, UnwritableOutputPath
 from aprilcam.types import MountParameters, TagFamily, TagId
+from aprilcam.cli._common import add_daemon_option
 
 
 @dataclass
@@ -135,6 +136,7 @@ def _args(**overrides) -> argparse.Namespace:
 
 def _build_parser() -> argparse.ArgumentParser:
     top = argparse.ArgumentParser(prog="aprilcam")
+    add_daemon_option(top)
     top.set_defaults(func=None)
     subparsers = top.add_subparsers(dest="command")
     tags_cli.add_subparser(subparsers)
@@ -435,9 +437,9 @@ def test_register_accepts_all_offset_flags():
     parser = _build_parser()
     args = parser.parse_args(
         [
-            "tags", "mount", "register", "aruco", "5",
+            "-d", "pi-field.local", "tags", "mount", "register", "aruco", "5",
             "--x", "8.0", "--y", "3.0", "--z", "15.0",
-            "--yaw-deg", "90.0", "--size", "12.5", "-d", "pi-field.local",
+            "--yaw-deg", "90.0", "--size", "12.5",
         ]
     )
     assert args.family == "aruco"

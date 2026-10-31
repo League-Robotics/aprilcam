@@ -87,7 +87,6 @@ from aprilcam.cli._common import (
     EXIT_ERROR,
     EXIT_OK,
     add_all_option,
-    add_daemon_option,
     fan_out,
     incomplete_command,
     report_error,
@@ -118,7 +117,7 @@ def cmd_register(
     args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
 ) -> int:
     """``aprilcam tags mount register <family> <number> [--x CM] [--y CM]
-    [--z CM] [--yaw-deg DEG] [--size CM] [-d HOST]`` (UC-12).
+    [--z CM] [--yaw-deg DEG] [--size CM]`` (UC-12).
 
     All offset flags default to ``0.0``, matching
     :class:`~aprilcam.types.MountParameters`'s own zero defaults --
@@ -180,7 +179,7 @@ def cmd_register(
 def cmd_clear(
     args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
 ) -> int:
-    """``aprilcam tags mount clear <family> <number> [-d HOST]``.
+    """``aprilcam tags mount clear <family> <number>``.
 
     Calls ``unregister_tag`` -- an absent registration is a no-op (see
     the module docstring); this always prints a confirmation and
@@ -241,7 +240,7 @@ def _print_registrations(registrations: Dict[TagId, MountRegistration]) -> None:
 def cmd_list(
     args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
 ) -> int:
-    """``aprilcam tags mount list [-d HOST] [--all]``.
+    """``aprilcam tags mount list [--all]``.
 
     Read-only, so it fans out like ``camera list``/``playfield list``
     (``cli.md``'s fan-out table).
@@ -420,7 +419,6 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
         "--size", type=float, default=None, metavar="CM",
         help="tag edge length override (default: the daemon's own configured default)",
     )
-    add_daemon_option(p_register)
     add_all_option(p_register, note=" (refused -- registration is single-target)")
     p_register.set_defaults(func=cmd_register)
 
@@ -429,12 +427,10 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     )
     p_clear.add_argument("family", choices=families, help="tag family")
     p_clear.add_argument("number", type=int, help="tag number")
-    add_daemon_option(p_clear)
     add_all_option(p_clear, note=" (refused -- clearing is single-target)")
     p_clear.set_defaults(func=cmd_clear)
 
     p_list = mount_sub.add_parser("list", help="list every registered tag's mount parameters")
-    add_daemon_option(p_list)
     add_all_option(p_list)
     p_list.set_defaults(func=cmd_list)
 

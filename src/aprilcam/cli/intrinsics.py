@@ -21,7 +21,7 @@ import sys
 import time
 from typing import Callable, Optional
 
-from aprilcam.cli._common import EXIT_ERROR, EXIT_OK, add_daemon_option, report_error
+from aprilcam.cli._common import EXIT_ERROR, EXIT_OK, report_error
 from aprilcam.client.discovery import Discovery
 from aprilcam.errors import AprilCamError
 from aprilcam.intrinsics.interfaces import BoardSpec
@@ -134,7 +134,7 @@ def cmd_intrinsics(
     interval: float = POLL_INTERVAL_S,
 ) -> int:
     """``aprilcam camera intrinsics <camera...> [--board SPEC] [--install]
-    [--no-gui] [-d HOST]``. Seams (all keyword) make it testable without a
+    [--no-gui]``. Seams (all keyword) make it testable without a
     daemon, a display, or a blocking stdin."""
     if args.board is not None:
         try:
@@ -203,5 +203,4 @@ def add_subparser(sub: "argparse._SubParsersAction") -> None:
                    "not-good result)")
     p.add_argument("--no-gui", action="store_true",
                    help="text mode: print status lines; Enter installs, Ctrl-C aborts")
-    add_daemon_option(p)
     p.set_defaults(func=cmd_intrinsics)

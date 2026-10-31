@@ -71,7 +71,7 @@ _SERVER_INSTRUCTIONS = (
     "configuration tools to change it.\n\n"
     "Every daemon-backed tool accepts an optional daemon parameter to "
     "target a specific host for one call; omitted, it uses the "
-    "daemon this server was started against (aprilcam mcp -d HOST), "
+    "daemon this server was started against (aprilcam -d HOST mcp), "
     "or the local daemon if none was given."
 )
 
@@ -90,7 +90,7 @@ def build_server(
     Parameters
     ----------
     default_daemon_host:
-        The session default daemon target -- ``aprilcam mcp -d HOST``'s
+        The session default daemon target -- ``aprilcam -d HOST mcp``'s
         value, or ``None`` for the local daemon. Seeds the
         ``ConnectionManager``'s default; any individual tool call's own
         ``daemon`` argument (tickets 002-005) overrides it for that one

@@ -21,7 +21,7 @@ by design."
 ``-d remote`` is refused (sprint architecture, UC-13.S-4).** This class
 takes no host parameter anywhere in its surface: there is nothing here
 that could even *accept* a remote target, let alone refuse one. Refusing
-``aprilcam daemon start -d pi-field.local`` is therefore entirely the
+``aprilcam -d pi-field.local daemon start`` is therefore entirely the
 CLI's job (ticket 006) -- by the time a call would reach this class,
 there is no remote destination left to carry, since ``start``/``stop``/
 ``status`` below only ever mean "the daemon on this machine." Recorded

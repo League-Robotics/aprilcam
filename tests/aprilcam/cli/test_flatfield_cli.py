@@ -18,6 +18,7 @@ from typing import Optional, Tuple
 import pytest
 
 from aprilcam.calibration.interfaces import FlatFieldResult
+from aprilcam.cli._common import add_daemon_option
 from aprilcam.cli import camera as camera_cli
 from aprilcam.cli import daemon as daemon_cli
 from aprilcam.cli import flatfield as flatfield_cli
@@ -340,6 +341,7 @@ def test_flatfield_reports_a_connection_failure(capsys):
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aprilcam")
+    add_daemon_option(parser)
     parser.set_defaults(func=None)
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
     daemon_cli.add_subparser(subparsers)
