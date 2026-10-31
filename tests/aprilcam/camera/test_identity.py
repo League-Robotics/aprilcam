@@ -766,3 +766,61 @@ class TestResolveAllMerge:
         assert set(out.keys()) == {0, 70}
         assert out[0].source != "libcamera_id"
         assert out[70].source == "libcamera_id"
+
+
+def _write_usb_device(sys_root, video_index: int, port: str, **attrs) -> None:
+    """Fake the real Linux shape: ``videoN/device`` is a symlink to the
+    UVC *interface* directory, whose parent is the USB device holding
+    ``idVendor``/``product``/``serial`` attribute files."""
+    usb_dev = sys_root / "devices" / "usb3" / port
+    iface = usb_dev / f"{port}:1.0"
+    iface.mkdir(parents=True, exist_ok=True)
+    for name, value in {"idVendor": "0c45", **attrs}.items():
+        (usb_dev / name).write_text(value + "\n")
+    node = sys_root / f"video{video_index}"
+    node.mkdir(parents=True, exist_ok=True)
+    os.symlink(iface, node / "device")
+
+
+class TestLinuxUsbIdentity:
+    """buzzkill (Ubuntu 26.04): uvcvideo card names read
+    ``"<product>: <entity>"`` truncated to 31 chars, and ``/dev/videoN``
+    is not a stable location -- identity comes from the USB device."""
+
+    def _run(self, monkeypatch, tmp_path, cams):
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(identity, "_SYS_V4L_ROOT", str(tmp_path))
+        monkeypatch.setattr(identity, "_probe_libcamera", lambda: {})
+        _patch_enumerate_cameras(monkeypatch, cams)
+        return identity.resolve_all(profiler_entries={})
+
+    def test_product_string_names_the_camera_and_serial_keys_it(self, monkeypatch, tmp_path):
+        _write_usb_device(tmp_path, 0, "3-2.1.4",
+                          product="Arducam OV9782 USB Camera", serial="UC852")
+        cams = [_fake_cam(0, "Arducam OV9782 USB Camera: Ardu", path="/dev/video0")]
+
+        ident = self._run(monkeypatch, tmp_path, cams)[0]
+
+        assert ident.slug == "arducam-ov9782-usb-camera"
+        assert ident.device_name == "Arducam OV9782 USB Camera"
+        assert ident.hardware_key == "serial:UC852"
+        assert ident.source == "usb_serial"
+
+    def test_no_serial_keys_on_usb_port_not_dev_node(self, monkeypatch, tmp_path):
+        _write_usb_device(tmp_path, 2, "3-2.1.2", product="HD USB CAMERA")
+        cams = [_fake_cam(2, "HD USB CAMERA: HD USB CAMERA", path="/dev/video2",
+                          vid=0x32E4, pid=0x0317)]
+
+        ident = self._run(monkeypatch, tmp_path, cams)[2]
+
+        assert ident.slug == "hd-usb-camera"
+        assert ident.hardware_key == "vidpid:32e4:0317@3-2-1-2"
+        assert ident.location == "3-2.1.2"
+
+    def test_non_usb_node_keeps_card_name(self, monkeypatch, tmp_path):
+        cams = [_fake_cam(70, "aprilcam-imx296-88000", path="/dev/video70")]
+
+        ident = self._run(monkeypatch, tmp_path, cams)[70]
+
+        assert ident.slug == "aprilcam-imx296-88000"
+        assert ident.location == "/dev/video70"

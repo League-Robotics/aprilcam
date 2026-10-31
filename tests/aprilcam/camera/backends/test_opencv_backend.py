@@ -271,3 +271,32 @@ def test_identity_check_skipped_when_no_expected_hardware_key_given():
     _FakeCV2Capture.open_indices = {0}
     monkeypatch_free_backend.open()
     assert monkeypatch_free_backend.is_open is True
+
+
+class TestV4l2Mjpg:
+    """Linux V4L2 opens request MJPG before the frame size -- uncompressed
+    YUYV starved every camera but the first on buzzkill's shared USB 2.0
+    hub ("Not enough bandwidth for altsetting")."""
+
+    def _open(self, backend):
+        _FakeCV2Capture.open_indices = {0}
+        b = OpenCVBackend(0, width=1280, height=720, backend=backend)
+        b.open()
+        return _FakeCV2Capture.instances[-1]
+
+    def test_v4l2_requests_mjpg_before_frame_size(self, monkeypatch):
+        order = []
+        original = _FakeCV2Capture.set
+
+        def recording_set(self, prop, value):
+            order.append(prop)
+            return original(self, prop, value)
+
+        monkeypatch.setattr(_FakeCV2Capture, "set", recording_set)
+        cap = self._open(ocv.cv.CAP_V4L2)
+        assert cap._props[ocv.cv.CAP_PROP_FOURCC] == ocv.cv.VideoWriter.fourcc(*"MJPG")
+        assert order.index(ocv.cv.CAP_PROP_FOURCC) < order.index(ocv.cv.CAP_PROP_FRAME_WIDTH)
+
+    def test_avfoundation_leaves_format_alone(self):
+        cap = self._open(ocv.cv.CAP_AVFOUNDATION)
+        assert ocv.cv.CAP_PROP_FOURCC not in cap._props

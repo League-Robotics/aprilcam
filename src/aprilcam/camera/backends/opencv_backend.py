@@ -254,6 +254,14 @@ class OpenCVBackend(CaptureBackend):
             c.release()
         if cap is None:
             raise RuntimeError(f"failed to open camera at index {self._index}")
+        if be == getattr(cv, "CAP_V4L2", 200):
+            # V4L2 opens UVC cameras as uncompressed YUYV, whose isochronous
+            # reservation (720p) takes most of a USB 2.0 bus: on buzzkill a
+            # second camera on the same hub got "Not enough bandwidth for
+            # altsetting" and never delivered a frame. MJPG lets several
+            # share one hub. Set before the size, which V4L2 negotiates per
+            # format; a camera without MJPG keeps its default.
+            cap.set(cv.CAP_PROP_FOURCC, cv.VideoWriter.fourcc(*"MJPG"))
         if self._width is not None:
             cap.set(cv.CAP_PROP_FRAME_WIDTH, self._width)
         if self._height is not None:

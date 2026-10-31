@@ -288,6 +288,12 @@ class _EnumEntry:
     vid: Optional[int] = None
     pid: Optional[int] = None
     path: Optional[str] = None
+    #: Linux only, from the USB device's ``/sys`` attributes
+    #: (:func:`_read_usb_attrs`): the iSerial string and the USB port
+    #: path (``3-2.1.4``), stable across reboots where ``path``
+    #: (``/dev/videoN``) is not.
+    serial: Optional[str] = None
+    usb_port: Optional[str] = None
 
 
 def _combined_index_offsets() -> Tuple[int, ...]:
@@ -407,6 +413,41 @@ def _read_v4l2_driver(video_index: int, *, sys_root: str = _SYS_V4L_ROOT) -> Opt
     return os.path.basename(target) or None
 
 
+def _read_usb_attrs(
+    video_index: int, *, sys_root: str = _SYS_V4L_ROOT
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """``(product, serial, usb_port)`` of the USB device behind
+    ``/dev/video<video_index>``; all ``None`` when it is not a USB device.
+
+    ``<sys_root>/video<N>/device`` links to the UVC *interface*
+    (``.../3-2.1.4/3-2.1.4:1.0``); its parent is the USB device, whose
+    ``product`` and ``serial`` files hold the iProduct/iSerial strings.
+    The product string is the camera's real name -- the V4L2 card name
+    ``cv2-enumerate-cameras`` reports is ``"<product>: <entity>"``
+    truncated to 31 characters on recent uvcvideo kernels (seen on
+    buzzkill, Ubuntu 26.04: ``"Arducam OV9782 USB Camera: Ardu"``),
+    which would slug differently from the same camera on macOS. A
+    directory without ``idVendor`` (a v4l2loopback node, a platform
+    device, a test fixture) is not a USB device and reads as unknown.
+    """
+    device = os.path.join(sys_root, f"video{video_index}", "device")
+    try:
+        usb_dev = os.path.dirname(os.path.realpath(device))
+    except OSError:
+        return None, None, None
+
+    def _attr(name: str) -> Optional[str]:
+        try:
+            with open(os.path.join(usb_dev, name), encoding="utf-8", errors="replace") as f:
+                return f.read().strip() or None
+        except OSError:
+            return None
+
+    if _attr("idVendor") is None:
+        return None, None, None
+    return _attr("product"), _attr("serial"), os.path.basename(usb_dev)
+
+
 def is_pi_internal_node(driver: Optional[str], name: Optional[str] = None) -> bool:
     """True if a V4L2 node is a Raspberry Pi RP1/PiSP media-pipeline-
     internal node and should never be proposed as a camera.
@@ -452,6 +493,7 @@ def _enumerate_cv2() -> Dict[int, _EnumEntry]:
             idx = _strip_backend_offset(raw, offsets)
             name = getattr(cam, "name", None) or None
             path = getattr(cam, "path", None) or None
+            serial = usb_port = None
 
             if on_linux:
                 video_idx = _video_node_index(path)
@@ -462,6 +504,11 @@ def _enumerate_cv2() -> Dict[int, _EnumEntry]:
                 )
                 if is_pi_internal_node(driver, name):
                     continue
+                if video_idx is not None:
+                    product, serial, usb_port = _read_usb_attrs(
+                        video_idx, sys_root=_SYS_V4L_ROOT
+                    )
+                    name = product or name
 
             out[idx] = _EnumEntry(
                 index=idx,
@@ -469,6 +516,8 @@ def _enumerate_cv2() -> Dict[int, _EnumEntry]:
                 vid=getattr(cam, "vid", None) or None,
                 pid=getattr(cam, "pid", None) or None,
                 path=path,
+                serial=serial,
+                usb_port=usb_port,
             )
     except ImportError:
         pass
@@ -700,8 +749,10 @@ def resolve_identity(
 
     vid = entry.vid if entry else None
     pid = entry.pid if entry else None
-    location = entry.path if entry else None
-    serial: Optional[str] = None
+    # Linux: the USB port path, not the /dev/videoN node, which can
+    # renumber across reboots and replugs.
+    location = (entry.usb_port or entry.path) if entry else None
+    serial: Optional[str] = entry.serial if entry else None
     avf_unique: Optional[str] = None
 
     # Backfill from system_profiler by matching on device name.
