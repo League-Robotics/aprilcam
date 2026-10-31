@@ -94,12 +94,18 @@ def test_never_auto_quits_on_green():
     assert d.finished == [] and d.aborted == ["a"] and d.polls["a"] > 5
 
 
-def test_enter_ignored_when_not_good(capsys):
+def test_single_enter_when_not_good_only_arms(capsys):
     d = FakeDaemon()
-    assert _run(d, _args(), enters={1, 2}) == 1
+    assert _run(d, _args(), enters={1}) == 1
     assert d.finished == []
-    assert "not GOOD ENOUGH" in capsys.readouterr().out
+    assert "Enter again" in capsys.readouterr().out
     assert d.aborted == ["a"]
+
+
+def test_second_enter_when_not_good_forces_install():
+    d = FakeDaemon()
+    _run(d, _args(), enters={1, 2})
+    assert d.finished and d.finished[0] == ("a", True, True)
 
 
 def test_install_flag_installs_once_when_good():

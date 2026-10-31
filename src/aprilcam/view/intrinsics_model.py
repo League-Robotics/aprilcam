@@ -45,6 +45,10 @@ __all__ = [
     "tile_colour",
     "key_action",
     "decide_enter",
+    "blocking_reasons",
+    "coverage_complete",
+    "KEYS_LINE",
+    "CONFIRM_WINDOW_S",
     "exit_code_for",
     "connection_banner",
     "GRID_EDGE_FRACTION",
@@ -70,21 +74,34 @@ TILT_ORDER = ("N", "E", "S", "W")
 
 #: Display-only copies of the daemon's thresholds.
 _GOOD_RESIDUAL_PX = 4
+_GOOD_RMS_PX = 0.6
 _MIN_VIEWS = 12
 _MIN_SOLVE_VIEWS = 6
+
+#: Display-only banner for "every tile is green but the solve is not good":
+#: more waving is unlikely to help, so say so instead of KEEP GOING.
+_BANNER_ACCEPT = "accept"
 
 BANNER_TEXT = {
     BANNER_SHOW_BOARD: "SHOW ME THE BOARD",
     BANNER_KEEP_GOING: "KEEP GOING",
     BANNER_GOOD_ENOUGH: "GOOD ENOUGH",
+    _BANNER_ACCEPT: "ENTER TO ACCEPT",
 }
 #: Colour class per banner: renderers map these to concrete colours.
 BANNER_CLASS = {
     BANNER_SHOW_BOARD: "dim",
     BANNER_KEEP_GOING: "yellow",
     BANNER_GOOD_ENOUGH: "green",
+    _BANNER_ACCEPT: "yellow",
 }
 GOOD_HINT = "Press Enter to finish and install.  Or keep going to tighten it further."
+#: Always on screen, so the operator is never stuck without a way out.
+KEYS_LINE = "Enter: install (twice to accept a not-good result)    Esc: quit without saving"
+#: Seconds a first not-good Enter stays armed for the confirming second press.
+CONFIRM_WINDOW_S = 10.0
+CONFIRM_NOTICE = ("NOT good enough -- press Enter again within 10 s to install it anyway "
+                  "(Esc quits without saving)")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -113,6 +130,10 @@ class CameraViewModel:
     good: bool
     banner_text: str
     banner_class: str
+    #: Why a solved camera is not good yet, in threshold terms (empty when good).
+    blockers: tuple[str, ...] = ()
+    #: Every region and tilt direction has 2+ views (all tiles green).
+    coverage_done: bool = False
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -136,6 +157,30 @@ def _tiles(counts: dict, order: Sequence[str]) -> tuple[TileState, ...]:
     )
 
 
+def blocking_reasons(status: IntrinsicsStatus) -> tuple[str, ...]:
+    """Why a solved camera is not GOOD ENOUGH, from the same thresholds the
+    daemon's verdict uses. Empty when good or not yet solved."""
+    if status.good or status.rms_px is None:
+        return ()
+    reasons = []
+    if status.rms_px >= _GOOD_RMS_PX:
+        reasons.append(f"error {status.rms_px:.2f} px (needs < {_GOOD_RMS_PX})")
+    if status.residual_px is None:
+        reasons.append(f"stability check needs {max(0, _MIN_VIEWS - status.view_count)} more views")
+    elif status.residual_px >= _GOOD_RESIDUAL_PX:
+        reasons.append(f"unstable: re-solves disagree by {status.residual_px:.1f} px "
+                       f"(needs < {_GOOD_RESIDUAL_PX})")
+    if not reasons:
+        reasons.append("waiting for the daemon to accept the solve")
+    return tuple(reasons)
+
+
+def coverage_complete(status: IntrinsicsStatus) -> bool:
+    """True when every region and tilt tile is green (2+ views each)."""
+    return (all(int(status.cell_coverage.get(k, 0)) >= 2 for k in CELL_ORDER)
+            and all(int(status.tilt_coverage.get(k, 0)) >= 2 for k in TILT_ORDER))
+
+
 def build_camera_model(status: IntrinsicsStatus) -> CameraViewModel:
     """Display strings and tile states for one camera's status."""
     n = status.view_count
@@ -147,7 +192,7 @@ def build_camera_model(status: IntrinsicsStatus) -> CameraViewModel:
             error_class = "plain"
         could, could_class = "could move --", "plain"
     else:
-        error_now = f"error now {status.rms_px:.2f} px"
+        error_now = f"error now {status.rms_px:.2f} px (good < {_GOOD_RMS_PX})"
         error_class = "green" if status.good else "yellow"
         if status.residual_px is None:
             could = f"could move (need {max(0, _MIN_VIEWS - n)} more views)"
@@ -159,6 +204,14 @@ def build_camera_model(status: IntrinsicsStatus) -> CameraViewModel:
                 could += f"   lens correction {status.correction_px:.1f} px"
             could_class = "green" if status.residual_px < _GOOD_RESIDUAL_PX else "yellow"
     banner = status.banner if status.banner in BANNER_TEXT else BANNER_SHOW_BOARD
+    blockers = blocking_reasons(status)
+    done = coverage_complete(status)
+    next_line = None if status.good else status.next_hint
+    if done and blockers:
+        # All green yet not good: name what is failing instead of KEEP GOING.
+        banner = _BANNER_ACCEPT
+        next_line = ("Coverage done, but not good enough: " + "; ".join(blockers)
+                     + ".  Enter twice installs it anyway.")
     return CameraViewModel(
         camera=status.camera,
         views_line=f"views: {n}   tilted: {status.tilted_count}",
@@ -168,12 +221,14 @@ def build_camera_model(status: IntrinsicsStatus) -> CameraViewModel:
         could_change_class=could_class,
         cells=_tiles(status.cell_coverage, CELL_ORDER),
         tilts=_tiles(status.tilt_coverage, TILT_ORDER),
-        next_line=None if status.good else status.next_hint,
+        next_line=next_line,
         reject_note=status.last_reject,
         errors=tuple(status.errors),
         good=status.good,
         banner_text=BANNER_TEXT[banner],
         banner_class=BANNER_CLASS[banner],
+        blockers=blockers,
+        coverage_done=done,
     )
 
 
@@ -187,6 +242,8 @@ def build_view_model(statuses: Sequence[IntrinsicsStatus]) -> IntrinsicsViewMode
     all_good = bool(cams) and all(c.good for c in cams)
     if all_good:
         key = BANNER_GOOD_ENOUGH
+    elif all(c.good or c.banner_text == BANNER_TEXT[_BANNER_ACCEPT] for c in cams):
+        key = _BANNER_ACCEPT
     elif any(s.banner != BANNER_SHOW_BOARD for s in statuses):
         key = BANNER_KEEP_GOING
     else:
@@ -317,10 +374,12 @@ def font_sizes(screen_height: int, camera_count: int = 1) -> FontSizes:
 
 @dataclass(frozen=True, kw_only=True)
 class EnterDecision:
-    """What Enter does: ``finish`` the listed cameras, show a ``notice``
-    (nothing good yet), or ``quit`` (nothing left to finish)."""
+    """What Enter does: ``finish`` the listed (good) cameras, ``confirm``
+    (nothing good yet: arm a second press), ``force`` (the confirming second
+    press: install the listed cameras as they are), or ``quit`` (nothing
+    left to finish)."""
 
-    action: str  # "finish" | "notice" | "quit"
+    action: str  # "finish" | "confirm" | "force" | "quit"
     cameras: tuple[str, ...] = ()
     notice: Optional[str] = None
 
@@ -334,17 +393,19 @@ def key_action(keysym: str) -> Optional[str]:
     return None
 
 
-def decide_enter(good_by_camera: dict) -> EnterDecision:
+def decide_enter(good_by_camera: dict, armed: bool = False) -> EnterDecision:
     """Enter, given ``{camera: good}`` for the cameras still owned (not yet
-    installed). Only good cameras are ever finished -- never forced."""
+    installed). Good cameras are finished normally. With none good, the
+    first press only arms (``confirm``); a second press while *armed*
+    forces every owned camera's install with whatever it has."""
     if not good_by_camera:
         return EnterDecision(action="quit")
     good = tuple(c for c, g in good_by_camera.items() if g)
-    if not good:
-        return EnterDecision(
-            action="notice",
-            notice="not GOOD ENOUGH yet -- keep going (Enter installs only a good result)")
-    return EnterDecision(action="finish", cameras=good)
+    if good:
+        return EnterDecision(action="finish", cameras=good)
+    if armed:
+        return EnterDecision(action="force", cameras=tuple(good_by_camera))
+    return EnterDecision(action="confirm", notice=CONFIRM_NOTICE)
 
 
 def exit_code_for(installed: Sequence[str], cameras: Sequence[str]) -> int:
@@ -485,7 +546,7 @@ class ColumnLayout:
 
 
 #: Longest strings the two metric slots can hold (``build_camera_model``).
-LONGEST_ERROR_NOW = "error: need 6 more views"
+LONGEST_ERROR_NOW = "error now 99.99 px (good < 0.6)"
 LONGEST_COULD_CHANGE = "could move 99.9 px (good < 4)   lens correction 99.9 px"
 #: Metric slots are sized for this many wrapped lines.
 METRIC_MAX_LINES = 2

@@ -41,7 +41,7 @@ def test_keep_going_tiles_and_strings():
     m = build_view_model([keep()])
     assert m.banner_text == "KEEP GOING" and m.banner_class == "yellow"
     c = m.cameras[0]
-    assert c.error_now == "error now 0.80 px"
+    assert c.error_now == "error now 0.80 px (good < 0.6)"
     assert "need 4 more views" in c.could_change
     assert [t.level for t in c.cells][:5] == ["good", "some", "none", "none", "good"]
     assert [t.name for t in c.tilts] == ["N", "E", "S", "W"]
@@ -172,3 +172,24 @@ def test_scale_polygons():
     assert im.scale_polygons((), (100, 50), (0, 0, 10, 10)) == ()
     assert im.scale_polygons(poly, (0, 0), (0, 0, 10, 10)) == ()
     assert im.scale_polygons(poly, None, (0, 0, 10, 10)) == ()
+
+
+FULL_CELLS = {k: 2 for k in ("NW", "N", "NE", "W", "C", "E", "SW", "S", "SE")}
+FULL_TILTS = {k: 2 for k in ("N", "E", "S", "W")}
+
+
+def test_all_green_but_not_good_says_why_not_keep_going():
+    s = keep(cell_coverage=FULL_CELLS, tilt_coverage=FULL_TILTS, view_count=53,
+             rms_px=0.95, residual_px=39.5)
+    m = build_view_model([s])
+    assert m.banner_text == "ENTER TO ACCEPT"
+    assert "error 0.95 px (needs < 0.6)" in m.next_line
+    assert "disagree by 39.5 px" in m.next_line
+    assert "Enter twice" in m.next_line
+    assert m.cameras[0].coverage_done
+
+
+def test_partial_coverage_keeps_daemon_hint():
+    m = build_view_model([keep(residual_px=39.5, view_count=20)])
+    assert m.banner_text == "KEEP GOING" and m.next_line == "tilt the board left"
+    assert m.cameras[0].blockers  # still computed for display

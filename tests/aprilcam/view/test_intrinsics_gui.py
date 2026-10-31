@@ -78,7 +78,10 @@ def test_colours_and_keys():
 def test_decide_enter():
     assert decide_enter({"a": True, "b": False}).cameras == ("a",)
     d = decide_enter({"a": False})
-    assert d.action == "notice" and d.cameras == ()
+    assert d.action == "confirm" and d.cameras == () and "Enter again" in d.notice
+    assert decide_enter({"a": False}, armed=True).action == "force"
+    assert decide_enter({"a": False}, armed=True).cameras == ("a",)
+    assert decide_enter({"a": True, "b": False}, armed=True).action == "finish"
     assert decide_enter({}).action == "quit"
     assert exit_code_for(["a"], ["a"]) == 0 and exit_code_for(["a"], ["a", "b"]) == 1
     assert connection_banner(None) is None and "LOST" in connection_banner("x")
@@ -102,8 +105,35 @@ def test_enter_when_not_good_shows_notice_installs_nothing():
     c.step()
     c.request("enter")
     c.step()
-    assert d.finished == [] and "not GOOD" in c.snapshot().notice_lines[0]
+    assert d.finished == [] and "NOT good" in c.snapshot().notice_lines[0]
     assert not c.finished
+
+
+def test_second_enter_forces_install_of_not_good():
+    d = Daemon()
+    t = [100.0]
+    c = gui.IntrinsicsController(d, ["a"], install=False, clock=lambda: t[0])
+    c.step()
+    c.request("enter")
+    c.step()
+    t[0] += 3.0
+    c.request("enter")
+    c.step()
+    assert d.finished == [("a", True, True)]
+    assert c.installed == {"a"} and c.owned == set()
+
+
+def test_second_enter_after_window_only_rearms():
+    d = Daemon()
+    t = [100.0]
+    c = gui.IntrinsicsController(d, ["a"], install=False, clock=lambda: t[0])
+    c.step()
+    c.request("enter")
+    c.step()
+    t[0] += 30.0
+    c.request("enter")
+    c.step()
+    assert d.finished == []
 
 
 def test_never_auto_quits_on_green_then_enter_quits():

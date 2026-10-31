@@ -21,6 +21,8 @@ from typing import Any, Callable, Optional
 
 from aprilcam.intrinsics.interfaces import IntrinsicsStatus
 from aprilcam.view.intrinsics_model import (
+    CONFIRM_WINDOW_S,
+    KEYS_LINE,
     build_view_model,
     colour_for,
     connection_banner,
@@ -74,6 +76,7 @@ class IntrinsicsController:
         self.owned: set = set(cameras)
         self.installed: set = set()
         self._auto_tried: set = set()
+        self._armed_at: Optional[float] = None  # first not-good Enter, awaiting a second
         self._lock = threading.Lock()
         self._commands: list = []
         self._statuses: dict = {}
@@ -167,22 +170,26 @@ class IntrinsicsController:
             with self._lock:
                 good = {c: bool(self._statuses[c].good) if c in self._statuses else False
                         for c in self.cameras if c in self.owned}
-            decision = decide_enter(good)
+            now = self._clock()
+            armed = self._armed_at is not None and now - self._armed_at < CONFIRM_WINDOW_S
+            decision = decide_enter(good, armed=armed)
+            self._armed_at = None
             if decision.action == "quit":
                 self.finished = True
-            elif decision.action == "notice":
+            elif decision.action == "confirm":
+                self._armed_at = now
                 with self._lock:
                     self._notice = [decision.notice]
             else:
                 for cam in decision.cameras:
-                    self._finish(cam)
+                    self._finish(cam, force=decision.action == "force")
         else:  # escape / close
             self.abort_all()
             self.finished = True
 
-    def _finish(self, cam: str) -> None:
+    def _finish(self, cam: str, force: bool = False) -> None:
         try:
-            result = self._daemon.finish_intrinsics(cam, True)
+            result = self._daemon.finish_intrinsics(cam, True, force)
         except Exception as exc:  # noqa: BLE001
             with self._lock:
                 self._notice = self._notice + [f"[{cam}] finish failed: {exc}"]
@@ -287,6 +294,9 @@ class _TkShell:
             y = fs.banner + 20
         col_w = w // n
         bottom = h - 10
+        c.create_text(w - 10, bottom, text=KEYS_LINE, anchor="se",
+                      fill=colour_for("dim"), font=("Helvetica", -fs.body))
+        bottom -= fs.body + 8  # fixed row for the always-on keys line
         lines = list(snap.notice_lines)[-_NOTICE_SLOTS:]
         bottom -= _NOTICE_SLOTS * (fs.body + 8)  # fixed reserve: columns never jump
         limit = bottom - fs.next_line * 3  # NEXT reserve is fixed, shown or not

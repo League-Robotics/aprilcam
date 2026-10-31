@@ -8,8 +8,9 @@ aborted on the way out** (normal exit, Ctrl-C, error) unless a finish already
 ended it, so no camera stays pinned.
 
 Never auto-quits on green. A good result waits for Enter (or, with
-``--install``, is installed once without asking). A not-good result is never
-installed and ``force`` is never sent.
+``--install``, is installed once without asking). A not-good result is
+installed (``force``) only on a confirming second Enter, so the operator can
+always stop with what they have.
 """
 
 from __future__ import annotations
@@ -25,6 +26,8 @@ from aprilcam.client.discovery import Discovery
 from aprilcam.errors import AprilCamError
 from aprilcam.intrinsics.interfaces import BoardSpec
 from aprilcam.view.intrinsics_model import (
+    CONFIRM_WINDOW_S,
+    decide_enter,
     finish_text_lines,
     status_text_lines,
 )
@@ -79,6 +82,7 @@ def _text_loop(daemon, cameras: list, owned: set, *, install: bool,
     auto_tried: set = set()
     installed: set = set()
     statuses = []
+    armed_at: Optional[float] = None  # first not-good Enter, awaiting a second
     while owned:
         statuses = [daemon.get_intrinsics_status(c) for c in cameras]
         text = status_text_lines(statuses)
@@ -95,20 +99,25 @@ def _text_loop(daemon, cameras: list, owned: set, *, install: bool,
             if not owned:
                 break
         if enter_ready(interval):
-            good = [c for c in list(owned) if by_cam[c].good]
-            if not good:
-                print("not GOOD ENOUGH yet -- keep going (Enter installs only a good result)",
-                      flush=True)
-            for cam in good:
-                _finish(daemon, cam, owned, installed)
+            now = time.monotonic()
+            armed = armed_at is not None and now - armed_at < CONFIRM_WINDOW_S
+            decision = decide_enter({c: by_cam[c].good for c in cameras if c in owned},
+                                    armed=armed)
+            armed_at = None
+            if decision.action == "confirm":
+                armed_at = now
+                print(decision.notice, flush=True)
+            for cam in decision.cameras:
+                _finish(daemon, cam, owned, installed, force=decision.action == "force")
             last_text = None
     return EXIT_OK if installed == set(cameras) else EXIT_ERROR
 
 
-def _finish(daemon, cam: str, owned: set, installed: set) -> None:
-    """Install a good camera; never forces. A session the finish ended is no
-    longer ours to abort; a refused install leaves it collecting (and owned)."""
-    result = daemon.finish_intrinsics(cam, True)
+def _finish(daemon, cam: str, owned: set, installed: set, force: bool = False) -> None:
+    """Install a camera (``force`` only after a confirmed not-good Enter). A
+    session the finish ended is no longer ours to abort; a refused install
+    leaves it collecting (and owned)."""
+    result = daemon.finish_intrinsics(cam, True, force)
     _print_lines(finish_text_lines(result))
     if result.installed:
         owned.discard(cam)
@@ -161,7 +170,7 @@ def cmd_intrinsics(
                 print("notice: GUI not available; using text mode", file=sys.stderr)
 
         print(f"intrinsics: {', '.join(cameras)} -- show the ChArUco board to the camera. "
-              "Enter installs when GOOD ENOUGH; Ctrl-C aborts.", flush=True)
+              "Enter installs when GOOD ENOUGH (twice: accept as-is); Ctrl-C aborts.", flush=True)
         return _text_loop(daemon, cameras, owned, install=args.install,
                           enter_ready=enter_ready, interval=interval)
     except KeyboardInterrupt:
