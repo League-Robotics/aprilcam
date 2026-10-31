@@ -1,0 +1,13 @@
+{
+  "camera_position": {
+    "height_cm": 120.76695902620513,
+    "nadir_x_cm": 6.225241263304386,
+    "nadir_y_cm": 1.7317677738475712
+  },
+  "name": "arducam-ov9281-usb-camera",
+  "playfield": "main-playfield",
+  "settings": {
+    "auto_exposure": 1,
+    "exposure": 12
+  }
+}
