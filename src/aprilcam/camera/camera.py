@@ -472,6 +472,24 @@ class Camera(_CameraBase):
         self._exhausted = False
         self._pending_open_settle = False
 
+    def release(self, *, only_if_idle: bool = False) -> bool:
+        """Deliberately close a PRESENT camera's device (idle reaper or an
+        explicit ``close_camera``, sprint 047 ticket 007): lifecycle
+        becomes CLOSED, the handle is freed, and config/subscribers stay.
+        :meth:`reopen` brings it back with the full stored config. Runs
+        under :attr:`_read_lock` so it never closes the handle mid-read.
+        With *only_if_idle*, backs off (returns ``False``) when another
+        read is already queued for the handle -- the reaper must not close
+        under a request that just arrived. ``False`` also for a camera
+        that is not PRESENT (nothing to release)."""
+        with self._read_lock:
+            if self._lifecycle is not CameraLifecycle.PRESENT:
+                return False
+            if only_if_idle and self.reads_in_flight > 0:
+                return False
+            self.close()
+            return True
+
     @property
     def lifecycle(self) -> CameraLifecycle:
         """PRESENT / ABSENT / CLOSED (sprint 047 ticket 001); see

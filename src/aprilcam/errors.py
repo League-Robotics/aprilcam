@@ -126,6 +126,23 @@ class CameraNotPresent(AprilCamError):
         super().__init__(f"camera {slug!r} is registered but not currently present")
 
 
+class CameraInUse(AprilCamError):
+    """``close_camera`` was refused: the camera has a live stream
+    subscriber or a read in flight (sprint 047 ticket 007).
+
+    Closing it would pull the device out from under a consumer, so the
+    operator must opt in (``force``). Carries the camera ``slug`` for
+    the wire (``aprilcam-slug`` trailing metadata).
+    """
+
+    def __init__(self, slug: str) -> None:
+        self.slug = slug
+        super().__init__(
+            f"camera {slug!r} is in use (a stream subscriber or a read is active); "
+            "pass --force to close it anyway"
+        )
+
+
 class NotCalibrated(AprilCamError):
     """A deskewed or world-coordinate product was asked of an
     uncalibrated camera (UC-19).

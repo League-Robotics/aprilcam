@@ -1085,3 +1085,8 @@ straddling period where both signatures need to work.
   sprint 038 "exhausted workers get a periodic retry" precedent). Both
   satisfy the stakeholder-fixed contract; the ticket implementing this
   fix chooses one.
+
+**`Camera.release()` (sprint 047 ticket 007).** Deliberate close of a PRESENT
+camera under the read lock (lifecycle CLOSED); with `only_if_idle` it backs
+off when another read is queued. `reopen()` is the way back (ABSENT or
+CLOSED), re-applying the full stored config.

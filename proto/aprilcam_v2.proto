@@ -360,6 +360,15 @@ service AprilCamV2 {
   // unconfigured camera reports) rather than erroring.
   rpc ResetCameraConfig (ResetCameraConfigRequest) returns (ResetCameraConfigResponse);
 
+  // Release the device behind one camera (sprint 047 ticket 007) without
+  // restarting the daemon; it stays listed and reopens transparently,
+  // with its full stored config, on next use. Refused with
+  // `FAILED_PRECONDITION` (`CameraInUse`) while a stream subscriber or
+  // read is active unless `force` is set; a forced close sticks for the
+  // existing subscribers (they are served the NO SIGNAL card) until some
+  // new request reopens the camera.
+  rpc CloseCamera (CloseCameraRequest) returns (CloseCameraResponse);
+
   // Upsert one annotation by its (layer, id) key (UC-28, ticket
   // 024-001). Last write wins on a colliding key -- documented
   // semantics, not a race bug (UC-28.S-6). Unknown playfield ->
@@ -513,6 +522,12 @@ message CameraState {
   // / .calibration_confidence.
   string calibration_method = 13;
   string calibration_confidence = 14;
+  // Sprint 047 ticket 007: the held device was deliberately closed
+  // (idle reaper or `CloseCamera`) while the hardware is still plugged
+  // in -- distinct from `present == false` (unplugged). It reopens
+  // transparently on next use. Additive: an older daemon reads false.
+  // Mirrors types.CameraState.closed.
+  bool closed = 15;
 }
 
 // One backend a probe could not interrogate, and why (UC-25.S-7).
@@ -1043,6 +1058,17 @@ message ResetCameraConfigRequest {
 }
 
 message ResetCameraConfigResponse {}
+
+// ---------------------------------------------------------------------------
+// CloseCamera (sprint 047 ticket 007)
+// ---------------------------------------------------------------------------
+
+message CloseCameraRequest {
+  string camera = 1;
+  bool force = 2;
+}
+
+message CloseCameraResponse {}
 
 // ---------------------------------------------------------------------------
 // Annotations (ticket 024-001). specification.md section 9 decision 8,

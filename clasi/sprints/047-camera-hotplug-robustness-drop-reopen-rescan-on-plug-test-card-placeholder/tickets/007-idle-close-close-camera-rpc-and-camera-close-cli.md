@@ -1,7 +1,7 @@
 ---
 id: '007'
 title: Idle close, close_camera RPC and camera close CLI
-status: open
+status: done
 use-cases:
 - SUC-005
 depends-on:
@@ -31,10 +31,10 @@ full config (ticket 001). Reaper uses an injectable clock.
 
 ## Acceptance Criteria
 
-- [ ] Idle device released after the timeout; timeout configurable.
-- [ ] No idle close while a subscriber or detection loop exists.
-- [ ] `camera close N` closes; refused with a clear message when subscribed unless `--force`.
-- [ ] Next frame request reopens and applies full config.
+- [x] Idle device released after the timeout; timeout configurable.
+- [x] No idle close while a subscriber or detection loop exists.
+- [x] `camera close N` closes; refused with a clear message when subscribed unless `--force`.
+- [x] Next frame request reopens and applies full config.
 
 ## Testing
 

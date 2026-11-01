@@ -94,6 +94,7 @@ The whole set. If a variable is not here, it does not exist.
 | `APRILCAM_DAEMON_HOST` | Default daemon to connect to (overridden by `-d`) |
 | `APRILCAM_DAEMON_PORT` | Default daemon port |
 | `APRILCAM_LOG_LEVEL` | Daemon log level |
+| `APRILCAM_IDLE_CLOSE_S` | Seconds a camera may sit unused (no stream, tag loop, intrinsics session or read) before the daemon releases its device; `0` disables; default `60` |
 
 v1 had roughly fourteen. The ones dropped were tuning knobs that belong
 in a camera or playfield config document rather than the environment —

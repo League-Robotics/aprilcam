@@ -7226,3 +7226,208 @@ def test_stream_on_unknown_camera_still_raises(directories, registry):
 
     with pytest.raises(UnknownCamera):
         service.stream_images("no-such-camera")
+
+
+# ---------------------------------------------------------------------------
+# Sprint 047 ticket 007: idle close, close_camera, CLOSED vs ABSENT.
+# ---------------------------------------------------------------------------
+
+
+class _IdleClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _idle_service(directories, registry, held_camera, idle_close_s=60.0):
+    identity, slug, cam = held_camera
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    clock = _IdleClock()
+    service._clock = clock
+    service._idle_close_s = idle_close_s
+    return service, slug, cam, clock
+
+
+def test_idle_camera_is_released_after_the_timeout(directories, registry, held_camera):
+    service, slug, cam, clock = _idle_service(directories, registry, held_camera)
+    backend = cam._backend
+
+    assert service._close_idle_cameras() == ()  # first sight starts the clock
+    clock.now += 59
+    assert service._close_idle_cameras() == ()
+    assert cam.lifecycle.value == "present"
+    clock.now += 2
+    assert service._close_idle_cameras() == (slug,)
+
+    assert cam.lifecycle.value == "closed"
+    assert backend.close_calls >= 1 and not backend.is_open
+    state = service.list_cameras()[0]
+    assert state.closed is True and state.present is True and state.usable is True
+
+
+def test_idle_timeout_is_configurable_and_zero_disables(directories, registry, held_camera):
+    service, slug, cam, clock = _idle_service(directories, registry, held_camera, idle_close_s=5)
+    service._close_idle_cameras()
+    clock.now += 6
+    assert service._close_idle_cameras() == (slug,)
+
+    service, slug, cam, clock = _idle_service(directories, registry, held_camera, idle_close_s=0)
+    service._close_idle_cameras()
+    clock.now += 10_000
+    assert service._close_idle_cameras() == ()
+
+
+def test_a_request_restarts_the_idle_clock(directories, registry, held_camera):
+    service, slug, cam, clock = _idle_service(directories, registry, held_camera)
+    service._close_idle_cameras()
+    clock.now += 50
+    service._camera_for(slug)  # a request touches the camera
+    clock.now += 50
+    assert service._close_idle_cameras() == ()
+    clock.now += 11
+    assert service._close_idle_cameras() == (slug,)
+
+
+def test_no_idle_close_while_a_stream_subscriber_exists(directories, registry, held_camera):
+    service, slug, cam, clock = _idle_service(directories, registry, held_camera)
+    stream = service.stream_tags(slug)
+    try:
+        service._close_idle_cameras()
+        clock.now += 600
+        assert service._close_idle_cameras() == ()
+        assert cam.lifecycle.value == "present"
+    finally:
+        stream.close()
+    # The clock restarts from the last busy sighting, not from the epoch.
+    clock.now += 30
+    assert service._close_idle_cameras() == ()
+    clock.now += 61
+    assert service._close_idle_cameras() == (slug,)
+
+
+def test_no_idle_close_during_an_intrinsics_session(directories, registry, held_camera):
+    service, slug, cam, clock = _idle_service(directories, registry, held_camera)
+    service._intrinsics.active_slugs = lambda: [slug]
+    service._close_idle_cameras()
+    clock.now += 600
+    assert service._close_idle_cameras() == ()
+
+
+def test_closed_camera_reopens_on_next_use_with_config(directories, registry, held_camera):
+    service, slug, cam, clock = _idle_service(directories, registry, held_camera)
+    service.set_camera_config(CameraConfig(name=slug, playfield=None, settings={"brightness": 40}))
+    service._close_idle_cameras()
+    clock.now += 61
+    service._close_idle_cameras()
+    backend = cam._backend
+    opens = backend.open_calls
+    assert cam.lifecycle.value == "closed"
+
+    service.get_frame(slug)
+
+    assert cam.lifecycle.value == "present"
+    assert backend.open_calls == opens + 1
+    assert backend._properties.get("brightness") == 40
+
+
+def test_close_camera_refused_while_subscribed_unless_forced(directories, registry, held_camera):
+    from aprilcam.errors import CameraInUse
+
+    service, slug, cam, _clock = _idle_service(directories, registry, held_camera)
+    stream = service.stream_images(slug)
+    try:
+        with pytest.raises(CameraInUse) as info:
+            service.close_camera(slug)
+        assert "--force" in str(info.value)
+        assert cam.lifecycle.value == "present"
+
+        service.close_camera(slug, force=True)
+        assert cam.lifecycle.value == "closed"
+        # Existing subscribers keep their subscription and see the card;
+        # their own demand does not undo the forced close.
+        deadline = time.time() + 5
+        frame = next(iter(stream))
+        while not frame.placeholder and time.time() < deadline:
+            frame = next(iter(stream))
+        assert frame.placeholder is True
+        assert cam.lifecycle.value == "closed"
+    finally:
+        stream.close()
+
+    service.get_frame(slug)  # a new request reopens it
+    assert cam.lifecycle.value == "present"
+
+
+def test_close_camera_closes_an_idle_camera_and_is_idempotent(directories, registry, held_camera):
+    service, slug, cam, _clock = _idle_service(directories, registry, held_camera)
+    service.close_camera(slug)
+    assert cam.lifecycle.value == "closed"
+    service.close_camera(slug)  # no-op
+    with pytest.raises(UnknownCamera):
+        service.close_camera("no-such-camera")
+
+
+def test_presence_watch_does_not_reopen_a_closed_camera(directories, registry, held_camera):
+    service, slug, cam, _clock = _idle_service(directories, registry, held_camera)
+    service.close_camera(slug)
+    backend = cam._backend
+    opens = backend.open_calls
+
+    assert service.on_hardware_presence(slug, True) is None
+    assert service._reopen_absent_cameras() == ()  # noqa: SLF001
+    assert cam.lifecycle.value == "closed"
+    assert backend.open_calls == opens
+
+
+def test_unplugging_a_closed_camera_marks_it_absent_without_opening(
+    directories, registry, held_camera
+):
+    service, slug, cam, _clock = _idle_service(directories, registry, held_camera)
+    service.close_camera(slug)
+    opens = cam._backend.open_calls
+
+    service.on_hardware_presence(slug, False)
+
+    assert cam.lifecycle.value == "absent"
+    assert cam._backend.open_calls == opens
+    assert service.on_hardware_presence(slug, True) is True  # absent -> reopens as usual
+
+
+def test_probe_leaves_a_closed_camera_closed(directories, registry, held_camera):
+    service, slug, cam, _clock = _idle_service(directories, registry, held_camera)
+    service.close_camera(slug)
+    assert service.probe_held_camera(slug) is None
+    assert cam.lifecycle.value == "closed"
+
+
+def test_close_camera_over_the_wire(directories, registry, held_camera):
+    from aprilcam.client.daemon_client import GrpcDaemon
+    from aprilcam.errors import CameraInUse
+
+    service, slug, cam, _clock = _idle_service(directories, registry, held_camera)
+    with _bind_stub(service) as stub:
+        client = GrpcDaemon(stub, target="test")
+        stream = service.stream_tags(slug)
+        try:
+            with pytest.raises(CameraInUse):
+                client.close_camera(slug)
+        finally:
+            stream.close()
+        client.close_camera(slug)
+        assert cam.lifecycle.value == "closed"
+        assert client.list_cameras()[0].closed is True
+
+
+def test_idle_close_env_parsing(monkeypatch):
+    from aprilcam.daemon.service import DEFAULT_IDLE_CLOSE_S
+
+    monkeypatch.delenv("APRILCAM_IDLE_CLOSE_S", raising=False)
+    assert daemon_main._idle_close_seconds() == DEFAULT_IDLE_CLOSE_S
+    monkeypatch.setenv("APRILCAM_IDLE_CLOSE_S", "12.5")
+    assert daemon_main._idle_close_seconds() == 12.5
+    monkeypatch.setenv("APRILCAM_IDLE_CLOSE_S", "0")
+    assert daemon_main._idle_close_seconds() == 0
+    monkeypatch.setenv("APRILCAM_IDLE_CLOSE_S", "banana")
+    assert daemon_main._idle_close_seconds() == DEFAULT_IDLE_CLOSE_S

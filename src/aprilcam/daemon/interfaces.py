@@ -240,6 +240,17 @@ class Daemon:
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.reset_camera_config")
 
+    def close_camera(self, camera: str, force: bool = False) -> None:
+        """Release the device behind *camera* without restarting the daemon.
+
+        The camera stays listed (``CameraState.closed``) and reopens
+        transparently, with its full stored config, on next use. Raises
+        ``CameraInUse`` while a stream subscriber or read is active unless
+        *force*; a forced close sticks for existing subscribers (they are
+        served the placeholder card) until a new request reopens it.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.close_camera")
+
     # -- playfields ------------------------------------------------------
 
     def list_playfields(self) -> tuple[Playfield, ...]:

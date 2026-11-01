@@ -207,6 +207,18 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         """
         connection.call(lambda d: d.reset_camera_config(camera), host=daemon)
 
+    @mcp.tool()
+    @handle_tool_errors
+    def close_camera(camera: str, force: bool = False, daemon: Optional[str] = None) -> None:
+        """Release *camera*'s device so other processes can use it,
+        without restarting the daemon. The camera stays listed (``closed``
+        in ``list_cameras``) and reopens transparently on next use.
+        Refused (``CameraInUse``) while a stream or read is active unless
+        *force*; a forced close leaves existing subscribers on the NO
+        SIGNAL card until a new request reopens the camera.
+        """
+        connection.call(lambda d: d.close_camera(camera, force=force), host=daemon)
+
     # -- playfields ----------------------------------------------------------
 
     @mcp.tool()

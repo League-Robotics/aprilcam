@@ -195,3 +195,21 @@ registered) or delivers no frame, frame requests are answered with the
   has no presence source). Strict `_camera_for` (calibrate, config calls)
   still raises `CameraNotPresent`; only an unknown camera raises on the
   frame and stream paths.
+
+**Idle close and `CloseCamera` (sprint 047 ticket 007).** A held camera with no
+stream subscriber, in-flight read or intrinsics session for
+`APRILCAM_IDLE_CLOSE_S` seconds (default 60, `0` = off, injectable `clock`)
+has its device released: lifecycle CLOSED, handle freed, config kept. The
+reaper (`_close_idle_cameras`) runs on the control-watchdog tick (15 s), so
+closing lags the timeout by up to one tick; a busy camera's idle clock is
+restarted each tick. `_camera_for` touches the clock and transparently
+`reopen()`s a CLOSED camera (full stored config), so get_frame, a new stream,
+tags and intrinsics frames all wake it. CLOSED is distinct from ABSENT: the
+presence watch and `_reopen_absent_cameras` never reopen a CLOSED camera, a
+probe leaves it closed, and an unplug of a CLOSED camera just marks it ABSENT
+without opening. `CloseCamera(camera, force)` is refused with `CameraInUse`
+(FAILED_PRECONDITION) while busy unless `force`; a **forced close sticks** --
+existing subscribers keep their subscription and are served the NO SIGNAL
+card (their own demand does not reopen it) until any new request reopens the
+camera. `CameraState.closed` (proto field 15) lets `camera list` show
+`closed` distinct from `absent`.

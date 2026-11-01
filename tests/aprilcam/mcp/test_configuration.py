@@ -43,6 +43,7 @@ class _FakeDaemon:
     get_camera_config_raises: Optional[Exception] = None
     set_camera_config_raises: Optional[Exception] = None
     reset_camera_config_raises: Optional[Exception] = None
+    close_args: Optional[tuple] = None
     playfield: Optional[Playfield] = None
     get_playfield_raises: Optional[Exception] = None
     set_playfield_raises: Optional[Exception] = None
@@ -80,6 +81,9 @@ class _FakeDaemon:
         self.requested_camera = camera
         if self.reset_camera_config_raises is not None:
             raise self.reset_camera_config_raises
+
+    def close_camera(self, camera: str, force: bool = False) -> None:
+        self.close_args = (camera, force)
 
     def get_playfield(self, name: str) -> Playfield:
         self.requested_playfield_name = name
@@ -781,3 +785,13 @@ async def test_list_cameras_includes_flatfield_state(tmp_path):
     structured = result.root.structuredContent["result"]
     assert structured[0]["flatfield_present"] is True
     assert structured[0]["flatfield_stale"] is True
+
+
+async def test_close_camera_calls_the_daemon(tmp_path):
+    daemon = _FakeDaemon()
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(server, "close_camera", {"camera": "cam-a", "force": True})
+
+    assert result.root.isError is False
+    assert daemon.close_args == ("cam-a", True)

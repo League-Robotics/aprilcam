@@ -446,3 +446,8 @@ text to stdout/stderr — there is no machine-readable output mode
 - **`playfield annotations` is list/clear only** — authoring
   (`put`/`draw`) is Python-client-library-only by explicit scope
   decision; there is no CLI path to author an annotation today.
+
+**`camera close <camera> [--force]` (sprint 047 ticket 007).** Releases the
+device via `CloseCamera`; refused while in use unless `--force` (exit 1 with
+the `CameraInUse` message). `camera list` shows a deliberately closed camera
+as `closed` (distinct from `absent`). MCP mirrors it as `close_camera`.

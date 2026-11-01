@@ -38,7 +38,7 @@ from aprilcam.config.loader import ConfigLoader
 from aprilcam.daemon.lifecycle import SOCKET_FILENAME, DaemonLifecycle
 from aprilcam.daemon.mdns import MdnsAdvertiser
 from aprilcam.daemon.rpc import build_server, build_stream_transport
-from aprilcam.daemon.service import DaemonService
+from aprilcam.daemon.service import DEFAULT_IDLE_CLOSE_S, DaemonService
 
 __all__ = ["build", "main"]
 
@@ -133,6 +133,7 @@ def build(
         discovery=discovery,
         directories=directories,
         cameras=held_cameras,
+        idle_close_s=_idle_close_seconds(),
     )
 
     service_ref.append(service)
@@ -205,6 +206,28 @@ def build(
         lock_path=lock_path,
         socket_path=socket_path,
     )
+
+
+IDLE_CLOSE_ENV = "APRILCAM_IDLE_CLOSE_S"
+
+
+def _idle_close_seconds() -> float:
+    """Idle-close timeout from ``APRILCAM_IDLE_CLOSE_S`` (seconds; ``0``
+    disables; default 60). A malformed or negative value is logged and
+    ignored in favour of the default -- a typo must not stop the daemon."""
+    raw = os.environ.get(IDLE_CLOSE_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_IDLE_CLOSE_S
+    try:
+        value = float(raw)
+    except ValueError:
+        value = -1.0
+    if value < 0:
+        logging.getLogger(__name__).warning(
+            "ignoring invalid %s=%r; using %.0fs", IDLE_CLOSE_ENV, raw, DEFAULT_IDLE_CLOSE_S
+        )
+        return DEFAULT_IDLE_CLOSE_S
+    return value
 
 
 def _load_config_dir(service: DaemonService, directories: Directories) -> None:

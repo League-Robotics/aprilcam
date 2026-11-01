@@ -435,6 +435,11 @@ class CameraState:
     file). Overlaid by ``DaemonService.list_cameras``."""
     calibration_confidence: str = ""
     """``"full"`` | ``"reduced"`` | ``"low"``; empty = unknown."""
+    closed: bool = False
+    """The held device was deliberately closed (idle reaper or an explicit
+    ``close_camera``, sprint 047) while the hardware is still plugged in.
+    Distinct from ``present`` false (unplugged): a closed camera is listed,
+    ``present`` true, and reopens transparently on next use."""
     number: Optional[int] = None
     """Stable registry enumeration (UC-14.S-1).
 

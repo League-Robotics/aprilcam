@@ -118,6 +118,7 @@ def camera_state_from_proto(msg: aprilcam_v2_pb2.CameraState) -> CameraState:
         lens_pending=msg.lens_pending,
         calibration_method=msg.calibration_method,
         calibration_confidence=msg.calibration_confidence,
+        closed=msg.closed,
         number=msg.number if msg.HasField("number") else None,
     )
 

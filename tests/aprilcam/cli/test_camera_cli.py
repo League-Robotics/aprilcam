@@ -220,6 +220,16 @@ class _FakeDaemon:
         if self.reset_camera_config_raises is not None:
             raise self.reset_camera_config_raises
 
+    close_camera_raises: Optional[Exception] = None
+    closed_requests: Optional[list] = None
+
+    def close_camera(self, camera: str, force: bool = False) -> None:
+        if self.closed_requests is None:
+            self.closed_requests = []
+        self.closed_requests.append((camera, force))
+        if self.close_camera_raises is not None:
+            raise self.close_camera_raises
+
     def get_camera_config(self, camera: str):
         self.get_camera_config_requested = camera
         if self.get_camera_config_raises is not None:
@@ -1615,3 +1625,37 @@ def test_view_h_prints_help_not_a_missing_hostname_error():
     with pytest.raises(SystemExit) as excinfo:
         parser.parse_args(["camera", "view", "some-camera", "-h"])
     assert excinfo.value.code == 0
+
+
+def test_camera_close_calls_the_daemon_and_passes_force(capsys):
+    daemon = _FakeDaemon()
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = camera_cli.cmd_close(
+        _args(camera="cam-a", force=True), discovery_factory=lambda: discovery
+    )
+
+    assert code == 0
+    assert daemon.closed_requests == [("cam-a", True)]
+    assert "closed" in capsys.readouterr().out
+
+
+def test_camera_close_reports_in_use_refusal_with_force_hint(capsys):
+    from aprilcam.errors import CameraInUse
+
+    daemon = _FakeDaemon(close_camera_raises=CameraInUse("cam-a"))
+    discovery = _FakeDiscovery(daemon=daemon)
+
+    code = camera_cli.cmd_close(_args(camera="cam-a"), discovery_factory=lambda: discovery)
+
+    assert code == 1
+    assert "--force" in capsys.readouterr().err
+
+
+def test_camera_close_is_registered_with_force_flag():
+    import argparse as _argparse
+
+    parser = _argparse.ArgumentParser()
+    camera_cli.add_subparser(parser.add_subparsers())
+    args = parser.parse_args(["camera", "close", "cam-a", "--force"])
+    assert args.func is camera_cli.cmd_close and args.force is True

@@ -146,7 +146,7 @@ def format_camera_row(state: CameraState) -> str:
     calibration does not yet embed -- run ``camera calibrate`` to apply.
     """
     number = f"[{state.number}]" if state.number is not None else "[-]"
-    presence = "present" if state.present else "absent"
+    presence = "closed" if state.closed and state.present else ("present" if state.present else "absent")
     usability = "usable" if state.usable else "unusable"
     playfield = state.playfield if state.playfield is not None else "-"
     calibration = "calibrated" if state.calibrated else "uncalibrated"

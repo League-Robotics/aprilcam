@@ -546,6 +546,25 @@ def cmd_config(
     return EXIT_OK
 
 
+def cmd_close(
+    args: argparse.Namespace,
+    *,
+    discovery_factory: Callable[[], Discovery] = Discovery,
+) -> int:
+    """``aprilcam [-d HOST] camera close <camera>`` (sprint 047 ticket
+    007): release the camera's device without restarting the daemon. The
+    camera stays listed (``closed``) and reopens on next use. Refused
+    with a clear message while a stream or read is active unless
+    ``--force``; a forced close sticks for existing subscribers (they
+    see the NO SIGNAL card) until a new request reopens the camera."""
+    try:
+        discovery_factory().connect(args.daemon).close_camera(args.camera, force=args.force)
+    except AprilCamError as exc:
+        return report_error(exc)
+    print(f"closed camera {args.camera!r} -- it reopens on next use")
+    return EXIT_OK
+
+
 def cmd_view(
     args: argparse.Namespace,
     *,
@@ -716,6 +735,24 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
         "instead of pushing (ticket 023-005, UC-24)",
     )
     p_config.set_defaults(func=cmd_config)
+
+    p_close = sub.add_parser(
+        "close",
+        help="release a camera's device (reopens on next use)",
+        description="Release the camera's device so other processes can use it, "
+        "without restarting the daemon. The camera stays listed as 'closed' and "
+        "reopens transparently on next use. Refused while a stream or read is "
+        "active unless --force.",
+    )
+    p_close.add_argument("camera", help="camera name (slug or persistent number)")
+    p_close.add_argument(
+        "--force",
+        action="store_true",
+        help="close even while in use: existing subscribers keep their "
+        "subscription but are served the NO SIGNAL card until a new request "
+        "reopens the camera",
+    )
+    p_close.set_defaults(func=cmd_close)
 
     p_view = sub.add_parser(
         "view", help="open a live raw-video window (UC-16 -- 'raw means raw', no --all)"
