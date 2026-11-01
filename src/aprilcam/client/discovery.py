@@ -80,6 +80,7 @@ document exists yet to read one from.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import ipaddress
 import logging
@@ -88,10 +89,10 @@ import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import grpc
-from zeroconf import ServiceBrowser, ServiceStateChange, Zeroconf
+from zeroconf import InterfaceChoice, ServiceBrowser, ServiceStateChange, Zeroconf
 
 from aprilcam.client.daemon_client import GrpcDaemon
 from aprilcam.client.interfaces import DaemonInfo
@@ -357,6 +358,31 @@ def resolve_ipv4_preferred(host: str, port: int) -> Optional[Tuple[int, str]]:
     return int(family), str(sockaddr[0])
 
 
+def _open_fallback_zeroconfs() -> List[Zeroconf]:
+    """The two browse instances used when ``Zeroconf()`` cannot bind
+    UDP 5353 on every interface, measured on gala (2026-11-01):
+
+    - **unicast** binds an ephemeral port, so nothing else on 5353 can
+      take its replies. It finds daemons on the same subnet (buzzkill),
+      but not ones an mDNS reflector relays from another subnet (donald
+      on the Robot_Garage Wi-Fi): a reflected query reaches the daemon
+      from the reflector's address, and the unicast reply goes there.
+    - **default interface only** shares 5353 on the primary interface
+      and sees reflected daemons, but can miss same-subnet ones whose
+      replies another 5353 socket on the host receives. It is skipped
+      if 5353 is taken there too (DYMO binds the wildcard address).
+    """
+    zeroconfs = [Zeroconf(unicast=True)]
+    try:
+        zeroconfs.append(Zeroconf(interfaces=InterfaceChoice.Default))
+    except OSError as exc:
+        if exc.errno != errno.EADDRINUSE:
+            zeroconfs[0].close()
+            raise
+        logger.info("mdns: UDP 5353 is taken on the default interface too; unicast browse only")
+    return zeroconfs
+
+
 def _browse_zeroconf(timeout: float = _DEFAULT_BROWSE_TIMEOUT) -> Tuple[_BrowseResult, ...]:
     """The real (default) ``browse`` implementation: a bounded
     ``zeroconf.ServiceBrowser`` scan of ``_SERVICE_TYPE`` (ticket
@@ -379,8 +405,22 @@ def _browse_zeroconf(timeout: float = _DEFAULT_BROWSE_TIMEOUT) -> Tuple[_BrowseR
     exactly what turns that into :class:`~aprilcam.errors.
     DiscoveryFailed`, distinct from "browsed and found nothing"
     (UC-13.S-5). See this module's docstring for the full rationale.
+
+    The one ``OSError`` handled here is ``EADDRINUSE`` from the default
+    ``Zeroconf()``, which binds UDP 5353 once per interface: any process
+    holding 5353 on one interface without ``SO_REUSEPORT`` makes it fail
+    (on gala: DYMO's label-printer web service, Chrome's Cast discovery,
+    and something on the Tailscale and VM-bridge addresses). The browse
+    then runs two instances at once and merges what they find (see
+    :func:`_open_fallback_zeroconfs`).
     """
-    zc = Zeroconf()
+    try:
+        zeroconfs = [Zeroconf()]
+    except OSError as exc:
+        if exc.errno != errno.EADDRINUSE:
+            raise
+        logger.info("mdns: UDP 5353 is taken on some interface (%s); using fallback browse", exc)
+        zeroconfs = _open_fallback_zeroconfs()
     found: Dict[str, _BrowseResult] = {}
 
     def _on_change(
@@ -392,7 +432,10 @@ def _browse_zeroconf(timeout: float = _DEFAULT_BROWSE_TIMEOUT) -> Tuple[_BrowseR
     ) -> None:
         if state_change is not ServiceStateChange.Added:
             return
-        info = zeroconf.get_service_info(service_type, name)
+        # Bounded by the browse window, not zeroconf's 3 s default: a
+        # name that never resolves (seen but unanswered, e.g. by the
+        # default-interface fallback) would otherwise hold close() up.
+        info = zeroconf.get_service_info(service_type, name, timeout=max(200, int(timeout * 1000)))
         if info is None or info.port is None:
             return
         addresses = info.parsed_addresses()
@@ -402,20 +445,22 @@ def _browse_zeroconf(timeout: float = _DEFAULT_BROWSE_TIMEOUT) -> Tuple[_BrowseR
         hostname = raw_host.decode() if raw_host else name
         found[name] = _BrowseResult(address=addresses[0], port=info.port, hostname=hostname)
 
-    # *browser* is constructed inside the try/finally (not alongside
-    # `zc = Zeroconf()` above) so that if ServiceBrowser's own
-    # constructor raises, zc.close() still runs below rather than
-    # leaking the just-opened multicast socket -- the browse-side
-    # analogue of MdnsAdvertiser.start's own "close a successfully
-    # constructed Zeroconf even when the next step fails" guarantee.
-    browser: Optional[ServiceBrowser] = None
+    # The browsers are constructed inside the try/finally (not alongside
+    # the Zeroconf()s above) so that if ServiceBrowser's own constructor
+    # raises, close() still runs below rather than leaking the
+    # just-opened multicast sockets -- the browse-side analogue of
+    # MdnsAdvertiser.start's own "close a successfully constructed
+    # Zeroconf even when the next step fails" guarantee.
+    browsers: List[ServiceBrowser] = []
     try:
-        browser = ServiceBrowser(zc, _SERVICE_TYPE, handlers=[_on_change])
+        for zc in zeroconfs:
+            browsers.append(ServiceBrowser(zc, _SERVICE_TYPE, handlers=[_on_change]))
         time.sleep(timeout)
     finally:
-        if browser is not None:
+        for browser in browsers:
             browser.cancel()
-        zc.close()
+        for zc in zeroconfs:
+            zc.close()
     return tuple(found.values())
 
 
