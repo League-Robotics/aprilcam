@@ -66,9 +66,39 @@ check `dmesg` first.
 frame size. That was **not enough**: even in MJPG, two Arducams at
 1280x800 plus the HD camera did not fit on one 480 Mbit link, because UVC
 cameras reserve an isochronous altsetting sized for their worst case, not
-their actual JPEG rate. **The real fix is physical:** put each camera on its
-own xHCI controller (`lsusb -t`; buzzkill has five). Going through a hub
-chain into one root port does not work for this set at native resolution.
+their actual JPEG rate.
+
+Measured on buzzkill by streaming with `v4l2-ctl` and polling
+`/sys/bus/usb/devices/<port>/<port>:1.1/bAlternateSetting`: every camera
+asks for its **largest** altsetting in MJPG whatever the size or frame
+rate (OV9281 and OV9782 alt 6 = 3x1024 B per microframe, HD alt 11 =
+3x1020 B). That is about 9200 B per microframe against roughly 6000 B of
+periodic budget on one high-speed link. The real streams are a fraction of
+it. macOS does not hard-reserve, which is why the same hub worked on gala;
+the AMD xHCI on buzzkill rejects the reservation. uvcvideo's
+`quirks=0x80` (FIX_BANDWIDTH) does not help, because it skips compressed
+formats. Lowering the frame rate does not help either, because the camera's
+request does not change.
+
+**Fix: a patched uvcvideo with a `max_payload` cap**
+(`deploy/uvcvideo-bwcap/`). It clamps `dwMaxPayloadTransferSize` in
+`uvc_fixup_video_ctrl`, and the driver then picks the smallest altsetting
+**at or above** the cap. Installed on buzzkill through DKMS with
+`options uvcvideo max_payload=1600` in
+`/etc/modprobe.d/uvcvideo-bwcap.conf`. At 1600, the Arducams get alt 4 (2x800) and
+the HD camera alt 8 (2x800), about 4800 B in total, and all three stream at once
+(OV9281 about 100 fps, the others about 30) with clean frames. 1984 was too high:
+because selection rounds up, it gave the Arducams alt 5 (2400) and the HD camera
+still did not fit. The cap can be tuned live with
+`echo N | sudo tee /sys/module/uvcvideo/parameters/max_payload`; it takes
+effect on the next stream start, so restart the daemon after changing it.
+
+Watch: DKMS rebuilds the module from the saved source on each new kernel.
+If a kernel bump changes uvcvideo and the build fails, the stock driver
+comes back and the bandwidth errors return. Rerun
+`deploy/uvcvideo-bwcap/install.sh`, which fetches the source matching the
+running kernel. Undo it all with
+`sudo dkms remove uvcvideo-bwcap/1.0 --all` and delete the modprobe.d file.
 
 ## Related: MJPG resets the size to 640x480
 

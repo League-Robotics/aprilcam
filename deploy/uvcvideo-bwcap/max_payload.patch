@@ -1,0 +1,36 @@
+--- a/drivers/media/usb/uvc/uvc_video.c
++++ b/drivers/media/usb/uvc/uvc_video.c
+@@ -25,6 +25,11 @@
+ 
+ #include "uvcvideo.h"
+ 
++static unsigned int uvc_max_payload_param;
++module_param_named(max_payload, uvc_max_payload_param, uint, 0644);
++MODULE_PARM_DESC(max_payload,
++		 "Cap on requested isochronous payload bytes per (micro)frame (0 = off)");
++
+ /* ------------------------------------------------------------------------
+  * UVC Controls
+  */
+@@ -226,6 +231,21 @@
+ 	if ((ctrl->dwMaxPayloadTransferSize & 0xffff0000) == 0xffff0000)
+ 		ctrl->dwMaxPayloadTransferSize &= ~0xffff0000;
+ 
++	/*
++	 * bwcap (local patch): many UVC cameras request their largest
++	 * isochronous altsetting for MJPEG regardless of resolution or frame
++	 * rate, so two or three of them cannot share one USB 2.0 hub even
++	 * though their real streams would fit. Cap the requested payload so a
++	 * smaller altsetting is chosen. 0 disables the cap.
++	 */
++	if (uvc_max_payload_param && stream->intf->num_altsetting > 1 &&
++	    ctrl->dwMaxPayloadTransferSize > uvc_max_payload_param) {
++		uvc_dbg(stream->dev, VIDEO,
++			"bwcap: dwMaxPayloadTransferSize %u -> %u\n",
++			ctrl->dwMaxPayloadTransferSize, uvc_max_payload_param);
++		ctrl->dwMaxPayloadTransferSize = uvc_max_payload_param;
++	}
++
+ 	if (!(format->flags & UVC_FMT_FLAG_COMPRESSED) &&
+ 	    stream->dev->quirks & UVC_QUIRK_FIX_BANDWIDTH &&
+ 	    stream->intf->num_altsetting > 1) {
