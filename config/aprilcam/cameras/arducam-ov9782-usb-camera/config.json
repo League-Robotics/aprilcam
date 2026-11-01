@@ -7,6 +7,8 @@
   "name": "arducam-ov9782-usb-camera",
   "playfield": "main-playfield",
   "settings": {
-    "exposure": "100"
+    "exposure": "100",
+    "frame_height": 800,
+    "frame_width": 1280
   }
 }

@@ -8,6 +8,8 @@
   "playfield": "main-playfield",
   "settings": {
     "auto_exposure": 1,
-    "exposure": 12
+    "exposure": 12,
+    "frame_height": 800,
+    "frame_width": 1280
   }
 }

@@ -6,5 +6,8 @@
   },
   "name": "hd-usb-camera",
   "playfield": "secondary-playfield",
-  "settings": {}
+  "settings": {
+    "frame_height": 1080,
+    "frame_width": 1920
+  }
 }
