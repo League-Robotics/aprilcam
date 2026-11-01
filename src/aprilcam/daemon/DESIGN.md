@@ -144,3 +144,17 @@ Error mapping (`rpc.py`'s `_STATUS_CODES`/`_abort`): `AlreadyRunning`→`ALREADY
 - **Corner-order equivalence between OpenCV's native detector output and `design.md`'s boundary convention is asserted from empirical verification, not enforced by a runtime check.** If a future tag family or OpenCV version ever changes native corner ordering, `_pixel_corners`' zero-permutation pass-through would silently produce wrong geometry with no test catching it structurally (only fixture-based regression tests would notice).
 - **The not-currently-enumerated-vs-budget-exhausted distinction for reopen (sprint 039) is a ticket-level decision, not fully specified here.** See `camera-DESIGN.md`'s own Open Questions for the two candidate mechanics (a budget-neutral `Camera` path vs. an independent identity poll in `check_stalled_cameras`); this file does not pick one, since either satisfies the stakeholder-fixed "never a stale index" contract equally well from `daemon/`'s side.
 - **Per-camera `DetectorConfig` tuning (ticket 035-001) now has exactly one real entry, for one known real-hardware quirk.** `detection._DETECTOR_CONFIG_OVERRIDES: Dict[str, DetectorConfig]` lets `_default_detector_factory` hand back a differently-tuned `TagDetector` for one camera slug without touching any other. `arducam-ov9281-usb-camera` ("camera 5") missed AprilTag 1 on 1-3 of 10 real polls at night exposures per the source issue (`apriltag-1-detects-unreliably-on-arducam-ov9281-usb-camera.md`), while all 10 ArUco markers on the same frames decoded on effectively every poll. Ticket 035-002's reopened session ran seven independent real sweeps against the physical camera (`tests/aprilcam/daemon/test_detector_tuning_hardware.py`, `docs/knowledge/2026-08-23-camera-5-detector-tuning-blocked-by-sandbox-camera-permission.md`) and found loosening the three AprilTag-quad earned constants (`april_min_wb_diff`/`april_min_cluster_pixels`/`april_max_line_fit_mse`) hit AprilTag 1 in 70/70 real bursts vs. the default's 46/50 (92%), with no additional ArUco-recall cost beyond what the *default* config already exhibits. Every other camera slug still falls through to plain `DetectorConfig()` defaults, unchanged. **Open remainder:** every measurement ran in daylight (auto-swept exposure 3-25); the source issue's own 150-500-exposure *night* regime was not re-measured here (forcing that exposure in daylight would blow out the sensor rather than reproduce the condition), so a genuinely dark-room re-run is the one thing this investigation could not confirm.
+
+## Sprint 047: "in use" is a subscriber or an in-flight read
+
+`DaemonService._cameras` is a device cache, not a subscriber table.
+`DaemonService.is_in_use(slug)` is true only with a live subscriber on the
+slug's tag stream or either image stream (Broadcaster `subscriber_count`) or
+a read in flight (`Camera.reads_in_flight`). `active_camera_state(slug)`
+(wired into `CameraDiscovery` in `daemon/__main__.py`) returns the held
+camera's state only when in use, so probe tests a cached idle camera normally
+and never reopens a streaming one. For a streaming camera probe reports
+`present=True` from enumeration and `usable` from the held camera.
+`list_cameras` takes a held camera's `present` from discovery's known-present
+set (kept current by the PresenceSource watch), not from `held.state`;
+`usable` is the held health AND present.

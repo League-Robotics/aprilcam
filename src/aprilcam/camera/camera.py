@@ -408,6 +408,10 @@ class Camera(_CameraBase):
         #: *not* held by :meth:`open`/:meth:`close`/:meth:`apply_config`
         #: -- see :meth:`read`'s own docstring for the scope rationale.
         self._read_lock = threading.Lock()
+        # Reads currently inside (or queued on) _read_lock; see
+        # :attr:`reads_in_flight` (sprint 047 ticket 003).
+        self._in_flight = 0
+        self._in_flight_lock = threading.Lock()
 
     @property
     def slug(self) -> str:
@@ -597,7 +601,26 @@ class Camera(_CameraBase):
         """
         return self._read_frame(apply_flatfield=False)
 
+    @property
+    def reads_in_flight(self) -> int:
+        """Number of ``read``/``read_raw`` calls running or waiting on
+        the read lock right now. One half of the daemon's "in use"
+        predicate (the other is live stream subscribers): a camera with
+        a read in flight must not be re-opened by a probe (sprint 047
+        ticket 003)."""
+        with self._in_flight_lock:
+            return self._in_flight
+
     def _read_frame(self, *, apply_flatfield: bool) -> Optional[np.ndarray]:
+        with self._in_flight_lock:
+            self._in_flight += 1
+        try:
+            return self._read_frame_locked(apply_flatfield=apply_flatfield)
+        finally:
+            with self._in_flight_lock:
+                self._in_flight -= 1
+
+    def _read_frame_locked(self, *, apply_flatfield: bool) -> Optional[np.ndarray]:
         with self._read_lock:
             frame = self._safe_read()
             if frame is not None:

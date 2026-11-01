@@ -191,27 +191,7 @@ def held_camera(registry: CameraRegistry):
 @pytest.fixture
 def service(directories, registry, held_camera):
     identity, slug, cam = held_camera
-    cameras: Dict[str, Camera] = {slug: cam}
-    discovery = CameraDiscovery(
-        registry,
-        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
-        identity_source=lambda: {0: identity},
-        backend_factory=lambda index: FakeBackend(),
-    )
-    return DaemonService(
-        registry=registry,
-        discovery=discovery,
-        directories=directories,
-        cameras=cameras,
-        # Headless-safe: without this, DaemonService's own
-        # identity_source defaults to real hardware enumeration
-        # (aprilcam.camera.identity.resolve_all). Only the held camera
-        # is "present" as far as _camera_for's _index_for lookup is
-        # concerned -- anything else registered but not in this dict
-        # is a registered-but-absent camera (CameraNotPresent tests
-        # below).
-        identity_source=lambda: {0: identity},
-    )
+    return _service_with_camera(directories, registry, identity, slug, cam)
 
 
 @pytest.fixture
@@ -247,15 +227,75 @@ def test_active_slugs_reflects_the_held_camera_cache(service, held_camera):
     assert service.active_slugs() == {slug}
 
 
-def test_probe_cameras_skips_the_held_open_camera(service, held_camera):
+def test_probe_cameras_skips_a_camera_with_a_live_subscriber(service, held_camera):
     """UC-25.S-7, wired for real: probe_cameras() must not touch a
-    camera get_frame already holds open."""
+    camera that has a live stream subscriber."""
     _, slug, _ = held_camera
-
-    report = service.probe_cameras()
+    stream = service.stream_images(slug)
+    try:
+        assert service.is_in_use(slug)
+        report = service.probe_cameras()
+    finally:
+        stream.close()
 
     assert len(report.skipped) == 1
     assert report.skipped[0].backend == slug
+    state = next(s for s in report.cameras if s.name == slug)
+    assert state.present is True and state.usable is True
+
+
+def test_probe_cameras_probes_a_cached_idle_camera_normally(service, held_camera):
+    """Sprint 047 ticket 003: being cached is not being in use."""
+    _, slug, _ = held_camera
+    assert not service.is_in_use(slug)
+    assert service.active_camera_state(slug) is None
+
+    report = service.probe_cameras()
+
+    assert report.skipped == ()
+    state = next(s for s in report.cameras if s.name == slug)
+    assert state.present is True and state.usable is True
+
+
+def test_in_use_ends_when_the_last_subscriber_leaves(service, held_camera):
+    _, slug, _ = held_camera
+    stream = service.stream_tags(slug)
+    assert service.is_in_use(slug)
+    stream.close()
+    assert not service.is_in_use(slug)
+
+
+def test_in_use_while_a_read_is_in_flight(service, held_camera):
+    _, slug, cam = held_camera
+    seen = []
+    original = cam._backend.read
+
+    def spying_read():
+        seen.append(service.is_in_use(slug))
+        return original()
+
+    cam._backend.read = spying_read
+    cam.read()
+    assert seen == [True]
+    assert not service.is_in_use(slug)
+
+
+def test_list_cameras_presence_for_held_camera_follows_enumeration(
+    directories, registry, held_camera
+):
+    """Sprint 047 ticket 003: a held camera's presence comes from the
+    discovery's known-present set, not from the held object."""
+    identity, slug, cam = held_camera
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    assert service.list_cameras()[0].present is True
+
+    service._discovery._present_slugs.discard(slug)  # watcher saw it unplug
+    gone = service.list_cameras()[0]
+    assert gone.present is False and gone.usable is False
+
+    service._discovery._present_slugs.add(slug)
+    back = service.list_cameras()[0]
+    assert back.present is True and back.usable is True
 
 
 def test_probe_cameras_and_list_cameras_agree_on_a_stalled_active_camera(directories, registry):
@@ -282,7 +322,11 @@ def test_probe_cameras_and_list_cameras_agree_on_a_stalled_active_camera(directo
     service = _service_with_camera(directories, registry, identity, slug, cam)
 
     list_state = next(s for s in service.list_cameras() if s.name == slug)
-    probe_report = service.probe_cameras()
+    stream = service.stream_images(slug)  # a live subscriber: probe must not reopen
+    try:
+        probe_report = service.probe_cameras()
+    finally:
+        stream.close()
     probe_state = next(s for s in probe_report.cameras if s.name == slug)
     skip = next(s for s in probe_report.skipped if s.backend == slug)
 
@@ -1103,10 +1147,13 @@ def test_rpc_list_cameras_round_trip(stub, held_camera):
     assert response.cameras[0].HasField("number")
 
 
-def test_rpc_probe_cameras_round_trip(stub, held_camera):
+def test_rpc_probe_cameras_round_trip(stub, service, held_camera):
     _, slug, _ = held_camera
-
-    response = stub.ProbeCameras(aprilcam_v2_pb2.ProbeCamerasRequest())
+    stream = service.stream_images(slug)  # a live subscriber makes it "in use"
+    try:
+        response = stub.ProbeCameras(aprilcam_v2_pb2.ProbeCamerasRequest())
+    finally:
+        stream.close()
 
     assert len(response.skipped) == 1
     assert response.skipped[0].backend == slug
@@ -3021,20 +3068,30 @@ def _open_camera_with_frames(
 
 
 def _service_with_camera(directories, registry, identity, slug, cam) -> DaemonService:
+    """Service holding *cam*, wired like ``daemon/__main__.py``: probe's
+    ``active_camera_state`` is the service's own in-use accessor. An
+    initial ``probe()`` seeds ``known_present`` the way the daemon's
+    start-up enumeration does."""
     cameras: Dict[str, Camera] = {slug: cam}
+    holder: list = []
     discovery = CameraDiscovery(
         registry,
-        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
+        active_camera_state=lambda s: holder[0].active_camera_state(s),
         identity_source=lambda: {0: identity},
-        backend_factory=lambda index: FakeBackend(),
+        backend_factory=lambda index: FakeBackend(read_queue=[_frame()], loop=True),
     )
-    return DaemonService(
+    service = DaemonService(
         registry=registry,
         discovery=discovery,
         directories=directories,
         cameras=cameras,
+        # Headless-safe: without this, DaemonService's own
+        # identity_source defaults to real hardware enumeration.
         identity_source=lambda: {0: identity},
     )
+    holder.append(service)
+    discovery.probe()
+    return service
 
 
 def _calibration_path(directories: Directories, slug: str) -> Path:

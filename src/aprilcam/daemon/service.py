@@ -68,9 +68,11 @@ camera *at most once*: the first successful open is cached in
 ``self._cameras`` and reused for every subsequent call, which is what
 lets ``Camera``'s self-heal (5 consecutive failures -> reopen, capped
 at 10) actually accumulate state across calls rather than resetting on
-every request. This cache **is** the daemon's live-subscriber table:
-:meth:`active_slugs` exposes its keys, and ``daemon/__main__.py`` wires
-the same ``self._cameras`` dict object into ``CameraDiscovery`` as the
+every request. This cache is a *device* cache, not a subscriber table (sprint 047
+ticket 003 -- "in use" means a live stream subscriber or an in-flight
+read, see :meth:`is_in_use`): :meth:`active_slugs` exposes its keys, and
+``daemon/__main__.py`` wires :meth:`active_camera_state` (which answers
+``None`` for a cached-but-idle camera) into ``CameraDiscovery`` as the
 ``active_camera_state`` callback (``camera/discovery.py``'s
 constructor; ticket 003 left this defaulting to "nothing is active"
 and named this exact wiring as this ticket's job) so
@@ -754,6 +756,31 @@ class DaemonService(Daemon):
         with self._lock:
             return frozenset(self._cameras.keys())
 
+    def is_in_use(self, slug: str) -> bool:
+        """True only when *slug* is actually being used: a live
+        subscriber on its tag stream or either of its image streams, or
+        a read in flight on the held camera. A merely cached (idle)
+        camera is not in use (sprint 047 ticket 003)."""
+        with self._lock:
+            camera = self._cameras.get(slug)
+            producers = [self._tag_stream_producers.get(slug)] + [
+                self._image_stream_producers.get((slug, deskewed))
+                for deskewed in (False, True)
+            ]
+        if camera is not None and camera.reads_in_flight > 0:
+            return True
+        return any(p is not None and p.broadcaster.subscriber_count > 0 for p in producers)
+
+    def active_camera_state(self, slug: str) -> Optional[CameraState]:
+        """``CameraDiscovery``'s ``active_camera_state`` callback: the
+        held camera's own state if (and only if) it is :meth:`is_in_use`,
+        else ``None`` so probe tests the device normally."""
+        with self._lock:
+            camera = self._cameras.get(slug)
+        if camera is None or not self.is_in_use(slug):
+            return None
+        return camera.state
+
     def on_hardware_presence(self, slug: str, present: bool) -> Optional[bool]:
         """Presence-watch callback (sprint 047): the hardware key behind
         *slug* disappeared (``present=False`` -> drop the held camera,
@@ -823,9 +850,16 @@ class DaemonService(Daemon):
             flatfield_present, flatfield_stale = self._flatfield_flags(record.slug)
             held = self._cameras.get(record.slug)
             if held is not None:
+                # Presence comes from enumeration / the PresenceSource
+                # (known_present), never from the held object's own
+                # opinion of itself; health stays the camera's.
+                held_state = held.state
+                is_present = record.slug in present
                 states.append(
                     replace(
-                        held.state,
+                        held_state,
+                        present=is_present,
+                        usable=held_state.usable and is_present,
                         playfield=playfield,
                         calibrated=calibrated,
                         calibration_stale=calibration_stale,

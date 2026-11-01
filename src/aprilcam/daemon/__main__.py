@@ -121,9 +121,9 @@ def build(
     service_ref: List[DaemonService] = []
     discovery = CameraDiscovery(
         registry,
-        active_camera_state=lambda slug: (
-            held_cameras[slug].state if slug in held_cameras else None
-        ),
+        # "In use" means a live stream subscriber or an in-flight read,
+        # not merely "cached" (sprint 047 ticket 003).
+        active_camera_state=lambda slug: service_ref[0].active_camera_state(slug),
         presence_source=presence_source,
         on_presence=lambda slug, present: service_ref[0].on_hardware_presence(slug, present),
     )

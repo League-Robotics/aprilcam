@@ -227,14 +227,17 @@ class CameraDiscovery(_CameraDiscoveryBase):
 
         For every currently-enumerated identity: resolve its registry
         slug (registering it if new), then call
-        ``active_camera_state(slug)``. ``None`` means the daemon does
-        not hold this slug open -- briefly open a ``Camera`` over it to
+        ``active_camera_state(slug)``. ``None`` means the daemon is not
+        actively using this slug (no live stream subscriber, no read in
+        flight -- merely being cached does not count, sprint 047 ticket
+        003) -- briefly open a ``Camera`` over it to
         determine ``usable`` and immediately close it again. A camera
         that raises on open is still reported, ``usable=False``,
         ``present=True`` (UC-25.S-4), never omitted. A real
-        ``CameraState`` means the slug is held open -- report *that*
-        state's own ``present``/``usable`` values instead of assuming
-        health, and record a ``ProbeSkip`` whose reason text
+        ``CameraState`` means the slug is actively in use -- do not
+        reopen it; report *that* state's ``usable`` (presence still
+        comes from this enumeration, so ``present=True``) instead of
+        assuming health, and record a ``ProbeSkip`` whose reason text
         distinguishes a healthy held-open camera from a stalled one
         (sprint 039 ticket 004: a held-open camera used to always probe
         ``usable=True`` even after its self-heal budget was exhausted).
@@ -264,7 +267,9 @@ class CameraDiscovery(_CameraDiscoveryBase):
                 cameras.append(
                     CameraState(
                         name=slug,
-                        present=held_state.present,
+                        # Enumeration is the truth for presence; the held
+                        # camera only vouches for its own health.
+                        present=True,
                         usable=held_state.usable,
                         playfield=None,
                         calibrated=False,
