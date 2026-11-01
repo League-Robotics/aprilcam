@@ -7,8 +7,12 @@
   "name": "arducam-ov9782-usb-camera",
   "playfield": "main-playfield",
   "settings": {
-    "exposure": "100",
+    "auto_exposure": 1,
+    "auto_white_balance": 0,
+    "exposure": 60,
     "frame_height": 800,
-    "frame_width": 1280
+    "frame_width": 1280,
+    "gain": 2,
+    "white_balance_temperature": 4600
   }
 }
