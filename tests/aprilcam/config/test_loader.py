@@ -937,10 +937,11 @@ def test_shipping_main_playfield_resolves_46_for_every_aruco_id(loader):
     assert d.required_marker_ids() == d.required_aruco_ids()
 
 
-def test_shipping_secondary_playfield_resolves_none(loader):
+def test_shipping_secondary_playfield_resolves_46_for_every_aruco_id(loader):
+    # Self-surveyed eight-marker field (e2435bf): 46 mm markers, as on main.
     d = loader.load_playfield(SHIPPING_DIR / "secondary-playfield.json")
-    assert d.marker_size_mm_default is None
-    assert all(d.marker_size_mm(i) is None for i in d.required_aruco_ids())
+    assert d.marker_size_mm_default == 46.0
+    assert all(d.marker_size_mm(i) == 46.0 for i in d.required_aruco_ids())
 
 
 @pytest.mark.parametrize("name", ["main-playfield.json", "secondary-playfield.json"])
