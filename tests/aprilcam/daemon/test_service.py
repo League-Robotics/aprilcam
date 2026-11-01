@@ -7158,3 +7158,71 @@ def test_installed_lens_is_used_by_next_calibrate_and_survives_playfield_change(
     again = service.calibrate(slug)
     assert again.succeeded is True, again.reason
     assert lens_path.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# Sprint 047 ticket 005: streams on a registered-but-unplugged camera serve
+# the card / absent heartbeats, then switch to real frames on plug-in.
+# ---------------------------------------------------------------------------
+
+
+def _absent_service(directories, registry, plugged: dict):
+    """Service over a registered camera that is never opened; enumeration
+    reports it only once ``plugged['yes']`` is set."""
+    identity = _identity("hw:late", "Late Camera")
+    slug = registry.resolve(identity)
+    discovery = CameraDiscovery(
+        registry,
+        identity_source=lambda: {0: identity} if plugged["yes"] else {},
+        backend_factory=lambda index: FakeBackend(read_queue=[_frame()], loop=True),
+    )
+    service = DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        cameras={},
+        identity_source=lambda: {0: identity} if plugged["yes"] else {},
+        backend_factory=lambda index: FakeBackend(read_queue=[_frame()], loop=True),
+    )
+    return service, slug
+
+
+def test_image_stream_on_never_opened_absent_camera_serves_card_then_real_frames(
+    directories, registry
+):
+    plugged = {"yes": False}
+    service, slug = _absent_service(directories, registry, plugged)
+
+    stream = service.stream_images(slug)
+    try:
+        first = next(iter(stream))
+        assert first.placeholder is True
+
+        plugged["yes"] = True
+        assert service._reopen_absent_cameras() == (slug,)  # noqa: SLF001
+        deadline = time.time() + 5
+        frame = first
+        it = iter(stream)
+        while frame.placeholder and time.time() < deadline:
+            frame = next(it)
+        assert frame.placeholder is False
+    finally:
+        stream.close()
+
+
+def test_tag_stream_on_never_opened_absent_camera_sends_absent_heartbeat(directories, registry):
+    service, slug = _absent_service(directories, registry, {"yes": False})
+
+    stream = service.stream_tags(slug)
+    try:
+        frame = next(iter(stream))
+        assert frame.camera_absent is True
+    finally:
+        stream.close()
+
+
+def test_stream_on_unknown_camera_still_raises(directories, registry):
+    service, _slug = _absent_service(directories, registry, {"yes": False})
+
+    with pytest.raises(UnknownCamera):
+        service.stream_images("no-such-camera")

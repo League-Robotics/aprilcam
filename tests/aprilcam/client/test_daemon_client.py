@@ -139,7 +139,7 @@ def service(directories, registry, held_camera):
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: FakeBackend(),
     )
-    return DaemonService(
+    service = DaemonService(
         registry=registry,
         discovery=discovery,
         directories=directories,
@@ -149,6 +149,10 @@ def service(directories, registry, held_camera):
         # enumeration for any registered-but-uncached camera.
         identity_source=lambda: {0: identity},
     )
+    # Seed known_present as start-up enumeration would (list_cameras
+    # reports presence from enumeration, never from the held object).
+    discovery._present_slugs.add(slug)
+    return service
 
 
 @pytest.fixture

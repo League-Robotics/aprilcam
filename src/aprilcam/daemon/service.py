@@ -1038,7 +1038,7 @@ class DaemonService(Daemon):
         cam = self._camera_for_frames(camera)
         frame = self._read_if_present(cam)
         placeholder = frame is None
-        slug = cam.slug if cam is not None else self._resolve_slug_if_known(camera)
+        slug = cam.slug
         if frame is None:
             frame = self._placeholder_array(slug, last_size=self._frame_sizes.get(slug))
 
@@ -1153,23 +1153,19 @@ class DaemonService(Daemon):
 
     # -- placeholder ("NO SIGNAL" card) support (sprint 047 ticket 005) ------
 
-    def _camera_for_frames(self, token: str) -> Optional[Camera]:
-        """:meth:`_camera_for`, except a registered-but-absent camera
-        that was never opened yields ``None`` instead of raising
-        :class:`CameraNotPresent`: frame requests are answered with the
-        test card, not an error (``UnknownCamera`` still propagates)."""
-        try:
-            return self._camera_for(token)
-        except CameraNotPresent:
-            return None
+    def _camera_for_frames(self, token: str) -> Camera:
+        """:meth:`_camera_for` with ``allow_absent``: frame and stream
+        requests get a (possibly ABSENT) camera, never
+        :class:`CameraNotPresent`; ``UnknownCamera`` still propagates."""
+        return self._camera_for(token, allow_absent=True)
 
     @staticmethod
-    def _read_if_present(cam: Optional[Camera]) -> Optional[np.ndarray]:
+    def _read_if_present(cam: Camera) -> Optional[np.ndarray]:
         """A real frame, or ``None`` when the camera is missing or not
         PRESENT. A non-PRESENT camera is never read: the card is served
         immediately, without burning self-heal/reopen budget or blocking
         on a dead handle."""
-        if cam is None or cam.lifecycle is not CameraLifecycle.PRESENT:
+        if cam.lifecycle is not CameraLifecycle.PRESENT:
             return None
         return cam.read()
 
@@ -1297,7 +1293,7 @@ class DaemonService(Daemon):
         -- this method does no lifecycle management of its own beyond
         constructing the producer once and subscribing to it.
         """
-        cam = self._camera_for(camera)
+        cam = self._camera_for(camera, allow_absent=True)
         producer = self._tag_stream_producer_for(cam.slug, cam)
         subscriber_queue = producer.broadcaster.subscribe()
         return BroadcasterTagStream(producer.broadcaster, subscriber_queue)
@@ -1368,7 +1364,7 @@ class DaemonService(Daemon):
         (``view.viewer``'s "raw means raw" contract) -- so it keeps the
         original, simpler wiring.
         """
-        cam = self._camera_for(camera)
+        cam = self._camera_for(camera, allow_absent=True)
         if deskewed:
             calibration = self.get_calibration(cam.slug)
             if calibration is None:
@@ -2459,6 +2455,17 @@ class DaemonService(Daemon):
         as the new sibling trigger."""
         self._mark_stale(slug)
         self._mark_flatfield_stale(slug)
+        # A camera first brought up from the ABSENT-never-opened state has
+        # no applied settings of its own; give it the config the service
+        # holds (a push that arrived while it was unplugged).
+        with self._lock:
+            cam = self._cameras.get(slug)
+            config = self._camera_configs.get(slug)
+        if cam is not None and config is not None and not cam.applied_settings:
+            try:
+                cam.apply_config(config)
+            except Exception as exc:
+                logger.warning("%s: applying held config after first open failed: %s", slug, exc)
 
     def _camera_config_for_calibration(self, camera: str) -> Optional[CameraConfig]:
         """``Calibrator``'s ``get_camera_config`` callable -- a locked
@@ -3029,7 +3036,7 @@ class DaemonService(Daemon):
 
     # -- internals -----------------------------------------------------
 
-    def _camera_for(self, token: str) -> Camera:
+    def _camera_for(self, token: str, *, allow_absent: bool = False) -> Camera:
         """The held-open ``Camera`` addressed by *token*, opening it on
         first use.
 
@@ -3120,6 +3127,19 @@ class DaemonService(Daemon):
         exactly like a live push would; :attr:`_cameras` is only updated
         after this succeeds, so a camera that fails to apply its stored
         config is not left half-registered as held-open.
+
+        **``allow_absent`` (sprint 047 ticket 005).** For the frame and
+        stream paths, which answer an unplugged camera with the "NO
+        SIGNAL" card: a registered camera that is not enumerated is
+        built anyway, with its backend unopened, dropped into ABSENT and
+        held like any other camera (``Camera.drop()`` on an unopened
+        backend is a no-op close). Every existing producer then attaches
+        to it unchanged, and the camera comes up through the same paths
+        a dropped camera does -- ``on_hardware_presence`` -> ``reopen()``
+        (Linux presence watch) or the watchdog's
+        :meth:`_reopen_absent_cameras` pass -- which re-resolves the index
+        through the backend's resolver and re-applies stored config. Only
+        an unknown camera still raises.
         """
         with self._lock:
             existing = self._cameras.get(token)
@@ -3136,8 +3156,11 @@ class DaemonService(Daemon):
             return existing
 
         index = self._index_for(record)
+        absent = index is None
         if index is None:
-            raise CameraNotPresent(record.slug)
+            if not allow_absent:
+                raise CameraNotPresent(record.slug)
+            index = 0  # never opened with this; the backend's resolver finds the real one
 
         capture_backend = resolve_capture_backend(
             record.hardware_key,
@@ -3187,6 +3210,10 @@ class DaemonService(Daemon):
             on_reopen=lambda: self._on_camera_reopen(record.slug),
             flatfield_path=self._flatfield_path_for(record.slug),
         )
+        if absent:
+            cam.drop()
+            with self._lock:
+                return self._cameras.setdefault(record.slug, cam)
         cam.open()
         with self._lock:
             config = self._camera_configs.get(record.slug)
@@ -3273,6 +3300,28 @@ class DaemonService(Daemon):
             )
         return tuple(stalled)
 
+    def _reopen_absent_cameras(self) -> Tuple[str, ...]:
+        """Watchdog pass (sprint 047 ticket 005): reopen every ABSENT
+        held camera whose hardware is enumerated again. The platform-
+        independent backstop for ``on_hardware_presence`` (Linux-only
+        sysfs watch), and the only way a camera held while never opened
+        comes up on macOS. Returns the slugs that came back."""
+        with self._lock:
+            held = list(self._cameras.items())
+        back: List[str] = []
+        for slug, cam in held:
+            if cam.lifecycle is not CameraLifecycle.ABSENT:
+                continue
+            try:
+                record = self._record_for(slug)
+                if record is None or self._index_for(record) is None:
+                    continue
+                if cam.reopen():
+                    back.append(slug)
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("reopening absent camera %s failed", slug)
+        return tuple(back)
+
     def _retry_exhausted_cameras(self) -> Tuple[str, ...]:
         """One watchdog pass giving every *exhausted* held-open camera
         (``Camera.state.usable`` stuck ``False`` -- its
@@ -3350,6 +3399,7 @@ class DaemonService(Daemon):
                 self.reassert_controls()
                 self.check_stalled_cameras()
                 self._retry_exhausted_cameras()
+                self._reopen_absent_cameras()
 
         thread = threading.Thread(target=_loop, name="aprilcam-control-watchdog", daemon=True)
         self._watchdog_stop = stop

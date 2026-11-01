@@ -183,6 +183,15 @@ registered) or delivers no frame, frame requests are answered with the
   an immediate then periodic empty heartbeat with it set while the camera is
   absent, and publishes the first real frame immediately on return. One-shot
   `get_tags` on a non-PRESENT camera raises `CameraNotPresent`.
-- Known gap: a stream cannot be opened on a camera that is registered but was
-  never opened (no `Camera` to attach a producer to); that still raises
-  `CameraNotPresent`.
+- Registered-but-unplugged cameras that were never opened: `_camera_for(...,
+  allow_absent=True)` (used by `get_frame`, `stream_images`, `stream_tags`)
+  builds the `Camera` with an unopened backend, `drop()`s it into ABSENT and
+  holds it. Chosen over a separate placeholder producer that hands over on
+  plug-in because the existing producers, presence watch
+  (`on_hardware_presence` -> `reopen()`), stored-config re-apply and
+  list/probe all already work on a held ABSENT camera, so there is one
+  switch-to-real-frames path instead of two. The control watchdog's
+  `_reopen_absent_cameras` pass is the platform-independent backstop (macOS
+  has no presence source). Strict `_camera_for` (calibrate, config calls)
+  still raises `CameraNotPresent`; only an unknown camera raises on the
+  frame and stream paths.
