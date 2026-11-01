@@ -1,0 +1,141 @@
+"""Camera address resolution: ``HOST-N`` to ``(host, camera)`` (sprint
+048, ticket 003).
+
+A camera argument is normally a slug (``brio-501``) or a persistent
+number (``4``). Fan-out listings also show each camera as ``HOST-N``
+(``donald-4``), where ``N`` is the camera's persistent registry number
+-- not its row position -- and ``HOST`` is the daemon's short host
+name. :func:`resolve_camera` turns an argument plus the effective
+daemon target into a :class:`ResolvedCamera`, so the CLI and the MCP
+``ConnectionManager`` apply identical rules. It depends only on
+``Discovery`` and ``Daemon`` (no CLI, MCP, or cv2 imports).
+
+Order (the sprint.md "Resolution order"):
+
+1. No trailing ``-digits``: pass through, no RPC.
+2. Otherwise ``list_cameras()`` on the target daemon; an exact slug or
+   number match wins (a daemon named ``brio`` must never shadow the
+   camera ``brio-501``). Target unreachable: pass through unchanged so
+   the normal connection error surfaces.
+3. Split at the last ``-``; match ``short_host_name(HOST)`` against
+   ``find_all()`` names, case-insensitively. A local hit gives
+   ``host=None``.
+4. No name hit: direct connect to ``HOST`` as typed, validated with
+   ``list_cameras()``; failure raises :class:`UnknownHost`.
+5. An explicit target naming a different daemon than the one resolved
+   raises :class:`ConflictingTarget`.
+
+Decisions on the sprint's open questions:
+
+* ``Discovery.connect(host)`` may be lazy (a channel exists before any
+  RPC), so step 4 validates with ``list_cameras()``, not ``connect``.
+* When the addressed daemon is not discoverable (step 4) the target is
+  compared with ``HOST`` as typed; if sameness cannot be confirmed
+  the result is a conservative ``ConflictingTarget``.
+* A non-``None`` ``target`` counts as explicit for step 5, whether it
+  came from ``-d``, a per-call ``daemon``, or a session default.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Optional
+
+from aprilcam.client.discovery import short_host_name, split_host_port
+from aprilcam.client.interfaces import DaemonInfo, Discovery
+from aprilcam.errors import (
+    AprilCamError,
+    ConflictingTarget,
+    ConnectionFailed,
+    UnknownHost,
+)
+
+__all__ = ["ResolvedCamera", "resolve_camera"]
+
+_HOST_N = re.compile(r"^(.+)-(\d+)$")
+_LOCAL_ALIASES = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+@dataclass(frozen=True, kw_only=True)
+class ResolvedCamera:
+    """The daemon to ask and the camera argument to send it.
+
+    ``host`` is ``None`` for the local daemon (or when the caller's
+    own target should be used unchanged), else a value accepted by
+    ``Discovery.connect``. ``camera`` is a slug or a number string.
+    """
+
+    host: Optional[str]
+    camera: str
+
+
+def _target_host(target: str) -> str:
+    """The host part of *target*, without any ``:port``."""
+    try:
+        return split_host_port(target)[0]
+    except Exception:  # unparseable target: compare it as typed
+        return target
+
+
+def _same_daemon(target: str, name: str, address: str, *, is_local: bool) -> bool:
+    """Whether explicit *target* names the daemon (*name*, *address*)."""
+    if target == address:
+        return True
+    host = _target_host(target)
+    if host and _target_host(address) == host:
+        return True
+    if name and short_host_name(host) == name:
+        return True
+    return is_local and host.lower() in _LOCAL_ALIASES
+
+
+def resolve_camera(
+    camera: str,
+    *,
+    discovery: Discovery,
+    target: Optional[str] = None,
+) -> ResolvedCamera:
+    """Resolve *camera* against the daemon at *target* (``None`` means
+    the local/default daemon). See the module docstring for the order.
+    """
+    match = _HOST_N.match(camera)
+    if match is None:
+        return ResolvedCamera(host=target, camera=camera)
+    host_part, number = match.group(1), match.group(2)
+
+    try:
+        cameras = discovery.connect(target).list_cameras()
+    except ConnectionFailed:
+        return ResolvedCamera(host=target, camera=camera)
+    for state in cameras:
+        if camera == state.name or camera == str(state.number):
+            return ResolvedCamera(host=target, camera=camera)
+
+    wanted = short_host_name(host_part)
+    daemons = discovery.find_all()
+    for info in daemons:
+        if info.name and info.name.lower() == wanted:
+            return _selected(camera, number, info, target)
+
+    try:
+        discovery.connect(host_part).list_cameras()
+    except AprilCamError as exc:
+        raise UnknownHost(
+            host_part, tuple(d.name or d.host for d in daemons)
+        ) from exc
+    if target is not None and not _same_daemon(
+        target, wanted, host_part, is_local=False
+    ):
+        raise ConflictingTarget(camera, host_part, target)
+    return ResolvedCamera(host=host_part, camera=number)
+
+
+def _selected(
+    camera: str, number: str, info: DaemonInfo, target: Optional[str]
+) -> ResolvedCamera:
+    if target is not None and not _same_daemon(
+        target, info.name, info.host, is_local=info.is_local
+    ):
+        raise ConflictingTarget(camera, info.name, target)
+    return ResolvedCamera(host=None if info.is_local else info.host, camera=number)
