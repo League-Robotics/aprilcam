@@ -1,7 +1,7 @@
 ---
 id: '001'
 title: Camera lifecycle states and full-config re-apply on reopen
-status: open
+status: done
 use-cases:
 - SUC-002
 depends-on: []
@@ -35,10 +35,10 @@ absent). Value types are frozen kw_only dataclasses; no typing.Protocol.
 
 ## Acceptance Criteria
 
-- [ ] Lifecycle state is queryable; transitions PRESENT -> ABSENT -> PRESENT and PRESENT -> CLOSED -> PRESENT work.
-- [ ] Every reopen (self-heal, explicit, post-absence) applies frame size first, then stored controls in order; frame size equals the configured size after reopen.
-- [ ] Watchdog and stall checks do nothing for ABSENT/CLOSED cameras.
-- [ ] Existing 5-failed-read self-heal now goes through the same reopen path.
+- [x] Lifecycle state is queryable; transitions PRESENT -> ABSENT -> PRESENT and PRESENT -> CLOSED -> PRESENT work.
+- [x] Every reopen (self-heal, explicit, post-absence) applies frame size first, then stored controls in order; frame size equals the configured size after reopen.
+- [x] Watchdog and stall checks do nothing for ABSENT/CLOSED cameras.
+- [x] Existing 5-failed-read self-heal now goes through the same reopen path.
 
 ## Testing
 

@@ -23,6 +23,7 @@ from aprilcam.camera.backends import CameraNotEnumeratedError, ControlBackend
 from aprilcam.camera.backends.opencv_backend import property_map
 from aprilcam.camera.camera import _OPEN_SETTLE_READS, FAILURE_THRESHOLD, MAX_REOPENS, Camera
 from aprilcam.camera.interfaces import Camera as CameraProtocol
+from aprilcam.camera.interfaces import CameraLifecycle
 from aprilcam.config.interfaces import CameraConfig, CameraPosition
 from aprilcam.errors import UnsupportedSetting
 from aprilcam.types import WorldPoint
@@ -2000,3 +2001,113 @@ def test_reset_updates_what_reassert_considers_applied(tmp_path):
     assert cam.applied_settings == {}
     backend._properties["exposure"] = 2500.0
     assert cam.reassert_config() == ()
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle states, drop/reopen, full-config re-apply (sprint 047 ticket 001)
+# ---------------------------------------------------------------------------
+
+
+class _OrderBackend(FakeBackend):
+    """Records set_property order and forgets properties on every open,
+    like a real device coming back at its driver defaults."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.set_log: List[str] = []
+
+    def open(self) -> None:
+        super().open()
+        self._properties = {"frame_width": 640.0, "frame_height": 480.0}
+
+    def set_property(self, name: str, value: float) -> bool:
+        self.set_log.append(name)
+        return super().set_property(name, value)
+
+
+def _configured_cam():
+    backend = _OrderBackend()
+    cam = Camera("cam-a", backend)
+    cam.open()
+    cam.apply_config(
+        CameraConfig(
+            name="cam-a",
+            playfield=None,
+            settings={"exposure": 12.0, "auto_exposure": 1.0, "frame_height": 800.0, "frame_width": 1280.0},
+        )
+    )
+    return backend, cam
+
+
+def test_lifecycle_transitions_absent_and_closed():
+    backend = FakeBackend()
+    cam = Camera("cam-a", backend)
+    assert cam.lifecycle is CameraLifecycle.CLOSED
+    cam.open()
+    assert cam.lifecycle is CameraLifecycle.PRESENT
+    cam.drop()
+    assert cam.lifecycle is CameraLifecycle.ABSENT
+    assert backend.is_open is False and cam.state.present is False
+    assert cam.reopen() is True
+    assert cam.lifecycle is CameraLifecycle.PRESENT and backend.is_open
+    cam.close()
+    assert cam.lifecycle is CameraLifecycle.CLOSED
+    assert cam.reopen() is True
+    assert cam.lifecycle is CameraLifecycle.PRESENT
+
+
+def test_reopen_not_enumerated_stays_absent():
+    backend = FakeBackend()
+    cam = Camera("cam-a", backend)
+    cam.open()
+    cam.drop()
+    backend.fail_open = True
+    backend.fail_open_exception = CameraNotEnumeratedError("gone")
+    assert cam.reopen() is False
+    assert cam.lifecycle is CameraLifecycle.ABSENT
+
+
+def test_reopen_reapplies_full_config_size_first():
+    backend, cam = _configured_cam()
+    assert backend.set_log[:4] == ["frame_height", "frame_width", "auto_exposure", "exposure"]
+    cam.drop()
+    backend.set_log.clear()
+    assert cam.reopen() is True
+    assert backend.set_log == ["frame_height", "frame_width", "auto_exposure", "exposure"]
+    assert backend.get_property("frame_width") == 1280.0
+    assert backend.get_property("frame_height") == 800.0
+    assert backend.get_property("exposure") == 12.0
+
+
+def test_self_heal_reapplies_stored_config():
+    backend, cam = _configured_cam()
+    backend.set_log.clear()
+    for _ in range(FAILURE_THRESHOLD):
+        cam.read()
+    assert backend.set_log == ["frame_height", "frame_width", "auto_exposure", "exposure"]
+    assert backend.get_property("frame_width") == 1280.0
+
+
+def test_reopen_with_nothing_stored_pushes_nothing():
+    backend = _OrderBackend()
+    cam = Camera("cam-a", backend)
+    cam.open()
+    cam.drop()
+    assert cam.reopen() is True
+    assert backend.set_log == []
+
+
+def test_reassert_and_check_stall_skip_non_present(caplog):
+    backend = _OrderBackend()
+    backend.heartbeat_age = lambda: 999.0  # type: ignore[attr-defined]
+    cam = Camera("cam-a", backend)
+    cam.open()
+    cam.apply_config(CameraConfig(name="cam-a", playfield=None, settings={"exposure": 12.0}))
+    cam.drop()
+    backend._properties["exposure"] = -1.0  # what a dead device reads back
+    backend.set_log.clear()
+    opens = backend.open_calls
+    assert cam.reassert_config() == ()
+    assert cam.check_stall() is False
+    assert backend.set_log == [] and backend.open_calls == opens
+    assert "drifted" not in caplog.text

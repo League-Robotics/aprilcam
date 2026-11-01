@@ -24,12 +24,27 @@ a dataclass) that merely happened to share a name — they are now one.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional
 
 import numpy as np
 
 from aprilcam.config.interfaces import CameraConfig
 from aprilcam.types import CameraState, ProbeReport
+
+
+class CameraLifecycle(Enum):
+    """Where a held :class:`Camera` is in its device lifecycle (sprint 047).
+
+    ``PRESENT``: device open (or being healed). ``ABSENT``: the hardware
+    is gone (unplugged); device closed, config and subscribers kept.
+    ``CLOSED``: deliberately closed (never opened, idle-reaped, explicit
+    close). ``Camera.reopen`` returns ABSENT/CLOSED to PRESENT.
+    """
+
+    PRESENT = "present"
+    ABSENT = "absent"
+    CLOSED = "closed"
 
 
 @dataclass(frozen=True, kw_only=True)

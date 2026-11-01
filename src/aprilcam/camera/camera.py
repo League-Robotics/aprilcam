@@ -174,6 +174,7 @@ import numpy as np
 
 from aprilcam.camera.backends import CameraNotEnumeratedError, CaptureBackend, ControlBackend
 from aprilcam.camera.interfaces import Camera as _CameraBase
+from aprilcam.camera.interfaces import CameraLifecycle
 from aprilcam.config.interfaces import CameraConfig
 from aprilcam.config.interfaces import ConfigLoader as ConfigLoaderIface
 from aprilcam.errors import UnsupportedSetting
@@ -382,7 +383,10 @@ class Camera(_CameraBase):
         #: the daemon's control watchdog may now run concurrently.
         #: Re-entrant because ``reassert_config`` calls ``apply_config``.
         self._config_lock = threading.RLock()
-        self._present = False
+        #: PRESENT / ABSENT / CLOSED (sprint 047 ticket 001) -- see
+        #: :attr:`lifecycle`. Replaces the old ``_present`` bool; ``state.present``
+        #: is ``lifecycle is PRESENT``.
+        self._lifecycle = CameraLifecycle.CLOSED
         self._consecutive_failures = 0
         self._reopens = 0
         self._exhausted = False
@@ -429,7 +433,7 @@ class Camera(_CameraBase):
         """
         return CameraState(
             name=self._slug,
-            present=self._present,
+            present=self._lifecycle is CameraLifecycle.PRESENT,
             usable=self._backend.is_open and not self._exhausted,
             playfield=self._playfield,
             calibrated=False,
@@ -449,7 +453,7 @@ class Camera(_CameraBase):
         signal that AC exists to surface.
         """
         self._backend.open()
-        self._present = True
+        self._lifecycle = CameraLifecycle.PRESENT
         self._consecutive_failures = 0
         self._reopens = 0
         self._exhausted = False
@@ -458,11 +462,95 @@ class Camera(_CameraBase):
 
     def close(self) -> None:
         self._backend.close()
-        self._present = False
+        self._lifecycle = CameraLifecycle.CLOSED
         self._consecutive_failures = 0
         self._reopens = 0
         self._exhausted = False
         self._pending_open_settle = False
+
+    @property
+    def lifecycle(self) -> CameraLifecycle:
+        """PRESENT / ABSENT / CLOSED (sprint 047 ticket 001); see
+        :class:`~aprilcam.camera.interfaces.CameraLifecycle`."""
+        return self._lifecycle
+
+    def drop(self) -> None:
+        """Close the device and mark the camera ABSENT: the hardware is
+        gone (unplugged) but the camera object, its stored config, and
+        its subscribers stay. :meth:`reopen` is the way back. Runs under
+        :attr:`_read_lock` so it never closes the handle mid-read."""
+        with self._read_lock:
+            try:
+                self._backend.close()
+            except Exception:  # pragma: no cover - defensive
+                pass
+            self._lifecycle = CameraLifecycle.ABSENT
+            self._consecutive_failures = 0
+            self._pending_open_settle = False
+
+    def reopen(self) -> bool:
+        """Bring an ABSENT or CLOSED camera back to PRESENT: the one
+        reopen path (self-heal and the watchdog retry share
+        :meth:`_reopen_device`). Re-resolves the device index through
+        the backend, then re-applies the full stored config. Never
+        raises; returns whether the camera is PRESENT afterwards.
+        Fires *on_reopen* on success, like any other reopen. A
+        not-currently-enumerated device leaves the camera ABSENT."""
+        with self._read_lock:
+            try:
+                self._reopen_device()
+            except CameraNotEnumeratedError as exc:
+                self._lifecycle = CameraLifecycle.ABSENT
+                logger.warning(
+                    "%s: reopen skipped -- hardware key not currently enumerated: %s",
+                    self._slug,
+                    exc,
+                )
+                return False
+            except Exception as exc:
+                logger.warning("%s: reopen failed: %s", self._slug, exc)
+                return False
+            self._consecutive_failures = 0
+            self._reopens = 0
+            self._exhausted = False
+            if self._on_reopen is not None:
+                self._on_reopen()
+            return True
+
+    def _reopen_device(self) -> None:
+        """Close, open (the backend re-resolves its index), mark PRESENT,
+        and re-apply the full stored config. Raises whatever the backend
+        open raises; a failure applying config is logged, not raised --
+        the device is open and the watchdog's drift check will retry.
+        Caller holds :attr:`_read_lock`."""
+        try:
+            self._backend.close()
+        except Exception:  # pragma: no cover - defensive
+            pass
+        self._backend.open()
+        self._lifecycle = CameraLifecycle.PRESENT
+        self._pending_open_settle = True  # ticket 030-005: a fresh session again
+        self._load_flatfield()
+        self._reapply_stored_config()
+
+    def _reapply_stored_config(self) -> None:
+        """Push the config this camera is supposed to hold -- the last
+        applied settings (live pushes included), else the on-disk
+        document -- through :meth:`apply_config`, which orders frame
+        size first, then gate controls, then the rest. A fresh device
+        comes up at the driver default (the 2026-11-01 spike: 640x480,
+        auto exposure), so every reopen must do this."""
+        settings: Dict[str, Any] = dict(self._applied_settings)
+        if not settings:
+            on_disk = self._on_disk_config()
+            if on_disk is not None:
+                settings = dict(on_disk.settings)
+        if not any(v is not None for v in settings.values()):
+            return
+        try:
+            self.apply_config(CameraConfig(name=self._slug, playfield=self._playfield, settings=settings))
+        except Exception as exc:
+            logger.warning("%s: re-applying stored config after reopen failed: %s", self._slug, exc)
 
     def read(self) -> Optional[np.ndarray]:
         """See ``camera.interfaces.Camera.read``.
@@ -661,7 +749,7 @@ class Camera(_CameraBase):
         ``present`` signal than an ordinary failure: a resolver
         reporting "not found" is positive evidence the hardware itself
         is gone (unlike a bare read/open failure, whose cause is
-        unknown), so :attr:`_present` is set ``False`` here -- the one
+        unknown), so :attr:`_lifecycle` is set ``ABSENT`` here -- the one
         place in this class besides :meth:`close` that does so.
         Rejected alternative (option (b), extending
         ``daemon.service.DaemonService.check_stalled_cameras`` to poll
@@ -678,16 +766,10 @@ class Camera(_CameraBase):
             "%s: read failing, reopen attempt %d/%d", self._slug, self._reopens, MAX_REOPENS
         )
         try:
-            self._backend.close()
-        except Exception:  # pragma: no cover - defensive
-            pass
-        try:
-            self._backend.open()
-            self._present = True
-            self._pending_open_settle = True  # ticket 030-005: a fresh session again
+            self._reopen_device()
         except CameraNotEnumeratedError as exc:
             self._reopens -= 1  # budget-neutral -- see this method's docstring
-            self._present = False
+            self._lifecycle = CameraLifecycle.ABSENT
             logger.warning(
                 "%s: reopen skipped -- hardware key not currently enumerated: %s",
                 self._slug,
@@ -749,7 +831,7 @@ class Camera(_CameraBase):
         reopen of the same backend handle.
         """
         heartbeat_age = getattr(self._backend, "heartbeat_age", None)
-        if heartbeat_age is None:
+        if heartbeat_age is None or self._lifecycle is not CameraLifecycle.PRESENT:
             return False
         with self._read_lock:
             age = heartbeat_age()
@@ -830,11 +912,7 @@ class Camera(_CameraBase):
                 self._slug,
             )
             try:
-                self._backend.close()
-            except Exception:  # pragma: no cover - defensive
-                pass
-            try:
-                self._backend.open()
+                self._reopen_device()
             except CameraNotEnumeratedError as exc:
                 # Sprint 039: same distinction _attempt_self_heal makes --
                 # a resolver reporting "not found" is positive evidence
@@ -844,7 +922,7 @@ class Camera(_CameraBase):
                 # (this method has no budget of its own to protect, but
                 # the watchdog's periodic retry above already *is* "keep
                 # retrying the identity lookup" for this case).
-                self._present = False
+                self._lifecycle = CameraLifecycle.ABSENT
                 logger.warning(
                     "%s: exhausted-camera retry skipped -- hardware key not "
                     "currently enumerated: %s",
@@ -855,8 +933,6 @@ class Camera(_CameraBase):
             except Exception as exc:
                 logger.warning("%s: exhausted-camera retry failed: %s", self._slug, exc)
                 return False
-            self._present = True
-            self._pending_open_settle = True  # ticket 030-005: a fresh session again
             self._reopens = 0
             self._exhausted = False
             if self._on_reopen is not None:
@@ -942,8 +1018,11 @@ class Camera(_CameraBase):
                 if value is not None:
                     previous[key] = value
 
-            ordered = [k for k in _GATE_KEYS if k in config.settings]
-            ordered += [k for k in config.settings if k not in _GATE_KEYS]
+            # Frame size first (a size change can reset controls on some
+            # drivers), then the gates, then everything else in stored order.
+            ordered = [k for k in config.settings if k in _RESOLUTION_KEYS]
+            ordered += [k for k in _GATE_KEYS if k in config.settings]
+            ordered += [k for k in config.settings if k not in _RESOLUTION_KEYS and k not in _GATE_KEYS]
 
             # Ticket 030-005 (reopened): the first real write following a
             # fresh open gets a settle drain first -- see the module
@@ -1048,9 +1127,16 @@ class Camera(_CameraBase):
         not open, or the hardware agrees. ``DaemonService``'s control
         watchdog calls this periodically for every held-open camera;
         :meth:`reset`/live pushes update what "supposed to hold" means.
+        Also ``()`` for an ABSENT/CLOSED camera (sprint 047): an
+        unplugged device's readbacks are meaningless and would only log
+        false drift every tick.
         """
         with self._config_lock:
-            if not self._applied_settings or not self._backend.is_open:
+            if (
+                not self._applied_settings
+                or not self._backend.is_open
+                or self._lifecycle is not CameraLifecycle.PRESENT
+            ):
                 return ()
             readback = self.read_back_settings()
             drifted = tuple(
@@ -1261,4 +1347,4 @@ class Camera(_CameraBase):
         return None
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostics only
-        return f"Camera(slug={self._slug!r}, present={self._present}, usable={self._backend.is_open})"
+        return f"Camera(slug={self._slug!r}, present={self._lifecycle.value}, usable={self._backend.is_open})"
