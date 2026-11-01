@@ -117,10 +117,20 @@ field (640x480 frames warped by 1920x1080 calibrations).
 - On Ubuntu 26.04 / Python 3.14, the pipx install of `aprilcam[daemon]`
   pulled opencv-contrib 5.0.0, which imported without extra `libgl1`
   packages.
-- gala's Chrome (its network-service helper) held UDP 5353, so gala's own
-  daemon could not advertise and `aprilcam daemon list` failed with
-  EADDRINUSE. The `EnableMediaRouter=false` Chrome policy turns off its
-  Cast discovery; it applies after Chrome restarts.
+- On gala, `aprilcam daemon list` (and every `--all`) failed with
+  EADDRINUSE: `Zeroconf()` binds UDP 5353 once per interface, and some
+  process held it without `SO_REUSEPORT`. The holders, in order: Chrome's
+  Cast discovery (`EnableMediaRouter=false` policy), DYMO's label-printer
+  web service (`DYMO.WebAPI`, now off), and something on the Tailscale and
+  VM-bridge addresses that `lsof` cannot show without root. Since 931ba7c
+  the browse falls back to a unicast instance (same-subnet daemons) plus a
+  default-interface instance (daemons relayed from Robot_Garage by the
+  reflector) and merges them. gala's own daemon still cannot *advertise*
+  while 5353 is taken.
+- `camera list` keeps reporting an unplugged camera as present, and a
+  re-plugged one gives `no frame available` until the daemon restarts
+  (`camera probe` skips it as "in use by a live subscriber"). Restart
+  `aprilcamd` after moving cameras.
 - A dual-homed host advertises only its default-route address over mDNS
   (`daemon/mdns.py:_primary_routable_ipv4`). Robots on the other network
   must use the host name for that interface (`buzzkill-rg.home`).
