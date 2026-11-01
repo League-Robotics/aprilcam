@@ -239,7 +239,8 @@ def fan_out(
 
     had_failure = False
     for info in infos:
-        label = f"{info.host} (local)" if info.is_local else info.host
+        base = info.name or info.host
+        label = f"{base} (local)" if info.is_local else base
         try:
             daemon = discovery.connect(None if info.is_local else info.host)
             result = call(daemon)

@@ -10,7 +10,9 @@ discovery, nothing to fake.
 
 from __future__ import annotations
 
-from aprilcam.cli._common import format_camera_row
+from aprilcam.cli._common import fan_out, format_camera_row
+from aprilcam.client.interfaces import DaemonInfo
+from aprilcam.errors import ConnectionFailed
 from aprilcam.types import CameraState
 
 
@@ -147,3 +149,64 @@ def test_format_camera_row_shows_closed_distinct_from_absent():
     absent = format_camera_row(_state(present=False, closed=False, usable=False))
     assert " closed " in closed and " absent " not in closed
     assert " absent " in absent and " closed " not in absent
+
+
+# ---------------------------------------------------------------------------
+# fan_out() labels -- sprint 048 ticket 001: host names, not addresses
+# ---------------------------------------------------------------------------
+
+
+class _FakeDiscovery:
+    def __init__(self, infos, dead=()):
+        self._infos = infos
+        self._dead = set(dead)
+
+    def find_all(self):
+        return self._infos
+
+    def connect(self, host=None):
+        if host in self._dead:
+            raise ConnectionFailed(f"cannot reach {host}")
+        return object()
+
+
+def _fan(infos, dead=()):
+    labels = []
+    code = fan_out(_FakeDiscovery(infos, dead), lambda d: 1, lambda label, r: labels.append(label))
+    return code, labels
+
+
+def test_fan_out_labels_use_host_names(capsys):
+    infos = (
+        DaemonInfo(host="localhost", port=0, is_local=True, reachable=True, name="gala"),
+        DaemonInfo(host="10.0.0.2:5280", port=5280, is_local=False, reachable=True, name="buzzkill"),
+        DaemonInfo(host="10.0.0.3:5280", port=5280, is_local=False, reachable=True, name="donald"),
+    )
+
+    code, labels = _fan(infos)
+
+    assert code == 0
+    assert labels == ["gala (local)", "buzzkill", "donald"]
+
+
+def test_fan_out_nameless_daemon_falls_back_to_address_label():
+    infos = (
+        DaemonInfo(host="localhost", port=0, is_local=True, reachable=True),
+        DaemonInfo(host="10.0.0.2:5280", port=5280, is_local=False, reachable=True),
+    )
+
+    _, labels = _fan(infos)
+
+    assert labels == ["localhost (local)", "10.0.0.2:5280"]
+
+
+def test_fan_out_unreachable_line_uses_the_host_name(capsys):
+    infos = (
+        DaemonInfo(host="10.0.0.2:5280", port=5280, is_local=False, reachable=False, name="buzzkill"),
+    )
+
+    code, labels = _fan(infos, dead=["10.0.0.2:5280"])
+
+    assert code == 1
+    assert labels == []
+    assert capsys.readouterr().err.startswith("buzzkill: unreachable")

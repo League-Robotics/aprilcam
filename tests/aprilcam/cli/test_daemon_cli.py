@@ -153,6 +153,7 @@ class _Info:
 
     host: str
     is_local: bool
+    name: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -676,7 +677,7 @@ def test_daemon_list_reports_two_real_local_daemons_on_alternate_ports(
 
             assert code == 0
             out = capsys.readouterr().out
-            assert "localhost (local):" in out
+            assert " (local):" in out
             assert "cameras: 0" in out
             assert "playfields: (none)" in out
             # The remote entry's label is "ip:port" (Discovery.find_all's

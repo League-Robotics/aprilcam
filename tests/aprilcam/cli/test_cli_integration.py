@@ -334,6 +334,7 @@ class _Info:
     def __init__(self, host: str, is_local: bool) -> None:
         self.host = host
         self.is_local = is_local
+        self.name = ""
 
 
 def _bind_zero_camera_daemon(socket_dir: Path):
@@ -458,7 +459,7 @@ def test_camera_list_all_against_a_real_multi_daemon_find_all_reports_partial_fa
 
         assert code == 1  # partial failure is visible in the exit code
         out, err = capsys.readouterr()
-        assert "localhost (local):" in out
+        assert " (local):" in out
         assert "(no cameras)" in out
         assert "unreachable" in err
     finally:

@@ -51,6 +51,11 @@ class DaemonInfo:
     A daemon that advertises but does not respond is exactly what a
     developer needs to see, so it is listed rather than filtered out.
     """
+    name: str = ""
+    """The daemon's machine name, normalized (``donald``, not
+    ``Donald.local``) -- what fan-out listings label its block with.
+    Empty when unknown; callers then fall back to ``host``.
+    """
 
 
 class Discovery:

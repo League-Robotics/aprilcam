@@ -268,6 +268,7 @@ class _FakeDiscovery:
 class _Info:
     host: str
     is_local: bool
+    name: str = ""
 
 
 # ---------------------------------------------------------------------------

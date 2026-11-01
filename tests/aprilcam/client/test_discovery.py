@@ -48,6 +48,7 @@ from aprilcam.client.discovery import (
     _BrowseResult,
     _browse_zeroconf,
     resolve_ipv4_preferred,
+    short_host_name,
     split_host_port,
 )
 from aprilcam.client.interfaces import DaemonInfo
@@ -151,16 +152,19 @@ def test_find_all_returns_empty_tuple_when_no_daemon_running(directories: Direct
     assert discovery.find_all() == ()
 
 
-def test_find_all_lists_a_held_but_unreachable_daemon(directories: Directories):
+def test_find_all_lists_a_held_but_unreachable_daemon(directories: Directories, monkeypatch):
     """A daemon that advertises (holds the lock) but does not answer is
     listed, not filtered out -- ``DaemonInfo.reachable`` says which."""
+    monkeypatch.setattr(socket, "gethostname", lambda: "My-Machine.local")
     lock_fd = _hold_lock(directories.socket_dir / LOCK_FILENAME)
     try:
         discovery = Discovery(directories=directories)
 
         results = discovery.find_all()
 
-        assert results == (DaemonInfo(host="localhost", port=0, is_local=True, reachable=False),)
+        assert results == (
+            DaemonInfo(host="localhost", port=0, is_local=True, reachable=False, name="my-machine"),
+        )
     finally:
         _release_lock(lock_fd)
 
@@ -241,7 +245,10 @@ def test_find_all_merges_local_and_a_distinctly_hostnamed_remote_daemon(
         assert len(results) == 2
         local = next(r for r in results if r.is_local)
         remote = next(r for r in results if not r.is_local)
-        assert local == DaemonInfo(host="localhost", port=0, is_local=True, reachable=True)
+        assert local == DaemonInfo(
+            host="localhost", port=0, is_local=True, reachable=True, name="my-machine"
+        )
+        assert remote.name == "test-second-host"
         assert remote.host == f"127.0.0.1:{remote_port}"
         assert remote.port == remote_port
         assert remote.reachable is True
@@ -756,3 +763,17 @@ def test_find_all_discovers_two_real_local_daemons_on_alternate_ports_via_real_m
             lifecycle2.stop()
     finally:
         lifecycle1.stop()
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("Donald.local", "donald"),
+        ("DONALD", "donald"),
+        ("donald.home", "donald"),
+        ("10.0.0.5", "10.0.0.5"),
+        ("::1", "::1"),
+    ],
+)
+def test_short_host_name(raw: str, expected: str):
+    assert short_host_name(raw) == expected
