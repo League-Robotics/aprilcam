@@ -158,3 +158,9 @@ and never reopens a streaming one. For a streaming camera probe reports
 `list_cameras` takes a held camera's `present` from discovery's known-present
 set (kept current by the PresenceSource watch), not from `held.state`;
 `usable` is the held health AND present.
+
+A held-but-idle camera is never probed by a second backend (a second open on
+the same V4L2 node fails EBUSY). `CameraDiscovery(probe_held=...)` is wired to
+`DaemonService.probe_held_camera`, which `reopen()`s a non-PRESENT camera and
+decides `usable` from up to three reads through the held handle. Only
+non-held cameras get the fresh open/close probe.

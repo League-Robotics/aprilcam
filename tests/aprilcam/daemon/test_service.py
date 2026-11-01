@@ -244,17 +244,40 @@ def test_probe_cameras_skips_a_camera_with_a_live_subscriber(service, held_camer
     assert state.present is True and state.usable is True
 
 
-def test_probe_cameras_probes_a_cached_idle_camera_normally(service, held_camera):
-    """Sprint 047 ticket 003: being cached is not being in use."""
-    _, slug, _ = held_camera
+def test_probe_cameras_probes_a_cached_idle_camera_through_its_own_handle(
+    directories, registry, held_camera
+):
+    """Sprint 047 ticket 003: a held idle camera is probed via the held
+    Camera -- no second backend is ever constructed on its device (a
+    second open fails EBUSY on Linux)."""
+    identity, slug, cam = held_camera
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+
+    def forbidden(index):
+        raise AssertionError("probe built a second backend on a held device")
+
+    service._discovery._backend_factory = forbidden
     assert not service.is_in_use(slug)
     assert service.active_camera_state(slug) is None
 
     report = service.probe_cameras()
 
-    assert report.skipped == ()
     state = next(s for s in report.cameras if s.name == slug)
     assert state.present is True and state.usable is True
+
+
+def test_probe_of_a_held_idle_camera_reopens_a_dropped_one(directories, registry, held_camera):
+    identity, slug, cam = held_camera
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    cam.drop()
+    service._discovery._backend_factory = lambda i: (_ for _ in ()).throw(
+        AssertionError("second backend")
+    )
+
+    state = next(s for s in service.probe_cameras().cameras if s.name == slug)
+
+    assert state.present is True
+    assert cam.lifecycle.value == "present"
 
 
 def test_in_use_ends_when_the_last_subscriber_leaves(service, held_camera):
@@ -3069,14 +3092,15 @@ def _open_camera_with_frames(
 
 def _service_with_camera(directories, registry, identity, slug, cam) -> DaemonService:
     """Service holding *cam*, wired like ``daemon/__main__.py``: probe's
-    ``active_camera_state`` is the service's own in-use accessor. An
-    initial ``probe()`` seeds ``known_present`` the way the daemon's
-    start-up enumeration does."""
+    ``active_camera_state`` is the service's own in-use accessor and
+    ``probe_held`` its held-handle probe. The camera is pre-seeded as
+    present, standing in for the daemon's start-up enumeration."""
     cameras: Dict[str, Camera] = {slug: cam}
     holder: list = []
     discovery = CameraDiscovery(
         registry,
         active_camera_state=lambda s: holder[0].active_camera_state(s),
+        probe_held=lambda s: holder[0].probe_held_camera(s),
         identity_source=lambda: {0: identity},
         backend_factory=lambda index: FakeBackend(read_queue=[_frame()], loop=True),
     )
@@ -3090,7 +3114,9 @@ def _service_with_camera(directories, registry, identity, slug, cam) -> DaemonSe
         identity_source=lambda: {0: identity},
     )
     holder.append(service)
-    discovery.probe()
+    # Seed known_present as start-up enumeration would, without probing
+    # (a probe reads frames through the held camera's own handle).
+    discovery._present_slugs.add(slug)
     return service
 
 

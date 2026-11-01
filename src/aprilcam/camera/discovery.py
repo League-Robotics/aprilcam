@@ -173,6 +173,13 @@ class CameraDiscovery(_CameraDiscoveryBase):
         the reopen did not take; it is then retried every tick while the
         key stays present. Only keys the source has itself reported are
         ever treated as gone.
+    probe_held:
+        Sprint 047 ticket 003. ``(slug) -> CameraState | None``,
+        consulted for a slug *not* in use but still held by the daemon.
+        The daemon already owns the device and a second open on it fails
+        (V4L2 ``REQBUFS: Device or resource busy``), so the answer must
+        come from the held ``Camera``'s own handle. ``None`` (not held)
+        falls through to the fresh open/close probe.
     list_loopback_cameras:
         () -> ``[LibcameraDevice, ...]``. Consulted only for a
         libcamera-identified camera (``identity.hardware_key`` prefixed
@@ -198,6 +205,7 @@ class CameraDiscovery(_CameraDiscoveryBase):
         presence_source: Optional[PresenceSource] = None,
         presence_interval: float = DEFAULT_PRESENCE_INTERVAL,
         on_presence: Optional[Callable[[str, bool], Optional[bool]]] = None,
+        probe_held: Optional[Callable[[str], Optional[CameraState]]] = None,
     ) -> None:
         self._registry = registry
         self._presence_source = presence_source
@@ -207,6 +215,7 @@ class CameraDiscovery(_CameraDiscoveryBase):
         self._presence_pending: Set[str] = set()
         self._presence_thread: Optional[threading.Thread] = None
         self._active_camera_state = active_camera_state or (lambda slug: None)
+        self._probe_held = probe_held or (lambda slug: None)
         self._backend_factory = backend_factory
         self._identity_source = identity_source
         self._watch_interval = watch_interval
@@ -282,6 +291,26 @@ class CameraDiscovery(_CameraDiscoveryBase):
                     else "in use by a live subscriber (stalled)"
                 )
                 skipped.append(ProbeSkip(backend=slug, reason=reason))
+                continue
+
+            held_idle = self._probe_held(slug)
+            if held_idle is not None:
+                cameras.append(
+                    CameraState(
+                        name=slug,
+                        present=True,
+                        usable=held_idle.usable,
+                        playfield=None,
+                        calibrated=False,
+                        number=number,
+                    )
+                )
+                skipped.append(
+                    ProbeSkip(
+                        backend=slug,
+                        reason="held open by the daemon (probed through its own handle)",
+                    )
+                )
                 continue
 
             usable = self._probe_openable(slug, index, identity.hardware_key)

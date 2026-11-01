@@ -124,6 +124,7 @@ def build(
         # "In use" means a live stream subscriber or an in-flight read,
         # not merely "cached" (sprint 047 ticket 003).
         active_camera_state=lambda slug: service_ref[0].active_camera_state(slug),
+        probe_held=lambda slug: service_ref[0].probe_held_camera(slug),
         presence_source=presence_source,
         on_presence=lambda slug, present: service_ref[0].on_hardware_presence(slug, present),
     )

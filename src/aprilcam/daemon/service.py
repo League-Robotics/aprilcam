@@ -122,6 +122,7 @@ from aprilcam.camera.backends.opencv_backend import OpenCVBackend
 from aprilcam.camera.backends.uvc_util import UvcUtilBackend
 from aprilcam.camera.backends.worker_backend import WorkerBackend
 from aprilcam.camera.camera import FLATFIELD_FILENAME, Camera
+from aprilcam.camera.interfaces import CameraLifecycle
 from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import CameraIdentity, resolve_all
 from aprilcam.camera.registry import CameraRecord, CameraRegistry
@@ -780,6 +781,32 @@ class DaemonService(Daemon):
         if camera is None or not self.is_in_use(slug):
             return None
         return camera.state
+
+    def probe_held_camera(self, slug: str) -> Optional[CameraState]:
+        """Probe a held-but-idle camera *through its own handle*.
+
+        Never builds a second backend: the daemon owns the device and a
+        second open fails with EBUSY on Linux, which would misreport the
+        common case as unusable. A camera whose lifecycle is not PRESENT
+        is ``reopen()``ed first; then up to three reads through the held
+        handle decide ``usable``. ``None`` if the slug is not held."""
+        with self._lock:
+            camera = self._cameras.get(slug)
+        if camera is None:
+            return None
+        if camera.lifecycle is not CameraLifecycle.PRESENT:
+            camera.reopen()
+        state = camera.state
+        if state.usable:
+            got_frame = False
+            for _ in range(3):
+                if camera.read() is not None:
+                    got_frame = True
+                    break
+                time.sleep(0.05)
+            if not got_frame:
+                state = replace(state, usable=False)
+        return state
 
     def on_hardware_presence(self, slug: str, present: bool) -> Optional[bool]:
         """Presence-watch callback (sprint 047): the hardware key behind
