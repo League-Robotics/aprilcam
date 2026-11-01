@@ -1,7 +1,7 @@
 ---
 id: '010'
 title: 'Docs: DESIGN updates, UC-25 coverage, knowledge entry'
-status: in-progress
+status: done
 use-cases:
 - SUC-001
 - SUC-002
@@ -36,10 +36,10 @@ choice and the idle-timeout setting in CLI/config docs.
 
 ## Acceptance Criteria
 
-- [ ] DESIGN docs no longer claim there is no hotplug event source and describe the new lifecycle.
-- [ ] UC-25 S-3/S-5/S-7 reference this sprint's behaviour.
-- [ ] Knowledge entry added and linked from where setup is documented.
-- [ ] CLI/config docs mention exit code 3, `camera close`, idle timeout.
+- [x] DESIGN docs no longer claim there is no hotplug event source and describe the new lifecycle.
+- [x] UC-25 S-3/S-5/S-7 reference this sprint's behaviour.
+- [x] Knowledge entry added and linked from where setup is documented.
+- [x] CLI/config docs mention exit code 3, `camera close`, idle timeout.
 
 ## Testing
 
