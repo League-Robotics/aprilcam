@@ -1,7 +1,7 @@
 ---
 id: '005'
 title: Proto placeholder flag; serve test card on frames and streams
-status: open
+status: done
 use-cases:
 - SUC-004
 depends-on:
@@ -33,10 +33,10 @@ and resume automatically on return.
 
 ## Acceptance Criteria
 
-- [ ] Unplugged camera: get_frame returns the flagged card at configured size, not an error.
-- [ ] Playfield image and image streams return the flagged card at playfield/camera size.
-- [ ] Tag stream heartbeats carry an explicit absent status instead of going silent.
-- [ ] Real frames have flag false; old clients unaffected (additive fields).
+- [x] Unplugged camera: get_frame returns the flagged card at configured size, not an error.
+- [x] Playfield image and image streams return the flagged card at playfield/camera size.
+- [x] Tag stream heartbeats carry an explicit absent status instead of going silent.
+- [x] Real frames have flag false; old clients unaffected (additive fields).
 
 ## Testing
 

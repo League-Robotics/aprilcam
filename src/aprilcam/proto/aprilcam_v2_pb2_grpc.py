@@ -113,6 +113,11 @@ class AprilCamV2Stub(object):
                 request_serializer=aprilcam__v2__pb2.ResetCameraConfigRequest.SerializeToString,
                 response_deserializer=aprilcam__v2__pb2.ResetCameraConfigResponse.FromString,
                 _registered_method=True)
+        self.CloseCamera = channel.unary_unary(
+                '/aprilcam.v2.AprilCamV2/CloseCamera',
+                request_serializer=aprilcam__v2__pb2.CloseCameraRequest.SerializeToString,
+                response_deserializer=aprilcam__v2__pb2.CloseCameraResponse.FromString,
+                _registered_method=True)
         self.PutAnnotation = channel.unary_unary(
                 '/aprilcam.v2.AprilCamV2/PutAnnotation',
                 request_serializer=aprilcam__v2__pb2.PutAnnotationRequest.SerializeToString,
@@ -367,6 +372,19 @@ class AprilCamV2Servicer(object):
         A camera with nothing installed there falls back to the
         introspected-plus-blank template (the same document an
         unconfigured camera reports) rather than erroring.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CloseCamera(self, request, context):
+        """Release the device behind one camera (sprint 047 ticket 007) without
+        restarting the daemon; it stays listed and reopens transparently,
+        with its full stored config, on next use. Refused with
+        `FAILED_PRECONDITION` (`CameraInUse`) while a stream subscriber or
+        read is active unless `force` is set; a forced close sticks for the
+        existing subscribers (they are served the NO SIGNAL card) until some
+        new request reopens the camera.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -638,6 +656,11 @@ def add_AprilCamV2Servicer_to_server(servicer, server):
                     servicer.ResetCameraConfig,
                     request_deserializer=aprilcam__v2__pb2.ResetCameraConfigRequest.FromString,
                     response_serializer=aprilcam__v2__pb2.ResetCameraConfigResponse.SerializeToString,
+            ),
+            'CloseCamera': grpc.unary_unary_rpc_method_handler(
+                    servicer.CloseCamera,
+                    request_deserializer=aprilcam__v2__pb2.CloseCameraRequest.FromString,
+                    response_serializer=aprilcam__v2__pb2.CloseCameraResponse.SerializeToString,
             ),
             'PutAnnotation': grpc.unary_unary_rpc_method_handler(
                     servicer.PutAnnotation,
@@ -1144,6 +1167,33 @@ class AprilCamV2(object):
             '/aprilcam.v2.AprilCamV2/ResetCameraConfig',
             aprilcam__v2__pb2.ResetCameraConfigRequest.SerializeToString,
             aprilcam__v2__pb2.ResetCameraConfigResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CloseCamera(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/aprilcam.v2.AprilCamV2/CloseCamera',
+            aprilcam__v2__pb2.CloseCameraRequest.SerializeToString,
+            aprilcam__v2__pb2.CloseCameraResponse.FromString,
             options,
             channel_credentials,
             insecure,

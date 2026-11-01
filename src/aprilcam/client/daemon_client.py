@@ -108,6 +108,7 @@ from aprilcam.daemon.interfaces import Daemon, DaemonStatus, ImageStream, MountR
 from aprilcam.errors import (
     AlreadyRunning,
     AnnotationLimitExceeded,
+    CameraInUse,
     CameraNotPresent,
     ConnectionFailed,
     DaemonVersionMismatch,
@@ -363,6 +364,8 @@ def _reconstruct_error(exc: grpc.RpcError, target: str) -> Exception:
         )
     if error_type == "CameraNotPresent":
         return CameraNotPresent(metadata.get("aprilcam-slug", "unknown"))
+    if error_type == "CameraInUse":
+        return CameraInUse(metadata.get("aprilcam-slug", "unknown"))
     if error_type == "NotCalibrated":
         return NotCalibrated(exc.details() or "camera not calibrated")
     if error_type == "UnknownPlayfield":
@@ -576,6 +579,13 @@ class GrpcDaemon(Daemon):
         for a caller to supply, the daemon reads its own disk."""
         request = aprilcam_v2_pb2.ResetCameraConfigRequest(camera=camera)
         self._call(self._stub.ResetCameraConfig, request)
+
+    def close_camera(self, camera: str, force: bool = False) -> None:
+        """Release *camera*'s device (sprint 047 ticket 007);
+        ``daemon.interfaces.Daemon.close_camera``'s RPC face. Raises
+        ``CameraInUse`` (reconstructed from the wire) when refused."""
+        request = aprilcam_v2_pb2.CloseCameraRequest(camera=camera, force=force)
+        self._call(self._stub.CloseCamera, request)
 
     def get_camera_config(self, camera: str) -> CameraConfig:
         request = aprilcam_v2_pb2.GetCameraConfigRequest(camera=camera)

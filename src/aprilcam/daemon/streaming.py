@@ -211,11 +211,12 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Iterator, Optional, Tuple
 
 import cv2 as cv
+import numpy as np
 import queue
 
 from aprilcam.calibration.calibration import Calibration
 from aprilcam.calibration.deskew import Deskewer
-from aprilcam.camera.interfaces import Camera
+from aprilcam.camera.interfaces import Camera, CameraLifecycle
 from aprilcam.config.interfaces import PlayfieldDefinition
 from aprilcam.daemon.broadcast import DEFAULT_SUBSCRIBER_QUEUE_DEPTH, Broadcaster
 from aprilcam.daemon.detection import DetectionEngine
@@ -407,6 +408,11 @@ class TagStreamProducer:
 
         self._last_publish_at: Optional[float] = None
         self._last_published_positions: Dict[TagId, _Position] = {}
+        #: Whether the last tick found the camera not PRESENT (sprint 047
+        #: ticket 005); drives the absent-heartbeat cadence and the
+        #: immediate publish when the camera comes back.
+        self._was_absent = False
+        self._last_frame_index = 0
 
         self.broadcaster: "Broadcaster[TagFrame]" = (
             broadcaster
@@ -476,6 +482,14 @@ class TagStreamProducer:
     def _run(self) -> None:
         while not self._stop.is_set():
             tick_start = self._clock()
+            tag_frame = None
+            if self._camera.lifecycle is not CameraLifecycle.PRESENT:
+                # Camera gone (unplugged / reopening): do not read it.
+                # Keep the stream alive with an explicit "absent"
+                # heartbeat instead of going silent.
+                self._publish_absent()
+                self._wait_remaining(tick_start)
+                continue
             try:
                 tag_frame = self._detection.run_burst(self._slug, self._camera)
             except RuntimeError:
@@ -492,15 +506,45 @@ class TagStreamProducer:
             if tag_frame is not None:
                 self._maybe_publish(tag_frame)
 
-            elapsed = self._clock() - tick_start
-            remaining = self._interval_s - elapsed
-            if remaining > 0:
-                self._wait(self._stop, remaining)
+            self._wait_remaining(tick_start)
+
+    def _wait_remaining(self, tick_start: float) -> None:
+        remaining = self._interval_s - (self._clock() - tick_start)
+        if remaining > 0:
+            self._wait(self._stop, remaining)
+
+    def _publish_absent(self) -> None:
+        """Publish a ``camera_absent`` heartbeat: at once on the first
+        absent tick, then every heartbeat interval."""
+        now = self._clock()
+        since_publish = (
+            now - self._last_publish_at if self._last_publish_at is not None else math.inf
+        )
+        if self._was_absent and since_publish < self._heartbeat_interval_s:
+            return
+        self._was_absent = True
+        self._last_publish_at = now
+        self._last_published_positions = {}
+        self.broadcaster.publish(
+            TagFrame(
+                tags=(),
+                timestamp=time.time(),
+                frame_index=self._last_frame_index,
+                camera_absent=True,
+            )
+        )
 
     # -- change-driven / rate-capped / heartbeat publish decision ---------
 
     def _maybe_publish(self, tag_frame: TagFrame) -> None:
         now = self._clock()
+        self._last_frame_index = tag_frame.frame_index
+        if self._was_absent:
+            # Camera is back: say so immediately rather than waiting for
+            # a change or the next heartbeat.
+            self._was_absent = False
+            self._publish(tag_frame, self._positions_for(tag_frame), now)
+            return
         positions = self._positions_for(tag_frame)
         since_publish = (
             now - self._last_publish_at if self._last_publish_at is not None else math.inf
@@ -717,6 +761,7 @@ class ImageStreamProducer:
         clock: Callable[[], float] = time.monotonic,
         wait: Callable[[threading.Event, float], bool] = _default_wait,
         stop_timeout_s: float = 2.0,
+        placeholder_source: Optional[Callable[..., np.ndarray]] = None,
     ) -> None:
         if deskewed and (
             calibration_lookup is None or playfield_lookup is None or annotations_lookup is None
@@ -733,6 +778,12 @@ class ImageStreamProducer:
         self._playfield_lookup = playfield_lookup
         self._annotations_lookup = annotations_lookup
         self._deskewer_factory = deskewer_factory
+        #: ``source(size=..., last_size=...) -> BGR array``: the "NO
+        #: SIGNAL" card published while the camera delivers no frames
+        #: (sprint 047 ticket 005). ``None`` keeps the old behaviour of
+        #: skipping the tick.
+        self._placeholder_source = placeholder_source
+        self._last_size: Optional[Tuple[int, int]] = None
         self._interval_s = interval_s
         self._clock = clock
         self._wait = wait
@@ -853,16 +904,30 @@ class ImageStreamProducer:
                 )
                 return
 
-        frame = self._camera.read()
+        # A non-PRESENT camera is not read at all (no reopen budget burnt).
+        frame = (
+            self._camera.read()
+            if self._camera.lifecycle is CameraLifecycle.PRESENT
+            else None
+        )
+        placeholder = frame is None
         if frame is None:
-            logger.debug("image stream producer %s: no frame available this tick", self._slug)
-            return
+            if self._placeholder_source is None:
+                logger.debug(
+                    "image stream producer %s: no frame available this tick", self._slug
+                )
+                return
+            card_size = deskew_ctx.deskewer.output_size if deskew_ctx is not None else None
+            frame = self._placeholder_source(size=card_size, last_size=self._last_size)
+        elif deskew_ctx is None:
+            self._last_size = (frame.shape[1], frame.shape[0])
 
         calibration = self._calibration_lookup(self._slug) if self._calibration_lookup else None
         calibration_stale = calibration.stale if calibration is not None else False
 
         if deskew_ctx is not None:
-            image = deskew_ctx.deskewer.deskew(frame)
+            # The card is already at the deskewed output size.
+            image = frame if placeholder else deskew_ctx.deskewer.deskew(frame)
             px_per_cm: Optional[float] = deskew_ctx.deskewer.px_per_cm
             world_extent: Optional[Tuple[float, float]] = deskew_ctx.deskewer.world_extent
             assert self._annotations_lookup is not None  # guaranteed by __init__'s guard
@@ -892,9 +957,10 @@ class ImageStreamProducer:
             deskewed=self._deskewed,
             px_per_cm=px_per_cm,
             world_extent=world_extent,
-            tags=self._detection.latest(self._slug),
+            tags=None if placeholder else self._detection.latest(self._slug),
             annotations=annotations,
             calibration_stale=calibration_stale,
+            placeholder=placeholder,
         )
         self.broadcaster.publish(image_frame)
 

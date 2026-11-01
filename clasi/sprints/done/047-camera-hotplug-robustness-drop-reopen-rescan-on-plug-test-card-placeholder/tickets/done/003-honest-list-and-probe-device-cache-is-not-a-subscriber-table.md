@@ -1,7 +1,7 @@
 ---
 id: '003'
 title: 'Honest list and probe: device cache is not a subscriber table'
-status: open
+status: done
 use-cases:
 - SUC-001
 - SUC-003
@@ -35,10 +35,10 @@ PresenceSource, not `held.state`.
 
 ## Acceptance Criteria
 
-- [ ] A cached idle camera is probed normally.
-- [ ] A streaming camera is not reopened by probe but reported with true presence.
-- [ ] `camera list` reflects current enumeration for held cameras within ~2 s.
-- [ ] Probe during a live stream does not disturb frames.
+- [x] A cached idle camera is probed normally.
+- [x] A streaming camera is not reopened by probe but reported with true presence.
+- [x] `camera list` reflects current enumeration for held cameras within ~2 s.
+- [x] Probe during a live stream does not disturb frames.
 
 ## Testing
 

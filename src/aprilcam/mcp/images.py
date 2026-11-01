@@ -69,7 +69,7 @@ def _mime_type(encoding: str) -> str:
 
 
 def image_response(
-    data: bytes, *, encoding: str, format: str, temp_dir: Path
+    data: bytes, *, encoding: str, format: str, temp_dir: Path, placeholder: bool = False
 ) -> Union[ImageContent, TextContent]:
     """Shape already-encoded *data* into the MCP content *format* asks
     for.
@@ -79,6 +79,9 @@ def image_response(
     nothing touches disk. ``format="file"`` writes *data* unchanged to a
     new file under *temp_dir* and returns a :class:`~mcp.types.TextContent`
     whose text is *only* that path — no bytes, no extra metadata. Any
+    The returned block's ``_meta`` always carries ``{"placeholder":
+    <bool>}`` (sprint 047) so a caller can tell a daemon-served NO SIGNAL
+    test card from a real camera frame without inspecting pixels. Any
     other *format* raises ``ValueError`` naming the two valid values; a
     calling tool's own error-mapping (``mcp/errors.py``) turns that into
     a normal tool-level error like any other bad input, same as every
@@ -86,10 +89,15 @@ def image_response(
     """
     if format == "base64":
         encoded = base64.b64encode(data).decode("ascii")
-        return ImageContent(type="image", data=encoded, mimeType=_mime_type(encoding))
+        return ImageContent(
+            type="image",
+            data=encoded,
+            mimeType=_mime_type(encoding),
+            _meta={"placeholder": placeholder},
+        )
     if format == "file":
         suffix = f".{encoding.lower()}" if encoding else ""
         path = temp_dir / f"aprilcam-{uuid.uuid4().hex}{suffix}"
         path.write_bytes(data)
-        return TextContent(type="text", text=str(path))
+        return TextContent(type="text", text=str(path), _meta={"placeholder": placeholder})
     raise ValueError(f'format must be "base64" or "file", got {format!r}')

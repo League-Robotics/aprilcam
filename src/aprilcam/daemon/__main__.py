@@ -24,19 +24,22 @@ import functools
 import logging
 import os
 import signal
+import sys
 import threading
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 from aprilcam.camera.camera import Camera
 from aprilcam.camera.discovery import CameraDiscovery
+from aprilcam.camera.interfaces import PresenceSource
+from aprilcam.camera.presence import LinuxSysfsPresenceSource, MacosAvfPresenceSource
 from aprilcam.camera.registry import CameraRegistry
 from aprilcam.config.directories import DEFAULT_DAEMON_PORT, Directories
 from aprilcam.config.loader import ConfigLoader
 from aprilcam.daemon.lifecycle import SOCKET_FILENAME, DaemonLifecycle
 from aprilcam.daemon.mdns import MdnsAdvertiser
 from aprilcam.daemon.rpc import build_server, build_stream_transport
-from aprilcam.daemon.service import DaemonService
+from aprilcam.daemon.service import DEFAULT_IDLE_CLOSE_S, DaemonService
 
 __all__ = ["build", "main"]
 
@@ -113,18 +116,34 @@ def build(
     # instead of assuming a held-open camera is healthy.
     held_cameras: Dict[str, Camera] = {}
     registry = CameraRegistry(directories.state_dir / "cameras")
+    # Sprint 047: on Linux, a fast /sys poll notices held cameras
+    # vanishing/returning; the service drops/reopens them.
+    # On macOS the equivalent is an AVFoundation listing, which only sees
+    # hotplug while main() pumps the main run loop (_wait_for_shutdown).
+    presence_source: Optional[PresenceSource] = None
+    if sys.platform.startswith("linux"):
+        presence_source = LinuxSysfsPresenceSource()
+    elif sys.platform == "darwin":
+        presence_source = MacosAvfPresenceSource()
+    service_ref: List[DaemonService] = []
     discovery = CameraDiscovery(
         registry,
-        active_camera_state=lambda slug: (
-            held_cameras[slug].state if slug in held_cameras else None
-        ),
+        # "In use" means a live stream subscriber or an in-flight read,
+        # not merely "cached" (sprint 047 ticket 003).
+        active_camera_state=lambda slug: service_ref[0].active_camera_state(slug),
+        probe_held=lambda slug: service_ref[0].probe_held_camera(slug),
+        presence_source=presence_source,
+        on_presence=lambda slug, present: service_ref[0].on_hardware_presence(slug, present),
     )
     service = DaemonService(
         registry=registry,
         discovery=discovery,
         directories=directories,
         cameras=held_cameras,
+        idle_close_s=_idle_close_seconds(),
     )
+
+    service_ref.append(service)
 
     _load_config_dir(service, directories)
 
@@ -194,6 +213,28 @@ def build(
         lock_path=lock_path,
         socket_path=socket_path,
     )
+
+
+IDLE_CLOSE_ENV = "APRILCAM_IDLE_CLOSE_S"
+
+
+def _idle_close_seconds() -> float:
+    """Idle-close timeout from ``APRILCAM_IDLE_CLOSE_S`` (seconds; ``0``
+    disables; default 60). A malformed or negative value is logged and
+    ignored in favour of the default -- a typo must not stop the daemon."""
+    raw = os.environ.get(IDLE_CLOSE_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_IDLE_CLOSE_S
+    try:
+        value = float(raw)
+    except ValueError:
+        value = -1.0
+    if value < 0:
+        logging.getLogger(__name__).warning(
+            "ignoring invalid %s=%r; using %.0fs", IDLE_CLOSE_ENV, raw, DEFAULT_IDLE_CLOSE_S
+        )
+        return DEFAULT_IDLE_CLOSE_S
+    return value
 
 
 def _load_config_dir(service: DaemonService, directories: Directories) -> None:
@@ -277,6 +318,39 @@ def configure_logging(state_dir: Path) -> Path:
     return log_path
 
 
+def _pump_main_run_loop(seconds: float) -> None:
+    """Run the main thread's NSRunLoop for up to *seconds* (macOS)."""
+    from Foundation import NSDate, NSRunLoop  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    NSRunLoop.mainRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(seconds))
+
+
+def _wait_for_shutdown(
+    shutdown: threading.Event,
+    *,
+    platform: str = sys.platform,
+    pump: Callable[[float], None] = _pump_main_run_loop,
+    slice_s: float = 0.1,
+) -> None:
+    """Block the main thread until *shutdown* is set.
+
+    On macOS, AVFoundation delivers camera connect/disconnect to the
+    main thread's run loop, and enumeration from worker threads never
+    sees them (sprint 047 ticket 008), so the main thread must spend its
+    wait pumping that loop instead of sleeping. Signal handlers still run
+    between slices. If pumping is unavailable (no pyobjc), fall back to a
+    plain wait.
+    """
+    if platform == "darwin":
+        try:
+            while not shutdown.is_set():
+                pump(slice_s)
+            return
+        except ImportError:
+            logger.warning("aprilcamd: pyobjc unavailable; macOS hotplug will not be seen")
+    shutdown.wait()
+
+
 def main() -> None:
     """Block until SIGTERM/SIGINT, mirroring v1's ``DaemonServer.run()``
     wait-for-shutdown loop. ``lifecycle.start()`` acquires the singleton
@@ -310,7 +384,7 @@ def main() -> None:
         # directly instead.
         logger.debug("aprilcamd: signal handlers not installed (non-main thread)")
 
-    shutdown.wait()
+    _wait_for_shutdown(shutdown)
     lifecycle.stop()
     logger.info("aprilcamd: goodbye")
 

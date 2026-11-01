@@ -68,9 +68,11 @@ camera *at most once*: the first successful open is cached in
 ``self._cameras`` and reused for every subsequent call, which is what
 lets ``Camera``'s self-heal (5 consecutive failures -> reopen, capped
 at 10) actually accumulate state across calls rather than resetting on
-every request. This cache **is** the daemon's live-subscriber table:
-:meth:`active_slugs` exposes its keys, and ``daemon/__main__.py`` wires
-the same ``self._cameras`` dict object into ``CameraDiscovery`` as the
+every request. This cache is a *device* cache, not a subscriber table (sprint 047
+ticket 003 -- "in use" means a live stream subscriber or an in-flight
+read, see :meth:`is_in_use`): :meth:`active_slugs` exposes its keys, and
+``daemon/__main__.py`` wires :meth:`active_camera_state` (which answers
+``None`` for a cached-but-idle camera) into ``CameraDiscovery`` as the
 ``active_camera_state`` callback (``camera/discovery.py``'s
 constructor; ticket 003 left this defaulting to "nothing is active"
 and named this exact wiring as this ticket's job) so
@@ -120,6 +122,7 @@ from aprilcam.camera.backends.opencv_backend import OpenCVBackend
 from aprilcam.camera.backends.uvc_util import UvcUtilBackend
 from aprilcam.camera.backends.worker_backend import WorkerBackend
 from aprilcam.camera.camera import FLATFIELD_FILENAME, Camera
+from aprilcam.camera.interfaces import CameraLifecycle
 from aprilcam.camera.discovery import CameraDiscovery
 from aprilcam.camera.identity import CameraIdentity, resolve_all
 from aprilcam.camera.registry import CameraRecord, CameraRegistry
@@ -129,7 +132,15 @@ from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitio
 from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
 from aprilcam.daemon.broadcast import Broadcaster
 from aprilcam.daemon.detection import DetectionEngine
-from aprilcam.daemon.interfaces import Daemon, DaemonStatus, ImageStream, MountRegistration, TagStream
+from aprilcam.daemon.interfaces import (
+    Daemon,
+    DaemonStatus,
+    ImageStream,
+    MountRegistration,
+    PlaceholderRenderer,
+    TagStream,
+)
+from aprilcam.daemon.testcard import CvPlaceholderRenderer, resolve_size
 from aprilcam.intrinsics.interfaces import IntrinsicsFinishResult, IntrinsicsStatus
 from aprilcam.intrinsics.manager import IntrinsicsManager
 from aprilcam.intrinsics.target import ChArUcoTargetObserver
@@ -141,6 +152,7 @@ from aprilcam.daemon.streaming import (
 )
 from aprilcam.errors import (
     AnnotationLimitExceeded,
+    CameraInUse,
     CameraNotPresent,
     NoFieldMask,
     NotCalibrated,
@@ -205,6 +217,18 @@ CONTROL_READBACK_INTERVAL_S = 15.0
 #: (a real close()+open() cycle against actual hardware is not free, and a
 #: camera that is still unplugged will simply fail again every time).
 STALLED_CAMERA_RETRY_INTERVAL_S = 60.0
+
+#: Default idle-close timeout (seconds, sprint 047 ticket 007): a held
+#: camera with no stream subscriber, no tag/detection loop, no active
+#: intrinsics session and no read for this long has its device released
+#: (lifecycle CLOSED) so other processes and USB bandwidth can use it; it
+#: reopens transparently on next use. ``0`` disables idle close. The
+#: daemon reads ``APRILCAM_IDLE_CLOSE_S`` (``daemon/__main__.py``) and
+#: passes it as ``DaemonService(idle_close_s=...)``. The reaper runs on
+#: the control watchdog's tick (:data:`CONTROL_READBACK_INTERVAL_S`), so a
+#: camera closes between ``idle_close_s`` and ``idle_close_s`` plus one
+#: tick after its last use.
+DEFAULT_IDLE_CLOSE_S = 60.0
 
 #: Name of the one shared mount-registry file under ``<state_dir>/mounts/``
 #: (ticket 036-007) -- ``camera/registry.py``'s ``<state_dir>/cameras/
@@ -589,8 +613,29 @@ class DaemonService(Daemon):
         config_loader: Optional[ConfigLoaderIface] = None,
         flatfield_capturer: Optional[FlatFieldCapturer] = None,
         flatfield_detector_factory: Callable[[], TagDetector] = TagDetector,
+        placeholder_renderer: Optional[PlaceholderRenderer] = None,
+        idle_close_s: Optional[float] = DEFAULT_IDLE_CLOSE_S,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._registry = registry
+        #: Idle-close timeout in seconds (``None``/``0`` = never) and the
+        #: injectable clock the reaper reads (sprint 047 ticket 007).
+        self._idle_close_s = idle_close_s
+        self._clock = clock
+        #: slug -> clock reading of the last time the camera was used or
+        #: seen busy; the idle reaper's only state.
+        self._last_used: Dict[str, float] = {}
+        #: Serialises waking a CLOSED camera so concurrent first requests
+        #: reopen the device once.
+        self._wake_lock = threading.Lock()
+        #: Renders the "NO SIGNAL" card served in place of frames while a
+        #: camera is not delivering them (sprint 047 ticket 005).
+        self._placeholder_renderer: PlaceholderRenderer = (
+            placeholder_renderer if placeholder_renderer is not None else CvPlaceholderRenderer()
+        )
+        #: slug -> ``(width, height)`` of the last real frame
+        #: :meth:`get_frame` served; the card's "last opened" size.
+        self._frame_sizes: Dict[str, Tuple[int, int]] = {}
         self._discovery = discovery
         self._directories = directories
         self._cameras: Dict[str, Camera] = cameras if cameras is not None else {}
@@ -683,6 +728,9 @@ class DaemonService(Daemon):
         # never restarted).
         self._image_stream_producers: Dict[Tuple[str, bool], ImageStreamProducer] = {}
         self._lock = threading.Lock()
+        # Serialises first-open in _camera_for: two streams (image + tag)
+        # subscribing to a cold camera at once must not both open the device.
+        self._open_lock = threading.RLock()
         self._lens_store = LensStore(self._directories.state_dir)
         self._calibrator = calibrator if calibrator is not None else Calibrator(
             get_camera_config=self._camera_config_for_calibration,
@@ -754,6 +802,151 @@ class DaemonService(Daemon):
         with self._lock:
             return frozenset(self._cameras.keys())
 
+    def is_in_use(self, slug: str) -> bool:
+        """True only when *slug* is actually being used: a live
+        subscriber on its tag stream or either of its image streams, or
+        a read in flight on the held camera. A merely cached (idle)
+        camera is not in use (sprint 047 ticket 003)."""
+        with self._lock:
+            camera = self._cameras.get(slug)
+            producers = [self._tag_stream_producers.get(slug)] + [
+                self._image_stream_producers.get((slug, deskewed))
+                for deskewed in (False, True)
+            ]
+        if camera is not None and camera.reads_in_flight > 0:
+            return True
+        return any(p is not None and p.broadcaster.subscriber_count > 0 for p in producers)
+
+    def _is_busy(self, slug: str) -> bool:
+        """:meth:`is_in_use`, plus an active intrinsics session: nothing
+        that is mid-session may have its device released."""
+        return self.is_in_use(slug) or slug in self._intrinsics.active_slugs()
+
+    def _touch(self, slug: str) -> None:
+        with self._lock:
+            self._last_used[slug] = self._clock()
+
+    def _wake(self, cam: Camera) -> None:
+        """Transparently reopen a CLOSED camera on new use (sprint 047
+        ticket 007). Failure leaves it ABSENT/CLOSED for the caller's
+        existing lifecycle handling."""
+        if cam.lifecycle is not CameraLifecycle.CLOSED:
+            return
+        with self._wake_lock:
+            if cam.lifecycle is CameraLifecycle.CLOSED:
+                cam.reopen()
+
+    def _close_idle_cameras(self) -> Tuple[str, ...]:
+        """Watchdog pass (sprint 047 ticket 007): release every PRESENT
+        held camera idle for ``idle_close_s``. A busy camera (stream
+        subscriber, in-flight read, intrinsics session) has its idle clock
+        restarted instead. Returns the slugs closed."""
+        timeout = self._idle_close_s
+        if not timeout:
+            return ()
+        now = self._clock()
+        with self._lock:
+            held = list(self._cameras.items())
+        closed: List[str] = []
+        for slug, cam in held:
+            if cam.lifecycle is not CameraLifecycle.PRESENT:
+                continue
+            try:
+                if self._is_busy(slug):
+                    self._touch(slug)
+                    continue
+                with self._lock:
+                    last = self._last_used.setdefault(slug, now)
+                if now - last >= timeout and cam.release(only_if_idle=True):
+                    logger.info("camera %s idle for %.0fs: device closed", slug, now - last)
+                    closed.append(slug)
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("idle-closing camera %s failed", slug)
+        return tuple(closed)
+
+    def close_camera(self, camera: str, force: bool = False) -> None:
+        """See ``daemon.interfaces.Daemon.close_camera``.
+
+        Refused (:class:`CameraInUse`) while the camera is busy unless
+        *force*. A forced close sticks: existing subscribers keep their
+        subscription and are served the NO SIGNAL card (their own demand
+        does not reopen it); the next new request (get_frame, a new
+        stream, tags, an intrinsics frame) reopens it transparently. A
+        camera that is not held open, or already ABSENT/CLOSED, has no
+        device to release (no-op)."""
+        record = self._record_for(camera)
+        if record is None:
+            raise UnknownCamera(camera, self._available())
+        with self._lock:
+            cam = self._cameras.get(record.slug)
+        if cam is None or cam.lifecycle is not CameraLifecycle.PRESENT:
+            return
+        if not force and self._is_busy(record.slug):
+            raise CameraInUse(record.slug)
+        cam.release()
+        logger.info("camera %s closed by request%s", record.slug, " (forced)" if force else "")
+
+    def active_camera_state(self, slug: str) -> Optional[CameraState]:
+        """``CameraDiscovery``'s ``active_camera_state`` callback: the
+        held camera's own state if (and only if) it is :meth:`is_in_use`,
+        else ``None`` so probe tests the device normally."""
+        with self._lock:
+            camera = self._cameras.get(slug)
+        if camera is None or not self.is_in_use(slug):
+            return None
+        return camera.state
+
+    def probe_held_camera(self, slug: str) -> Optional[CameraState]:
+        """Probe a held-but-idle camera *through its own handle*.
+
+        Never builds a second backend: the daemon owns the device and a
+        second open fails with EBUSY on Linux, which would misreport the
+        common case as unusable. A camera whose lifecycle is not PRESENT
+        is ``reopen()``ed first; then up to three reads through the held
+        handle decide ``usable``. ``None`` if the slug is not held."""
+        with self._lock:
+            camera = self._cameras.get(slug)
+        if camera is None:
+            return None
+        if camera.lifecycle is CameraLifecycle.CLOSED:
+            return None  # deliberately closed: probe it normally, don't undo the close
+        if camera.lifecycle is not CameraLifecycle.PRESENT:
+            camera.reopen()
+        state = camera.state
+        if state.usable:
+            got_frame = False
+            for _ in range(3):
+                if camera.read() is not None:
+                    got_frame = True
+                    break
+                time.sleep(0.05)
+            if not got_frame:
+                state = replace(state, usable=False)
+        return state
+
+    def on_hardware_presence(self, slug: str, present: bool) -> Optional[bool]:
+        """Presence-watch callback (sprint 047): the hardware key behind
+        *slug* disappeared (``present=False`` -> drop the held camera,
+        marking it ABSENT) or came back on any node (``present=True`` ->
+        reopen it with its full stored config). A slug with no held
+        camera is a no-op (``None``). Returns whether a reopen took, so
+        the watcher can retry; ``None`` for everything else."""
+        with self._lock:
+            camera = self._cameras.get(slug)
+        if camera is None:
+            return None
+        if not present:
+            logger.info("camera %s unplugged: dropping device", slug)
+            camera.drop()
+            return None
+        if camera.lifecycle is CameraLifecycle.CLOSED:
+            # Deliberately closed (idle/explicit): its key reappearing is
+            # not a reason to undo that -- it reopens on next use.
+            return None
+        ok = camera.reopen()
+        logger.info("camera %s back: reopen %s", slug, "ok" if ok else "pending")
+        return ok
+
     # -- daemon.interfaces.Daemon (this sprint's slice) --------------------
 
     def list_cameras(self) -> Tuple[CameraState, ...]:
@@ -804,9 +997,18 @@ class DaemonService(Daemon):
             flatfield_present, flatfield_stale = self._flatfield_flags(record.slug)
             held = self._cameras.get(record.slug)
             if held is not None:
+                # Presence comes from enumeration / the PresenceSource
+                # (known_present), never from the held object's own
+                # opinion of itself; health stays the camera's.
+                held_state = held.state
+                is_present = record.slug in present
+                closed = is_present and held.lifecycle is CameraLifecycle.CLOSED
                 states.append(
                     replace(
-                        held.state,
+                        held_state,
+                        present=is_present,
+                        closed=closed,
+                        usable=is_present if closed else held_state.usable and is_present,
                         playfield=playfield,
                         calibrated=calibrated,
                         calibration_stale=calibration_stale,
@@ -938,17 +1140,21 @@ class DaemonService(Daemon):
         if deskewed:
             return self._get_deskewed_frame(camera, encoding=encoding)
 
-        cam = self._camera_for(camera)
-        frame = cam.read()
+        cam = self._camera_for_frames(camera)
+        frame = self._read_if_present(cam)
+        placeholder = frame is None
+        slug = cam.slug
         if frame is None:
-            raise RuntimeError(f"no frame available from camera {camera!r}")
+            frame = self._placeholder_array(slug, last_size=self._frame_sizes.get(slug))
 
         ok, buf = cv.imencode(_CV_EXTENSION[encoding], frame)
         if not ok:
             raise RuntimeError(f"failed to encode frame from {camera!r} as {encoding}")
 
         height, width = frame.shape[:2]
-        calibration = self.get_calibration(cam.slug)
+        if not placeholder:
+            self._frame_sizes[slug] = (width, height)
+        calibration = self.get_calibration(slug)
         return ImageFrame(
             data=buf.tobytes(),
             width=width,
@@ -956,8 +1162,9 @@ class DaemonService(Daemon):
             encoding=encoding,
             timestamp=time.time(),
             deskewed=False,
-            tags=self._detection.latest(cam.slug),
+            tags=None if placeholder else self._detection.latest(slug),
             calibration_stale=calibration.stale if calibration is not None else False,
+            placeholder=placeholder,
         )
 
     def _get_deskewed_frame(self, camera: str, *, encoding: str) -> ImageFrame:
@@ -1013,17 +1220,21 @@ class DaemonService(Daemon):
                 f"{calibration.playfield!r}, which this daemon no longer holds"
             )
 
-        cam = self._camera_for(camera)
-        frame = cam.read()
-        if frame is None:
-            raise RuntimeError(f"no frame available from camera {camera!r}")
-
         deskewer = Deskewer(
             calibration=calibration,
             width_cm=definition.width_cm,
             height_cm=definition.height_cm,
         )
-        warped = deskewer.deskew(frame)
+        cam = self._camera_for_frames(camera)
+        frame = self._read_if_present(cam)
+        placeholder = frame is None
+        if frame is None:
+            # No signal: the card at the deskewed output size, so the
+            # frame keeps its geometry metadata and consumers needn't
+            # special-case the size. ``placeholder`` says it is not real.
+            warped = self._placeholder_array(slug, size=deskewer.output_size)
+        else:
+            warped = deskewer.deskew(frame)
 
         ok, buf = cv.imencode(_CV_EXTENSION[encoding], warped)
         if not ok:
@@ -1039,10 +1250,57 @@ class DaemonService(Daemon):
             deskewed=True,
             px_per_cm=deskewer.px_per_cm,
             world_extent=deskewer.world_extent,
-            tags=self._detection.latest(cam.slug),
+            tags=None if placeholder else self._detection.latest(slug),
             annotations=self.get_annotations(calibration.playfield),
             calibration_stale=calibration.stale,
+            placeholder=placeholder,
         )
+
+    # -- placeholder ("NO SIGNAL" card) support (sprint 047 ticket 005) ------
+
+    def _camera_for_frames(self, token: str) -> Camera:
+        """:meth:`_camera_for` with ``allow_absent``: frame and stream
+        requests get a (possibly ABSENT) camera, never
+        :class:`CameraNotPresent`; ``UnknownCamera`` still propagates."""
+        return self._camera_for(token, allow_absent=True)
+
+    @staticmethod
+    def _read_if_present(cam: Camera) -> Optional[np.ndarray]:
+        """A real frame, or ``None`` when the camera is missing or not
+        PRESENT. A non-PRESENT camera is never read: the card is served
+        immediately, without burning self-heal/reopen budget or blocking
+        on a dead handle."""
+        if cam.lifecycle is not CameraLifecycle.PRESENT:
+            return None
+        return cam.read()
+
+    def _configured_frame_size(self, slug: str) -> Optional[Tuple[int, int]]:
+        with self._lock:
+            config = self._camera_configs.get(slug)
+        if config is None:
+            return None
+        width = config.settings.get("frame_width")
+        height = config.settings.get("frame_height")
+        if isinstance(width, (int, float)) and isinstance(height, (int, float)) and width and height:
+            return int(width), int(height)
+        return None
+
+    def _placeholder_array(
+        self,
+        slug: str,
+        *,
+        size: Optional[Tuple[int, int]] = None,
+        last_size: Optional[Tuple[int, int]] = None,
+    ) -> np.ndarray:
+        """The "NO SIGNAL" card for *slug* as a BGR array. *size* is an
+        exact size (a deskewed output); otherwise the configured frame
+        size, else *last_size*, else the 1280x720 default. The array is
+        the renderer's cached, read-only one -- never drawn on."""
+        if size is None:
+            size = resolve_size(self._configured_frame_size(slug), last_size)
+        record = self._record_for(slug)
+        number = record.number if record is not None else 0
+        return self._placeholder_renderer.render(size[0], size[1], number, slug)
 
     def get_tags(self, camera: str) -> TagFrame:
         """See ``daemon.interfaces.Daemon.get_tags``.
@@ -1058,6 +1316,8 @@ class DaemonService(Daemon):
         pin).
         """
         cam = self._camera_for(camera)
+        if cam.lifecycle is not CameraLifecycle.PRESENT:
+            raise CameraNotPresent(cam.slug)
         return self._detection.run_burst(cam.slug, cam)
 
     def get_tag(self, camera: str, tag: TagId) -> Optional[TagRecord]:
@@ -1138,7 +1398,7 @@ class DaemonService(Daemon):
         -- this method does no lifecycle management of its own beyond
         constructing the producer once and subscribing to it.
         """
-        cam = self._camera_for(camera)
+        cam = self._camera_for(camera, allow_absent=True)
         producer = self._tag_stream_producer_for(cam.slug, cam)
         subscriber_queue = producer.broadcaster.subscribe()
         return BroadcasterTagStream(producer.broadcaster, subscriber_queue)
@@ -1209,7 +1469,7 @@ class DaemonService(Daemon):
         (``view.viewer``'s "raw means raw" contract) -- so it keeps the
         original, simpler wiring.
         """
-        cam = self._camera_for(camera)
+        cam = self._camera_for(camera, allow_absent=True)
         if deskewed:
             calibration = self.get_calibration(cam.slug)
             if calibration is None:
@@ -1228,11 +1488,30 @@ class DaemonService(Daemon):
                 producer = (
                     self._build_deskewed_image_producer(cam)
                     if deskewed
-                    else ImageStreamProducer(cam.slug, cam, self._detection)
+                    else ImageStreamProducer(
+                        cam.slug,
+                        cam,
+                        self._detection,
+                        placeholder_source=self._placeholder_source_for(cam.slug),
+                    )
                 )
                 self._image_stream_producers[key] = producer
         subscriber_queue = producer.broadcaster.subscribe()
         return BroadcasterImageStream(producer.broadcaster, subscriber_queue)
+
+    def _placeholder_source_for(
+        self, slug: str
+    ) -> Callable[..., np.ndarray]:
+        """The card source an :class:`ImageStreamProducer` calls (as
+        ``source(size=..., last_size=...)``) while its camera is not
+        delivering frames."""
+
+        def source(
+            *, size: Optional[Tuple[int, int]] = None, last_size: Optional[Tuple[int, int]] = None
+        ) -> np.ndarray:
+            return self._placeholder_array(slug, size=size, last_size=last_size)
+
+        return source
 
     def _build_deskewed_image_producer(self, cam: Camera) -> ImageStreamProducer:
         """Builds the deskewed ``ImageStreamProducer`` for *cam*, wired
@@ -1313,6 +1592,7 @@ class DaemonService(Daemon):
             calibration_lookup=self.get_calibration,
             playfield_lookup=self._playfield_for_calibration,
             annotations_lookup=self.get_annotations,
+            placeholder_source=self._placeholder_source_for(slug),
         )
         return image_producer
 
@@ -2280,6 +2560,17 @@ class DaemonService(Daemon):
         as the new sibling trigger."""
         self._mark_stale(slug)
         self._mark_flatfield_stale(slug)
+        # A camera first brought up from the ABSENT-never-opened state has
+        # no applied settings of its own; give it the config the service
+        # holds (a push that arrived while it was unplugged).
+        with self._lock:
+            cam = self._cameras.get(slug)
+            config = self._camera_configs.get(slug)
+        if cam is not None and config is not None and not cam.applied_settings:
+            try:
+                cam.apply_config(config)
+            except Exception as exc:
+                logger.warning("%s: applying held config after first open failed: %s", slug, exc)
 
     def _camera_config_for_calibration(self, camera: str) -> Optional[CameraConfig]:
         """``Calibrator``'s ``get_camera_config`` callable -- a locked
@@ -2850,7 +3141,16 @@ class DaemonService(Daemon):
 
     # -- internals -----------------------------------------------------
 
-    def _camera_for(self, token: str) -> Camera:
+    def _camera_for(self, token: str, *, allow_absent: bool = False) -> Camera:
+        """Serialised :meth:`_camera_for_unlocked`: concurrent first
+        requests (image + tag stream on a cold daemon) would otherwise
+        both open the device and the loser fails with "failed to open
+        camera at index N". The second caller re-checks the held map
+        under the lock and reuses the first caller's camera."""
+        with self._open_lock:
+            return self._camera_for_unlocked(token, allow_absent=allow_absent)
+
+    def _camera_for_unlocked(self, token: str, *, allow_absent: bool = False) -> Camera:
         """The held-open ``Camera`` addressed by *token*, opening it on
         first use.
 
@@ -2941,11 +3241,24 @@ class DaemonService(Daemon):
         exactly like a live push would; :attr:`_cameras` is only updated
         after this succeeds, so a camera that fails to apply its stored
         config is not left half-registered as held-open.
+
+        **``allow_absent`` (sprint 047 ticket 005).** For the frame and
+        stream paths, which answer an unplugged camera with the "NO
+        SIGNAL" card: a registered camera that is not enumerated is
+        built anyway, with its backend unopened, dropped into ABSENT and
+        held like any other camera (``Camera.drop()`` on an unopened
+        backend is a no-op close). Every existing producer then attaches
+        to it unchanged, and the camera comes up through the same paths
+        a dropped camera does -- ``on_hardware_presence`` -> ``reopen()``
+        (Linux presence watch) or the watchdog's
+        :meth:`_reopen_absent_cameras` pass -- which re-resolves the index
+        through the backend's resolver and re-applies stored config. Only
+        an unknown camera still raises.
         """
         with self._lock:
             existing = self._cameras.get(token)
         if existing is not None:
-            return existing
+            return self._use(existing)
 
         record = self._record_for(token)
         if record is None:
@@ -2954,11 +3267,14 @@ class DaemonService(Daemon):
         with self._lock:
             existing = self._cameras.get(record.slug)
         if existing is not None:
-            return existing
+            return self._use(existing)
 
         index = self._index_for(record)
+        absent = index is None
         if index is None:
-            raise CameraNotPresent(record.slug)
+            if not allow_absent:
+                raise CameraNotPresent(record.slug)
+            index = 0  # never opened with this; the backend's resolver finds the real one
 
         capture_backend = resolve_capture_backend(
             record.hardware_key,
@@ -3008,6 +3324,11 @@ class DaemonService(Daemon):
             on_reopen=lambda: self._on_camera_reopen(record.slug),
             flatfield_path=self._flatfield_path_for(record.slug),
         )
+        if absent:
+            cam.drop()
+            with self._lock:
+                held = self._cameras.setdefault(record.slug, cam)
+            return self._use(held)
         cam.open()
         with self._lock:
             config = self._camera_configs.get(record.slug)
@@ -3015,6 +3336,13 @@ class DaemonService(Daemon):
             cam.apply_config(config)
         with self._lock:
             self._cameras[record.slug] = cam
+        return self._use(cam)
+
+    def _use(self, cam: Camera) -> Camera:
+        """A request is using *cam*: restart its idle clock and wake it
+        if CLOSED (sprint 047 ticket 007)."""
+        self._touch(cam.slug)
+        self._wake(cam)
         return cam
 
     def _config_path_for(self, slug: str) -> Path:
@@ -3094,6 +3422,28 @@ class DaemonService(Daemon):
             )
         return tuple(stalled)
 
+    def _reopen_absent_cameras(self) -> Tuple[str, ...]:
+        """Watchdog pass (sprint 047 ticket 005): reopen every ABSENT
+        held camera whose hardware is enumerated again. The platform-
+        independent backstop for ``on_hardware_presence`` (Linux-only
+        sysfs watch), and the only way a camera held while never opened
+        comes up on macOS. Returns the slugs that came back."""
+        with self._lock:
+            held = list(self._cameras.items())
+        back: List[str] = []
+        for slug, cam in held:
+            if cam.lifecycle is not CameraLifecycle.ABSENT:
+                continue
+            try:
+                record = self._record_for(slug)
+                if record is None or self._index_for(record) is None:
+                    continue
+                if cam.reopen():
+                    back.append(slug)
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("reopening absent camera %s failed", slug)
+        return tuple(back)
+
     def _retry_exhausted_cameras(self) -> Tuple[str, ...]:
         """One watchdog pass giving every *exhausted* held-open camera
         (``Camera.state.usable`` stuck ``False`` -- its
@@ -3171,6 +3521,8 @@ class DaemonService(Daemon):
                 self.reassert_controls()
                 self.check_stalled_cameras()
                 self._retry_exhausted_cameras()
+                self._reopen_absent_cameras()
+                self._close_idle_cameras()
 
         thread = threading.Thread(target=_loop, name="aprilcam-control-watchdog", daemon=True)
         self._watchdog_stop = stop

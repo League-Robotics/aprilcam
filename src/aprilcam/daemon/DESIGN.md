@@ -144,3 +144,72 @@ Error mapping (`rpc.py`'s `_STATUS_CODES`/`_abort`): `AlreadyRunning`→`ALREADY
 - **Corner-order equivalence between OpenCV's native detector output and `design.md`'s boundary convention is asserted from empirical verification, not enforced by a runtime check.** If a future tag family or OpenCV version ever changes native corner ordering, `_pixel_corners`' zero-permutation pass-through would silently produce wrong geometry with no test catching it structurally (only fixture-based regression tests would notice).
 - **The not-currently-enumerated-vs-budget-exhausted distinction for reopen (sprint 039) is a ticket-level decision, not fully specified here.** See `camera-DESIGN.md`'s own Open Questions for the two candidate mechanics (a budget-neutral `Camera` path vs. an independent identity poll in `check_stalled_cameras`); this file does not pick one, since either satisfies the stakeholder-fixed "never a stale index" contract equally well from `daemon/`'s side.
 - **Per-camera `DetectorConfig` tuning (ticket 035-001) now has exactly one real entry, for one known real-hardware quirk.** `detection._DETECTOR_CONFIG_OVERRIDES: Dict[str, DetectorConfig]` lets `_default_detector_factory` hand back a differently-tuned `TagDetector` for one camera slug without touching any other. `arducam-ov9281-usb-camera` ("camera 5") missed AprilTag 1 on 1-3 of 10 real polls at night exposures per the source issue (`apriltag-1-detects-unreliably-on-arducam-ov9281-usb-camera.md`), while all 10 ArUco markers on the same frames decoded on effectively every poll. Ticket 035-002's reopened session ran seven independent real sweeps against the physical camera (`tests/aprilcam/daemon/test_detector_tuning_hardware.py`, `docs/knowledge/2026-08-23-camera-5-detector-tuning-blocked-by-sandbox-camera-permission.md`) and found loosening the three AprilTag-quad earned constants (`april_min_wb_diff`/`april_min_cluster_pixels`/`april_max_line_fit_mse`) hit AprilTag 1 in 70/70 real bursts vs. the default's 46/50 (92%), with no additional ArUco-recall cost beyond what the *default* config already exhibits. Every other camera slug still falls through to plain `DetectorConfig()` defaults, unchanged. **Open remainder:** every measurement ran in daylight (auto-swept exposure 3-25); the source issue's own 150-500-exposure *night* regime was not re-measured here (forcing that exposure in daylight would blow out the sensor rather than reproduce the condition), so a genuinely dark-room re-run is the one thing this investigation could not confirm.
+
+## Sprint 047: "in use" is a subscriber or an in-flight read
+
+`DaemonService._cameras` is a device cache, not a subscriber table.
+`DaemonService.is_in_use(slug)` is true only with a live subscriber on the
+slug's tag stream or either image stream (Broadcaster `subscriber_count`) or
+a read in flight (`Camera.reads_in_flight`). `active_camera_state(slug)`
+(wired into `CameraDiscovery` in `daemon/__main__.py`) returns the held
+camera's state only when in use, so probe tests a cached idle camera normally
+and never reopens a streaming one. For a streaming camera probe reports
+`present=True` from enumeration and `usable` from the held camera.
+`list_cameras` takes a held camera's `present` from discovery's known-present
+set (kept current by the PresenceSource watch), not from `held.state`;
+`usable` is the held health AND present.
+
+A held-but-idle camera is never probed by a second backend (a second open on
+the same V4L2 node fails EBUSY). `CameraDiscovery(probe_held=...)` is wired to
+`DaemonService.probe_held_camera`, which `reopen()`s a non-PRESENT camera and
+decides `usable` from up to three reads through the held handle. Only
+non-held cameras get the fresh open/close probe.
+
+## Sprint 047: placeholder card instead of "no frame"
+
+While a camera is not PRESENT (unplugged, reopening, never opened but
+registered) or delivers no frame, frame requests are answered with the
+"NO SIGNAL" card (`testcard.py`) rather than an error or silence:
+
+- `GetFrameResponse.placeholder` (additive proto field 13, also carried on
+  image-stream frames) is true for a card, false for a real frame. `get_frame`
+  (raw and deskewed) and image streams resume real frames on their own when
+  the camera returns. Card size: deskewed = the deskewer's output size; raw =
+  configured `frame_width`/`frame_height`, else the last real frame's size,
+  else 1280x720. Embedded `tags` are omitted on a card.
+- A non-PRESENT camera is never read by these paths, so serving the card
+  burns no self-heal/reopen budget and never blocks on a dead handle.
+- `TagFrame.camera_absent` (additive field 5): the tag-stream producer sends
+  an immediate then periodic empty heartbeat with it set while the camera is
+  absent, and publishes the first real frame immediately on return. One-shot
+  `get_tags` on a non-PRESENT camera raises `CameraNotPresent`.
+- Registered-but-unplugged cameras that were never opened: `_camera_for(...,
+  allow_absent=True)` (used by `get_frame`, `stream_images`, `stream_tags`)
+  builds the `Camera` with an unopened backend, `drop()`s it into ABSENT and
+  holds it. Chosen over a separate placeholder producer that hands over on
+  plug-in because the existing producers, presence watch
+  (`on_hardware_presence` -> `reopen()`), stored-config re-apply and
+  list/probe all already work on a held ABSENT camera, so there is one
+  switch-to-real-frames path instead of two. The control watchdog's
+  `_reopen_absent_cameras` pass is the platform-independent backstop (macOS
+  has no presence source). Strict `_camera_for` (calibrate, config calls)
+  still raises `CameraNotPresent`; only an unknown camera raises on the
+  frame and stream paths.
+
+**Idle close and `CloseCamera` (sprint 047 ticket 007).** A held camera with no
+stream subscriber, in-flight read or intrinsics session for
+`APRILCAM_IDLE_CLOSE_S` seconds (default 60, `0` = off, injectable `clock`)
+has its device released: lifecycle CLOSED, handle freed, config kept. The
+reaper (`_close_idle_cameras`) runs on the control-watchdog tick (15 s), so
+closing lags the timeout by up to one tick; a busy camera's idle clock is
+restarted each tick. `_camera_for` touches the clock and transparently
+`reopen()`s a CLOSED camera (full stored config), so get_frame, a new stream,
+tags and intrinsics frames all wake it. CLOSED is distinct from ABSENT: the
+presence watch and `_reopen_absent_cameras` never reopen a CLOSED camera, a
+probe leaves it closed, and an unplug of a CLOSED camera just marks it ABSENT
+without opening. `CloseCamera(camera, force)` is refused with `CameraInUse`
+(FAILED_PRECONDITION) while busy unless `force`; a **forced close sticks** --
+existing subscribers keep their subscription and are served the NO SIGNAL
+card (their own demand does not reopen it) until any new request reopens the
+camera. `CameraState.closed` (proto field 15) lets `camera list` show
+`closed` distinct from `absent`.

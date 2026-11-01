@@ -191,27 +191,7 @@ def held_camera(registry: CameraRegistry):
 @pytest.fixture
 def service(directories, registry, held_camera):
     identity, slug, cam = held_camera
-    cameras: Dict[str, Camera] = {slug: cam}
-    discovery = CameraDiscovery(
-        registry,
-        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
-        identity_source=lambda: {0: identity},
-        backend_factory=lambda index: FakeBackend(),
-    )
-    return DaemonService(
-        registry=registry,
-        discovery=discovery,
-        directories=directories,
-        cameras=cameras,
-        # Headless-safe: without this, DaemonService's own
-        # identity_source defaults to real hardware enumeration
-        # (aprilcam.camera.identity.resolve_all). Only the held camera
-        # is "present" as far as _camera_for's _index_for lookup is
-        # concerned -- anything else registered but not in this dict
-        # is a registered-but-absent camera (CameraNotPresent tests
-        # below).
-        identity_source=lambda: {0: identity},
-    )
+    return _service_with_camera(directories, registry, identity, slug, cam)
 
 
 @pytest.fixture
@@ -247,15 +227,98 @@ def test_active_slugs_reflects_the_held_camera_cache(service, held_camera):
     assert service.active_slugs() == {slug}
 
 
-def test_probe_cameras_skips_the_held_open_camera(service, held_camera):
+def test_probe_cameras_skips_a_camera_with_a_live_subscriber(service, held_camera):
     """UC-25.S-7, wired for real: probe_cameras() must not touch a
-    camera get_frame already holds open."""
+    camera that has a live stream subscriber."""
     _, slug, _ = held_camera
-
-    report = service.probe_cameras()
+    stream = service.stream_images(slug)
+    try:
+        assert service.is_in_use(slug)
+        report = service.probe_cameras()
+    finally:
+        stream.close()
 
     assert len(report.skipped) == 1
     assert report.skipped[0].backend == slug
+    state = next(s for s in report.cameras if s.name == slug)
+    assert state.present is True and state.usable is True
+
+
+def test_probe_cameras_probes_a_cached_idle_camera_through_its_own_handle(
+    directories, registry, held_camera
+):
+    """Sprint 047 ticket 003: a held idle camera is probed via the held
+    Camera -- no second backend is ever constructed on its device (a
+    second open fails EBUSY on Linux)."""
+    identity, slug, cam = held_camera
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+
+    def forbidden(index):
+        raise AssertionError("probe built a second backend on a held device")
+
+    service._discovery._backend_factory = forbidden
+    assert not service.is_in_use(slug)
+    assert service.active_camera_state(slug) is None
+
+    report = service.probe_cameras()
+
+    state = next(s for s in report.cameras if s.name == slug)
+    assert state.present is True and state.usable is True
+
+
+def test_probe_of_a_held_idle_camera_reopens_a_dropped_one(directories, registry, held_camera):
+    identity, slug, cam = held_camera
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    cam.drop()
+    service._discovery._backend_factory = lambda i: (_ for _ in ()).throw(
+        AssertionError("second backend")
+    )
+
+    state = next(s for s in service.probe_cameras().cameras if s.name == slug)
+
+    assert state.present is True
+    assert cam.lifecycle.value == "present"
+
+
+def test_in_use_ends_when_the_last_subscriber_leaves(service, held_camera):
+    _, slug, _ = held_camera
+    stream = service.stream_tags(slug)
+    assert service.is_in_use(slug)
+    stream.close()
+    assert not service.is_in_use(slug)
+
+
+def test_in_use_while_a_read_is_in_flight(service, held_camera):
+    _, slug, cam = held_camera
+    seen = []
+    original = cam._backend.read
+
+    def spying_read():
+        seen.append(service.is_in_use(slug))
+        return original()
+
+    cam._backend.read = spying_read
+    cam.read()
+    assert seen == [True]
+    assert not service.is_in_use(slug)
+
+
+def test_list_cameras_presence_for_held_camera_follows_enumeration(
+    directories, registry, held_camera
+):
+    """Sprint 047 ticket 003: a held camera's presence comes from the
+    discovery's known-present set, not from the held object."""
+    identity, slug, cam = held_camera
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    assert service.list_cameras()[0].present is True
+
+    service._discovery._present_slugs.discard(slug)  # watcher saw it unplug
+    gone = service.list_cameras()[0]
+    assert gone.present is False and gone.usable is False
+
+    service._discovery._present_slugs.add(slug)
+    back = service.list_cameras()[0]
+    assert back.present is True and back.usable is True
 
 
 def test_probe_cameras_and_list_cameras_agree_on_a_stalled_active_camera(directories, registry):
@@ -282,7 +345,11 @@ def test_probe_cameras_and_list_cameras_agree_on_a_stalled_active_camera(directo
     service = _service_with_camera(directories, registry, identity, slug, cam)
 
     list_state = next(s for s in service.list_cameras() if s.name == slug)
-    probe_report = service.probe_cameras()
+    stream = service.stream_images(slug)  # a live subscriber: probe must not reopen
+    try:
+        probe_report = service.probe_cameras()
+    finally:
+        stream.close()
     probe_state = next(s for s in probe_report.cameras if s.name == slug)
     skip = next(s for s in probe_report.skipped if s.backend == slug)
 
@@ -349,26 +416,101 @@ def test_get_frame_unknown_number_raises_unknown_camera_with_number_slug_availab
     assert excinfo.value.available == (f"{number} {slug}",)
 
 
-def test_get_frame_absent_registered_camera_by_slug_raises_camera_not_present(
+def test_get_frame_absent_registered_camera_by_slug_returns_flagged_card(
     service, absent_camera
 ):
     slug, _number = absent_camera
 
-    with pytest.raises(CameraNotPresent) as excinfo:
-        service.get_frame(slug)
+    frame = service.get_frame(slug)
 
-    assert excinfo.value.slug == slug
+    assert frame.placeholder is True
+    assert (frame.width, frame.height) == (1280, 720)
+    assert frame.data[:2] == b"\xff\xd8"
+    assert frame.tags is None
 
 
-def test_get_frame_absent_registered_camera_by_number_raises_camera_not_present(
+def test_get_frame_absent_registered_camera_by_number_returns_flagged_card(
     service, absent_camera
 ):
-    slug, number = absent_camera
+    _slug, number = absent_camera
 
-    with pytest.raises(CameraNotPresent) as excinfo:
-        service.get_frame(str(number))
+    assert service.get_frame(str(number)).placeholder is True
 
-    assert excinfo.value.slug == slug
+
+def test_get_frame_real_frame_is_not_placeholder(service, held_camera):
+    _, slug, _ = held_camera
+
+    assert service.get_frame(slug).placeholder is False
+
+
+def test_get_frame_dropped_camera_serves_card_at_last_size_then_resumes(service, held_camera):
+    _, slug, cam = held_camera
+    real = service.get_frame(slug)
+    cam.drop()
+
+    card = service.get_frame(slug)
+
+    assert card.placeholder is True
+    assert (card.width, card.height) == (real.width, real.height)
+
+    cam.reopen()
+    assert service.get_frame(slug).placeholder is False
+
+
+def test_get_tags_dropped_camera_raises_camera_not_present(service, held_camera):
+    _, slug, cam = held_camera
+    cam.drop()
+
+    with pytest.raises(CameraNotPresent):
+        service.get_tags(slug)
+
+
+class _ExclusiveSlowBackend(FakeBackend):
+    """open() is slow and fails if the device is already opened --
+    like a real V4L2 node under two racing first-opens (047-009)."""
+
+    opens = 0
+
+    def open(self) -> None:
+        type(self).opens += 1
+        if type(self).opens > 1:
+            raise RuntimeError("failed to open camera at index 0")
+        time.sleep(0.3)
+        super().open()
+
+
+def test_concurrent_first_requests_open_the_camera_once(directories, registry):
+    """An image stream and a tag stream subscribing to a cold camera at
+    the same time must share one open, not race two (047-009: the tag
+    stream died with 'failed to open camera' on a fresh daemon)."""
+    identity = _identity("hw:race", "Race Camera")
+    slug = registry.resolve(identity)
+    _ExclusiveSlowBackend.opens = 0
+    svc = _service_for_backend_selection(
+        directories,
+        registry,
+        identity=identity,
+        index=0,
+        backend_factory=lambda index: _ExclusiveSlowBackend(),
+    )
+    results: list = []
+    errors: list = []
+
+    def go() -> None:
+        try:
+            results.append(svc._camera_for(slug))  # noqa: SLF001
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=go) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+
+    assert errors == []
+    assert len(results) == 2 and results[0] is results[1]
+    assert _ExclusiveSlowBackend.opens == 1
 
 
 def _service_for_backend_selection(
@@ -1103,10 +1245,13 @@ def test_rpc_list_cameras_round_trip(stub, held_camera):
     assert response.cameras[0].HasField("number")
 
 
-def test_rpc_probe_cameras_round_trip(stub, held_camera):
+def test_rpc_probe_cameras_round_trip(stub, service, held_camera):
     _, slug, _ = held_camera
-
-    response = stub.ProbeCameras(aprilcam_v2_pb2.ProbeCamerasRequest())
+    stream = service.stream_images(slug)  # a live subscriber makes it "in use"
+    try:
+        response = stub.ProbeCameras(aprilcam_v2_pb2.ProbeCamerasRequest())
+    finally:
+        stream.close()
 
     assert len(response.skipped) == 1
     assert response.skipped[0].backend == slug
@@ -1175,34 +1320,21 @@ def test_rpc_get_frame_by_number_round_trip(stub, held_camera, registry):
     assert response.data[:2] == b"\xff\xd8"
 
 
-def test_rpc_get_frame_camera_not_present_maps_to_failed_precondition_with_slug(
-    stub, absent_camera
-):
+def test_rpc_get_frame_absent_camera_returns_placeholder_flag(stub, absent_camera):
     slug, _number = absent_camera
 
-    with pytest.raises(grpc.RpcError) as excinfo:
-        stub.GetFrame(aprilcam_v2_pb2.GetFrameRequest(camera=slug))
+    resp = stub.GetFrame(aprilcam_v2_pb2.GetFrameRequest(camera=slug))
 
-    err = excinfo.value
-    assert err.code() == grpc.StatusCode.FAILED_PRECONDITION
-    metadata = dict(err.trailing_metadata())
-    assert metadata["aprilcam-error-type"] == "CameraNotPresent"
-    assert metadata["aprilcam-slug"] == slug
+    assert resp.placeholder is True
+    assert resp.width > 0 and resp.height > 0
 
 
-def test_rpc_get_frame_camera_not_present_by_number_maps_to_failed_precondition(
-    stub, absent_camera
-):
-    slug, number = absent_camera
+def test_rpc_get_frame_real_frame_placeholder_flag_false(stub, held_camera):
+    _, slug, _ = held_camera
 
-    with pytest.raises(grpc.RpcError) as excinfo:
-        stub.GetFrame(aprilcam_v2_pb2.GetFrameRequest(camera=str(number)))
+    resp = stub.GetFrame(aprilcam_v2_pb2.GetFrameRequest(camera=slug))
 
-    err = excinfo.value
-    assert err.code() == grpc.StatusCode.FAILED_PRECONDITION
-    metadata = dict(err.trailing_metadata())
-    assert metadata["aprilcam-error-type"] == "CameraNotPresent"
-    assert metadata["aprilcam-slug"] == slug
+    assert resp.placeholder is False
 
 
 # ---------------------------------------------------------------------------
@@ -3021,20 +3153,33 @@ def _open_camera_with_frames(
 
 
 def _service_with_camera(directories, registry, identity, slug, cam) -> DaemonService:
+    """Service holding *cam*, wired like ``daemon/__main__.py``: probe's
+    ``active_camera_state`` is the service's own in-use accessor and
+    ``probe_held`` its held-handle probe. The camera is pre-seeded as
+    present, standing in for the daemon's start-up enumeration."""
     cameras: Dict[str, Camera] = {slug: cam}
+    holder: list = []
     discovery = CameraDiscovery(
         registry,
-        active_camera_state=lambda slug: cameras[slug].state if slug in cameras else None,
+        active_camera_state=lambda s: holder[0].active_camera_state(s),
+        probe_held=lambda s: holder[0].probe_held_camera(s),
         identity_source=lambda: {0: identity},
-        backend_factory=lambda index: FakeBackend(),
+        backend_factory=lambda index: FakeBackend(read_queue=[_frame()], loop=True),
     )
-    return DaemonService(
+    service = DaemonService(
         registry=registry,
         discovery=discovery,
         directories=directories,
         cameras=cameras,
+        # Headless-safe: without this, DaemonService's own
+        # identity_source defaults to real hardware enumeration.
         identity_source=lambda: {0: identity},
     )
+    holder.append(service)
+    # Seed known_present as start-up enumeration would, without probing
+    # (a probe reads frames through the held camera's own handle).
+    discovery._present_slugs.add(slug)
+    return service
 
 
 def _calibration_path(directories: Directories, slug: str) -> Path:
@@ -7061,3 +7206,276 @@ def test_installed_lens_is_used_by_next_calibrate_and_survives_playfield_change(
     again = service.calibrate(slug)
     assert again.succeeded is True, again.reason
     assert lens_path.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# Sprint 047 ticket 005: streams on a registered-but-unplugged camera serve
+# the card / absent heartbeats, then switch to real frames on plug-in.
+# ---------------------------------------------------------------------------
+
+
+def _absent_service(directories, registry, plugged: dict):
+    """Service over a registered camera that is never opened; enumeration
+    reports it only once ``plugged['yes']`` is set."""
+    identity = _identity("hw:late", "Late Camera")
+    slug = registry.resolve(identity)
+    discovery = CameraDiscovery(
+        registry,
+        identity_source=lambda: {0: identity} if plugged["yes"] else {},
+        backend_factory=lambda index: FakeBackend(read_queue=[_frame()], loop=True),
+    )
+    service = DaemonService(
+        registry=registry,
+        discovery=discovery,
+        directories=directories,
+        cameras={},
+        identity_source=lambda: {0: identity} if plugged["yes"] else {},
+        backend_factory=lambda index: FakeBackend(read_queue=[_frame()], loop=True),
+    )
+    return service, slug
+
+
+def test_image_stream_on_never_opened_absent_camera_serves_card_then_real_frames(
+    directories, registry
+):
+    plugged = {"yes": False}
+    service, slug = _absent_service(directories, registry, plugged)
+
+    stream = service.stream_images(slug)
+    try:
+        first = next(iter(stream))
+        assert first.placeholder is True
+
+        plugged["yes"] = True
+        assert service._reopen_absent_cameras() == (slug,)  # noqa: SLF001
+        deadline = time.time() + 5
+        frame = first
+        it = iter(stream)
+        while frame.placeholder and time.time() < deadline:
+            frame = next(it)
+        assert frame.placeholder is False
+    finally:
+        stream.close()
+
+
+def test_tag_stream_on_never_opened_absent_camera_sends_absent_heartbeat(directories, registry):
+    service, slug = _absent_service(directories, registry, {"yes": False})
+
+    stream = service.stream_tags(slug)
+    try:
+        frame = next(iter(stream))
+        assert frame.camera_absent is True
+    finally:
+        stream.close()
+
+
+def test_stream_on_unknown_camera_still_raises(directories, registry):
+    service, _slug = _absent_service(directories, registry, {"yes": False})
+
+    with pytest.raises(UnknownCamera):
+        service.stream_images("no-such-camera")
+
+
+# ---------------------------------------------------------------------------
+# Sprint 047 ticket 007: idle close, close_camera, CLOSED vs ABSENT.
+# ---------------------------------------------------------------------------
+
+
+class _IdleClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _idle_service(directories, registry, held_camera, idle_close_s=60.0):
+    identity, slug, cam = held_camera
+    service = _service_with_camera(directories, registry, identity, slug, cam)
+    clock = _IdleClock()
+    service._clock = clock
+    service._idle_close_s = idle_close_s
+    return service, slug, cam, clock
+
+
+def test_idle_camera_is_released_after_the_timeout(directories, registry, held_camera):
+    service, slug, cam, clock = _idle_service(directories, registry, held_camera)
+    backend = cam._backend
+
+    assert service._close_idle_cameras() == ()  # first sight starts the clock
+    clock.now += 59
+    assert service._close_idle_cameras() == ()
+    assert cam.lifecycle.value == "present"
+    clock.now += 2
+    assert service._close_idle_cameras() == (slug,)
+
+    assert cam.lifecycle.value == "closed"
+    assert backend.close_calls >= 1 and not backend.is_open
+    state = service.list_cameras()[0]
+    assert state.closed is True and state.present is True and state.usable is True
+
+
+def test_idle_timeout_is_configurable_and_zero_disables(directories, registry, held_camera):
+    service, slug, cam, clock = _idle_service(directories, registry, held_camera, idle_close_s=5)
+    service._close_idle_cameras()
+    clock.now += 6
+    assert service._close_idle_cameras() == (slug,)
+
+    service, slug, cam, clock = _idle_service(directories, registry, held_camera, idle_close_s=0)
+    service._close_idle_cameras()
+    clock.now += 10_000
+    assert service._close_idle_cameras() == ()
+
+
+def test_a_request_restarts_the_idle_clock(directories, registry, held_camera):
+    service, slug, cam, clock = _idle_service(directories, registry, held_camera)
+    service._close_idle_cameras()
+    clock.now += 50
+    service._camera_for(slug)  # a request touches the camera
+    clock.now += 50
+    assert service._close_idle_cameras() == ()
+    clock.now += 11
+    assert service._close_idle_cameras() == (slug,)
+
+
+def test_no_idle_close_while_a_stream_subscriber_exists(directories, registry, held_camera):
+    service, slug, cam, clock = _idle_service(directories, registry, held_camera)
+    stream = service.stream_tags(slug)
+    try:
+        service._close_idle_cameras()
+        clock.now += 600
+        assert service._close_idle_cameras() == ()
+        assert cam.lifecycle.value == "present"
+    finally:
+        stream.close()
+    # The clock restarts from the last busy sighting, not from the epoch.
+    clock.now += 30
+    assert service._close_idle_cameras() == ()
+    clock.now += 61
+    assert service._close_idle_cameras() == (slug,)
+
+
+def test_no_idle_close_during_an_intrinsics_session(directories, registry, held_camera):
+    service, slug, cam, clock = _idle_service(directories, registry, held_camera)
+    service._intrinsics.active_slugs = lambda: [slug]
+    service._close_idle_cameras()
+    clock.now += 600
+    assert service._close_idle_cameras() == ()
+
+
+def test_closed_camera_reopens_on_next_use_with_config(directories, registry, held_camera):
+    service, slug, cam, clock = _idle_service(directories, registry, held_camera)
+    service.set_camera_config(CameraConfig(name=slug, playfield=None, settings={"brightness": 40}))
+    service._close_idle_cameras()
+    clock.now += 61
+    service._close_idle_cameras()
+    backend = cam._backend
+    opens = backend.open_calls
+    assert cam.lifecycle.value == "closed"
+
+    service.get_frame(slug)
+
+    assert cam.lifecycle.value == "present"
+    assert backend.open_calls == opens + 1
+    assert backend._properties.get("brightness") == 40
+
+
+def test_close_camera_refused_while_subscribed_unless_forced(directories, registry, held_camera):
+    from aprilcam.errors import CameraInUse
+
+    service, slug, cam, _clock = _idle_service(directories, registry, held_camera)
+    stream = service.stream_images(slug)
+    try:
+        with pytest.raises(CameraInUse) as info:
+            service.close_camera(slug)
+        assert "--force" in str(info.value)
+        assert cam.lifecycle.value == "present"
+
+        service.close_camera(slug, force=True)
+        assert cam.lifecycle.value == "closed"
+        # Existing subscribers keep their subscription and see the card;
+        # their own demand does not undo the forced close.
+        deadline = time.time() + 5
+        frame = next(iter(stream))
+        while not frame.placeholder and time.time() < deadline:
+            frame = next(iter(stream))
+        assert frame.placeholder is True
+        assert cam.lifecycle.value == "closed"
+    finally:
+        stream.close()
+
+    service.get_frame(slug)  # a new request reopens it
+    assert cam.lifecycle.value == "present"
+
+
+def test_close_camera_closes_an_idle_camera_and_is_idempotent(directories, registry, held_camera):
+    service, slug, cam, _clock = _idle_service(directories, registry, held_camera)
+    service.close_camera(slug)
+    assert cam.lifecycle.value == "closed"
+    service.close_camera(slug)  # no-op
+    with pytest.raises(UnknownCamera):
+        service.close_camera("no-such-camera")
+
+
+def test_presence_watch_does_not_reopen_a_closed_camera(directories, registry, held_camera):
+    service, slug, cam, _clock = _idle_service(directories, registry, held_camera)
+    service.close_camera(slug)
+    backend = cam._backend
+    opens = backend.open_calls
+
+    assert service.on_hardware_presence(slug, True) is None
+    assert service._reopen_absent_cameras() == ()  # noqa: SLF001
+    assert cam.lifecycle.value == "closed"
+    assert backend.open_calls == opens
+
+
+def test_unplugging_a_closed_camera_marks_it_absent_without_opening(
+    directories, registry, held_camera
+):
+    service, slug, cam, _clock = _idle_service(directories, registry, held_camera)
+    service.close_camera(slug)
+    opens = cam._backend.open_calls
+
+    service.on_hardware_presence(slug, False)
+
+    assert cam.lifecycle.value == "absent"
+    assert cam._backend.open_calls == opens
+    assert service.on_hardware_presence(slug, True) is True  # absent -> reopens as usual
+
+
+def test_probe_leaves_a_closed_camera_closed(directories, registry, held_camera):
+    service, slug, cam, _clock = _idle_service(directories, registry, held_camera)
+    service.close_camera(slug)
+    assert service.probe_held_camera(slug) is None
+    assert cam.lifecycle.value == "closed"
+
+
+def test_close_camera_over_the_wire(directories, registry, held_camera):
+    from aprilcam.client.daemon_client import GrpcDaemon
+    from aprilcam.errors import CameraInUse
+
+    service, slug, cam, _clock = _idle_service(directories, registry, held_camera)
+    with _bind_stub(service) as stub:
+        client = GrpcDaemon(stub, target="test")
+        stream = service.stream_tags(slug)
+        try:
+            with pytest.raises(CameraInUse):
+                client.close_camera(slug)
+        finally:
+            stream.close()
+        client.close_camera(slug)
+        assert cam.lifecycle.value == "closed"
+        assert client.list_cameras()[0].closed is True
+
+
+def test_idle_close_env_parsing(monkeypatch):
+    from aprilcam.daemon.service import DEFAULT_IDLE_CLOSE_S
+
+    monkeypatch.delenv("APRILCAM_IDLE_CLOSE_S", raising=False)
+    assert daemon_main._idle_close_seconds() == DEFAULT_IDLE_CLOSE_S
+    monkeypatch.setenv("APRILCAM_IDLE_CLOSE_S", "12.5")
+    assert daemon_main._idle_close_seconds() == 12.5
+    monkeypatch.setenv("APRILCAM_IDLE_CLOSE_S", "0")
+    assert daemon_main._idle_close_seconds() == 0
+    monkeypatch.setenv("APRILCAM_IDLE_CLOSE_S", "banana")
+    assert daemon_main._idle_close_seconds() == DEFAULT_IDLE_CLOSE_S

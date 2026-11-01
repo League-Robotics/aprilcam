@@ -273,6 +273,12 @@ uses for `camera config`.
 **Error -> exit-code mapping.** Two exit codes cover every `cmd_*`
 outcome: `EXIT_OK = 0`, `EXIT_ERROR = 1` (`_common.py`). Argparse's own
 parse failures use its standard code 2, untouched by this package.
+`EXIT_PLACEHOLDER = 3` (sprint 047) is returned by `camera image` /
+`playfield image` when the daemon served a NO SIGNAL test card
+(`ImageFrame.placeholder`): the card is still written, a warning goes to
+stderr. Viewers never exit on a placeholder; their status line says
+"NO SIGNAL". `camera tags` prints "camera absent" (and `--json` carries
+`camera_absent`) for absent-camera heartbeats.
 Every typed `AprilCamError` maps to `EXIT_ERROR` via `report_error`,
 which prints `f"error: {exc}"` to stderr — `str(exc)` is exactly the
 message the error's own `__init__` already built (holder name,
@@ -440,3 +446,8 @@ text to stdout/stderr — there is no machine-readable output mode
 - **`playfield annotations` is list/clear only** — authoring
   (`put`/`draw`) is Python-client-library-only by explicit scope
   decision; there is no CLI path to author an annotation today.
+
+**`camera close <camera> [--force]` (sprint 047 ticket 007).** Releases the
+device via `CloseCamera`; refused while in use unless `--force` (exit 1 with
+the `CameraInUse` message). `camera list` shows a deliberately closed camera
+as `closed` (distinct from `absent`). MCP mirrors it as `close_camera`.

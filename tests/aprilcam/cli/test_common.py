@@ -22,11 +22,15 @@ def _state(
     flatfield_stale: bool = False,
     lens_model: str = "absent",
     lens_pending: bool = False,
+    present: bool = True,
+    usable: bool = True,
+    closed: bool = False,
 ) -> CameraState:
     return CameraState(
         name="arducam-ov9782-usb-camera",
-        present=True,
-        usable=True,
+        present=present,
+        usable=usable,
+        closed=closed,
         playfield="main-playfield",
         calibrated=True,
         calibration_stale=calibration_stale,
@@ -136,3 +140,10 @@ def test_format_camera_row_shows_pose_method_and_confidence():
     assert "calibrated (centre-point)" in row
     assert row.startswith("[3]")
     assert "calibrated  flatfield" in format_camera_row(state)
+
+
+def test_format_camera_row_shows_closed_distinct_from_absent():
+    closed = format_camera_row(_state(present=True, closed=True))
+    absent = format_camera_row(_state(present=False, closed=False, usable=False))
+    assert " closed " in closed and " absent " not in closed
+    assert " absent " in absent and " closed " not in absent

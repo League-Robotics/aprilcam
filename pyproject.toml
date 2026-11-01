@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aprilcam"
-version = "0.20261031.4"
+version = "0.20261101.1"
 description = "MCP server and CLI for camera management, AprilTag/ArUco detection, playfield homography, and image processing"
 authors = [
   { name = "Eric Busboom" }
@@ -106,6 +106,7 @@ markers = [
     "integration: end-to-end tests that start real daemon/hardware processes (deselect with -m 'not integration')",
     "camera: tests that require real capture hardware attached (deselect with -m 'not camera')",
     "acceptance: tests against the real daemon and real field state (deselect with -m 'not acceptance')",
+    "hardware: Linux USB unbind/bind hotplug acceptance (sprint 047); also needs APRILCAM_HOTPLUG_ACCEPTANCE=1 (deselect with -m 'not hardware')",
 ]
 
 [dependency-groups]

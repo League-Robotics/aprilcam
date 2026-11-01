@@ -1,7 +1,7 @@
 ---
 id: '006'
 title: Surface placeholder flag in CLI, MCP tools and client library
-status: open
+status: done
 use-cases:
 - SUC-004
 depends-on:
@@ -32,10 +32,10 @@ include the flag / absent status in their results. Clients stay thin
 
 ## Acceptance Criteria
 
-- [ ] Client library exposes the flag on every frame/stream result.
-- [ ] `camera image` on a placeholder writes the file, warns, exits 3; real frame exits 0.
-- [ ] `camera view` and `playfield image/view` indicate placeholder state.
-- [ ] MCP get_frame result includes the flag; tag tools report camera-absent.
+- [x] Client library exposes the flag on every frame/stream result.
+- [x] `camera image` on a placeholder writes the file, warns, exits 3; real frame exits 0.
+- [x] `camera view` and `playfield image/view` indicate placeholder state.
+- [x] MCP get_frame result includes the flag; tag tools report camera-absent.
 
 ## Testing
 

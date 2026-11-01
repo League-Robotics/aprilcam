@@ -24,12 +24,27 @@ a dataclass) that merely happened to share a name — they are now one.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from enum import Enum
+from typing import FrozenSet, Optional
 
 import numpy as np
 
 from aprilcam.config.interfaces import CameraConfig
 from aprilcam.types import CameraState, ProbeReport
+
+
+class CameraLifecycle(Enum):
+    """Where a held :class:`Camera` is in its device lifecycle (sprint 047).
+
+    ``PRESENT``: device open (or being healed). ``ABSENT``: the hardware
+    is gone (unplugged); device closed, config and subscribers kept.
+    ``CLOSED``: deliberately closed (never opened, idle-reaped, explicit
+    close). ``Camera.reopen`` returns ABSENT/CLOSED to PRESENT.
+    """
+
+    PRESENT = "present"
+    ABSENT = "absent"
+    CLOSED = "closed"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -171,6 +186,23 @@ class CameraDiscovery:
         raise NotImplementedError(f"{type(self).__name__} does not implement CameraDiscovery.watch")
 
 
+class PresenceSource:
+    """Cheap answer to "which hardware keys are attached right now?".
+
+    A plain base class, not ``Protocol`` (sprint 047). Implementations
+    must only list -- never open a device -- so the daemon can poll
+    them every fraction of a second, including for cameras it holds
+    open (enumeration, not read failure, is the unplug signal). Keys
+    use the same ``hardware_key`` strings ``CameraIdentity`` carries.
+    A source covers only the keys it can express; a held camera whose
+    key a source has never reported is never dropped on its account.
+    """
+
+    def present_keys(self) -> FrozenSet[str]:
+        """Hardware keys of the cameras currently attached."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement PresenceSource.present_keys")
+
+
 class Camera:
     """One physical camera, owned end to end.
 
@@ -187,6 +219,19 @@ class Camera:
     @property
     def state(self) -> CameraState:
         raise NotImplementedError(f"{type(self).__name__} does not implement Camera.state")
+
+    @property
+    def lifecycle(self) -> CameraLifecycle:
+        raise NotImplementedError(f"{type(self).__name__} does not implement Camera.lifecycle")
+
+    def drop(self) -> None:
+        """Hardware gone: close the device, mark ABSENT, keep config."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement Camera.drop")
+
+    def reopen(self) -> bool:
+        """Bring the camera back to PRESENT with its full stored config.
+        Never raises; returns whether it is PRESENT afterwards."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement Camera.reopen")
 
     def open(self) -> None:
         raise NotImplementedError(f"{type(self).__name__} does not implement Camera.open")

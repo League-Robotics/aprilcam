@@ -170,6 +170,11 @@ it — every other tool either returns no image or hands a structured
 dataclass straight back for FastMCP's pydantic `TypeAdapter` to
 serialize natively.
 
+**Placeholder flag (sprint 047).** `image_response(..., placeholder=)` puts
+`{"placeholder": bool}` in the content block's `_meta`; `get_frame` adds a
+second text block when true. `TagFrame.camera_absent` reaches agents
+through the dataclass passthrough of `get_tags`/`get_tag_history`.
+
 ### Intrinsics tools (sprint 044, extends the ticket 044-009 entry in §5)
 
 The four tools mirror the CLI's daemon commands one for one; an agent starts a session, polls `get_intrinsics_status` about once per second (an unpolled session auto-aborts after 120 s), follows `next_hint`, and calls `finish_intrinsics(install=True)` only when `good_enough`. Board resolution is the same chain as the CLI. `get_calibration` and `list_cameras` surface `lens_source`/`lens_pending`.

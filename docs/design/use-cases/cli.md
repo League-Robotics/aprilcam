@@ -998,7 +998,12 @@ from the Arducam's, because different hardware exposes different controls
 A probed and configured camera is unplugged and re-plugged into a
 different USB port. A second probe derives the **same** name, so the
 installed config still matches it. This is the property that makes
-configuration-by-name workable at all.
+configuration-by-name workable at all. While the daemon holds the camera,
+the same replug is handled in place (sprint 047): the camera goes ABSENT on
+unplug and, on re-plug (new `/dev/videoN` node and all), is reopened under
+the same slug with its **full stored config re-applied** -- frame size
+first, then controls -- so it does not come back at 640x480 with default
+exposure.
 
 **UC-25.S-4 — Camera attached but unopenable** · _failure path_
 A camera is present but cannot be opened. The probe reports it with its
@@ -1012,6 +1017,35 @@ A daemon is running with one camera. The developer plugs in
 shows it within a few seconds — the daemon noticed the device arriving.
 Unplugging it flags the camera absent, again with no command. This is the
 common case, and it must not require `probe`.
+
+Sprint 047 extends this to cameras the daemon already holds and to the
+streams on them. Unplugging a held camera flags it absent within about a
+second (a 0.5 s presence poll: sysfs on Linux, AVFoundation with a
+main-thread run-loop pump on macOS). Subscribers are not dropped: image
+streams, `camera image`/`playfield image` and `get_frame` receive a
+**NO SIGNAL test card** (`placeholder` flag set) and tag streams receive
+`camera_absent` heartbeats, instead of errors or silence. `camera image`
+still writes the card but prints a warning to stderr and exits **3**; the
+viewer shows "NO SIGNAL"; `camera tags --follow` prints "camera absent".
+On re-plug the **same streams** resume real frames with no command, no
+probe and no daemon restart. A registered camera that is unplugged when a
+stream is requested gets the card too and hands over on plug-in.
+
+Sub-cases:
+
+- **S-5a Unplug under a stream** -- as above; verified on hardware by
+  `scripts/hotplug_acceptance.py` (absent in 0.4 s, real frames 0.9 s
+  after re-bind).
+- **S-5b Request while absent** -- `camera image N` exits 3 with the card
+  written and a stderr warning; the MCP result carries
+  `_meta.placeholder`.
+- **S-5c Deliberate close** -- `camera close N` releases the device
+  (refused with an in-use message while a subscriber or read is active
+  unless `--force`); `camera list` shows it `closed`, distinct from
+  `absent`. A forced close sticks: existing subscribers see the card until
+  any new request reopens the camera. An unused camera is closed
+  automatically after `APRILCAM_IDLE_CLOSE_S` (default 60, `0` disables) and
+  the next request wakes it with its config.
 
 **UC-25.S-6 — Raspberry Pi camera needs a probe** · _happy path_
 A daemon runs on the field Pi with a libcamera camera attached. Because
@@ -1027,7 +1061,12 @@ A subscriber is watching `arducam-ov9782-usb-camera`'s deskewed stream
 (UC-07) when `aprilcam camera probe` runs. The probe refreshes the camera
 list without dropping the stream or interrupting frames. If a backend
 cannot be interrogated without disturbing an open camera, the probe skips
-it and says so rather than killing the stream.
+it and says so rather than killing the stream. Sprint 047 sharpens
+"in use": only a stream subscriber or an in-flight read counts. A camera the
+daemon merely holds open and idle is probed **through its own handle**
+(a second V4L2 open of the same node fails EBUSY), so it is reported present
+and usable honestly rather than skipped or falsely failed; a plugged-in but
+stalled held camera reports `usable=False`.
 
 ---
 

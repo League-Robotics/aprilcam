@@ -100,6 +100,7 @@ from aprilcam.errors import (
     AlreadyRunning,
     AnnotationLimitExceeded,
     AprilCamError,
+    CameraInUse,
     CameraNotPresent,
     NoFieldMask,
     NoPlayfieldLinked,
@@ -170,6 +171,9 @@ _STATUS_CODES = {
     # as NotCalibrated -- the camera is known, just not present right
     # now (ticket 021-002).
     CameraNotPresent: grpc.StatusCode.FAILED_PRECONDITION,
+    # close_camera refused while the camera is in use (sprint 047 ticket
+    # 007) -- state doesn't allow it right now; retry with force.
+    CameraInUse: grpc.StatusCode.FAILED_PRECONDITION,
     # A calibrate request for a camera with no playfield link -- a
     # precondition failure, not a calibration failure (UC-15.S-2). Same
     # code family as NotCalibrated/CameraNotPresent: "cannot succeed
@@ -225,6 +229,7 @@ def _camera_state_to_proto(state: CameraState) -> aprilcam_v2_pb2.CameraState:
         lens_pending=state.lens_pending,
         calibration_method=state.calibration_method,
         calibration_confidence=state.calibration_confidence,
+        closed=state.closed,
     )
     # optional fields: only set when not None, so HasField() on the wire
     # matches Optional[...] being None on this side (design.md §6).
@@ -259,6 +264,7 @@ def _image_frame_to_proto(frame: ImageFrame) -> aprilcam_v2_pb2.GetFrameResponse
         deskewed=frame.deskewed,
         calibration_stale=frame.calibration_stale,
         frame_dark=frame.frame_dark,
+        placeholder=frame.placeholder,
     )
     # Presence, not an empty-vs-absent default: only set `tags` when
     # detection has actually run (frame.tags is not None). Leaving it
@@ -386,6 +392,7 @@ def _tag_frame_to_proto(frame: TagFrame) -> aprilcam_v2_pb2.TagFrame:
         timestamp=frame.timestamp,
         frame_index=frame.frame_index,
         calibration_stale=frame.calibration_stale,
+        camera_absent=frame.camera_absent,
     )
 
 
@@ -981,7 +988,7 @@ def _abort(context: grpc.ServicerContext, exc: Exception) -> None:
         elif isinstance(exc, (UnknownCamera, UnknownPlayfield, UnknownGuide)):
             metadata.append(("aprilcam-requested", exc.requested))
             metadata.append(("aprilcam-available", ",".join(exc.available)))
-        elif isinstance(exc, CameraNotPresent):
+        elif isinstance(exc, (CameraNotPresent, CameraInUse)):
             metadata.append(("aprilcam-slug", exc.slug))
         elif isinstance(exc, NoPlayfieldLinked):
             metadata.append(("aprilcam-camera", exc.camera))
@@ -1171,6 +1178,14 @@ class _Servicer(aprilcam_v2_pb2_grpc.AprilCamV2Servicer):
             _abort(context, exc)
             return aprilcam_v2_pb2.ResetCameraConfigResponse()
         return aprilcam_v2_pb2.ResetCameraConfigResponse()
+
+    def CloseCamera(self, request, context):  # noqa: N802
+        try:
+            self._service.close_camera(request.camera, force=request.force)
+        except Exception as exc:  # noqa: BLE001
+            _abort(context, exc)
+            return aprilcam_v2_pb2.CloseCameraResponse()
+        return aprilcam_v2_pb2.CloseCameraResponse()
 
     def PutAnnotation(self, request, context):  # noqa: N802
         annotation = _annotation_from_proto(request.annotation)
