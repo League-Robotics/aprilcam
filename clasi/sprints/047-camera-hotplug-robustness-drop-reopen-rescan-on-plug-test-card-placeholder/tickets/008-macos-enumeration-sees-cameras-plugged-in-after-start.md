@@ -1,7 +1,7 @@
 ---
-id: '008'
+id: 008
 title: macOS enumeration sees cameras plugged in after start
-status: open
+status: done
 use-cases:
 - SUC-006
 depends-on:
@@ -35,7 +35,7 @@ watcher. Read the issue file for the diagnosis.
 
 - [ ] A camera plugged in after daemon start appears in `camera list` without restart (manual, gala).
 - [ ] Unplug marks held cameras absent via the common watcher (manual).
-- [ ] Non-darwin code paths and tests unaffected.
+- [x] Non-darwin code paths and tests unaffected.
 
 ## Testing
 

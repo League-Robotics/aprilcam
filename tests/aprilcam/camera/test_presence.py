@@ -129,3 +129,51 @@ def test_service_callback_drops_and_reopens_held_camera(tmp_path):
     assert cam.state.present is False
     assert svc.on_hardware_presence(slug, True) is True
     assert cam.lifecycle is CameraLifecycle.PRESENT
+
+
+# -- ticket 047-008: macOS AVFoundation presence ---------------------------
+
+
+def test_macos_presence_keys_are_avf_unique_ids():
+    from aprilcam.camera.presence import MacosAvfPresenceSource
+
+    paths = ["0x1", "0x2"]
+    src = MacosAvfPresenceSource(lambda: list(paths))
+    assert src.present_keys() == frozenset({"avf:0x1", "avf:0x2"})
+    paths.pop()
+    assert src.present_keys() == frozenset({"avf:0x1"})
+
+
+def test_macos_presence_enumeration_error_propagates_and_watcher_keeps_snapshot(tmp_path):
+    from aprilcam.camera.presence import MacosAvfPresenceSource
+
+    reg, slug = _registered(tmp_path, key="avf:0x1")
+    state = {"fail": False}
+
+    def enum():
+        if state["fail"]:
+            raise RuntimeError("AVFoundation hiccup")
+        return ["0x1"]
+
+    events: List[Tuple[str, bool]] = []
+    d = _discovery(reg, MacosAvfPresenceSource(enum), events)
+    d.presence_poll_once()
+    events.clear()
+    state["fail"] = True
+    d.presence_poll_once()
+    assert events == []  # a failed listing is not an unplug
+
+
+def test_macos_presence_unplug_and_replug_notify_held_camera(tmp_path):
+    from aprilcam.camera.presence import MacosAvfPresenceSource
+
+    reg, slug = _registered(tmp_path, key="avf:0x1")
+    paths = ["0x1"]
+    events: List[Tuple[str, bool]] = []
+    d = _discovery(reg, MacosAvfPresenceSource(lambda: list(paths)), events)
+    d._presence_prev = frozenset({"avf:0x1"})
+    paths.clear()
+    d.presence_poll_once()
+    paths.append("0x1")
+    d.presence_poll_once()
+    assert events == [(slug, False), (slug, True)]

@@ -11,12 +11,30 @@ equal the registry's stored ``hardware_key`` for the same camera:
 ``serial:<serial>``, else ``vidpid:<vid>:<pid>@<port>``, else
 ``loc:<port>``. Non-USB nodes (v4l2loopback, platform, Pi-internal)
 contribute no key.
+
+``MacosAvfPresenceSource`` (ticket 047-008) lists AVFoundation devices
+through ``cv2-enumerate-cameras`` -- the same enumeration, and the same
+``AVCaptureDevice.uniqueID()`` ``path``, that ``resolve_identity`` turns
+into the registry's ``avf:<uniqueID>`` hardware key, so keys match with
+no translation. Choice of mechanism: AVFoundation applies device
+connect/disconnect to the **main thread's** run loop, and the library
+only pumps the *calling* thread's loop, so a worker-thread poll is
+frozen at daemon start. We therefore keep the poll on the presence
+thread (cheap, listing only) and have the daemon's otherwise idle main
+thread pump its own run loop (``daemon.__main__._wait_for_shutdown``).
+Rejected: marshalling every enumeration onto the main thread (needs a
+dispatch queue the Python main thread does not service), IOKit
+notifications (new pyobjc surface, still needs the run loop), and
+``system_profiler`` polling (~0.5 s per call, spawns a process every
+tick). Unlike ``_enumerate_cv2`` this lets enumeration errors
+propagate, so the watcher keeps its previous snapshot instead of
+reading a transient failure as "every camera was unplugged".
 """
 
 from __future__ import annotations
 
 import os
-from typing import FrozenSet, Optional
+from typing import Callable, FrozenSet, Iterable, Optional
 
 from aprilcam.camera.identity import (
     _SYS_V4L_ROOT,
@@ -28,7 +46,7 @@ from aprilcam.camera.identity import (
 )
 from aprilcam.camera.interfaces import PresenceSource
 
-__all__ = ["LinuxSysfsPresenceSource"]
+__all__ = ["LinuxSysfsPresenceSource", "MacosAvfPresenceSource"]
 
 
 def _hex_attr(usb_dev: str, name: str) -> Optional[int]:
@@ -74,3 +92,24 @@ class LinuxSysfsPresenceSource(PresenceSource):
             else:
                 keys.add(f"loc:{_slug(port)}")
         return frozenset(keys)
+
+
+def _enumerate_avf_paths() -> Iterable[str]:
+    """AVFoundation uniqueIDs of the attached cameras (raises on failure)."""
+    from cv2_enumerate_cameras import enumerate_cameras  # noqa: PLC0415
+
+    return [p for p in (getattr(c, "path", None) for c in enumerate_cameras()) if p]
+
+
+class MacosAvfPresenceSource(PresenceSource):
+    """``avf:<uniqueID>`` keys of the cameras AVFoundation lists now.
+
+    Only sees hotplug while the main thread pumps its run loop (see the
+    module docstring). *enumerate_paths* is injectable for tests.
+    """
+
+    def __init__(self, enumerate_paths: Callable[[], Iterable[str]] = _enumerate_avf_paths) -> None:
+        self._enumerate_paths = enumerate_paths
+
+    def present_keys(self) -> FrozenSet[str]:
+        return frozenset(f"avf:{p}" for p in self._enumerate_paths())
