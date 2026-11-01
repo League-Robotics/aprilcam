@@ -1,5 +1,9 @@
 ---
-status: pending
+status: in-progress
+sprint: '047'
+tickets:
+- 047-008
+- 047-010
 ---
 
 # Cameras plugged in after the daemon starts are invisible until a restart (macOS run-loop staleness)

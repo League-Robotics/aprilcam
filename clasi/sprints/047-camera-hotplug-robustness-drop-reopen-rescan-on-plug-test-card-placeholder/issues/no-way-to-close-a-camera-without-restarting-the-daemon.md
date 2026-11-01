@@ -1,5 +1,9 @@
 ---
-status: pending
+status: in-progress
+sprint: '047'
+tickets:
+- 047-007
+- 047-010
 ---
 
 # There is no way to close a held-open camera without restarting the daemon
