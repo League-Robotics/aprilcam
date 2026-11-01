@@ -17,6 +17,7 @@ import logging
 import sys
 from typing import Callable, Optional, Tuple, TypeVar
 
+from aprilcam.client.addressing import resolve_camera
 from aprilcam.client.interfaces import Discovery
 from aprilcam.daemon.interfaces import Daemon
 from aprilcam.errors import AprilCamError
@@ -38,6 +39,7 @@ __all__ = [
     "print_probe_report",
     "fan_out",
     "resolve_playfield_camera",
+    "connect_for_camera",
 ]
 
 #: Exit codes every subcommand function returns. Argparse's own parse
@@ -243,7 +245,18 @@ def format_camera_row(state: CameraState) -> str:
     )
 
 
-def print_cameras(cameras: Tuple[CameraState, ...], *, verbose: int = 0) -> None:
+def label_host(label: str) -> Optional[str]:
+    """The bare host name from a :func:`fan_out` label (``"donald
+    (192.168.4.60:5280)"`` -> ``"donald"``), or ``None`` when the label
+    is just an address (a nameless daemon) and so cannot prefix a
+    ``HOST-N`` camera address."""
+    host = label.split(" (", 1)[0]
+    return None if ":" in host or host.replace(".", "").isdigit() else host
+
+
+def print_cameras(
+    cameras: Tuple[CameraState, ...], *, verbose: int = 0, host: Optional[str] = None
+) -> None:
     """A camera list/probe result, one row per camera. An empty tuple
     prints an explicit ``(no cameras)`` rather than nothing at all, so
     a genuinely empty daemon looks deliberate rather than like the
@@ -254,13 +267,20 @@ def print_cameras(cameras: Tuple[CameraState, ...], *, verbose: int = 0) -> None
     and a ``(N unusable camera(s) hidden; -v to show)`` note says so --
     a daemon whose cameras are all unusable prints just the note.
     ``camera probe`` passes ``verbose=1`` (via :func:`print_probe_report`)
-    because it reports discovery state and must show everything."""
+    because it reports discovery state and must show everything.
+
+    With *host* (the daemon's short name, from a fan-out label) each
+    numbered row ends with ``address=HOST-N`` -- the copyable form
+    ``camera image`` and friends accept (sprint 048)."""
     if not cameras:
         print("  (no cameras)")
         return
     shown = [c for c in cameras if c.usable] if verbose < 1 else list(cameras)
     for state in shown:
-        print(f"  {format_camera_row(state)}")
+        row = format_camera_row(state)
+        if host and state.number is not None:
+            row += f"  address={host}-{state.number}"
+        print(f"  {row}")
     hidden = len(cameras) - len(shown)
     if hidden:
         noun = "camera" if hidden == 1 else "cameras"
@@ -342,6 +362,24 @@ def fan_out(
         render(label, result)
 
     return EXIT_ERROR if had_failure else EXIT_OK
+
+
+def connect_for_camera(
+    discovery: Discovery, daemon_flag: Optional[str], camera: str
+) -> Tuple[Daemon, str]:
+    """Connect to the daemon a camera argument addresses.
+
+    *camera* may be a slug, a number, or a fan-out ``HOST-N`` address
+    (sprint 048); :func:`aprilcam.client.addressing.resolve_camera`
+    decides the daemon and the camera string to send it. *daemon_flag*
+    is ``args.daemon`` (the explicit ``-d``) -- a ``HOST-N`` naming a
+    different daemon raises ``ConflictingTarget``. The
+    ``APRILCAM_DAEMON_HOST`` default is not passed: ``connect(None)``
+    applies it, and ``HOST-N`` overrides it. Typed errors propagate for
+    the caller's usual ``report_error`` path.
+    """
+    resolved = resolve_camera(camera, discovery=discovery, target=daemon_flag)
+    return discovery.connect(resolved.host), resolved.camera
 
 
 def resolve_playfield_camera(

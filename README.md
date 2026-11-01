@@ -124,6 +124,31 @@ aprilcam -d buzzkill.home camera list
 aprilcam -d buzzkill.home camera image 3 -o frame.jpg
 ```
 
+### Camera addressing
+
+A camera can be named three ways, anywhere a command takes a camera:
+
+- **slug** -- `brio-501`;
+- **persistent number** -- `4` (the `[N]` column of `camera list`);
+- **`HOST-N`** -- `donald-4`: camera 4 on the daemon named `donald`.
+  `camera list --all` prints each camera's address as `address=donald-4`,
+  so you can copy it straight into `camera image donald-4 -o f.jpg`
+  with no `-d`.
+
+Resolution order for something that looks like `X-123`: first the
+target daemon (`-d`, else `$APRILCAM_DAEMON_HOST`, else local) is asked
+whether it has a camera with exactly that slug or number -- so a daemon
+named `brio` never shadows the camera `brio-501`. Otherwise `X` is matched
+(case-insensitively, `.local` ignored) against discovered daemon names,
+then tried as a direct host. An unknown host is an error listing the
+daemons found.
+
+`HOST-N` overrides `$APRILCAM_DAEMON_HOST`, but combined with an explicit
+`-d` naming a different daemon it is an error
+(`aprilcam -d buzzkill camera image donald-4` fails; drop one of them).
+`camera intrinsics` with several cameras requires them all on one daemon.
+`--all` does not resolve `HOST-N`.
+
 ### Field calibration
 
 ```

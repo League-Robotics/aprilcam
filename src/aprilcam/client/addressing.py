@@ -32,8 +32,15 @@ Decisions on the sprint's open questions:
 * When the addressed daemon is not discoverable (step 4) the target is
   compared with ``HOST`` as typed; if sameness cannot be confirmed
   the result is a conservative ``ConflictingTarget``.
-* A non-``None`` ``target`` counts as explicit for step 5, whether it
-  came from ``-d``, a per-call ``daemon``, or a session default.
+* Only an *explicit* ``target`` (the ``-d`` flag, a per-call ``daemon``)
+  is conflict-checked in step 5. A *default* (``default_target``: the
+  ``APRILCAM_DAEMON_HOST`` env var, an ``aprilcam mcp -d HOST`` session
+  default) is only the daemon used for the step-2 slug/number lookup
+  and for pass-through results; ``HOST-N`` overrides it, never
+  conflicts with it. ``target`` wins over ``default_target`` when both
+  are given. The CLI passes ``args.daemon`` as ``target`` and no
+  ``default_target``: ``Discovery.connect(None)`` already applies the
+  env default itself.
 """
 
 from __future__ import annotations
@@ -95,22 +102,26 @@ def resolve_camera(
     *,
     discovery: Discovery,
     target: Optional[str] = None,
+    default_target: Optional[str] = None,
 ) -> ResolvedCamera:
-    """Resolve *camera* against the daemon at *target* (``None`` means
-    the local/default daemon). See the module docstring for the order.
+    """Resolve *camera* against the daemon at *target* (explicit; checked
+    for conflicts) or, when that is ``None``, *default_target* (never
+    conflict-checked); both ``None`` means the local/default daemon.
+    See the module docstring for the order.
     """
+    effective = target if target is not None else default_target
     match = _HOST_N.match(camera)
     if match is None:
-        return ResolvedCamera(host=target, camera=camera)
+        return ResolvedCamera(host=effective, camera=camera)
     host_part, number = match.group(1), match.group(2)
 
     try:
-        cameras = discovery.connect(target).list_cameras()
+        cameras = discovery.connect(effective).list_cameras()
     except ConnectionFailed:
-        return ResolvedCamera(host=target, camera=camera)
+        return ResolvedCamera(host=effective, camera=camera)
     for state in cameras:
         if camera == state.name or camera == str(state.number):
-            return ResolvedCamera(host=target, camera=camera)
+            return ResolvedCamera(host=effective, camera=camera)
 
     wanted = short_host_name(host_part)
     daemons = discovery.find_all()

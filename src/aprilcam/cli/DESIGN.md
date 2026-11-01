@@ -40,7 +40,7 @@ presentation.
 | File | Lines | Owns |
 |---|---|---|
 | `__init__.py` | 160 | `main()` — the single dispatch seam. Builds the top-level parser, wires every subcommand module's `add_subparser`, resets `SIGPIPE` to default disposition, and is the one place `BrokenPipeError` is caught. |
-| `_common.py` | 257 | Shared plumbing: `EXIT_OK`/`EXIT_ERROR`, `add_daemon_option`/`add_all_option` (the `-d`/`--all` flags), `incomplete_command` (a subparser-tree default), `report_error`, `format_camera_row`/`print_cameras`/`print_probe_report`, `fan_out`, `resolve_playfield_camera`. |
+| `_common.py` | 257 | Shared plumbing: `EXIT_OK`/`EXIT_ERROR`, `add_daemon_option`/`add_all_option` (the `-d`/`--all` flags), `incomplete_command` (a subparser-tree default), `report_error`, `format_camera_row`/`print_cameras`/`print_probe_report`, `fan_out`, `resolve_playfield_camera`, `connect_for_camera`, `label_host`. |
 | `camera.py` | 521 | `camera list\|probe\|image\|tags\|config\|view` — camera-addressed commands. Also wires in `calibrate.py` and `locate.py` as sub-subcommands of its own `camera` subparser tree. |
 | `calibrate.py` | ~210 | `camera calibrate [--verbose]` — a pure RPC orchestrator around the `Calibrate` RPC; grouped under `camera` but kept in its own file. Prints the matched ids, `lens model:` line, then (sprint 045) `method`, `confidence`, corners used, reprojection error in px and cm, scale agreement, angular spread, camera height/nadir/tilt and the worst leave-one-out marker; caveats (`reduced`/`low`, centre-point fallback reason, helpful markers not seen) go to stderr, `--verbose` adds the per-marker leave-one-out table, and a failed pose attempt prints its measurements before the reason. `--with-intrinsics` was removed in sprint 045. `camera list` shows `calibrated (pose, full)`; `camera lens` aliases `camera intrinsics`; `locate.py` prints the pose-vs-locate comparison note. |
 | `flatfield.py` | ~130 (sprint 037) | `camera flatfield` — a pure RPC orchestrator around `CaptureFlatField`/`GetFlatField`/`ClearFlatField`; grouped under `camera`, same one-file shape as `calibrate.py`. |
@@ -298,6 +298,24 @@ calls the caller-supplied `call(daemon)`, rendering successes via
 `ConnectionFailed`. A `DiscoveryFailed` from `find_all()` itself aborts
 the whole command, since there's nothing left to iterate — distinct
 from "enumerated zero," which is a normal empty result.
+
+**Fan-out labels and HOST-N (sprint 048).** The label `fan_out` passes to
+`render` is the daemon's short host name (`DaemonInfo.name`), with
+` (local)` appended for the local daemon; the address is added at `-v`
+and is the whole label only for a nameless daemon. `camera list --all`
+rows end with `address=HOST-N` (`print_cameras(..., host=label_host(label))`;
+N is the persistent number, rows without one omit it). Every
+camera-taking subcommand (`image`, `tags` incl. `--follow`, `view`,
+`close`, `calibrate`, `flatfield`, `locate`, `intrinsics`) connects via
+`_common.connect_for_camera(discovery, args.daemon, camera)`, which calls
+`client.addressing.resolve_camera(camera, discovery=..., target=args.daemon)`
+and returns `(daemon, camera_to_send)`. Only the explicit `-d` is passed
+as `target`; the `APRILCAM_DAEMON_HOST` default is left to
+`Discovery.connect(None)`, so `HOST-N` overrides it while
+`-d buzzkill ... donald-4` is a `ConflictingTarget`. `UnknownHost` and
+`ConflictingTarget` are `AprilCamError`s and reach `report_error`
+(`error: ...`, exit 1). `intrinsics` resolves every camera and requires
+one daemon for all. `--all` variants do not resolve `HOST-N`.
 
 **`camera tags --follow`/`--json` (sprint 039).** `cmd_tags` gains a
 `--follow` flag: instead of one `discovery.connect(args.daemon)

@@ -46,7 +46,7 @@ import argparse
 import sys
 from typing import Callable
 
-from aprilcam.cli._common import EXIT_ERROR, EXIT_OK, add_all_option, report_error
+from aprilcam.cli._common import EXIT_ERROR, EXIT_OK, add_all_option, connect_for_camera, report_error
 from aprilcam.client.discovery import Discovery
 from aprilcam.errors import AprilCamError
 
@@ -124,7 +124,7 @@ def cmd_flatfield(
         return EXIT_ERROR
 
     try:
-        daemon = discovery_factory().connect(args.daemon)
+        daemon, args.camera = connect_for_camera(discovery_factory(), args.daemon, args.camera)
         if args.clear:
             daemon.clear_flat_field(args.camera)
             print(f"cleared flat-field gain map for {args.camera!r}")

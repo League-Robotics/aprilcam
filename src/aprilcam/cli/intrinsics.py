@@ -22,8 +22,9 @@ import time
 from typing import Callable, Optional
 
 from aprilcam.cli._common import EXIT_ERROR, EXIT_OK, report_error
+from aprilcam.client.addressing import resolve_camera
 from aprilcam.client.discovery import Discovery
-from aprilcam.errors import AprilCamError
+from aprilcam.errors import AprilCamError, ConflictingTarget
 from aprilcam.intrinsics.interfaces import BoardSpec
 from aprilcam.view.intrinsics_model import (
     CONFIRM_WINDOW_S,
@@ -124,6 +125,21 @@ def _finish(daemon, cam: str, owned: set, installed: set, force: bool = False) -
         installed.add(cam)
 
 
+def _connect_all(discovery, daemon_flag, cameras: list):
+    """Resolve every camera argument; all must address the same daemon
+    (one intrinsics session talks to one daemon), else
+    ``ConflictingTarget``. Returns ``(daemon, resolved_cameras)``."""
+    resolved = [resolve_camera(c, discovery=discovery, target=daemon_flag) for c in cameras]
+    hosts = {r.host for r in resolved}
+    if len(hosts) > 1:
+        other = next(r for r in resolved if r.host != resolved[0].host)
+        raise ConflictingTarget(
+            other.camera, other.host or "local", resolved[0].host or "local"
+        )
+    resolved_cameras = list(dict.fromkeys(r.camera for r in resolved))
+    return discovery.connect(resolved[0].host), resolved_cameras
+
+
 def cmd_intrinsics(
     args: argparse.Namespace,
     *,
@@ -147,7 +163,7 @@ def cmd_intrinsics(
     owned: set = set()
     daemon = None
     try:
-        daemon = discovery_factory().connect(args.daemon)
+        daemon, cameras = _connect_all(discovery_factory(), args.daemon, cameras)
         for cam in cameras:
             daemon.start_intrinsics(cam, args.board)
             owned.add(cam)

@@ -39,7 +39,7 @@ import argparse
 import sys
 from typing import Callable
 
-from aprilcam.cli._common import EXIT_ERROR, EXIT_OK, add_all_option, report_error, verbosity
+from aprilcam.cli._common import EXIT_ERROR, EXIT_OK, add_all_option, connect_for_camera, report_error, verbosity
 from aprilcam.client.discovery import Discovery
 from aprilcam.errors import AprilCamError
 
@@ -67,7 +67,7 @@ def cmd_calibrate(
         return EXIT_ERROR
 
     try:
-        daemon = discovery_factory().connect(args.daemon)
+        daemon, args.camera = connect_for_camera(discovery_factory(), args.daemon, args.camera)
         result = daemon.calibrate(args.camera)
     except AprilCamError as exc:
         return report_error(exc)

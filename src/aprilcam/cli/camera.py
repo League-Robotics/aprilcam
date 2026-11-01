@@ -85,8 +85,10 @@ from aprilcam.cli._common import (
     EXIT_OK,
     EXIT_PLACEHOLDER,
     add_all_option,
+    connect_for_camera,
     fan_out,
     incomplete_command,
+    label_host,
     print_cameras,
     verbosity,
     print_probe_report,
@@ -125,7 +127,7 @@ def cmd_list(
     if args.all:
         def render(label: str, cameras) -> None:
             print(f"{label}:")
-            print_cameras(cameras, verbose=verbose)
+            print_cameras(cameras, verbose=verbose, host=label_host(label))
 
         return fan_out(discovery, lambda daemon: daemon.list_cameras(), render, verbose=verbose)
 
@@ -251,9 +253,8 @@ def cmd_image(
         return EXIT_ERROR
 
     try:
-        frame = discovery_factory().connect(args.daemon).get_frame(
-            args.camera, deskewed=False, encoding=args.encoding
-        )
+        daemon, camera = connect_for_camera(discovery_factory(), args.daemon, args.camera)
+        frame = daemon.get_frame(camera, deskewed=False, encoding=args.encoding)
     except AprilCamError as exc:
         return report_error(exc)
 
@@ -416,7 +417,8 @@ def _cmd_tags_follow(args: argparse.Namespace, discovery: Discovery) -> int:
     that closes itself, e.g. a clean daemon-side disconnect).
     """
     try:
-        stream: TagStream = discovery.connect(args.daemon).stream_tags(args.camera)
+        daemon, camera = connect_for_camera(discovery, args.daemon, args.camera)
+        stream: TagStream = daemon.stream_tags(camera)
     except AprilCamError as exc:
         return report_error(exc)
 
@@ -472,7 +474,8 @@ def cmd_tags(
         return fan_out(discovery, lambda daemon: daemon.get_tags(args.camera), render, verbose=verbosity(args))
 
     try:
-        frame = discovery.connect(args.daemon).get_tags(args.camera)
+        daemon, camera = connect_for_camera(discovery, args.daemon, args.camera)
+        frame = daemon.get_tags(camera)
     except AprilCamError as exc:
         return report_error(exc)
     _print_tags(frame, as_json=args.json)
@@ -562,7 +565,8 @@ def cmd_close(
     ``--force``; a forced close sticks for existing subscribers (they
     see the NO SIGNAL card) until a new request reopens the camera."""
     try:
-        discovery_factory().connect(args.daemon).close_camera(args.camera, force=args.force)
+        daemon, camera = connect_for_camera(discovery_factory(), args.daemon, args.camera)
+        daemon.close_camera(camera, force=args.force)
     except AprilCamError as exc:
         return report_error(exc)
     print(f"closed camera {args.camera!r} -- it reopens on next use")
@@ -623,12 +627,12 @@ def cmd_view(
     )
 
     try:
-        daemon = discovery_factory().connect(args.daemon)
+        daemon, camera = connect_for_camera(discovery_factory(), args.daemon, args.camera)
     except AprilCamError as exc:
         return report_error(exc)
 
     try:
-        run_view(args.camera, daemon)
+        run_view(camera, daemon)
     except viewer.NoDisplayAvailable as exc:
         print(
             f"error: no display available ({exc}) -- run 'aprilcam camera "

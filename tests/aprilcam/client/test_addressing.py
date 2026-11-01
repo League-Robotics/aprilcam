@@ -146,3 +146,30 @@ def test_unreachable_target_passes_through():
     d = FakeDiscovery([_info("donald", "1.1.1.1")], {None: FakeDaemon(fail=True)})
     assert resolve_camera("donald-4", discovery=d) == ResolvedCamera(
         host=None, camera="donald-4")
+
+
+def test_default_target_never_conflicts_with_host_n():
+    """APRILCAM_DAEMON_HOST / `aprilcam mcp -d HOST` are defaults: HOST-N
+    overrides them. Only an explicit target conflicts."""
+    r = resolve_camera("donald-4", discovery=_disc(), default_target="buzzkill")
+    assert r == ResolvedCamera(host="192.168.4.60:5280", camera="4")
+
+
+def test_default_target_is_the_step_one_lookup_daemon():
+    buzz = FakeDaemon([_state("donald-4", 7)])
+    d = FakeDiscovery([_info("donald", "192.168.4.60")], {"buzzkill": buzz})
+    r = resolve_camera("donald-4", discovery=d, default_target="buzzkill")
+    assert r == ResolvedCamera(host="buzzkill", camera="donald-4")
+    assert d.connects == ["buzzkill"]
+
+
+def test_default_target_used_for_pass_through():
+    d = _disc()
+    assert resolve_camera("4", discovery=d, default_target="buzzkill") == (
+        ResolvedCamera(host="buzzkill", camera="4"))
+
+
+def test_explicit_target_wins_over_default_and_still_conflicts():
+    with pytest.raises(ConflictingTarget):
+        resolve_camera("donald-4", discovery=_disc(), target="buzzkill",
+                       default_target="donald")
