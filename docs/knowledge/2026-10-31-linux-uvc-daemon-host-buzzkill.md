@@ -81,7 +81,7 @@ formats. Lowering the frame rate does not help either, because the camera's
 request does not change.
 
 **Fix: a patched uvcvideo with a `max_payload` cap**
-(`deploy/uvcvideo-bwcap/`). It clamps `dwMaxPayloadTransferSize` in
+(`deploy/uvcvideo-bwcap/`, installed by `deploy/provision-uvc-host.sh`). It clamps `dwMaxPayloadTransferSize` in
 `uvc_fixup_video_ctrl`, and the driver then picks the smallest altsetting
 **at or above** the cap. Installed on buzzkill through DKMS with
 `options uvcvideo max_payload=1600` in
@@ -96,8 +96,8 @@ effect on the next stream start, so restart the daemon after changing it.
 Watch: DKMS rebuilds the module from the saved source on each new kernel.
 If a kernel bump changes uvcvideo and the build fails, the stock driver
 comes back and the bandwidth errors return. Rerun
-`deploy/uvcvideo-bwcap/install.sh`, which fetches the source matching the
-running kernel. Undo it all with
+`deploy/provision-uvc-host.sh <user>@<host>`, which fetches the source
+matching the running kernel and rebuilds. Undo it all with
 `sudo dkms remove uvcvideo-bwcap/1.0 --all` and delete the modprobe.d file.
 
 ## Related: MJPG resets the size to 640x480
@@ -106,8 +106,11 @@ After switching to MJPG, every camera opened at 640x480. The flat-field
 gain maps were then skipped ("shape (800, 1280, 3) does not match frame
 shape (480, 640, 3)"), and the intrinsics (1280x800, 1920x1080) no longer
 matched. Pin the native size in each camera's config `settings`
-(`frame_width`/`frame_height`). Push it with
-`aprilcam camera config <file> -d HOST` after a `--dump`.
+(`frame_width`/`frame_height`) **in `config/aprilcam/cameras/*/config.json`**
+and copy that to `/etc/aprilcam`. A push with `aprilcam -d HOST camera config
+<file>` is **not persisted** to `/etc/aprilcam`: it was lost on the next daemon
+restart, and the playfield view then showed only the top-left quarter of the
+field (640x480 frames warped by 1920x1080 calibrations).
 
 ## Other host notes
 

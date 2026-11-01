@@ -263,3 +263,25 @@ aprilcam daemon list          # rediscovered with no manual intervention
 | `modprobe.d/aprilcam.conf` | `/etc/modprobe.d/aprilcam.conf` | v4l2loopback module options (device numbers, card labels, buffer count). |
 | `modules-load.d/aprilcam.conf` | `/etc/modules-load.d/aprilcam.conf` | Autoloads v4l2loopback at boot. |
 | `provision-pi.sh` | (run, not installed) | Idempotent apt/user/group/module-config setup for a fresh Pi. |
+| `provision-uvc-host.sh` | (run, not installed) | Idempotent setup for a Linux x86 host with USB (UVC) cameras: apt, user/group, and the uvcvideo bandwidth cap below. |
+| `modprobe.d/uvcvideo-bwcap.conf` | `/etc/modprobe.d/uvcvideo-bwcap.conf` | `max_payload` cap for the patched uvcvideo. |
+| `uvcvideo-bwcap/` | `/usr/src/uvcvideo-bwcap-1.0` (DKMS) | Patch + `dkms.conf` for uvcvideo with a `max_payload` parameter, so several UVC cameras share one USB 2.0 hub. |
+
+## Linux host with USB (UVC) cameras
+
+The steps above are for a Pi with CSI cameras. A Linux x86 host whose cameras
+are USB webcams (buzzkill) needs no bridge units, but does need a patched
+`uvcvideo`, because the stock driver lets each camera reserve its worst-case USB
+bandwidth and only one of three cameras on a shared hub will stream. Provision it
+with:
+
+```bash
+./deploy/provision-uvc-host.sh <user>@<host>
+```
+
+Then install the wheel and `aprilcamd.service` as in steps 3 and 5, and copy
+`config/aprilcam/` to `/etc/aprilcam`. The camera configs there pin
+`frame_width`/`frame_height`: V4L2 otherwise opens MJPG at 640x480, which
+does not match the native-resolution calibrations. Rerun the script after a
+kernel upgrade if `dmesg` shows "Not enough bandwidth". See
+`docs/knowledge/2026-10-31-linux-uvc-daemon-host-buzzkill.md`.
