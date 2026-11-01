@@ -57,6 +57,7 @@ from aprilcam.camera.backends.libcamera import LibcameraDevice
 from aprilcam.camera.camera import Camera
 from aprilcam.camera.identity import CameraIdentity, is_pi_internal_node, resolve_all
 from aprilcam.camera.interfaces import CameraDiscovery as _CameraDiscoveryBase
+from aprilcam.camera.interfaces import PresenceSource
 from aprilcam.camera.registry import CameraRegistry
 from aprilcam.types import CameraState, ProbeReport, ProbeSkip
 
@@ -67,6 +68,11 @@ logger = logging.getLogger(__name__)
 #: Seconds between passive-watch polls. Small enough that a hotplugged
 #: camera shows up in ``camera list`` "within a few seconds" (UC-25.S-5).
 DEFAULT_WATCH_INTERVAL = 2.0
+
+#: Seconds between ``PresenceSource`` polls (sprint 047). Listing only,
+#: no device opens, so cheap enough to run well inside the 2 s budget
+#: for noticing an unplugged held camera.
+DEFAULT_PRESENCE_INTERVAL = 0.5
 
 #: Wall-clock bound (seconds) ``_probe_openable`` waits -- across as many
 #: ``backend.read()`` attempts as fit within it -- for a real frame after
@@ -158,6 +164,15 @@ class CameraDiscovery(_CameraDiscoveryBase):
         :data:`DEFAULT_PROBE_READ_TIMEOUT` for the bound and the
         tradeoff it accepts. Overridable so a test can inject a short
         bound rather than waiting out the default.
+    presence_source, presence_interval, on_presence:
+        Sprint 047. When *presence_source* is given, ``watch()`` also
+        runs a fast loop that diffs its hardware keys; a key that
+        disappears calls ``on_presence(slug, False)`` and one that
+        returns (on any device node) calls ``on_presence(slug, True)``.
+        The callback may return ``False`` from a ``True`` event to say
+        the reopen did not take; it is then retried every tick while the
+        key stays present. Only keys the source has itself reported are
+        ever treated as gone.
     list_loopback_cameras:
         () -> ``[LibcameraDevice, ...]``. Consulted only for a
         libcamera-identified camera (``identity.hardware_key`` prefixed
@@ -180,8 +195,17 @@ class CameraDiscovery(_CameraDiscoveryBase):
         watch_interval: float = DEFAULT_WATCH_INTERVAL,
         probe_read_timeout: float = DEFAULT_PROBE_READ_TIMEOUT,
         list_loopback_cameras: Optional[Callable[[], List[LibcameraDevice]]] = None,
+        presence_source: Optional[PresenceSource] = None,
+        presence_interval: float = DEFAULT_PRESENCE_INTERVAL,
+        on_presence: Optional[Callable[[str, bool], Optional[bool]]] = None,
     ) -> None:
         self._registry = registry
+        self._presence_source = presence_source
+        self._presence_interval = presence_interval
+        self._on_presence = on_presence
+        self._presence_prev: FrozenSet[str] = frozenset()
+        self._presence_pending: Set[str] = set()
+        self._presence_thread: Optional[threading.Thread] = None
         self._active_camera_state = active_camera_state or (lambda slug: None)
         self._backend_factory = backend_factory
         self._identity_source = identity_source
@@ -316,6 +340,14 @@ class CameraDiscovery(_CameraDiscoveryBase):
             target=self._watch_loop, name="camera-discovery-watch", daemon=True
         )
         self._watch_thread.start()
+        if self._presence_source is not None and (
+            self._presence_thread is None or not self._presence_thread.is_alive()
+        ):
+            self._presence_prev = self._safe_presence_keys()
+            self._presence_thread = threading.Thread(
+                target=self._presence_loop, name="camera-presence-watch", daemon=True
+            )
+            self._presence_thread.start()
 
     # -- beyond the Protocol: what watch() maintains, and test/shutdown hooks --
 
@@ -343,6 +375,9 @@ class CameraDiscovery(_CameraDiscoveryBase):
         thread, self._watch_thread = self._watch_thread, None
         if thread is not None:
             thread.join(timeout=self._watch_interval + 1.0)
+        presence, self._presence_thread = self._presence_thread, None
+        if presence is not None:
+            presence.join(timeout=self._presence_interval + 1.0)
 
     # -- internals -----------------------------------------------------
 
@@ -469,3 +504,68 @@ class CameraDiscovery(_CameraDiscoveryBase):
             self._known_hardware_keys = current_keys
             self._present_slugs |= newly_present
             self._present_slugs -= gone_slugs
+
+    # -- presence (sprint 047) -----------------------------------------
+
+    def _safe_presence_keys(self) -> FrozenSet[str]:
+        assert self._presence_source is not None
+        try:
+            return self._presence_source.present_keys()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("presence: listing failed: %s", exc)
+            return self._presence_prev
+
+    def _presence_loop(self) -> None:
+        while not self._watch_stop.is_set():
+            try:
+                self.presence_poll_once()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("presence: poll failed: %s", exc)
+            self._watch_stop.wait(self._presence_interval)
+
+    def presence_poll_once(self) -> None:
+        """One presence tick: diff the source's keys, report changes.
+
+        Public so tests can drive it deterministically."""
+        if self._presence_source is None:
+            return
+        current = self._safe_presence_keys()
+        previous = self._presence_prev
+        self._presence_prev = current
+        by_key = {r.hardware_key: r.slug for r in self._registry.records()}
+
+        for key in previous - current:
+            slug = by_key.get(key)
+            if slug is None:
+                continue
+            self._presence_pending.discard(slug)
+            with self._lock:
+                self._present_slugs.discard(slug)
+                self._known_hardware_keys = self._known_hardware_keys - {key}
+            self._notify(slug, False)
+
+        for key in current - previous:
+            slug = by_key.get(key)
+            if slug is None:
+                continue
+            with self._lock:
+                self._present_slugs.add(slug)
+            if self._notify(slug, True) is False:
+                self._presence_pending.add(slug)
+
+        # Retry reopens that did not take while the key is still there.
+        for slug in list(self._presence_pending):
+            held_key = next((k for k, v in by_key.items() if v == slug), None)
+            if held_key not in current:
+                self._presence_pending.discard(slug)
+            elif self._notify(slug, True) is not False:
+                self._presence_pending.discard(slug)
+
+    def _notify(self, slug: str, present: bool) -> Optional[bool]:
+        if self._on_presence is None:
+            return None
+        try:
+            return self._on_presence(slug, present)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("presence: callback failed for %s: %s", slug, exc)
+            return None

@@ -24,12 +24,14 @@ import functools
 import logging
 import os
 import signal
+import sys
 import threading
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from aprilcam.camera.camera import Camera
 from aprilcam.camera.discovery import CameraDiscovery
+from aprilcam.camera.presence import LinuxSysfsPresenceSource
 from aprilcam.camera.registry import CameraRegistry
 from aprilcam.config.directories import DEFAULT_DAEMON_PORT, Directories
 from aprilcam.config.loader import ConfigLoader
@@ -113,11 +115,17 @@ def build(
     # instead of assuming a held-open camera is healthy.
     held_cameras: Dict[str, Camera] = {}
     registry = CameraRegistry(directories.state_dir / "cameras")
+    # Sprint 047: on Linux, a fast /sys poll notices held cameras
+    # vanishing/returning; the service drops/reopens them.
+    presence_source = LinuxSysfsPresenceSource() if sys.platform.startswith("linux") else None
+    service_ref: List[DaemonService] = []
     discovery = CameraDiscovery(
         registry,
         active_camera_state=lambda slug: (
             held_cameras[slug].state if slug in held_cameras else None
         ),
+        presence_source=presence_source,
+        on_presence=lambda slug, present: service_ref[0].on_hardware_presence(slug, present),
     )
     service = DaemonService(
         registry=registry,
@@ -125,6 +133,8 @@ def build(
         directories=directories,
         cameras=held_cameras,
     )
+
+    service_ref.append(service)
 
     _load_config_dir(service, directories)
 

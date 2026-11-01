@@ -1,7 +1,7 @@
 ---
 id: '002'
 title: Presence watch covers held cameras (Linux sysfs source, drop and reopen)
-status: open
+status: done
 use-cases:
 - SUC-001
 - SUC-002
@@ -35,10 +35,10 @@ watcher emits events to the service; keep DaemonService additions thin.
 
 ## Acceptance Criteria
 
-- [ ] Held camera whose key disappears is dropped and reported absent within ~2 s with no reads.
-- [ ] Key reappearing on a different node triggers reopen with full config and the camera returns to PRESENT.
-- [ ] PresenceSource is a real base class (no Protocol); a fake source is used in tests.
-- [ ] Polling cost is negligible (listing only, no device opens).
+- [x] Held camera whose key disappears is dropped and reported absent within ~2 s with no reads.
+- [x] Key reappearing on a different node triggers reopen with full config and the camera returns to PRESENT.
+- [x] PresenceSource is a real base class (no Protocol); a fake source is used in tests.
+- [x] Polling cost is negligible (listing only, no device opens).
 
 ## Testing
 

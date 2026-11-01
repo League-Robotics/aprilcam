@@ -754,6 +754,25 @@ class DaemonService(Daemon):
         with self._lock:
             return frozenset(self._cameras.keys())
 
+    def on_hardware_presence(self, slug: str, present: bool) -> Optional[bool]:
+        """Presence-watch callback (sprint 047): the hardware key behind
+        *slug* disappeared (``present=False`` -> drop the held camera,
+        marking it ABSENT) or came back on any node (``present=True`` ->
+        reopen it with its full stored config). A slug with no held
+        camera is a no-op (``None``). Returns whether a reopen took, so
+        the watcher can retry; ``None`` for everything else."""
+        with self._lock:
+            camera = self._cameras.get(slug)
+        if camera is None:
+            return None
+        if not present:
+            logger.info("camera %s unplugged: dropping device", slug)
+            camera.drop()
+            return None
+        ok = camera.reopen()
+        logger.info("camera %s back: reopen %s", slug, "ok" if ok else "pending")
+        return ok
+
     # -- daemon.interfaces.Daemon (this sprint's slice) --------------------
 
     def list_cameras(self) -> Tuple[CameraState, ...]:
