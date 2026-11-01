@@ -1,7 +1,7 @@
 ---
 id: '047'
 title: 'Camera hotplug robustness: drop/reopen, rescan on plug, test-card placeholder'
-status: ticketing
+status: executing
 branch: sprint/047-camera-hotplug-robustness-drop-reopen-rescan-on-plug-test-card-placeholder
 use-cases: []
 issues:
