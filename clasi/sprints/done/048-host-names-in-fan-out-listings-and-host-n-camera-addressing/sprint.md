@@ -1,7 +1,7 @@
 ---
 id: 048
 title: Host names in fan-out listings and HOST-N camera addressing
-status: executing
+status: done
 branch: sprint/048-host-names-in-fan-out-listings-and-host-n-camera-addressing
 use-cases:
 - SUC-001

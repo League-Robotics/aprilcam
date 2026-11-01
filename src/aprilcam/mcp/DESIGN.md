@@ -55,19 +55,14 @@ locals.
   directly with no `Discovery`/`Daemon` involved at all — the one
   capability that must work before any daemon exists, mirroring
   `cli/guide.py`'s identical exception.
-- **HOST-N camera addresses (sprint 048).** `ConnectionManager.call_camera(camera, fn, *, host=None)`
-  runs `client.addressing.resolve_camera` on the tool's `camera` argument
-  (per-call `daemon` is the explicit `target`; the session default is the
-  `default_target`), then resolves/caches the daemon for the *resolved*
-  host and calls `fn(daemon, resolved_camera)`. Every tool with a `camera`
-  parameter uses it (a test enumerates the registered tools). A `HOST-N`
-  overrides the session default; a conflicting per-call `daemon` raises
-  `ConflictingTarget`, an unknown host `UnknownHost`, both surfaced as
-  tool errors by `handle_tool_errors` like any `AprilCamError`. A
-  `HOST-N` naming the machine the server runs on connects with
-  `Discovery.connect_local()` under its own cache key, so neither the
-  session default nor `APRILCAM_DAEMON_HOST` can redirect it. Cache
-  semantics (evict only that target on `ConnectionFailed`) are unchanged.
+- **HOST-N camera addresses (sprint 048).** `ConnectionManager` gains a
+  camera-aware entry point that runs `client.addressing` on the tool's
+  `camera` argument and the effective target (per-call `daemon`, else
+  session default), then resolves/caches the daemon for the *resolved*
+  target and passes the rewritten camera argument to the RPC. Every tool
+  with a `camera` parameter uses it; a conflicting per-call `daemon` is a
+  tool error. Cache semantics (evict only that target on
+  `ConnectionFailed`) are unchanged.
 - **Cache-and-evict-on-failure, not reconnect-per-call or
   preflight-probe.** `ConnectionManager` resolves a target once and
   reuses it across calls until an actual RPC raises
@@ -147,10 +142,7 @@ follows the identical shape: define `register(mcp, connection,
 temp_dir)`, decorate each tool function with `@mcp.tool()` then
 `@handle_tool_errors` (in that order, so `functools.wraps` preserves
 the signature FastMCP's schema introspection needs), and inside the
-body call `connection.call(lambda d: d.<method>(...), host=daemon)`
-(or, for a tool with a `camera` parameter,
-`connection.call_camera(camera, lambda d, camera: d.<method>(camera, ...), host=daemon)`
-so `HOST-N` addresses resolve).
+body call `connection.call(lambda d: d.<method>(...), host=daemon)`.
 No tool group holds a `Daemon` of its own or re-derives business logic
 the daemon already owns (upsert semantics, no-op-on-absent behavior,
 precondition ordering) — each docstring is explicit about which
