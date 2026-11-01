@@ -603,6 +603,11 @@ message TagFrame {
   double timestamp = 2;
   int32 frame_index = 3;
   bool calibration_stale = 4;
+  // Sprint 047 ticket 005: true on a tag-stream heartbeat sent while the
+  // camera is absent (unplugged / reopening / no frame): `tags` is empty
+  // and says nothing about the field -- it means "no signal", not "no
+  // tags". Additive; old clients read it as default false.
+  bool camera_absent = 5;
 }
 
 // ---------------------------------------------------------------------------
@@ -685,6 +690,13 @@ message GetFrameResponse {
   // frame: annotations are world-only and a raw frame publishes no
   // world->pixel mapping to render them with (UC-16, "raw means raw").
   optional AnnotationSet annotations = 12;
+
+  // Sprint 047 ticket 005: true when `data` is the daemon's "NO SIGNAL"
+  // test card standing in for a camera that is absent / reopening / not
+  // delivering frames, false (the default) for a real captured frame.
+  // Additive: old clients ignore it. Frames resume automatically when
+  // the camera returns.
+  bool placeholder = 13;
 }
 
 // A field's world extent (width_cm, height_cm) -- distinct from

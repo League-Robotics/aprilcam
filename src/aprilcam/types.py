@@ -155,6 +155,9 @@ class TagFrame:
     timestamp: float
     frame_index: int
     calibration_stale: bool = False
+    #: True only on a tag-stream heartbeat sent while the camera is
+    #: absent: ``tags`` is empty and means "no signal", not "no tags".
+    camera_absent: bool = False
 
 
 @dataclass(frozen=True)
@@ -327,6 +330,9 @@ class ImageFrame:
     annotations: Optional[AnnotationSet] = None
     calibration_stale: bool = False
     frame_dark: bool = False
+    #: True when ``data`` is the "NO SIGNAL" test card standing in for an
+    #: absent camera rather than a real captured frame.
+    placeholder: bool = False
 
 
 @dataclass(frozen=True)

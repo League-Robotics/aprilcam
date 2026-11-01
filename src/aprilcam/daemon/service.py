@@ -132,7 +132,15 @@ from aprilcam.config.interfaces import PlayfieldDefinition as PlayfieldDefinitio
 from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
 from aprilcam.daemon.broadcast import Broadcaster
 from aprilcam.daemon.detection import DetectionEngine
-from aprilcam.daemon.interfaces import Daemon, DaemonStatus, ImageStream, MountRegistration, TagStream
+from aprilcam.daemon.interfaces import (
+    Daemon,
+    DaemonStatus,
+    ImageStream,
+    MountRegistration,
+    PlaceholderRenderer,
+    TagStream,
+)
+from aprilcam.daemon.testcard import CvPlaceholderRenderer, resolve_size
 from aprilcam.intrinsics.interfaces import IntrinsicsFinishResult, IntrinsicsStatus
 from aprilcam.intrinsics.manager import IntrinsicsManager
 from aprilcam.intrinsics.target import ChArUcoTargetObserver
@@ -592,8 +600,17 @@ class DaemonService(Daemon):
         config_loader: Optional[ConfigLoaderIface] = None,
         flatfield_capturer: Optional[FlatFieldCapturer] = None,
         flatfield_detector_factory: Callable[[], TagDetector] = TagDetector,
+        placeholder_renderer: Optional[PlaceholderRenderer] = None,
     ) -> None:
         self._registry = registry
+        #: Renders the "NO SIGNAL" card served in place of frames while a
+        #: camera is not delivering them (sprint 047 ticket 005).
+        self._placeholder_renderer: PlaceholderRenderer = (
+            placeholder_renderer if placeholder_renderer is not None else CvPlaceholderRenderer()
+        )
+        #: slug -> ``(width, height)`` of the last real frame
+        #: :meth:`get_frame` served; the card's "last opened" size.
+        self._frame_sizes: Dict[str, Tuple[int, int]] = {}
         self._discovery = discovery
         self._directories = directories
         self._cameras: Dict[str, Camera] = cameras if cameras is not None else {}
@@ -1018,17 +1035,21 @@ class DaemonService(Daemon):
         if deskewed:
             return self._get_deskewed_frame(camera, encoding=encoding)
 
-        cam = self._camera_for(camera)
-        frame = cam.read()
+        cam = self._camera_for_frames(camera)
+        frame = self._read_if_present(cam)
+        placeholder = frame is None
+        slug = cam.slug if cam is not None else self._resolve_slug_if_known(camera)
         if frame is None:
-            raise RuntimeError(f"no frame available from camera {camera!r}")
+            frame = self._placeholder_array(slug, last_size=self._frame_sizes.get(slug))
 
         ok, buf = cv.imencode(_CV_EXTENSION[encoding], frame)
         if not ok:
             raise RuntimeError(f"failed to encode frame from {camera!r} as {encoding}")
 
         height, width = frame.shape[:2]
-        calibration = self.get_calibration(cam.slug)
+        if not placeholder:
+            self._frame_sizes[slug] = (width, height)
+        calibration = self.get_calibration(slug)
         return ImageFrame(
             data=buf.tobytes(),
             width=width,
@@ -1036,8 +1057,9 @@ class DaemonService(Daemon):
             encoding=encoding,
             timestamp=time.time(),
             deskewed=False,
-            tags=self._detection.latest(cam.slug),
+            tags=None if placeholder else self._detection.latest(slug),
             calibration_stale=calibration.stale if calibration is not None else False,
+            placeholder=placeholder,
         )
 
     def _get_deskewed_frame(self, camera: str, *, encoding: str) -> ImageFrame:
@@ -1093,17 +1115,21 @@ class DaemonService(Daemon):
                 f"{calibration.playfield!r}, which this daemon no longer holds"
             )
 
-        cam = self._camera_for(camera)
-        frame = cam.read()
-        if frame is None:
-            raise RuntimeError(f"no frame available from camera {camera!r}")
-
         deskewer = Deskewer(
             calibration=calibration,
             width_cm=definition.width_cm,
             height_cm=definition.height_cm,
         )
-        warped = deskewer.deskew(frame)
+        cam = self._camera_for_frames(camera)
+        frame = self._read_if_present(cam)
+        placeholder = frame is None
+        if frame is None:
+            # No signal: the card at the deskewed output size, so the
+            # frame keeps its geometry metadata and consumers needn't
+            # special-case the size. ``placeholder`` says it is not real.
+            warped = self._placeholder_array(slug, size=deskewer.output_size)
+        else:
+            warped = deskewer.deskew(frame)
 
         ok, buf = cv.imencode(_CV_EXTENSION[encoding], warped)
         if not ok:
@@ -1119,10 +1145,61 @@ class DaemonService(Daemon):
             deskewed=True,
             px_per_cm=deskewer.px_per_cm,
             world_extent=deskewer.world_extent,
-            tags=self._detection.latest(cam.slug),
+            tags=None if placeholder else self._detection.latest(slug),
             annotations=self.get_annotations(calibration.playfield),
             calibration_stale=calibration.stale,
+            placeholder=placeholder,
         )
+
+    # -- placeholder ("NO SIGNAL" card) support (sprint 047 ticket 005) ------
+
+    def _camera_for_frames(self, token: str) -> Optional[Camera]:
+        """:meth:`_camera_for`, except a registered-but-absent camera
+        that was never opened yields ``None`` instead of raising
+        :class:`CameraNotPresent`: frame requests are answered with the
+        test card, not an error (``UnknownCamera`` still propagates)."""
+        try:
+            return self._camera_for(token)
+        except CameraNotPresent:
+            return None
+
+    @staticmethod
+    def _read_if_present(cam: Optional[Camera]) -> Optional[np.ndarray]:
+        """A real frame, or ``None`` when the camera is missing or not
+        PRESENT. A non-PRESENT camera is never read: the card is served
+        immediately, without burning self-heal/reopen budget or blocking
+        on a dead handle."""
+        if cam is None or cam.lifecycle is not CameraLifecycle.PRESENT:
+            return None
+        return cam.read()
+
+    def _configured_frame_size(self, slug: str) -> Optional[Tuple[int, int]]:
+        with self._lock:
+            config = self._camera_configs.get(slug)
+        if config is None:
+            return None
+        width = config.settings.get("frame_width")
+        height = config.settings.get("frame_height")
+        if isinstance(width, (int, float)) and isinstance(height, (int, float)) and width and height:
+            return int(width), int(height)
+        return None
+
+    def _placeholder_array(
+        self,
+        slug: str,
+        *,
+        size: Optional[Tuple[int, int]] = None,
+        last_size: Optional[Tuple[int, int]] = None,
+    ) -> np.ndarray:
+        """The "NO SIGNAL" card for *slug* as a BGR array. *size* is an
+        exact size (a deskewed output); otherwise the configured frame
+        size, else *last_size*, else the 1280x720 default. The array is
+        the renderer's cached, read-only one -- never drawn on."""
+        if size is None:
+            size = resolve_size(self._configured_frame_size(slug), last_size)
+        record = self._record_for(slug)
+        number = record.number if record is not None else 0
+        return self._placeholder_renderer.render(size[0], size[1], number, slug)
 
     def get_tags(self, camera: str) -> TagFrame:
         """See ``daemon.interfaces.Daemon.get_tags``.
@@ -1138,6 +1215,8 @@ class DaemonService(Daemon):
         pin).
         """
         cam = self._camera_for(camera)
+        if cam.lifecycle is not CameraLifecycle.PRESENT:
+            raise CameraNotPresent(cam.slug)
         return self._detection.run_burst(cam.slug, cam)
 
     def get_tag(self, camera: str, tag: TagId) -> Optional[TagRecord]:
@@ -1308,11 +1387,30 @@ class DaemonService(Daemon):
                 producer = (
                     self._build_deskewed_image_producer(cam)
                     if deskewed
-                    else ImageStreamProducer(cam.slug, cam, self._detection)
+                    else ImageStreamProducer(
+                        cam.slug,
+                        cam,
+                        self._detection,
+                        placeholder_source=self._placeholder_source_for(cam.slug),
+                    )
                 )
                 self._image_stream_producers[key] = producer
         subscriber_queue = producer.broadcaster.subscribe()
         return BroadcasterImageStream(producer.broadcaster, subscriber_queue)
+
+    def _placeholder_source_for(
+        self, slug: str
+    ) -> Callable[..., np.ndarray]:
+        """The card source an :class:`ImageStreamProducer` calls (as
+        ``source(size=..., last_size=...)``) while its camera is not
+        delivering frames."""
+
+        def source(
+            *, size: Optional[Tuple[int, int]] = None, last_size: Optional[Tuple[int, int]] = None
+        ) -> np.ndarray:
+            return self._placeholder_array(slug, size=size, last_size=last_size)
+
+        return source
 
     def _build_deskewed_image_producer(self, cam: Camera) -> ImageStreamProducer:
         """Builds the deskewed ``ImageStreamProducer`` for *cam*, wired
@@ -1393,6 +1491,7 @@ class DaemonService(Daemon):
             calibration_lookup=self.get_calibration,
             playfield_lookup=self._playfield_for_calibration,
             annotations_lookup=self.get_annotations,
+            placeholder_source=self._placeholder_source_for(slug),
         )
         return image_producer
 

@@ -416,26 +416,53 @@ def test_get_frame_unknown_number_raises_unknown_camera_with_number_slug_availab
     assert excinfo.value.available == (f"{number} {slug}",)
 
 
-def test_get_frame_absent_registered_camera_by_slug_raises_camera_not_present(
+def test_get_frame_absent_registered_camera_by_slug_returns_flagged_card(
     service, absent_camera
 ):
     slug, _number = absent_camera
 
-    with pytest.raises(CameraNotPresent) as excinfo:
-        service.get_frame(slug)
+    frame = service.get_frame(slug)
 
-    assert excinfo.value.slug == slug
+    assert frame.placeholder is True
+    assert (frame.width, frame.height) == (1280, 720)
+    assert frame.data[:2] == b"\xff\xd8"
+    assert frame.tags is None
 
 
-def test_get_frame_absent_registered_camera_by_number_raises_camera_not_present(
+def test_get_frame_absent_registered_camera_by_number_returns_flagged_card(
     service, absent_camera
 ):
-    slug, number = absent_camera
+    _slug, number = absent_camera
 
-    with pytest.raises(CameraNotPresent) as excinfo:
-        service.get_frame(str(number))
+    assert service.get_frame(str(number)).placeholder is True
 
-    assert excinfo.value.slug == slug
+
+def test_get_frame_real_frame_is_not_placeholder(service, held_camera):
+    _, slug, _ = held_camera
+
+    assert service.get_frame(slug).placeholder is False
+
+
+def test_get_frame_dropped_camera_serves_card_at_last_size_then_resumes(service, held_camera):
+    _, slug, cam = held_camera
+    real = service.get_frame(slug)
+    cam.drop()
+
+    card = service.get_frame(slug)
+
+    assert card.placeholder is True
+    assert (card.width, card.height) == (real.width, real.height)
+
+    cam.reopen()
+    assert service.get_frame(slug).placeholder is False
+
+
+def test_get_tags_dropped_camera_raises_camera_not_present(service, held_camera):
+    _, slug, cam = held_camera
+    cam.drop()
+
+    with pytest.raises(CameraNotPresent):
+        service.get_tags(slug)
 
 
 def _service_for_backend_selection(
@@ -1245,34 +1272,21 @@ def test_rpc_get_frame_by_number_round_trip(stub, held_camera, registry):
     assert response.data[:2] == b"\xff\xd8"
 
 
-def test_rpc_get_frame_camera_not_present_maps_to_failed_precondition_with_slug(
-    stub, absent_camera
-):
+def test_rpc_get_frame_absent_camera_returns_placeholder_flag(stub, absent_camera):
     slug, _number = absent_camera
 
-    with pytest.raises(grpc.RpcError) as excinfo:
-        stub.GetFrame(aprilcam_v2_pb2.GetFrameRequest(camera=slug))
+    resp = stub.GetFrame(aprilcam_v2_pb2.GetFrameRequest(camera=slug))
 
-    err = excinfo.value
-    assert err.code() == grpc.StatusCode.FAILED_PRECONDITION
-    metadata = dict(err.trailing_metadata())
-    assert metadata["aprilcam-error-type"] == "CameraNotPresent"
-    assert metadata["aprilcam-slug"] == slug
+    assert resp.placeholder is True
+    assert resp.width > 0 and resp.height > 0
 
 
-def test_rpc_get_frame_camera_not_present_by_number_maps_to_failed_precondition(
-    stub, absent_camera
-):
-    slug, number = absent_camera
+def test_rpc_get_frame_real_frame_placeholder_flag_false(stub, held_camera):
+    _, slug, _ = held_camera
 
-    with pytest.raises(grpc.RpcError) as excinfo:
-        stub.GetFrame(aprilcam_v2_pb2.GetFrameRequest(camera=str(number)))
+    resp = stub.GetFrame(aprilcam_v2_pb2.GetFrameRequest(camera=slug))
 
-    err = excinfo.value
-    assert err.code() == grpc.StatusCode.FAILED_PRECONDITION
-    metadata = dict(err.trailing_metadata())
-    assert metadata["aprilcam-error-type"] == "CameraNotPresent"
-    assert metadata["aprilcam-slug"] == slug
+    assert resp.placeholder is False
 
 
 # ---------------------------------------------------------------------------

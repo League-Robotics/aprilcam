@@ -164,3 +164,25 @@ the same V4L2 node fails EBUSY). `CameraDiscovery(probe_held=...)` is wired to
 `DaemonService.probe_held_camera`, which `reopen()`s a non-PRESENT camera and
 decides `usable` from up to three reads through the held handle. Only
 non-held cameras get the fresh open/close probe.
+
+## Sprint 047: placeholder card instead of "no frame"
+
+While a camera is not PRESENT (unplugged, reopening, never opened but
+registered) or delivers no frame, frame requests are answered with the
+"NO SIGNAL" card (`testcard.py`) rather than an error or silence:
+
+- `GetFrameResponse.placeholder` (additive proto field 13, also carried on
+  image-stream frames) is true for a card, false for a real frame. `get_frame`
+  (raw and deskewed) and image streams resume real frames on their own when
+  the camera returns. Card size: deskewed = the deskewer's output size; raw =
+  configured `frame_width`/`frame_height`, else the last real frame's size,
+  else 1280x720. Embedded `tags` are omitted on a card.
+- A non-PRESENT camera is never read by these paths, so serving the card
+  burns no self-heal/reopen budget and never blocks on a dead handle.
+- `TagFrame.camera_absent` (additive field 5): the tag-stream producer sends
+  an immediate then periodic empty heartbeat with it set while the camera is
+  absent, and publishes the first real frame immediately on return. One-shot
+  `get_tags` on a non-PRESENT camera raises `CameraNotPresent`.
+- Known gap: a stream cannot be opened on a camera that is registered but was
+  never opened (no `Camera` to attach a producer to); that still raises
+  `CameraNotPresent`.

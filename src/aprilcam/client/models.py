@@ -158,6 +158,7 @@ def image_frame_from_proto(msg: aprilcam_v2_pb2.GetFrameResponse) -> ImageFrame:
         deskewed=msg.deskewed,
         calibration_stale=msg.calibration_stale,
         frame_dark=msg.frame_dark,
+        placeholder=msg.placeholder,
         tags=tag_frame_from_proto(msg.tags) if msg.HasField("tags") else None,
         px_per_cm=msg.px_per_cm if msg.HasField("px_per_cm") else None,
         world_extent=(
@@ -269,6 +270,7 @@ def tag_frame_from_proto(msg: aprilcam_v2_pb2.TagFrame) -> TagFrame:
         timestamp=msg.timestamp,
         frame_index=msg.frame_index,
         calibration_stale=msg.calibration_stale,
+        camera_absent=msg.camera_absent,
     )
 
 

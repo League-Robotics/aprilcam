@@ -421,15 +421,13 @@ def test_get_frame_by_number_round_trip(client, held_camera, registry):
     assert frame.data[:2] == b"\xff\xd8"
 
 
-def test_get_frame_camera_not_present_raises_camera_not_present_with_slug_intact(
-    client, absent_camera
-):
+def test_get_frame_camera_not_present_returns_placeholder_frame(client, absent_camera):
     slug, _number = absent_camera
 
-    with pytest.raises(CameraNotPresent) as excinfo:
-        client.get_frame(slug)
+    frame = client.get_frame(slug)
 
-    assert excinfo.value.slug == slug
+    assert frame.placeholder is True
+    assert frame.data[:2] == b"\xff\xd8"
 
 
 def test_rpc_failure_after_server_shutdown_raises_connection_failed(service):

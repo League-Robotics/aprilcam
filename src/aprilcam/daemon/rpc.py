@@ -259,6 +259,7 @@ def _image_frame_to_proto(frame: ImageFrame) -> aprilcam_v2_pb2.GetFrameResponse
         deskewed=frame.deskewed,
         calibration_stale=frame.calibration_stale,
         frame_dark=frame.frame_dark,
+        placeholder=frame.placeholder,
     )
     # Presence, not an empty-vs-absent default: only set `tags` when
     # detection has actually run (frame.tags is not None). Leaving it
@@ -386,6 +387,7 @@ def _tag_frame_to_proto(frame: TagFrame) -> aprilcam_v2_pb2.TagFrame:
         timestamp=frame.timestamp,
         frame_index=frame.frame_index,
         calibration_stale=frame.calibration_stale,
+        camera_absent=frame.camera_absent,
     )
 
 

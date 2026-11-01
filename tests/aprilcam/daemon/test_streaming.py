@@ -48,7 +48,7 @@ from aprilcam.calibration.deskew import Deskewer
 from aprilcam.calibration.interfaces import Calibration
 from aprilcam.camera.camera import Camera
 from aprilcam.config.loader import PlayfieldDefinition
-from aprilcam.daemon.broadcast import DEFAULT_SUBSCRIBER_QUEUE_DEPTH
+from aprilcam.daemon.broadcast import DEFAULT_SUBSCRIBER_QUEUE_DEPTH, Broadcaster
 from aprilcam.daemon.detection import CONFIRMATION_STREAK, DetectionEngine
 from aprilcam.daemon.streaming import (
     TAG_STREAM_CHANGE_THRESHOLD_CM,
@@ -1130,3 +1130,79 @@ def test_broadcaster_image_stream_close_unsubscribes_and_is_idempotent():
     assert producer.running is False  # last subscriber left -- idle-gated
 
     stream.close()  # idempotent -- no error
+
+
+# ---------------------------------------------------------------------------
+# Sprint 047 ticket 005: placeholder card on image streams, absent
+# heartbeat on tag streams, automatic resume.
+# ---------------------------------------------------------------------------
+
+
+def _card_source(*, size=None, last_size=None):
+    w, h = size or last_size or (48, 32)
+    return np.full((h, w, 3), 96, dtype=np.uint8)
+
+
+def test_image_producer_publishes_flagged_card_while_absent_then_resumes():
+    engine = DetectionEngine(detector_factory=lambda _slug: _CallCountingDetector(), confirmation_streak=1)
+    backend = FakeBackend(read_queue=[_blank_frame()], loop=True)
+    cam = Camera("cam-img-absent", backend)
+    cam.open()
+    producer = ImageStreamProducer(
+        "cam-img-absent", cam, engine, Broadcaster(), placeholder_source=_card_source
+    )
+    q = producer.broadcaster.subscribe()  # no hooks: ticks are driven by hand
+
+    producer._tick()  # noqa: SLF001
+    real = q.get_nowait()
+    assert real.placeholder is False
+
+    cam.drop()
+    reads = backend.read_calls
+    producer._tick()  # noqa: SLF001
+    card = q.get_nowait()
+    assert card.placeholder is True
+    assert (card.width, card.height) == (32, 32)  # last real size
+    assert backend.read_calls == reads  # absent camera is not read
+
+    cam.reopen()
+    producer._tick()  # noqa: SLF001
+    assert q.get_nowait().placeholder is False
+
+
+def test_image_producer_without_placeholder_source_skips_absent_tick():
+    engine = DetectionEngine(detector_factory=lambda _slug: _CallCountingDetector(), confirmation_streak=1)
+    cam = _camera("cam-img-nosrc")
+    producer = ImageStreamProducer("cam-img-nosrc", cam, engine, Broadcaster())
+    q = producer.broadcaster.subscribe()
+    cam.drop()
+
+    producer._tick()  # noqa: SLF001
+
+    assert q.empty()
+
+
+def test_tag_stream_sends_absent_heartbeats_then_resumes():
+    detector = _CallCountingDetector()
+    engine = DetectionEngine(detector_factory=lambda _slug: detector, confirmation_streak=1)
+    cam = _camera("cam-tag-absent")
+    cam.drop()
+    producer = TagStreamProducer(
+        "cam-tag-absent", cam, engine, interval_s=0.01, heartbeat_interval_s=0.05
+    )
+    q = producer.broadcaster.subscribe()
+    try:
+        first = q.get(timeout=2)
+        second = q.get(timeout=2)  # a later heartbeat, not silence
+        assert first.camera_absent is True and first.tags == ()
+        assert second.camera_absent is True
+        assert detector.calls == 0  # never read while absent
+
+        cam.reopen()
+        deadline = time.time() + 2
+        frame = q.get(timeout=2)
+        while frame.camera_absent and time.time() < deadline:
+            frame = q.get(timeout=2)
+        assert frame.camera_absent is False
+    finally:
+        producer.broadcaster.unsubscribe(q)
