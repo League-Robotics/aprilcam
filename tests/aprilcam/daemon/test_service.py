@@ -465,6 +465,54 @@ def test_get_tags_dropped_camera_raises_camera_not_present(service, held_camera)
         service.get_tags(slug)
 
 
+class _ExclusiveSlowBackend(FakeBackend):
+    """open() is slow and fails if the device is already opened --
+    like a real V4L2 node under two racing first-opens (047-009)."""
+
+    opens = 0
+
+    def open(self) -> None:
+        type(self).opens += 1
+        if type(self).opens > 1:
+            raise RuntimeError("failed to open camera at index 0")
+        time.sleep(0.3)
+        super().open()
+
+
+def test_concurrent_first_requests_open_the_camera_once(directories, registry):
+    """An image stream and a tag stream subscribing to a cold camera at
+    the same time must share one open, not race two (047-009: the tag
+    stream died with 'failed to open camera' on a fresh daemon)."""
+    identity = _identity("hw:race", "Race Camera")
+    slug = registry.resolve(identity)
+    _ExclusiveSlowBackend.opens = 0
+    svc = _service_for_backend_selection(
+        directories,
+        registry,
+        identity=identity,
+        index=0,
+        backend_factory=lambda index: _ExclusiveSlowBackend(),
+    )
+    results: list = []
+    errors: list = []
+
+    def go() -> None:
+        try:
+            results.append(svc._camera_for(slug))  # noqa: SLF001
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=go) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+
+    assert errors == []
+    assert len(results) == 2 and results[0] is results[1]
+    assert _ExclusiveSlowBackend.opens == 1
+
+
 def _service_for_backend_selection(
     directories, registry, *, identity, index, backend_factory, list_loopback_cameras=None
 ):

@@ -728,6 +728,9 @@ class DaemonService(Daemon):
         # never restarted).
         self._image_stream_producers: Dict[Tuple[str, bool], ImageStreamProducer] = {}
         self._lock = threading.Lock()
+        # Serialises first-open in _camera_for: two streams (image + tag)
+        # subscribing to a cold camera at once must not both open the device.
+        self._open_lock = threading.RLock()
         self._lens_store = LensStore(self._directories.state_dir)
         self._calibrator = calibrator if calibrator is not None else Calibrator(
             get_camera_config=self._camera_config_for_calibration,
@@ -3139,6 +3142,15 @@ class DaemonService(Daemon):
     # -- internals -----------------------------------------------------
 
     def _camera_for(self, token: str, *, allow_absent: bool = False) -> Camera:
+        """Serialised :meth:`_camera_for_unlocked`: concurrent first
+        requests (image + tag stream on a cold daemon) would otherwise
+        both open the device and the loser fails with "failed to open
+        camera at index N". The second caller re-checks the held map
+        under the lock and reuses the first caller's camera."""
+        with self._open_lock:
+            return self._camera_for_unlocked(token, allow_absent=allow_absent)
+
+    def _camera_for_unlocked(self, token: str, *, allow_absent: bool = False) -> Camera:
         """The held-open ``Camera`` addressed by *token*, opening it on
         first use.
 
