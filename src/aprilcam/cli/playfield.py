@@ -123,6 +123,7 @@ from typing import Callable, Optional, Tuple
 from aprilcam.cli._common import (
     EXIT_ERROR,
     EXIT_OK,
+    EXIT_PLACEHOLDER,
     add_all_option,
     fan_out,
     incomplete_command,
@@ -231,6 +232,10 @@ def cmd_image(
     substituted, since ``get_frame(deskewed=True)`` itself never
     produces one for that camera (``daemon/service.py``'s
     ``_get_deskewed_frame``).
+
+    **Exit code 3 (sprint 047)**: a NO SIGNAL test card
+    (``ImageFrame.placeholder``) is still written, with a stderr warning,
+    and the exit code is 3 -- distinguishing it from a real frame (0).
     """
     if args.output is not None:
         problem = _unwritable_reason(Path(args.output))
@@ -274,6 +279,13 @@ def cmd_image(
     else:
         sys.stdout.buffer.write(frame.data)
         sys.stdout.buffer.flush()
+    if frame.placeholder:
+        print(
+            f"warning: camera {camera}: NO SIGNAL -- wrote test card, not a "
+            "camera frame",
+            file=sys.stderr,
+        )
+        return EXIT_PLACEHOLDER
     return EXIT_OK
 
 
@@ -652,7 +664,11 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     p_config.set_defaults(func=cmd_config)
 
     p_image = sub.add_parser(
-        "image", help="capture one deskewed, calibrated playfield frame (UC-06, UC-19)"
+        "image",
+        help="capture one deskewed, calibrated playfield frame (UC-06, UC-19)",
+        description="Capture one deskewed playfield frame. Exit codes: 0 real "
+        "frame, 1 error, 3 the camera is unplugged/absent and a NO SIGNAL test "
+        "card was written instead (a warning is printed to stderr).",
     )
     p_image.add_argument(
         "--camera",

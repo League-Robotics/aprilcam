@@ -266,6 +266,7 @@ def _image_frame(
     frame_dark: bool = False,
     calibration_stale: bool = False,
     tags: Optional[TagFrame] = None,
+    placeholder: bool = False,
 ) -> ImageFrame:
     return ImageFrame(
         data=data,
@@ -276,6 +277,7 @@ def _image_frame(
         frame_dark=frame_dark,
         calibration_stale=calibration_stale,
         tags=tags,
+        placeholder=placeholder,
     )
 
 
@@ -949,6 +951,23 @@ def test_run_raw_view_still_displays_a_dark_frame_with_the_advisory_surfaced():
 
     assert window.shown == [b"dark-frame"]  # never withheld
     assert window.statuses == ["frame dark -- image may be hard to see"]
+
+
+def test_run_raw_view_displays_a_placeholder_card_with_a_no_signal_status():
+    stream = _ScriptedImageStream([_image_frame(data=b"card", placeholder=True)])
+    daemon = _FakeStreamDaemon(stream=stream)
+    window = _FakeWindow(close_after_frames=1)
+
+    viewer.run_raw_view("cam", daemon, window_factory=lambda title: window)
+
+    assert window.shown == [b"card"]  # shown, never exits on a placeholder
+    assert len(window.statuses) == 1 and "NO SIGNAL" in window.statuses[0]
+
+
+def test_bare_playfield_converter_flags_a_placeholder():
+    out = viewer._convert_bare_playfield_frame(_image_frame(placeholder=True))
+    assert out.status is not None and "NO SIGNAL" in out.status
+    assert viewer._convert_bare_playfield_frame(_image_frame()).status is None
 
 
 def test_run_raw_view_propagates_no_display_available_before_any_daemon_call():

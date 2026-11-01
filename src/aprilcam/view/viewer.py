@@ -876,11 +876,22 @@ class StreamLoop:
             thread.join(timeout=_READER_JOIN_TIMEOUT_S)
 
 
+#: Status-line note for a daemon-served test card (sprint 047): the card
+#: itself is the visual cue; this is the textual one. A viewer never exits
+#: on a placeholder -- the camera may be plugged back in.
+_PLACEHOLDER_STATUS = "NO SIGNAL (placeholder test card, not a camera frame)"
+
+
 def _convert_raw_frame(frame: ImageFrame) -> DisplayFrame:
     """One streamed frame's raw-view display payload (UC-16, SUC-002).
     See the module docstring's "raw means raw is enforced by omission"
     note -- this never reads ``frame.tags``."""
-    status = "frame dark -- image may be hard to see" if frame.frame_dark else None
+    status_parts = []
+    if frame.placeholder:
+        status_parts.append(_PLACEHOLDER_STATUS)
+    if frame.frame_dark:
+        status_parts.append("frame dark -- image may be hard to see")
+    status = "; ".join(status_parts) if status_parts else None
     return DisplayFrame(data=frame.data, status=status)
 
 
@@ -961,6 +972,8 @@ def _make_playfield_converter(renderer: RendererBase) -> Callable[[ImageFrame], 
         data = renderer.render(frame)
 
         status_parts = []
+        if frame.placeholder:
+            status_parts.append(_PLACEHOLDER_STATUS)
         if frame.calibration_stale:
             status_parts.append(
                 "calibration stale -- re-run 'aprilcam camera calibrate' (UC-18)"
@@ -991,6 +1004,8 @@ def _convert_bare_playfield_frame(frame: ImageFrame) -> DisplayFrame:
     still surface as the window's advisory status line, exactly like
     :func:`_make_playfield_converter`'s ``convert``."""
     status_parts = []
+    if frame.placeholder:
+        status_parts.append(_PLACEHOLDER_STATUS)
     if frame.calibration_stale:
         status_parts.append(
             "calibration stale -- re-run 'aprilcam camera calibrate' (UC-18)"

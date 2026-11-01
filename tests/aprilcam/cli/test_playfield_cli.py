@@ -422,6 +422,23 @@ def test_image_writes_the_deskewed_frame_to_a_file(tmp_path):
     assert daemon.requested_encoding == "png"
 
 
+def test_image_placeholder_writes_card_warns_and_exits_3(capsys, tmp_path):
+    card = ImageFrame(
+        data=b"CARD", width=4, height=4, encoding="png", timestamp=0.0, placeholder=True
+    )
+    daemon = _FakeDaemon(cameras=(_camera("arducam", playfield="main-playfield"),), frame=card)
+    discovery = _FakeDiscovery(daemon=daemon)
+    out_path = tmp_path / "field.png"
+
+    code = playfield_cli.cmd_image(
+        _args(output=str(out_path), encoding="png"), discovery_factory=lambda: discovery
+    )
+
+    assert code == 3
+    assert out_path.read_bytes() == b"CARD"
+    assert "NO SIGNAL" in capsys.readouterr().err
+
+
 def test_image_reports_the_resolved_dimensions_and_px_per_cm(capsys, tmp_path):
     frame = _frame(width=800, height=532, px_per_cm=800 / 134.3)
     daemon = _FakeDaemon(cameras=(_camera("arducam", playfield="main-playfield"),), frame=frame)

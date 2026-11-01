@@ -122,7 +122,7 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         encoding: str = "jpeg",
         format: str = "base64",
         daemon: Optional[str] = None,
-    ) -> Union[ImageContent, TextContent]:
+    ) -> Union[ImageContent, TextContent, list[Union[ImageContent, TextContent]]]:
         """One frame from a named camera (UC-06) -- raw, or the
         deskewed top-down view when *deskewed* is true. Requesting a
         deskewed frame from an uncalibrated camera surfaces the
@@ -136,12 +136,35 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         both, and never a path the caller did not ask for
         (``mcp/images.py``'s ``image_response``, unchanged from ticket
         001).
+
+        **Placeholder (sprint 047)**: if the camera is unplugged the
+        daemon serves a NO SIGNAL test card instead of a camera frame.
+        The content block's ``_meta`` always carries ``{"placeholder":
+        <bool>}``, and when true a second text block follows the image
+        saying so in words -- an agent must not treat that card as what
+        the camera sees. A real frame is returned as a single block.
         """
         frame = connection.call(
             lambda d: d.get_frame(camera, deskewed=deskewed, encoding=encoding),
             host=daemon,
         )
-        return image_response(frame.data, encoding=frame.encoding, format=format, temp_dir=temp_dir)
+        content = image_response(
+            frame.data,
+            encoding=frame.encoding,
+            format=format,
+            temp_dir=temp_dir,
+            placeholder=frame.placeholder,
+        )
+        if not frame.placeholder:
+            return content
+        warning = TextContent(
+            type="text",
+            text=(
+                f"placeholder: true -- camera {camera!r} has NO SIGNAL (unplugged "
+                "or absent); this is a test card, not a camera frame"
+            ),
+        )
+        return [content, warning]
 
     @mcp.tool()
     @handle_tool_errors
@@ -151,6 +174,12 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         the camera is calibrated, ``None`` (with ``pixel`` as the only
         representation) otherwise -- never a fabricated world position.
         An empty field returns an empty frame, not an error.
+
+        ``camera_absent`` (sprint 047) is true when the camera is
+        unplugged or absent: the frame is then empty because there is no
+        signal, *not* because the field is clear -- never read it as
+        "no tags present". It is a field of every returned ``TagFrame``
+        (``get_tag_history`` frames too).
 
         Each record's ``image_yaw_deg`` (sprint 039) is a separate,
         diagnostic-only orientation, populated whether or not the

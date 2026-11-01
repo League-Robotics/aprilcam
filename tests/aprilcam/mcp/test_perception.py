@@ -228,6 +228,51 @@ async def test_get_frame_file_writes_under_the_servers_temp_dir_and_returns_only
     assert written_path.read_bytes() == b"raw-jpeg-bytes"
 
 
+async def test_get_frame_real_frame_meta_placeholder_false_single_block(tmp_path):
+    daemon = _FakeDaemon(frame=ImageFrame(data=b"x", width=4, height=4, encoding="jpeg", timestamp=0.0))
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(server, "get_frame", {"camera": "arducam-ov9782-usb-camera"})
+
+    (content,) = result.root.content
+    assert content.meta == {"placeholder": False}
+
+
+async def test_get_frame_placeholder_is_flagged_in_meta_and_in_words(tmp_path):
+    daemon = _FakeDaemon(
+        frame=ImageFrame(data=b"card", width=4, height=4, encoding="jpeg", timestamp=0.0, placeholder=True)
+    )
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(server, "get_frame", {"camera": "arducam-ov9782-usb-camera"})
+
+    image, note = result.root.content
+    assert image.type == "image" and image.meta == {"placeholder": True}
+    assert note.type == "text" and "placeholder: true" in note.text and "NO SIGNAL" in note.text
+
+
+async def test_get_frame_placeholder_file_format_flags_meta(tmp_path):
+    daemon = _FakeDaemon(
+        frame=ImageFrame(data=b"card", width=4, height=4, encoding="jpeg", timestamp=0.0, placeholder=True)
+    )
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(server, "get_frame", {"camera": "c", "format": "file"})
+
+    path_block, note = result.root.content
+    assert path_block.meta == {"placeholder": True}
+    assert Path(path_block.text).read_bytes() == b"card"
+
+
+async def test_get_tags_reports_camera_absent(tmp_path):
+    daemon = _FakeDaemon(tag_frame=TagFrame(tags=(), timestamp=1.0, frame_index=0, camera_absent=True))
+    server, _ = _build(daemon, tmp_path)
+
+    result = await _call(server, "get_tags", {"camera": "arducam-ov9782-usb-camera"})
+
+    assert result.root.structuredContent["camera_absent"] is True
+
+
 async def test_get_frame_deskewed_on_uncalibrated_camera_surfaces_not_calibrated(tmp_path):
     daemon = _FakeDaemon(get_frame_raises=NotCalibrated("camera not calibrated"))
     server, _ = _build(daemon, tmp_path)

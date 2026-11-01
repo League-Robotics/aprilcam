@@ -24,6 +24,7 @@ from aprilcam.types import CameraState, ProbeReport
 __all__ = [
     "EXIT_OK",
     "EXIT_ERROR",
+    "EXIT_PLACEHOLDER",
     "add_daemon_option",
     "add_all_option",
     "incomplete_command",
@@ -41,6 +42,11 @@ __all__ = [
 #: parsed cleanly and then either succeeded or hit a typed error.
 EXIT_OK = 0
 EXIT_ERROR = 1
+#: ``camera image`` / ``playfield image`` got a daemon-served NO SIGNAL
+#: test card instead of a camera frame (sprint 047). The card is still
+#: written to the requested destination; this code tells a script it is
+#: not a real frame.
+EXIT_PLACEHOLDER = 3
 
 T = TypeVar("T")
 

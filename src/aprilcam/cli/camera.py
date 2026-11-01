@@ -83,6 +83,7 @@ from typing import Callable, Optional
 from aprilcam.cli._common import (
     EXIT_ERROR,
     EXIT_OK,
+    EXIT_PLACEHOLDER,
     add_all_option,
     fan_out,
     incomplete_command,
@@ -166,6 +167,17 @@ def _unwritable_reason(path: Path) -> Optional[str]:
     return None
 
 
+def _warn_placeholder(camera: str, where: Optional[str] = None) -> None:
+    """Stderr warning for a daemon-served NO SIGNAL test card
+    (sprint 047)."""
+    suffix = f" [{where}]" if where else ""
+    print(
+        f"warning: camera {camera}: NO SIGNAL -- wrote test card, not a camera "
+        f"frame{suffix}",
+        file=sys.stderr,
+    )
+
+
 def _cmd_image_all(
     args: argparse.Namespace, discovery_factory: Callable[[], Discovery]
 ) -> int:
@@ -190,21 +202,33 @@ def _cmd_image_all(
 
     discovery = discovery_factory()
 
+    saw_placeholder = False
+
     def render(label: str, frame) -> None:
+        nonlocal saw_placeholder
+        if frame.placeholder:
+            saw_placeholder = True
+            _warn_placeholder(args.camera, label)
         print(f"{label}: {base64.b64encode(frame.data).decode('ascii')}")
 
-    return fan_out(
+    rc = fan_out(
         discovery,
         lambda daemon: daemon.get_frame(args.camera, deskewed=False, encoding=args.encoding),
         render,
     )
+    return EXIT_PLACEHOLDER if rc == EXIT_OK and saw_placeholder else rc
 
 
 def cmd_image(
     args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
 ) -> int:
     """``aprilcam camera image <camera> [-o FILE | --base64]
-    [--all] [--encoding jpeg|png] [--force]``."""
+    [--all] [--encoding jpeg|png] [--force]``.
+
+    **Exit code 3 (sprint 047)**: if the camera is unplugged the daemon
+    serves a NO SIGNAL test card (``ImageFrame.placeholder``). The card
+    is still written to the destination, a warning goes to stderr, and
+    the exit code is 3 so scripts can tell it from a real frame (0)."""
     if args.all:
         return _cmd_image_all(args, discovery_factory)
 
@@ -237,6 +261,9 @@ def cmd_image(
     else:
         sys.stdout.buffer.write(frame.data)
         sys.stdout.buffer.flush()
+    if frame.placeholder:
+        _warn_placeholder(args.camera)
+        return EXIT_PLACEHOLDER
     return EXIT_OK
 
 
@@ -327,6 +354,7 @@ def _frame_to_json(frame: TagFrame) -> dict:
         "timestamp": frame.timestamp,
         "frame_index": frame.frame_index,
         "calibration_stale": frame.calibration_stale,
+        "camera_absent": frame.camera_absent,
         "tags": [_tag_record_to_json(record) for record in frame.tags],
     }
 
@@ -352,6 +380,9 @@ def _print_tags(frame: TagFrame, *, as_json: bool = False) -> None:
     signal."""
     if as_json:
         print(json.dumps(_frame_to_json(frame)))
+        return
+    if frame.camera_absent:
+        print("  (camera absent -- no signal)")
         return
     if not frame.tags:
         print("  (no tags detected)")
@@ -389,6 +420,8 @@ def _cmd_tags_follow(args: argparse.Namespace, discovery: Discovery) -> int:
         for frame in stream:
             if args.json:
                 print(json.dumps(_frame_to_json(frame)))
+            elif frame.camera_absent:
+                print(f"{frame.timestamp:.3f}  camera absent -- no signal")
             else:
                 for record in frame.tags:
                     print(_format_follow_row(record, frame.timestamp))
@@ -610,7 +643,13 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
     add_all_option(p_probe)
     p_probe.set_defaults(func=cmd_probe)
 
-    p_image = sub.add_parser("image", help="capture one raw frame")
+    p_image = sub.add_parser(
+        "image",
+        help="capture one raw frame",
+        description="Capture one raw frame. Exit codes: 0 real frame, 1 error, "
+        "3 the camera is unplugged/absent and a NO SIGNAL test card was "
+        "written instead of a camera frame (a warning is printed to stderr).",
+    )
     p_image.add_argument("camera", help="camera name (slug)")
     add_all_option(p_image, note=" (--base64 destination only)")
     output_group = p_image.add_mutually_exclusive_group()

@@ -132,6 +132,10 @@ def _calibrated_record(
     )
 
 
+def _absent_frame(timestamp: float = 5.0) -> TagFrame:
+    return TagFrame(tags=(), timestamp=timestamp, frame_index=0, camera_absent=True)
+
+
 def _tag_frame(tags: Tuple[TagRecord, ...] = ()) -> TagFrame:
     return TagFrame(tags=tags, timestamp=0.0, frame_index=0)
 
@@ -421,6 +425,64 @@ def test_image_writes_png_to_a_file_with_the_requested_encoding(tmp_path):
     assert code == 0
     assert out_path.read_bytes() == png_bytes
     assert daemon.requested_encoding == "png"
+
+
+def test_image_placeholder_writes_card_warns_on_stderr_and_exits_3(capsys, tmp_path):
+    card = ImageFrame(
+        data=b"CARD", width=4, height=4, encoding="jpeg", timestamp=0.0, placeholder=True
+    )
+    discovery = _FakeDiscovery(daemon=_FakeDaemon(frame=card))
+    out_path = tmp_path / "frame.jpg"
+
+    code = camera_cli.cmd_image(_args(output=str(out_path)), discovery_factory=lambda: discovery)
+
+    assert code == 3
+    assert out_path.read_bytes() == b"CARD"
+    err = capsys.readouterr().err
+    assert "NO SIGNAL" in err and "test card" in err
+
+
+def test_image_real_frame_exits_0_with_no_warning(capsys, tmp_path):
+    discovery = _FakeDiscovery(daemon=_FakeDaemon())
+    code = camera_cli.cmd_image(
+        _args(output=str(tmp_path / "f.jpg")), discovery_factory=lambda: discovery
+    )
+    assert code == 0
+    assert "NO SIGNAL" not in capsys.readouterr().err
+
+
+def test_image_all_base64_placeholder_exits_3(capsys):
+    card = ImageFrame(
+        data=b"CARD", width=4, height=4, encoding="jpeg", timestamp=0.0, placeholder=True
+    )
+    discovery = _FakeDiscovery(
+        infos=(_Info(host="h1", is_local=False),), daemons_by_host={"h1": _FakeDaemon(frame=card)}
+    )
+    code = camera_cli.cmd_image(_args(all=True, base64=True), discovery_factory=lambda: discovery)
+    assert code == 3
+    assert "NO SIGNAL" in capsys.readouterr().err
+
+
+def test_tags_follow_prints_camera_absent_line(capsys):
+    stream = _FakeTagStream(frames=(_absent_frame(5.0),), interrupt_after=1)
+    discovery = _FakeDiscovery(daemon=_FakeDaemon(tag_stream=stream))
+    code = camera_cli.cmd_tags(_args(follow=True), discovery_factory=lambda: discovery)
+    assert code == 0
+    assert "camera absent" in capsys.readouterr().out
+
+
+def test_tags_follow_json_carries_camera_absent(capsys):
+    stream = _FakeTagStream(frames=(_absent_frame(), _tag_frame()), interrupt_after=2)
+    discovery = _FakeDiscovery(daemon=_FakeDaemon(tag_stream=stream))
+    camera_cli.cmd_tags(_args(follow=True, json=True), discovery_factory=lambda: discovery)
+    lines = [json.loads(l) for l in capsys.readouterr().out.splitlines()]
+    assert [l["camera_absent"] for l in lines] == [True, False]
+
+
+def test_tags_one_shot_absent_prints_camera_absent(capsys):
+    discovery = _FakeDiscovery(daemon=_FakeDaemon(tag_frame=_absent_frame()))
+    camera_cli.cmd_tags(_args(), discovery_factory=lambda: discovery)
+    assert "camera absent" in capsys.readouterr().out
 
 
 def test_image_default_streams_raw_bytes_to_a_non_tty_stdout(capsysbinary, monkeypatch):
