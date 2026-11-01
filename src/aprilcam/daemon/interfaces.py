@@ -91,12 +91,15 @@ different ways:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterator, Optional
+from typing import TYPE_CHECKING, Iterator, Optional
 
 from aprilcam.calibration.interfaces import Calibration, CalibrationResult, FlatFieldInfo, FlatFieldResult
 from aprilcam.config.interfaces import CameraConfig, Feature, PlayfieldDefinition
 from aprilcam.intrinsics.interfaces import IntrinsicsFinishResult, IntrinsicsStatus
 from aprilcam.playfield.interfaces import Playfield
+if TYPE_CHECKING:  # annotation only; numpy stays out of the import path
+    import numpy
+
 from aprilcam.types import (
     Annotation,
     AnnotationSet,
@@ -623,6 +626,23 @@ class Daemon:
         drifting from a document nobody updated.
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement Daemon.get_guide")
+
+
+class PlaceholderRenderer:
+    """Renders the "NO SIGNAL" placeholder frame for an absent camera.
+
+    A plain base class, not ``Protocol`` -- see the module docstring's
+    design rule. The one implementation is
+    ``daemon.testcard.CvPlaceholderRenderer`` (OpenCV, daemon-only).
+    """
+
+    def render(self, width: int, height: int, number: int, name: str) -> "numpy.ndarray":
+        """Return a BGR ``uint8`` array of exactly ``height`` x ``width``.
+
+        The card is labelled with the camera ``number``, its ``name`` and
+        "NO SIGNAL". Deterministic: equal arguments give equal pixels.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement PlaceholderRenderer.render")
 
 
 class DaemonLifecycle:

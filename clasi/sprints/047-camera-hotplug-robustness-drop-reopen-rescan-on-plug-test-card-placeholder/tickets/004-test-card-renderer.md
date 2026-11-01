@@ -1,7 +1,7 @@
 ---
 id: '004'
 title: Test-card renderer
-status: open
+status: done
 use-cases:
 - SUC-004
 depends-on: []
@@ -32,10 +32,10 @@ raises NotImplementedError.
 
 ## Acceptance Criteria
 
-- [ ] `render(width, height, number, name)` returns a BGR array of exactly that size.
-- [ ] Output contains rings, wedges, gray steps, crosshair and the label text (structure checks in tests).
-- [ ] Size fallback chain implemented and tested.
-- [ ] Per-size cache; repeated calls are cheap.
+- [x] `render(width, height, number, name)` returns a BGR array of exactly that size.
+- [x] Output contains rings, wedges, gray steps, crosshair and the label text (structure checks in tests).
+- [x] Size fallback chain implemented and tested.
+- [x] Per-size cache; repeated calls are cheap.
 
 ## Testing
 
