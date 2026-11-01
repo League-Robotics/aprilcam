@@ -98,6 +98,10 @@ class FakeDiscovery(Discovery):
                        reachable=True, name="buzzkill"),
         )
 
+    def connect_local(self):
+        self.connects.append("<local>")
+        return self.local
+
     def connect(self, host=None):
         self.connects.append(host)
         table = {None: self.local, DONALD: self.donald, "donald": self.donald,
@@ -222,3 +226,23 @@ def test_list_all_nameless_daemon_has_no_address():
     assert label_host("donald (192.168.4.60:5280)") == "donald"
     assert label_host("here (local)") == "here"
     assert label_host("192.168.4.60:5280") is None
+
+
+def test_local_host_n_ignores_env_default(monkeypatch, capsys):
+    """gala-1 on gala goes to the local daemon even though
+    APRILCAM_DAEMON_HOST points at buzzkill (048/005 fix)."""
+    monkeypatch.setenv("APRILCAM_DAEMON_HOST", "buzzkill")
+    disc = FakeDiscovery()
+    assert _call(camera_cli.cmd_image, _args(camera="here-1"), disc) == 0
+    assert ("get_frame", "1") in disc.local.rpcs
+    assert disc.buzzkill.rpcs == []
+    assert "<local>" in disc.connects
+
+
+def test_intrinsics_cross_daemon_message_is_accurate(capsys):
+    disc = FakeDiscovery()
+    _call(intrinsics_cli.cmd_intrinsics,
+          _args(camera=["donald-4", "buzzkill-2"]), disc)
+    err = capsys.readouterr().err
+    assert "explicit target" not in err
+    assert "one daemon" in err

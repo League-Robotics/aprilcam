@@ -618,6 +618,11 @@ class Discovery(_DiscoveryBase):
             return self._connect_local()
         return self._connect_remote(resolved)
 
+    def connect_local(self) -> Daemon:
+        """See ``client.interfaces.Discovery.connect_local``: the local
+        socket, with ``APRILCAM_DAEMON_HOST`` deliberately ignored."""
+        return self._connect_local()
+
     # -- internals -----------------------------------------------------
 
     @staticmethod

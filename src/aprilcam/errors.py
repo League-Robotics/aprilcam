@@ -146,6 +146,20 @@ class ConflictingTarget(AprilCamError):
         )
 
 
+class CamerasOnDifferentDaemons(AprilCamError):
+    """Cameras that must share one daemon (one intrinsics session)
+    resolve to different daemons (sprint 048, ticket 005)."""
+
+    def __init__(self, camera: str, daemon: str, other: str) -> None:
+        self.camera = camera
+        self.daemon = daemon
+        self.other = other
+        super().__init__(
+            f"camera {camera!r} is on daemon {daemon!r}, but the other "
+            f"cameras are on {other!r}; give cameras from one daemon"
+        )
+
+
 class CameraNotPresent(AprilCamError):
     """A camera the registry knows -- addressed by slug or by its
     persistent number -- is not currently enumerated among live

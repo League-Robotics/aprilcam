@@ -144,8 +144,9 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         saying so in words -- an agent must not treat that card as what
         the camera sees. A real frame is returned as a single block.
         """
-        frame = connection.call(
-            lambda d: d.get_frame(camera, deskewed=deskewed, encoding=encoding),
+        frame = connection.call_camera(
+            camera,
+            lambda d, camera: d.get_frame(camera, deskewed=deskewed, encoding=encoding),
             host=daemon,
         )
         content = image_response(
@@ -188,7 +189,7 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         opposite rotational sense from ``yaw_rad``'s CCW-positive world
         convention, and never a substitute for it.
         """
-        return connection.call(lambda d: d.get_tags(camera), host=daemon)
+        return connection.call_camera(camera, lambda d, camera: d.get_tags(camera), host=daemon)
 
     @mcp.tool()
     @handle_tool_errors
@@ -209,7 +210,7 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         (sprint 039) -- identical here.
         """
         tag = TagId(family=family, number=number)
-        return connection.call(lambda d: d.get_tag(camera, tag), host=daemon)
+        return connection.call_camera(camera, lambda d, camera: d.get_tag(camera, tag), host=daemon)
 
     @mcp.tool()
     @handle_tool_errors
@@ -242,7 +243,9 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         (sprint 039) -- identical here, per historical frame.
         """
         tag = _tag_id_or_none(family, number)
-        return connection.call(lambda d: d.get_tag_history(camera, tag, frames), host=daemon)
+        return connection.call_camera(
+            camera, lambda d, camera: d.get_tag_history(camera, tag, frames), host=daemon
+        )
 
     @mcp.tool()
     @handle_tool_errors

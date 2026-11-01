@@ -45,6 +45,10 @@ class FakeDiscovery(Discovery):
     def find_all(self):
         return self.infos
 
+    def connect_local(self):
+        self.connects.append("<local>")
+        return self.daemons[None]
+
     def connect(self, host=None):
         self.connects.append(host)
         if host in self.daemons:
@@ -74,7 +78,7 @@ def test_host_n_resolves_remote_daemon_and_number():
 
 def test_local_hit_gives_host_none():
     assert resolve_camera("here-2", discovery=_disc()) == ResolvedCamera(
-        host=None, camera="2")
+        host=None, camera="2", local=True)
 
 
 def test_case_and_domain_normalize():
@@ -173,3 +177,12 @@ def test_explicit_target_wins_over_default_and_still_conflicts():
     with pytest.raises(ConflictingTarget):
         resolve_camera("donald-4", discovery=_disc(), target="buzzkill",
                        default_target="donald")
+
+
+def test_local_hit_is_flagged_local_with_a_default_pointing_elsewhere():
+    r = resolve_camera("here-2", discovery=_disc(), default_target="buzzkill")
+    assert r.local is True and r.camera == "2"
+
+
+def test_remote_hit_is_not_local():
+    assert resolve_camera("donald-4", discovery=_disc()).local is False

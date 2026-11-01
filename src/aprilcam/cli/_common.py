@@ -17,7 +17,7 @@ import logging
 import sys
 from typing import Callable, Optional, Tuple, TypeVar
 
-from aprilcam.client.addressing import resolve_camera
+from aprilcam.client.addressing import ResolvedCamera, resolve_camera
 from aprilcam.client.interfaces import Discovery
 from aprilcam.daemon.interfaces import Daemon
 from aprilcam.errors import AprilCamError
@@ -40,6 +40,7 @@ __all__ = [
     "fan_out",
     "resolve_playfield_camera",
     "connect_for_camera",
+    "connect_resolved",
 ]
 
 #: Exit codes every subcommand function returns. Argparse's own parse
@@ -379,7 +380,16 @@ def connect_for_camera(
     the caller's usual ``report_error`` path.
     """
     resolved = resolve_camera(camera, discovery=discovery, target=daemon_flag)
-    return discovery.connect(resolved.host), resolved.camera
+    return connect_resolved(discovery, resolved), resolved.camera
+
+
+def connect_resolved(discovery: Discovery, resolved: ResolvedCamera) -> Daemon:
+    """Connect to the daemon a :class:`ResolvedCamera` names: the local
+    socket explicitly when ``HOST-N`` named this machine (so
+    ``APRILCAM_DAEMON_HOST`` cannot redirect it), else ``connect(host)``."""
+    if resolved.local:
+        return discovery.connect_local()
+    return discovery.connect(resolved.host)
 
 
 def resolve_playfield_camera(

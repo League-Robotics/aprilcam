@@ -21,10 +21,10 @@ import sys
 import time
 from typing import Callable, Optional
 
-from aprilcam.cli._common import EXIT_ERROR, EXIT_OK, report_error
+from aprilcam.cli._common import EXIT_ERROR, EXIT_OK, connect_resolved, report_error
 from aprilcam.client.addressing import resolve_camera
 from aprilcam.client.discovery import Discovery
-from aprilcam.errors import AprilCamError, ConflictingTarget
+from aprilcam.errors import AprilCamError, CamerasOnDifferentDaemons
 from aprilcam.intrinsics.interfaces import BoardSpec
 from aprilcam.view.intrinsics_model import (
     CONFIRM_WINDOW_S,
@@ -128,16 +128,20 @@ def _finish(daemon, cam: str, owned: set, installed: set, force: bool = False) -
 def _connect_all(discovery, daemon_flag, cameras: list):
     """Resolve every camera argument; all must address the same daemon
     (one intrinsics session talks to one daemon), else
-    ``ConflictingTarget``. Returns ``(daemon, resolved_cameras)``."""
+    ``CamerasOnDifferentDaemons``. Returns ``(daemon, resolved_cameras)``."""
     resolved = [resolve_camera(c, discovery=discovery, target=daemon_flag) for c in cameras]
-    hosts = {r.host for r in resolved}
-    if len(hosts) > 1:
-        other = next(r for r in resolved if r.host != resolved[0].host)
-        raise ConflictingTarget(
-            other.camera, other.host or "local", resolved[0].host or "local"
-        )
+    first = resolved[0]
+    for r in resolved[1:]:
+        if (r.host, r.local) != (first.host, first.local):
+            raise CamerasOnDifferentDaemons(
+                r.camera, _daemon_label(r), _daemon_label(first)
+            )
     resolved_cameras = list(dict.fromkeys(r.camera for r in resolved))
-    return discovery.connect(resolved[0].host), resolved_cameras
+    return connect_resolved(discovery, first), resolved_cameras
+
+
+def _daemon_label(r) -> str:
+    return "local" if r.local or r.host is None else r.host
 
 
 def cmd_intrinsics(

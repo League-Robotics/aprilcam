@@ -19,7 +19,8 @@ Order (the sprint.md "Resolution order"):
    the normal connection error surfaces.
 3. Split at the last ``-``; match ``short_host_name(HOST)`` against
    ``find_all()`` names, case-insensitively. A local hit gives
-   ``host=None``.
+   ``local=True`` (``host=None``), so no env or session default can
+   redirect it.
 4. No name hit: direct connect to ``HOST`` as typed, validated with
    ``list_cameras()``; failure raises :class:`UnknownHost`.
 5. An explicit target naming a different daemon than the one resolved
@@ -68,13 +69,17 @@ _LOCAL_ALIASES = frozenset({"localhost", "127.0.0.1", "::1"})
 class ResolvedCamera:
     """The daemon to ask and the camera argument to send it.
 
-    ``host`` is ``None`` for the local daemon (or when the caller's
-    own target should be used unchanged), else a value accepted by
-    ``Discovery.connect``. ``camera`` is a slug or a number string.
+    ``local`` is true when a ``HOST-N`` address named this machine's
+    own daemon: connect with ``Discovery.connect_local()``, which
+    ignores ``APRILCAM_DAEMON_HOST`` and any session default. Otherwise
+    ``host`` is ``None`` when the caller's own target should be used
+    unchanged, else a value accepted by ``Discovery.connect``.
+    ``camera`` is a slug or a number string.
     """
 
     host: Optional[str]
     camera: str
+    local: bool = False
 
 
 def _target_host(target: str) -> str:
@@ -149,4 +154,6 @@ def _selected(
         target, info.name, info.host, is_local=info.is_local
     ):
         raise ConflictingTarget(camera, info.name, target)
-    return ResolvedCamera(host=None if info.is_local else info.host, camera=number)
+    if info.is_local:
+        return ResolvedCamera(host=None, camera=number, local=True)
+    return ResolvedCamera(host=info.host, camera=number)
