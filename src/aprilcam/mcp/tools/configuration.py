@@ -178,7 +178,9 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         installed on disk, never a live hardware readback merged in
         (UC-03.S-1, UC-24.S-3).
         """
-        config = connection.call(lambda d: d.get_camera_config(camera), host=daemon)
+        config = connection.call_camera(
+            camera, lambda d, camera: d.get_camera_config(camera), host=daemon
+        )
         return config.to_dict()
 
     @mcp.tool()
@@ -205,7 +207,7 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         stored on-disk config immediately (UC-03) -- how an experiment
         ends without a daemon restart.
         """
-        connection.call(lambda d: d.reset_camera_config(camera), host=daemon)
+        connection.call_camera(camera, lambda d, camera: d.reset_camera_config(camera), host=daemon)
 
     @mcp.tool()
     @handle_tool_errors
@@ -217,7 +219,9 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         *force*; a forced close leaves existing subscribers on the NO
         SIGNAL card until a new request reopens the camera.
         """
-        connection.call(lambda d: d.close_camera(camera, force=force), host=daemon)
+        connection.call_camera(
+            camera, lambda d, camera: d.close_camera(camera, force=force), host=daemon
+        )
 
     # -- playfields ----------------------------------------------------------
 
@@ -310,7 +314,7 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         (``succeeded`` false) the measured numbers are still returned and
         ``reason`` names the failing gate, its threshold and the value.
         """
-        return connection.call(lambda d: d.calibrate(camera), host=daemon)
+        return connection.call_camera(camera, lambda d, camera: d.calibrate(camera), host=daemon)
 
     @mcp.tool()
     @handle_tool_errors
@@ -342,7 +346,9 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         carries ``calibration_method`` / ``calibration_confidence`` per
         camera.
         """
-        return connection.call(lambda d: d.get_calibration(camera), host=daemon)
+        return connection.call_camera(
+            camera, lambda d, camera: d.get_calibration(camera), host=daemon
+        )
 
     # -- flat-field gain map (sprint 037 ticket 005) ----------------------
 
@@ -401,8 +407,9 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         exposed here regardless (always ``None`` on this client-library
         path).
         """
-        result = connection.call(
-            lambda d: d.capture_flat_field(
+        result = connection.call_camera(
+            camera,
+            lambda d, camera: d.capture_flat_field(
                 camera, exposure=exposure, frames=frames, force=force, dry_run=dry_run
             ),
             host=daemon,
@@ -421,7 +428,9 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         still applied, not hidden, so a caller can decide what to do
         with it (mirrors ``Calibration.stale``'s own contract).
         """
-        return connection.call(lambda d: d.get_flatfield(camera), host=daemon)
+        return connection.call_camera(
+            camera, lambda d, camera: d.get_flatfield(camera), host=daemon
+        )
 
     @mcp.tool()
     @handle_tool_errors
@@ -431,4 +440,4 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         needed, mirroring how a freshly captured map takes effect live.
         Clearing an already-absent map is a no-op, enforced daemon-side.
         """
-        connection.call(lambda d: d.clear_flat_field(camera), host=daemon)
+        connection.call_camera(camera, lambda d, camera: d.clear_flat_field(camera), host=daemon)

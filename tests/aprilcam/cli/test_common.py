@@ -10,8 +10,10 @@ discovery, nothing to fake.
 
 from __future__ import annotations
 
-from aprilcam.cli._common import format_camera_row
-from aprilcam.types import CameraState
+from aprilcam.cli._common import fan_out, format_camera_row, print_cameras, print_probe_report
+from aprilcam.client.interfaces import DaemonInfo
+from aprilcam.errors import ConnectionFailed
+from aprilcam.types import CameraState, ProbeReport
 
 
 def _state(
@@ -147,3 +149,112 @@ def test_format_camera_row_shows_closed_distinct_from_absent():
     absent = format_camera_row(_state(present=False, closed=False, usable=False))
     assert " closed " in closed and " absent " not in closed
     assert " absent " in absent and " closed " not in absent
+
+
+# ---------------------------------------------------------------------------
+# fan_out() labels -- sprint 048 ticket 001: host names, not addresses
+# ---------------------------------------------------------------------------
+
+
+class _FakeDiscovery:
+    def __init__(self, infos, dead=()):
+        self._infos = infos
+        self._dead = set(dead)
+
+    def find_all(self):
+        return self._infos
+
+    def connect(self, host=None):
+        if host in self._dead:
+            raise ConnectionFailed(f"cannot reach {host}")
+        return object()
+
+
+def _fan(infos, dead=()):
+    labels = []
+    code = fan_out(_FakeDiscovery(infos, dead), lambda d: 1, lambda label, r: labels.append(label))
+    return code, labels
+
+
+def test_fan_out_labels_use_host_names(capsys):
+    infos = (
+        DaemonInfo(host="localhost", port=0, is_local=True, reachable=True, name="gala"),
+        DaemonInfo(host="10.0.0.2:5280", port=5280, is_local=False, reachable=True, name="buzzkill"),
+        DaemonInfo(host="10.0.0.3:5280", port=5280, is_local=False, reachable=True, name="donald"),
+    )
+
+    code, labels = _fan(infos)
+
+    assert code == 0
+    assert labels == ["gala (local)", "buzzkill", "donald"]
+
+
+def test_fan_out_nameless_daemon_falls_back_to_address_label():
+    infos = (
+        DaemonInfo(host="localhost", port=0, is_local=True, reachable=True),
+        DaemonInfo(host="10.0.0.2:5280", port=5280, is_local=False, reachable=True),
+    )
+
+    _, labels = _fan(infos)
+
+    assert labels == ["localhost (local)", "10.0.0.2:5280"]
+
+
+def test_fan_out_unreachable_line_uses_the_host_name(capsys):
+    infos = (
+        DaemonInfo(host="10.0.0.2:5280", port=5280, is_local=False, reachable=False, name="buzzkill"),
+    )
+
+    code, labels = _fan(infos, dead=["10.0.0.2:5280"])
+
+    assert code == 1
+    assert labels == []
+    assert capsys.readouterr().err.startswith("buzzkill: unreachable")
+
+
+def test_fan_out_labels_carry_the_address_at_verbose():
+    infos = (
+        DaemonInfo(host="localhost", port=0, is_local=True, reachable=True, name="gala"),
+        DaemonInfo(host="10.0.0.3:5280", port=5280, is_local=False, reachable=True, name="donald"),
+        DaemonInfo(host="10.0.0.4:5280", port=5280, is_local=False, reachable=True),
+    )
+    labels = []
+    fan_out(_FakeDiscovery(infos), lambda d: 1, lambda label, r: labels.append(label), verbose=1)
+
+    assert labels == ["gala (local)", "donald (10.0.0.3:5280)", "10.0.0.4:5280"]
+
+
+# ---------------------------------------------------------------------------
+# print_cameras() -- sprint 048 ticket 002: unusable cameras hidden unless -v
+# ---------------------------------------------------------------------------
+
+
+def _cam(name, usable=True):
+    return CameraState(name=name, present=True, usable=usable, playfield=None, calibrated=False, number=1)
+
+
+def test_print_cameras_hides_unusable_with_singular_note(capsys):
+    print_cameras((_cam("good"), _cam("bad", usable=False)))
+    out = capsys.readouterr().out
+    assert "good" in out and "bad" not in out
+    assert "(1 unusable camera hidden; -v to show)" in out
+
+
+def test_print_cameras_all_hidden_prints_note_not_empty_marker(capsys):
+    print_cameras((_cam("bad", usable=False),))
+    out = capsys.readouterr().out
+    assert "(no cameras)" not in out
+    assert "(1 unusable camera hidden; -v to show)" in out
+
+
+def test_print_cameras_verbose_shows_everything_without_note(capsys):
+    print_cameras((_cam("good"), _cam("bad", usable=False)), verbose=1)
+    out = capsys.readouterr().out
+    assert "good" in out and "bad" in out and "hidden" not in out
+
+
+def test_print_probe_report_never_hides_unusable(capsys):
+    report = ProbeReport(cameras=(_cam("bad", usable=False),), skipped=())
+    print_probe_report(report)
+    out = capsys.readouterr().out
+    assert "bad" in out and "hidden" not in out

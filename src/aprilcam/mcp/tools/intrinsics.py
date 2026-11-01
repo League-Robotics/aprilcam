@@ -118,7 +118,9 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         aborts itself after 120 s without polling.
         """
         spec = None if board in (None, "", "NONE") else board
-        status = connection.call(lambda d: d.start_intrinsics(camera, spec), host=daemon)
+        status = connection.call_camera(
+            camera, lambda d, camera: d.start_intrinsics(camera, spec), host=daemon
+        )
         return _status_to_dict(status)
 
     @mcp.tool()
@@ -146,7 +148,9 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         keep adding views if you want a better fit, and finish only when
         you are satisfied.
         """
-        status = connection.call(lambda d: d.get_intrinsics_status(camera), host=daemon)
+        status = connection.call_camera(
+            camera, lambda d, camera: d.get_intrinsics_status(camera), host=daemon
+        )
         return _status_to_dict(status)
 
     @mcp.tool()
@@ -167,8 +171,9 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         ``install=False`` the session ends and the solution is only
         reported. Returns ``{installed, reason, status, lens}``.
         """
-        result = connection.call(
-            lambda d: d.finish_intrinsics(camera, install, force=force), host=daemon
+        result = connection.call_camera(
+            camera,
+            lambda d, camera: d.finish_intrinsics(camera, install, force=force), host=daemon
         )
         return _finish_to_dict(result)
 
@@ -181,5 +186,7 @@ def register(mcp: FastMCP, connection: ConnectionManager, temp_dir: Path) -> Non
         camera is freed immediately rather than waiting for the 120 s
         no-polling self-abort. Returns the final status dict.
         """
-        status = connection.call(lambda d: d.abort_intrinsics(camera), host=daemon)
+        status = connection.call_camera(
+            camera, lambda d, camera: d.abort_intrinsics(camera), host=daemon
+        )
         return _status_to_dict(status)

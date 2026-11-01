@@ -39,7 +39,7 @@ import argparse
 import sys
 from typing import Callable
 
-from aprilcam.cli._common import EXIT_ERROR, EXIT_OK, add_all_option, report_error
+from aprilcam.cli._common import EXIT_ERROR, EXIT_OK, add_all_option, connect_for_camera, report_error, verbosity
 from aprilcam.client.discovery import Discovery
 from aprilcam.errors import AprilCamError
 
@@ -67,7 +67,7 @@ def cmd_calibrate(
         return EXIT_ERROR
 
     try:
-        daemon = discovery_factory().connect(args.daemon)
+        daemon, args.camera = connect_for_camera(discovery_factory(), args.daemon, args.camera)
         result = daemon.calibrate(args.camera)
     except AprilCamError as exc:
         return report_error(exc)
@@ -89,13 +89,13 @@ def cmd_calibrate(
             f"{len(result.matched_ids)} ArUco id(s) matched ({matched}){error_note}"
         )
         print(_lens_line(result.lens_model_source))
-        _print_pose_report(result, verbose=getattr(args, "verbose", False))
+        _print_pose_report(result, verbose=verbosity(args) >= 1)
         return EXIT_OK
 
     if result.method == "pose":
         # A pose attempt that failed a gate: show what was measured, so the
         # reason's threshold can be read against the value.
-        _print_pose_report(result, verbose=getattr(args, "verbose", False), to_stderr=True)
+        _print_pose_report(result, verbose=verbosity(args) >= 1, to_stderr=True)
     if result.missing_ids:
         missing = ", ".join(str(i) for i in result.missing_ids)
         print(
@@ -199,12 +199,5 @@ def add_subparser(sub: "argparse._SubParsersAction") -> None:
         "calibrate", help="calibrate a camera against its linked playfield (UC-04, UC-15)"
     )
     p_calibrate.add_argument("camera", help="camera name (slug or persistent number)")
-    p_calibrate.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        default=False,
-        help="also print the per-marker leave-one-out residual table",
-    )
     add_all_option(p_calibrate, note=" (refused -- calibration is single-target)")
     p_calibrate.set_defaults(func=cmd_calibrate)

@@ -38,7 +38,12 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import Optional, Sequence
 
 from aprilcam.cli import camera, config, daemon, guide, mcp, playfield, tags
-from aprilcam.cli._common import add_daemon_option
+from aprilcam.cli._common import (
+    add_daemon_option,
+    add_verbose_option,
+    add_verbose_to_subparsers,
+    configure_logging,
+)
 
 
 def _package_version() -> str:
@@ -94,6 +99,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # Commands that never talk to a daemon (guide, config, tags generate,
     # daemon list) ignore it.
     add_daemon_option(parser)
+    add_verbose_option(parser)
     parser.set_defaults(func=None)
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
     daemon.add_subparser(subparsers)
@@ -103,6 +109,7 @@ def _build_parser() -> argparse.ArgumentParser:
     guide.add_subparser(subparsers)
     config.add_subparser(subparsers)
     mcp.add_subparser(subparsers)
+    add_verbose_to_subparsers(parser)
     return parser
 
 
@@ -181,6 +188,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     _reset_sigpipe_to_default()
     parser = _build_parser()
     args = parser.parse_args(argv)
+    # `-v` before the subcommand counts into `verbose`, after it into
+    # `sub_verbose`; one merged count is what every command reads.
+    args.verbose = getattr(args, "verbose", 0) + getattr(args, "sub_verbose", 0)
+    configure_logging(args.verbose)
     func = args.func
     if func is None:
         parser.print_help()

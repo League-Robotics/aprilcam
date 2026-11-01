@@ -51,6 +51,11 @@ class DaemonInfo:
     A daemon that advertises but does not respond is exactly what a
     developer needs to see, so it is listed rather than filtered out.
     """
+    name: str = ""
+    """The daemon's machine name, normalized (``donald``, not
+    ``Donald.local``) -- what fan-out listings label its block with.
+    Empty when unknown; callers then fall back to ``host``.
+    """
 
 
 class Discovery:
@@ -80,6 +85,18 @@ class Discovery:
         (``docs/design/configuration.md``).
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement Discovery.connect")
+
+    def connect_local(self) -> Daemon:
+        """Connect to the local daemon's socket, explicitly.
+
+        Unlike ``connect(None)``, this never consults
+        ``APRILCAM_DAEMON_HOST``: it is for a caller that has already
+        decided the local daemon is the one it wants (a ``HOST-N``
+        address naming this machine, sprint 048).
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement Discovery.connect_local"
+        )
 
 
 # ImageStream and TagStream live in aprilcam.daemon.interfaces, next to

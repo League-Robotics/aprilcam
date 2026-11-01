@@ -88,6 +88,7 @@ from aprilcam.cli._common import (
     EXIT_OK,
     add_all_option,
     fan_out,
+    verbosity,
     incomplete_command,
     report_error,
 )
@@ -251,7 +252,7 @@ def cmd_list(
             print(f"{label}:")
             _print_registrations(registrations)
 
-        return fan_out(discovery, lambda daemon: daemon.list_tag_parameters(), render)
+        return fan_out(discovery, lambda daemon: daemon.list_tag_parameters(), render, verbose=verbosity(args))
 
     try:
         registrations = discovery.connect(args.daemon).list_tag_parameters()

@@ -299,6 +299,16 @@ calls the caller-supplied `call(daemon)`, rendering successes via
 the whole command, since there's nothing left to iterate — distinct
 from "enumerated zero," which is a normal empty result.
 
+**Fan-out labels and HOST-N (sprint 048).** The label `fan_out` passes to
+`render` is the daemon's short host name (`DaemonInfo.name`), with
+` (local)` appended for the local daemon; it falls back to the address
+only when a daemon advertises no name. `camera list --all` rows also show
+a copyable `HOST-N` address (N = the bracketed persistent number). Every
+camera-taking subcommand (`image`, `tags`, `view`, `close`, `config`,
+`calibrate`, `flatfield`, `locate`, `intrinsics`) calls
+`client.addressing` before connecting, so `donald-4` works without `-d`;
+`donald-4` combined with a different `-d` is an error.
+
 **`camera tags --follow`/`--json` (sprint 039).** `cmd_tags` gains a
 `--follow` flag: instead of one `discovery.connect(args.daemon)
 .get_tags(args.camera)` call, it opens `daemon.stream_tags(args.camera)`

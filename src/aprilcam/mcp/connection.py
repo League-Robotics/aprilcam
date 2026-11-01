@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from typing import Callable, Dict, Optional, TypeVar
 
+from aprilcam.client.addressing import resolve_camera
 from aprilcam.client.discovery import Discovery
 from aprilcam.client.interfaces import Discovery as DiscoveryBase
 from aprilcam.daemon.interfaces import Daemon
@@ -43,6 +44,12 @@ from aprilcam.errors import ConnectionFailed
 __all__ = ["ConnectionManager"]
 
 T = TypeVar("T")
+
+# Cache key for the local daemon reached explicitly (a ``HOST-N`` naming
+# this machine). Distinct from ``None`` -- "whatever ``connect(None)``
+# picks", which honors ``APRILCAM_DAEMON_HOST`` -- and from any real
+# host string.
+_LOCAL_KEY = "\0local"
 
 
 class ConnectionManager:
@@ -93,6 +100,16 @@ class ConnectionManager:
         ``Discovery.connect`` itself documents."""
         return host if host is not None else self._default_host
 
+    def _connect_key(self, key: Optional[str]) -> Daemon:
+        """The cached ``Daemon`` for an already-final cache *key*."""
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        discovery = self._discovery_instance()
+        daemon = discovery.connect_local() if key == _LOCAL_KEY else discovery.connect(key)
+        self._cache[key] = daemon
+        return daemon
+
     def resolve(self, host: Optional[str] = None) -> Daemon:
         """A live ``Daemon`` for *host* (or the session default),
         served from cache when one is already resolved for that exact
@@ -100,13 +117,7 @@ class ConnectionManager:
         ``Discovery.connect`` — never a preflight probe beyond what
         ``connect`` itself performs to hand back a usable channel.
         """
-        key = self._target_key(host)
-        cached = self._cache.get(key)
-        if cached is not None:
-            return cached
-        daemon = self._discovery_instance().connect(key)
-        self._cache[key] = daemon
-        return daemon
+        return self._connect_key(self._target_key(host))
 
     def call(self, fn: Callable[[Daemon], T], *, host: Optional[str] = None) -> T:
         """Resolve a ``Daemon`` for *host* and invoke *fn* against it.
@@ -125,6 +136,41 @@ class ConnectionManager:
         daemon = self.resolve(host)
         try:
             return fn(daemon)
+        except ConnectionFailed:
+            self._cache.pop(key, None)
+            raise
+
+    def call_camera(
+        self,
+        camera: str,
+        fn: Callable[[Daemon, str], T],
+        *,
+        host: Optional[str] = None,
+    ) -> T:
+        """Like :meth:`call`, for a tool addressed by *camera*, which may
+        be a ``HOST-N`` fan-out address (sprint 048).
+
+        :func:`aprilcam.client.addressing.resolve_camera` picks the daemon
+        and the camera string to send it: the per-call *host* is the
+        explicit ``target`` (a ``HOST-N`` naming a different daemon raises
+        ``ConflictingTarget``), the session default is only the
+        ``default_target`` (``HOST-N`` overrides it). A ``HOST-N`` naming
+        this machine connects to the local daemon explicitly, so neither
+        the session default nor ``APRILCAM_DAEMON_HOST`` can redirect it.
+        The cache is keyed by the resolved daemon and evicted on
+        ``ConnectionFailed`` exactly as in :meth:`call`; slugs and numbers
+        resolve to the same key :meth:`call` would use.
+        """
+        resolved = resolve_camera(
+            camera,
+            discovery=self._discovery_instance(),
+            target=host,
+            default_target=self._default_host,
+        )
+        key = _LOCAL_KEY if resolved.local else self._target_key(resolved.host)
+        daemon = self._connect_key(key)
+        try:
+            return fn(daemon, resolved.camera)
         except ConnectionFailed:
             self._cache.pop(key, None)
             raise

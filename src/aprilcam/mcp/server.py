@@ -72,7 +72,12 @@ _SERVER_INSTRUCTIONS = (
     "Every daemon-backed tool accepts an optional daemon parameter to "
     "target a specific host for one call; omitted, it uses the "
     "daemon this server was started against (aprilcam -d HOST mcp), "
-    "or the local daemon if none was given."
+    "or the local daemon if none was given.\n\n"
+    "A camera argument may be a slug, a number, or a host-qualified "
+    "HOST-N (e.g. donald-4, as list_cameras output across daemons "
+    "shows); HOST-N picks that daemon by itself, so no daemon "
+    "parameter is needed, and a daemon parameter naming a different "
+    "host is an error."
 )
 
 

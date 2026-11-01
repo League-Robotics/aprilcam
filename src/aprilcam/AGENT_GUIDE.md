@@ -34,6 +34,19 @@ Numbers are always **non-negative** in every request and response —
 there is no negative tag id anywhere in this interface, even though the
 daemon may use one internally to disambiguate families on its own side.
 
+### Naming a camera on a specific daemon: `HOST-N`
+
+Wherever a tool or command takes a `camera`, you may pass a slug
+(`brio-501`), a persistent number (`4`), or a host-qualified `HOST-N`
+such as `donald-4` -- the form `camera list --all` prints when several
+daemons are on the network. `HOST` is the daemon's short host name and
+`N` is the camera's persistent number on that daemon (not its row
+position). `HOST-N` routes the call to that daemon on its own, so no
+`daemon` argument is needed; combining it with a `daemon` argument (or
+`-d`) that names a *different* daemon is an error, and an unknown HOST
+is an error that lists the daemons found. A slug or number is looked up
+on the session's default daemon (or the one you pass as `daemon`).
+
 ## 3. Bring-Up Order
 
 Nothing answers a world-coordinate query until this sequence has

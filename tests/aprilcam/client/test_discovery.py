@@ -48,6 +48,7 @@ from aprilcam.client.discovery import (
     _BrowseResult,
     _browse_zeroconf,
     resolve_ipv4_preferred,
+    short_host_name,
     split_host_port,
 )
 from aprilcam.client.interfaces import DaemonInfo
@@ -151,16 +152,19 @@ def test_find_all_returns_empty_tuple_when_no_daemon_running(directories: Direct
     assert discovery.find_all() == ()
 
 
-def test_find_all_lists_a_held_but_unreachable_daemon(directories: Directories):
+def test_find_all_lists_a_held_but_unreachable_daemon(directories: Directories, monkeypatch):
     """A daemon that advertises (holds the lock) but does not answer is
     listed, not filtered out -- ``DaemonInfo.reachable`` says which."""
+    monkeypatch.setattr(socket, "gethostname", lambda: "My-Machine.local")
     lock_fd = _hold_lock(directories.socket_dir / LOCK_FILENAME)
     try:
         discovery = Discovery(directories=directories)
 
         results = discovery.find_all()
 
-        assert results == (DaemonInfo(host="localhost", port=0, is_local=True, reachable=False),)
+        assert results == (
+            DaemonInfo(host="localhost", port=0, is_local=True, reachable=False, name="my-machine"),
+        )
     finally:
         _release_lock(lock_fd)
 
@@ -241,7 +245,10 @@ def test_find_all_merges_local_and_a_distinctly_hostnamed_remote_daemon(
         assert len(results) == 2
         local = next(r for r in results if r.is_local)
         remote = next(r for r in results if not r.is_local)
-        assert local == DaemonInfo(host="localhost", port=0, is_local=True, reachable=True)
+        assert local == DaemonInfo(
+            host="localhost", port=0, is_local=True, reachable=True, name="my-machine"
+        )
+        assert remote.name == "test-second-host"
         assert remote.host == f"127.0.0.1:{remote_port}"
         assert remote.port == remote_port
         assert remote.reachable is True
@@ -671,11 +678,19 @@ class _SecondHostAdvertiser:
     docstring and ``MdnsAdvertiser.start``'s docstring for the full
     reasoning)."""
 
+    #: Whether the most recent ``start()`` actually registered. An
+    #: advertise failure is swallowed by design (a host whose UDP 5353
+    #: is held by another process, e.g. a dev box running Node, cannot
+    #: advertise), and the test can then never find its own daemon.
+    advertised: bool = False
+
     def __init__(self) -> None:
         self._real = MdnsAdvertiser()
+        type(self).advertised = False
 
     def start(self, tcp_port, *, hostname=None):
         self._real.start(tcp_port, hostname="test-second-host")
+        type(self).advertised = self._real._zeroconf is not None
 
     def stop(self) -> None:
         self._real.stop()
@@ -740,13 +755,22 @@ def test_find_all_discovers_two_real_local_daemons_on_alternate_ports_via_real_m
             # fixture's blanket _browse_zeroconf patch) -- this is the
             # one call in this whole file that exercises discovery.py's
             # real _browse_zeroconf against real advertisements.
+            if not _SecondHostAdvertiser.advertised:
+                pytest.skip("this host cannot advertise over mDNS (UDP 5353 held elsewhere)")
             discovery = Discovery(directories=directories1)
 
             results = discovery.find_all()
 
-            assert len(results) == 2
-            local = next(r for r in results if r.is_local)
-            remote = next(r for r in results if not r.is_local)
+            # Assert only on the daemons this test started: on a LAN
+            # the real browse also reports foreign daemons (buzzkill,
+            # donald, ...), so totals and "the one remote" are not ours
+            # to pin. Ours is the single local entry plus the one
+            # advertised under the synthetic hostname.
+            locals_ = [r for r in results if r.is_local]
+            remotes = [r for r in results if r.name == "test-second-host"]
+            assert len(locals_) == 1  # advertised too, but self-filtered
+            assert len(remotes) == 1
+            local, remote = locals_[0], remotes[0]
             assert local.host == "localhost"
             assert remote.is_local is False
             assert ":" in remote.host
@@ -756,3 +780,17 @@ def test_find_all_discovers_two_real_local_daemons_on_alternate_ports_via_real_m
             lifecycle2.stop()
     finally:
         lifecycle1.stop()
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("Donald.local", "donald"),
+        ("DONALD", "donald"),
+        ("donald.home", "donald"),
+        ("10.0.0.5", "10.0.0.5"),
+        ("::1", "::1"),
+    ],
+)
+def test_short_host_name(raw: str, expected: str):
+    assert short_host_name(raw) == expected

@@ -55,6 +55,14 @@ locals.
   directly with no `Discovery`/`Daemon` involved at all — the one
   capability that must work before any daemon exists, mirroring
   `cli/guide.py`'s identical exception.
+- **HOST-N camera addresses (sprint 048).** `ConnectionManager` gains a
+  camera-aware entry point that runs `client.addressing` on the tool's
+  `camera` argument and the effective target (per-call `daemon`, else
+  session default), then resolves/caches the daemon for the *resolved*
+  target and passes the rewritten camera argument to the RPC. Every tool
+  with a `camera` parameter uses it; a conflicting per-call `daemon` is a
+  tool error. Cache semantics (evict only that target on
+  `ConnectionFailed`) are unchanged.
 - **Cache-and-evict-on-failure, not reconnect-per-call or
   preflight-probe.** `ConnectionManager` resolves a target once and
   reuses it across calls until an actual RPC raises

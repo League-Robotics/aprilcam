@@ -107,6 +107,59 @@ class UnknownGuide(UnknownTarget):
     kind = "guide"
 
 
+class UnknownHost(AprilCamError):
+    """A ``HOST-N`` camera address whose ``HOST`` names no daemon
+    (sprint 048, ticket 003).
+
+    Raised only after both lookups failed: no discovered daemon carries
+    that short name, and a direct connect to ``HOST`` as typed did not
+    yield a daemon that answers ``list_cameras``. Lists the daemon names
+    discovery did find, in the same spirit as :class:`UnknownTarget`.
+    """
+
+    def __init__(self, host: str, available: tuple[str, ...]) -> None:
+        self.host = host
+        self.available = available
+        super().__init__(
+            f"unknown host {host!r}; daemons found: "
+            + (", ".join(available) or "(none)")
+        )
+
+
+class ConflictingTarget(AprilCamError):
+    """A ``HOST-N`` camera address names a different daemon than the
+    explicit target (``-d`` / per-call ``daemon``) (sprint 048, ticket
+    003).
+
+    ``donald-4`` with ``-d buzzkill`` is ambiguous about which daemon to
+    ask, so it is rejected rather than one silently winning. Carries
+    both so the message can name them.
+    """
+
+    def __init__(self, camera: str, addressed: str, target: str) -> None:
+        self.camera = camera
+        self.addressed = addressed
+        self.target = target
+        super().__init__(
+            f"camera {camera!r} addresses daemon {addressed!r}, but the "
+            f"explicit target is {target!r}; drop one of them"
+        )
+
+
+class CamerasOnDifferentDaemons(AprilCamError):
+    """Cameras that must share one daemon (one intrinsics session)
+    resolve to different daemons (sprint 048, ticket 005)."""
+
+    def __init__(self, camera: str, daemon: str, other: str) -> None:
+        self.camera = camera
+        self.daemon = daemon
+        self.other = other
+        super().__init__(
+            f"camera {camera!r} is on daemon {daemon!r}, but the other "
+            f"cameras are on {other!r}; give cameras from one daemon"
+        )
+
+
 class CameraNotPresent(AprilCamError):
     """A camera the registry knows -- addressed by slug or by its
     persistent number -- is not currently enumerated among live

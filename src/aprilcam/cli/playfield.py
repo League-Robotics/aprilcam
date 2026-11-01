@@ -126,6 +126,7 @@ from aprilcam.cli._common import (
     EXIT_PLACEHOLDER,
     add_all_option,
     fan_out,
+    verbosity,
     incomplete_command,
     report_error,
     resolve_playfield_camera,
@@ -498,7 +499,7 @@ def cmd_list(
             print(f"{label}:")
             _print_playfields(playfields)
 
-        return fan_out(discovery, lambda daemon: daemon.list_playfields(), render)
+        return fan_out(discovery, lambda daemon: daemon.list_playfields(), render, verbose=verbosity(args))
 
     try:
         playfields = discovery.connect(args.daemon).list_playfields()
@@ -561,6 +562,7 @@ def cmd_annotations(
             discovery,
             lambda daemon: daemon.get_annotations(args.playfield, args.layer),
             render,
+            verbose=verbosity(args),
         )
 
     try:
@@ -623,7 +625,10 @@ def cmd_where(
             _print_features(features)
 
         return fan_out(
-            discovery, lambda daemon: daemon.find_feature(args.playfield, args.query), render
+            discovery,
+            lambda daemon: daemon.find_feature(args.playfield, args.query),
+            render,
+            verbose=verbosity(args),
         )
 
     try:

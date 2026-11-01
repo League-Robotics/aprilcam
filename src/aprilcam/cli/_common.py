@@ -13,9 +13,11 @@ talks to a daemon.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from typing import Callable, Optional, Tuple, TypeVar
 
+from aprilcam.client.addressing import ResolvedCamera, resolve_camera
 from aprilcam.client.interfaces import Discovery
 from aprilcam.daemon.interfaces import Daemon
 from aprilcam.errors import AprilCamError
@@ -27,6 +29,9 @@ __all__ = [
     "EXIT_PLACEHOLDER",
     "add_daemon_option",
     "add_all_option",
+    "add_verbose_option",
+    "verbosity",
+    "configure_logging",
     "incomplete_command",
     "report_error",
     "format_camera_row",
@@ -34,6 +39,8 @@ __all__ = [
     "print_probe_report",
     "fan_out",
     "resolve_playfield_camera",
+    "connect_for_camera",
+    "connect_resolved",
 ]
 
 #: Exit codes every subcommand function returns. Argparse's own parse
@@ -66,6 +73,69 @@ def add_daemon_option(parser: argparse.ArgumentParser) -> None:
         help="target daemon HOST[:PORT] for any command "
         "(default: $APRILCAM_DAEMON_HOST, else the local daemon)",
     )
+
+
+def add_verbose_option(parser: argparse.ArgumentParser) -> None:
+    """``-v``/``--verbose`` -- a repeatable verbosity count, on the root
+    parser. ``-v`` reveals detail commands normally hide (unusable
+    cameras in ``camera list``, daemon addresses in fan-out labels,
+    ``camera calibrate``'s per-marker table); ``-vv`` also logs at INFO
+    and ``-vvv`` at DEBUG (see :func:`configure_logging`).
+
+    Subparsers get a ``sub_verbose`` copy of the flag via
+    :func:`add_verbose_to_subparsers` so ``camera list -v`` works too;
+    ``cli.main`` sums the two counts into ``verbose``.
+    """
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="more detail: -v shows hidden cameras and daemon addresses, "
+        "-vv logs at INFO, -vvv at DEBUG",
+    )
+
+
+def add_verbose_to_subparsers(
+    parser: argparse.ArgumentParser, _seen: Optional[set] = None
+) -> None:
+    """Give every subparser under *parser* (recursively) a ``-v`` that
+    counts into ``sub_verbose``, so the flag is accepted after the
+    subcommand as well as before it. A separate ``dest`` (rather than
+    reusing ``verbose``) keeps a subparser's default from clobbering a
+    count the root parser already parsed. Aliases (``camera lens``) map
+    several names to one parser, so each is visited once."""
+    seen = _seen if _seen is not None else set()
+    for action in parser._actions:
+        if not isinstance(action, argparse._SubParsersAction):
+            continue
+        for sub in action.choices.values():
+            if id(sub) in seen:
+                continue
+            seen.add(id(sub))
+            sub.add_argument(
+                "-v",
+                "--verbose",
+                dest="sub_verbose",
+                action="count",
+                default=0,
+                help="more detail (same as the global -v)",
+            )
+            add_verbose_to_subparsers(sub, seen)
+
+
+def verbosity(args: argparse.Namespace) -> int:
+    """The merged ``-v`` count from *args* (0 when the namespace has none)."""
+    return getattr(args, "verbose", 0) or 0
+
+
+def configure_logging(verbose: int) -> None:
+    """Level wiring only: ``-vv`` sets the root logger to INFO, ``-vvv``
+    (or more) to DEBUG; below that the logging config is left alone."""
+    if verbose >= 3:
+        logging.getLogger().setLevel(logging.DEBUG)
+    elif verbose == 2:
+        logging.getLogger().setLevel(logging.INFO)
 
 
 def add_all_option(parser: argparse.ArgumentParser, *, note: str = "") -> None:
@@ -176,17 +246,46 @@ def format_camera_row(state: CameraState) -> str:
     )
 
 
-def print_cameras(cameras: Tuple[CameraState, ...]) -> None:
+def label_host(label: str) -> Optional[str]:
+    """The bare host name from a :func:`fan_out` label (``"donald
+    (192.168.4.60:5280)"`` -> ``"donald"``), or ``None`` when the label
+    is just an address (a nameless daemon) and so cannot prefix a
+    ``HOST-N`` camera address."""
+    host = label.split(" (", 1)[0]
+    return None if ":" in host or host.replace(".", "").isdigit() else host
+
+
+def print_cameras(
+    cameras: Tuple[CameraState, ...], *, verbose: int = 0, host: Optional[str] = None
+) -> None:
     """A camera list/probe result, one row per camera. An empty tuple
     prints an explicit ``(no cameras)`` rather than nothing at all, so
     a genuinely empty daemon looks deliberate rather than like the
     command produced no output by accident (UC-01.S-2: empty is a
-    normal, successful state, not an error)."""
+    normal, successful state, not an error).
+
+    With ``verbose < 1`` rows whose camera is not ``usable`` are hidden
+    and a ``(N unusable camera(s) hidden; -v to show)`` note says so --
+    a daemon whose cameras are all unusable prints just the note.
+    ``camera probe`` passes ``verbose=1`` (via :func:`print_probe_report`)
+    because it reports discovery state and must show everything.
+
+    With *host* (the daemon's short name, from a fan-out label) each
+    numbered row ends with ``address=HOST-N`` -- the copyable form
+    ``camera image`` and friends accept (sprint 048)."""
     if not cameras:
         print("  (no cameras)")
         return
-    for state in cameras:
-        print(f"  {format_camera_row(state)}")
+    shown = [c for c in cameras if c.usable] if verbose < 1 else list(cameras)
+    for state in shown:
+        row = format_camera_row(state)
+        if host and state.number is not None:
+            row += f"  address={host}-{state.number}"
+        print(f"  {row}")
+    hidden = len(cameras) - len(shown)
+    if hidden:
+        noun = "camera" if hidden == 1 else "cameras"
+        print(f"  ({hidden} unusable {noun} hidden; -v to show)")
 
 
 def print_probe_report(report: ProbeReport) -> None:
@@ -194,7 +293,7 @@ def print_probe_report(report: ProbeReport) -> None:
     probe could not interrogate -- printed explicitly, never silently
     dropped, so a partial probe can never read as a complete one
     (``ProbeReport.skipped``'s contract, UC-25.S-7)."""
-    print_cameras(report.cameras)
+    print_cameras(report.cameras, verbose=1)
     if report.skipped:
         print("  skipped:")
         for skip in report.skipped:
@@ -205,6 +304,8 @@ def fan_out(
     discovery: Discovery,
     call: Callable[[Daemon], T],
     render: Callable[[str, T], None],
+    *,
+    verbose: int = 0,
 ) -> int:
     """Run *call* against every daemon ``discovery.find_all()`` reports.
 
@@ -220,6 +321,11 @@ def fan_out(
     zero", UC-13.S-5) aborts the whole command, since there is nothing
     left to iterate; a per-daemon ``connect``/RPC failure during the
     loop does not.
+
+    At ``verbose >= 1`` a remote daemon's label also carries its address,
+    ``donald (192.168.4.60:5280)``; the local label stays ``gala (local)``
+    (no address worth showing for the local socket). A nameless
+    daemon is already labelled by its address, so nothing is added.
 
     Returns :data:`EXIT_ERROR` if any discovered daemon failed to
     answer, so a script can detect a partial result even though the
@@ -239,7 +345,14 @@ def fan_out(
 
     had_failure = False
     for info in infos:
-        label = f"{info.host} (local)" if info.is_local else info.host
+        base = info.name or info.host
+        if info.is_local:
+            label = f"{base} (local)"
+        elif verbose >= 1 and base != info.host:
+            # `info.host` already carries the port ("ip:port").
+            label = f"{base} ({info.host})"
+        else:
+            label = base
         try:
             daemon = discovery.connect(None if info.is_local else info.host)
             result = call(daemon)
@@ -250,6 +363,33 @@ def fan_out(
         render(label, result)
 
     return EXIT_ERROR if had_failure else EXIT_OK
+
+
+def connect_for_camera(
+    discovery: Discovery, daemon_flag: Optional[str], camera: str
+) -> Tuple[Daemon, str]:
+    """Connect to the daemon a camera argument addresses.
+
+    *camera* may be a slug, a number, or a fan-out ``HOST-N`` address
+    (sprint 048); :func:`aprilcam.client.addressing.resolve_camera`
+    decides the daemon and the camera string to send it. *daemon_flag*
+    is ``args.daemon`` (the explicit ``-d``) -- a ``HOST-N`` naming a
+    different daemon raises ``ConflictingTarget``. The
+    ``APRILCAM_DAEMON_HOST`` default is not passed: ``connect(None)``
+    applies it, and ``HOST-N`` overrides it. Typed errors propagate for
+    the caller's usual ``report_error`` path.
+    """
+    resolved = resolve_camera(camera, discovery=discovery, target=daemon_flag)
+    return connect_resolved(discovery, resolved), resolved.camera
+
+
+def connect_resolved(discovery: Discovery, resolved: ResolvedCamera) -> Daemon:
+    """Connect to the daemon a :class:`ResolvedCamera` names: the local
+    socket explicitly when ``HOST-N`` named this machine (so
+    ``APRILCAM_DAEMON_HOST`` cannot redirect it), else ``connect(host)``."""
+    if resolved.local:
+        return discovery.connect_local()
+    return discovery.connect(resolved.host)
 
 
 def resolve_playfield_camera(

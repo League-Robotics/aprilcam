@@ -60,6 +60,7 @@ from aprilcam.cli._common import (
     EXIT_ERROR,
     EXIT_OK,
     add_all_option,
+    connect_for_camera,
     report_error,
 )
 from aprilcam.client.discovery import Discovery
@@ -226,7 +227,7 @@ def cmd_locate(
         )
 
     try:
-        daemon = discovery_factory().connect(args.daemon)
+        daemon, args.camera = connect_for_camera(discovery_factory(), args.daemon, args.camera)
         config = daemon.get_camera_config(args.camera)
     except AprilCamError as exc:
         return report_error(exc)

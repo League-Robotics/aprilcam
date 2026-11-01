@@ -84,6 +84,10 @@ restriction, not a silent single-target fallback.
 When a command does fan out, **every row is labelled with its daemon**,
 and one unreachable daemon does not fail the whole command — it is
 reported as unreachable alongside the results that did come back.
+The label is the daemon's short host name (`donald`, `gala (local)`); `-v`
+adds the address (`donald (192.168.4.60:5280)`). `camera list --all` rows
+also end with a copyable `address=HOST-N` (e.g. `donald-4`), accepted
+wherever a camera is named (below).
 
 ### Playfield commands resolve their camera
 
@@ -98,6 +102,14 @@ a human can see and correct it — never in the daemon, where it would
 become a wrong answer that looks right.
 
 ### Camera addressing — number or slug
+
+A fan-out `HOST-N` address (`donald-4`) is also accepted by every
+single-camera command (`camera image`/`tags`/`view`/`close`/`calibrate`/
+`flatfield`/`locate`/`intrinsics`) with no `-d`: the CLI looks the
+daemon up by name and sends it the number. A real slug or number on the
+target daemon wins over a `HOST-N` reading; `-d` naming a different
+daemon than `HOST` is an error, while `APRILCAM_DAEMON_HOST` is only a
+default and is overridden.
 
 Every camera-addressed command (`camera image`, `camera calibrate`, and
 every future one, including this sprint's `camera tags`) accepts either

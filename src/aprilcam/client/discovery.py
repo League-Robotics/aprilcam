@@ -110,6 +110,7 @@ __all__ = [
     "probe_lock_holder",
     "probe_socket_reachable",
     "resolve_ipv4_preferred",
+    "short_host_name",
     "split_host_port",
 ]
 
@@ -186,6 +187,19 @@ class _BrowseResult:
     address: str
     port: int
     hostname: str
+
+
+def short_host_name(raw: str) -> str:
+    """Normalize a machine name for display: lowercase, with ``.local``
+    and any other domain suffix stripped (``Donald.local`` -> ``donald``).
+    An IP-looking value is returned unchanged -- its dots are not a domain.
+    """
+    raw = raw.strip()
+    try:
+        ipaddress.ip_address(raw.strip("[]"))
+    except ValueError:
+        return raw.split(".", 1)[0].lower()
+    return raw
 
 
 def probe_lock_holder(lock_path: Path) -> Optional[str]:
@@ -567,7 +581,14 @@ class Discovery(_DiscoveryBase):
         local: Tuple[DaemonInfo, ...] = ()
         if holder is not None:
             reachable = self._socket_reachable(self.socket_path)
-            local = (DaemonInfo(host="localhost", port=0, is_local=True, reachable=reachable),)
+            local = (DaemonInfo(
+                    host="localhost",
+                    port=0,
+                    is_local=True,
+                    reachable=reachable,
+                    name=short_host_name(socket.gethostname()),
+                ),
+            )
 
         try:
             browsed = self._browse()
@@ -581,6 +602,7 @@ class Discovery(_DiscoveryBase):
                 port=entry.port,
                 is_local=False,
                 reachable=_probe_remote_reachable(f"{entry.address}:{entry.port}"),
+                name=short_host_name(entry.hostname),
             )
             for entry in browsed
             if entry.hostname != own_hostname
@@ -595,6 +617,11 @@ class Discovery(_DiscoveryBase):
         if resolved is None:
             return self._connect_local()
         return self._connect_remote(resolved)
+
+    def connect_local(self) -> Daemon:
+        """See ``client.interfaces.Discovery.connect_local``: the local
+        socket, with ``APRILCAM_DAEMON_HOST`` deliberately ignored."""
+        return self._connect_local()
 
     # -- internals -----------------------------------------------------
 
