@@ -1,7 +1,7 @@
 ---
 id: '010'
 title: 'Docs: DESIGN updates, UC-25 coverage, knowledge entry'
-status: open
+status: in-progress
 use-cases:
 - SUC-001
 - SUC-002
@@ -10,8 +10,8 @@ use-cases:
 - SUC-005
 - SUC-006
 depends-on:
-- '008'
-- '009'
+- 008
+- 009
 github-issue: ''
 issue:
 - camera-hotplug-rock-solid-drop-reopen-and-test-card.md

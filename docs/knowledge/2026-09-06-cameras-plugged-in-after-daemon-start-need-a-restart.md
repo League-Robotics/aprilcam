@@ -26,6 +26,10 @@ The 2-second passive watch (UC-25.S-5) therefore cannot see hotplug on
 macOS, and a forced probe does not help because it uses the same
 enumeration.
 
+> Superseded by sprint 047 (`MacosAvfPresenceSource` + main-thread run-loop
+> pump; see `2026-11-01-camera-hotplug-v4l2-findings.md`). Kept for the
+> diagnosis.
+
 ## Fix / workaround
 
 Restart the daemon (see

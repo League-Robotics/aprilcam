@@ -162,6 +162,22 @@ board available, calibration uses the centre-point path without a lens model
 `start_intrinsics`, `get_intrinsics_status`, `finish_intrinsics`,
 `abort_intrinsics`.
 
+### Camera hotplug, close, and exit code 3
+
+Unplugging or re-plugging a camera needs no daemon restart. While a camera is
+absent, `get_frame`, image streams and `camera image` return a NO SIGNAL test
+card, and `camera image` / `playfield image` write it but warn on stderr and
+exit **3** (0 means a real frame). Streams resume real frames on re-plug.
+
+```
+aprilcam [-d HOST] camera close <camera> [--force]   # release the device; list shows "closed"
+```
+
+A camera nothing is using is released after `APRILCAM_IDLE_CLOSE_S` seconds
+(default 60, `0` disables) and reopens, with its stored config, on the next
+request. Hardware check: `scripts/hotplug_acceptance.py`; see
+`docs/knowledge/2026-11-01-camera-hotplug-v4l2-findings.md`.
+
 ## Development
 
 ```

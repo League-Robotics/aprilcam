@@ -127,10 +127,10 @@ field (640x480 frames warped by 1920x1080 calibrations).
   default-interface instance (daemons relayed from Robot_Garage by the
   reflector) and merges them. gala's own daemon still cannot *advertise*
   while 5353 is taken.
-- `camera list` keeps reporting an unplugged camera as present, and a
-  re-plugged one gives `no frame available` until the daemon restarts
-  (`camera probe` skips it as "in use by a live subscriber"). Restart
-  `aprilcamd` after moving cameras.
+- (Fixed in sprint 047; no longer true.) `camera list` used to keep
+  reporting an unplugged camera as present and a re-plugged one gave `no
+  frame available` until the daemon restarted. Moving cameras now needs no
+  restart: see `2026-11-01-camera-hotplug-v4l2-findings.md`.
 - A dual-homed host advertises only its default-route address over mDNS
   (`daemon/mdns.py:_primary_routable_ipv4`). Robots on the other network
   must use the host name for that interface (`buzzkill-rg.home`).
