@@ -88,6 +88,7 @@ from aprilcam.cli._common import (
     fan_out,
     incomplete_command,
     print_cameras,
+    verbosity,
     print_probe_report,
     report_error,
 )
@@ -117,20 +118,22 @@ __all__ = [
 def cmd_list(
     args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
 ) -> int:
-    """``aprilcam camera list [--all]``."""
+    """``aprilcam camera list [--all]``. Rows for unusable cameras are
+    hidden (with a count note) unless ``-v`` is given."""
     discovery = discovery_factory()
+    verbose = verbosity(args)
     if args.all:
         def render(label: str, cameras) -> None:
             print(f"{label}:")
-            print_cameras(cameras)
+            print_cameras(cameras, verbose=verbose)
 
-        return fan_out(discovery, lambda daemon: daemon.list_cameras(), render)
+        return fan_out(discovery, lambda daemon: daemon.list_cameras(), render, verbose=verbose)
 
     try:
         cameras = discovery.connect(args.daemon).list_cameras()
     except AprilCamError as exc:
         return report_error(exc)
-    print_cameras(cameras)
+    print_cameras(cameras, verbose=verbose)
     return EXIT_OK
 
 
@@ -144,7 +147,7 @@ def cmd_probe(
             print(f"{label}:")
             print_probe_report(report)
 
-        return fan_out(discovery, lambda daemon: daemon.probe_cameras(), render)
+        return fan_out(discovery, lambda daemon: daemon.probe_cameras(), render, verbose=verbosity(args))
 
     try:
         report = discovery.connect(args.daemon).probe_cameras()
@@ -215,6 +218,7 @@ def _cmd_image_all(
         discovery,
         lambda daemon: daemon.get_frame(args.camera, deskewed=False, encoding=args.encoding),
         render,
+        verbose=verbosity(args),
     )
     return EXIT_PLACEHOLDER if rc == EXIT_OK and saw_placeholder else rc
 
@@ -465,7 +469,7 @@ def cmd_tags(
             print(f"{label}:")
             _print_tags(frame, as_json=args.json)
 
-        return fan_out(discovery, lambda daemon: daemon.get_tags(args.camera), render)
+        return fan_out(discovery, lambda daemon: daemon.get_tags(args.camera), render, verbose=verbosity(args))
 
     try:
         frame = discovery.connect(args.daemon).get_tags(args.camera)

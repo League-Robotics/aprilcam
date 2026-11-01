@@ -435,8 +435,12 @@ text to stdout/stderr — there is no machine-readable output mode
   `playfield.py` rather than shared via `_common.py` — a deliberate
   choice per each module's docstring, but it means the two copies can
   drift if one is edited without the other.
-- **No structured logging or `--verbose`/`--quiet` flags.** All
-  output is the one fixed verbosity level baked into each `cmd_*`.
+- **No structured logging or `--quiet` flag.** The one verbosity control
+  is the root `-v` count (sprint 048): `-v` shows unusable cameras in
+  `camera list` and adds the address to `--all` labels, `-vv`/`-vvv` set
+  the root logger to INFO/DEBUG (level wiring only). It is accepted
+  before or after the subcommand (subparsers count into `sub_verbose`,
+  merged in `main()`).
 - **`playfield tags`, the documented eventual spelling for
   playfield-addressed tag listing, does not exist yet** — `camera tags
   <camera>` is the shipped stand-in (§4's "rejected spelling," which

@@ -614,13 +614,20 @@ class _SecondHostAdvertiser:
     otherwise ticket 004's client-side self-filter would collapse it
     into "that's just my own local daemon"."""
 
+    #: Whether the most recent ``start()`` actually registered; a host
+    #: whose UDP 5353 is held by another process cannot advertise, and
+    #: the test could then never find its own second daemon.
+    advertised: bool = False
+
     def __init__(self) -> None:
         from aprilcam.daemon.mdns import MdnsAdvertiser
 
         self._real = MdnsAdvertiser()
+        type(self).advertised = False
 
     def start(self, tcp_port, *, hostname=None):
         self._real.start(tcp_port, hostname="test-second-host")
+        type(self).advertised = self._real._zeroconf is not None
 
     def stop(self) -> None:
         self._real.stop()
@@ -671,6 +678,8 @@ def test_daemon_list_reports_two_real_local_daemons_on_alternate_ports(
         lifecycle2 = daemon_main.build(directories2, start_watch=False, tcp_port=0)
         lifecycle2.start()
         try:
+            if not _SecondHostAdvertiser.advertised:
+                pytest.skip("this host cannot advertise over mDNS (UDP 5353 held elsewhere)")
             discovery = Discovery(directories=directories1)
 
             code = daemon_cli.cmd_list(_args(), discovery_factory=lambda: discovery)
@@ -680,11 +689,24 @@ def test_daemon_list_reports_two_real_local_daemons_on_alternate_ports(
             assert " (local):" in out
             assert "cameras: 0" in out
             assert "playfields: (none)" in out
-            # The remote entry's label is "ip:port" (Discovery.find_all's
-            # "Load-bearing formatting" note) -- assert structurally
-            # rather than pin an exact address.
-            assert out.count("cameras: 0") == 2
-            assert out.count("playfields: (none)") == 2
+            # Foreign daemons on the LAN may be listed too, so check
+            # only the two blocks this test started: the local one and
+            # the one labelled with the synthetic host name.
+            blocks = {}
+            current = None
+            for line in out.splitlines():
+                if line and not line[0].isspace() and line.endswith(":"):
+                    current = line[:-1]
+                    blocks[current] = []
+                elif current is not None:
+                    blocks[current].append(line.strip())
+            ours = [lines for label, lines in blocks.items()
+                    if label.endswith(" (local)") or label == "test-second-host"]
+            assert len(ours) == 2
+            for lines in ours:
+                assert "cameras: 0" in lines
+                assert "playfields: (none)" in lines
+            assert "test-second-host" in blocks
         finally:
             lifecycle2.stop()
     finally:

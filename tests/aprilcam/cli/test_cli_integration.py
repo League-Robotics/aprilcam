@@ -447,6 +447,8 @@ def test_camera_list_all_against_a_real_multi_daemon_find_all_reports_partial_fa
     advertiser = MdnsAdvertiser()
     advertiser.start(dead_port, hostname="test-second-host")
     try:
+        if advertiser._zeroconf is None:
+            pytest.skip("this host cannot advertise over mDNS (UDP 5353 held elsewhere)")
         # No browse= override, no lock_holder/socket_reachable override
         # -- the real Discovery, real default browse. connect_timeout
         # is shrunk only so this test does not wait out the production
@@ -459,9 +461,13 @@ def test_camera_list_all_against_a_real_multi_daemon_find_all_reports_partial_fa
 
         assert code == 1  # partial failure is visible in the exit code
         out, err = capsys.readouterr()
-        assert " (local):" in out
-        assert "(no cameras)" in out
-        assert "unreachable" in err
+        # Foreign daemons on the LAN may appear too; assert only on the
+        # two this test started: the local one (zero cameras) and the
+        # phantom, which must be reported unreachable by its host name.
+        local_block = out.split(" (local):", 1)
+        assert len(local_block) == 2
+        assert local_block[1].lstrip("\n").lstrip().startswith("(no cameras)")
+        assert "test-second-host: unreachable" in err
     finally:
         advertiser.stop()
         lifecycle.stop()

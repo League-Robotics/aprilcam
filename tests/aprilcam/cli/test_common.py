@@ -10,10 +10,10 @@ discovery, nothing to fake.
 
 from __future__ import annotations
 
-from aprilcam.cli._common import fan_out, format_camera_row
+from aprilcam.cli._common import fan_out, format_camera_row, print_cameras, print_probe_report
 from aprilcam.client.interfaces import DaemonInfo
 from aprilcam.errors import ConnectionFailed
-from aprilcam.types import CameraState
+from aprilcam.types import CameraState, ProbeReport
 
 
 def _state(
@@ -210,3 +210,51 @@ def test_fan_out_unreachable_line_uses_the_host_name(capsys):
     assert code == 1
     assert labels == []
     assert capsys.readouterr().err.startswith("buzzkill: unreachable")
+
+
+def test_fan_out_labels_carry_the_address_at_verbose():
+    infos = (
+        DaemonInfo(host="localhost", port=0, is_local=True, reachable=True, name="gala"),
+        DaemonInfo(host="10.0.0.3:5280", port=5280, is_local=False, reachable=True, name="donald"),
+        DaemonInfo(host="10.0.0.4:5280", port=5280, is_local=False, reachable=True),
+    )
+    labels = []
+    fan_out(_FakeDiscovery(infos), lambda d: 1, lambda label, r: labels.append(label), verbose=1)
+
+    assert labels == ["gala (local)", "donald (10.0.0.3:5280)", "10.0.0.4:5280"]
+
+
+# ---------------------------------------------------------------------------
+# print_cameras() -- sprint 048 ticket 002: unusable cameras hidden unless -v
+# ---------------------------------------------------------------------------
+
+
+def _cam(name, usable=True):
+    return CameraState(name=name, present=True, usable=usable, playfield=None, calibrated=False, number=1)
+
+
+def test_print_cameras_hides_unusable_with_singular_note(capsys):
+    print_cameras((_cam("good"), _cam("bad", usable=False)))
+    out = capsys.readouterr().out
+    assert "good" in out and "bad" not in out
+    assert "(1 unusable camera hidden; -v to show)" in out
+
+
+def test_print_cameras_all_hidden_prints_note_not_empty_marker(capsys):
+    print_cameras((_cam("bad", usable=False),))
+    out = capsys.readouterr().out
+    assert "(no cameras)" not in out
+    assert "(1 unusable camera hidden; -v to show)" in out
+
+
+def test_print_cameras_verbose_shows_everything_without_note(capsys):
+    print_cameras((_cam("good"), _cam("bad", usable=False)), verbose=1)
+    out = capsys.readouterr().out
+    assert "good" in out and "bad" in out and "hidden" not in out
+
+
+def test_print_probe_report_never_hides_unusable(capsys):
+    report = ProbeReport(cameras=(_cam("bad", usable=False),), skipped=())
+    print_probe_report(report)
+    out = capsys.readouterr().out
+    assert "bad" in out and "hidden" not in out

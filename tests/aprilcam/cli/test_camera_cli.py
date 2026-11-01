@@ -300,11 +300,25 @@ def test_list_shows_present_but_unusable_camera_distinctly_from_absent(capsys):
     gone = _camera("unplugged-cam", 4, present=False, usable=False)
     discovery = _FakeDiscovery(daemon=_FakeDaemon(cameras=(broken, gone)))
 
-    camera_cli.cmd_list(_args(), discovery_factory=lambda: discovery)
+    camera_cli.cmd_list(_args(verbose=1), discovery_factory=lambda: discovery)
 
     out = capsys.readouterr().out
     assert "broken-cam" in out and "present" in out and "unusable" in out
     assert "unplugged-cam" in out and "absent" in out
+    assert "hidden" not in out
+
+
+def test_list_hides_unusable_cameras_by_default_with_a_count_note(capsys):
+    ok = _camera("ok-cam", 1)
+    broken = _camera("broken-cam", 3, present=True, usable=False)
+    gone = _camera("unplugged-cam", 4, present=False, usable=False)
+    discovery = _FakeDiscovery(daemon=_FakeDaemon(cameras=(ok, broken, gone)))
+
+    camera_cli.cmd_list(_args(), discovery_factory=lambda: discovery)
+
+    out = capsys.readouterr().out
+    assert "ok-cam" in out and "broken-cam" not in out and "unplugged-cam" not in out
+    assert "(2 unusable cameras hidden; -v to show)" in out
 
 
 def test_list_with_no_cameras_prints_explicit_empty_marker(capsys):

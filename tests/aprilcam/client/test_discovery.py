@@ -678,11 +678,19 @@ class _SecondHostAdvertiser:
     docstring and ``MdnsAdvertiser.start``'s docstring for the full
     reasoning)."""
 
+    #: Whether the most recent ``start()`` actually registered. An
+    #: advertise failure is swallowed by design (a host whose UDP 5353
+    #: is held by another process, e.g. a dev box running Node, cannot
+    #: advertise), and the test can then never find its own daemon.
+    advertised: bool = False
+
     def __init__(self) -> None:
         self._real = MdnsAdvertiser()
+        type(self).advertised = False
 
     def start(self, tcp_port, *, hostname=None):
         self._real.start(tcp_port, hostname="test-second-host")
+        type(self).advertised = self._real._zeroconf is not None
 
     def stop(self) -> None:
         self._real.stop()
@@ -747,13 +755,22 @@ def test_find_all_discovers_two_real_local_daemons_on_alternate_ports_via_real_m
             # fixture's blanket _browse_zeroconf patch) -- this is the
             # one call in this whole file that exercises discovery.py's
             # real _browse_zeroconf against real advertisements.
+            if not _SecondHostAdvertiser.advertised:
+                pytest.skip("this host cannot advertise over mDNS (UDP 5353 held elsewhere)")
             discovery = Discovery(directories=directories1)
 
             results = discovery.find_all()
 
-            assert len(results) == 2
-            local = next(r for r in results if r.is_local)
-            remote = next(r for r in results if not r.is_local)
+            # Assert only on the daemons this test started: on a LAN
+            # the real browse also reports foreign daemons (buzzkill,
+            # donald, ...), so totals and "the one remote" are not ours
+            # to pin. Ours is the single local entry plus the one
+            # advertised under the synthetic hostname.
+            locals_ = [r for r in results if r.is_local]
+            remotes = [r for r in results if r.name == "test-second-host"]
+            assert len(locals_) == 1  # advertised too, but self-filtered
+            assert len(remotes) == 1
+            local, remote = locals_[0], remotes[0]
             assert local.host == "localhost"
             assert remote.is_local is False
             assert ":" in remote.host

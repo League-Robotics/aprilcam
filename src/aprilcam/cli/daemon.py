@@ -73,6 +73,7 @@ from typing import Callable
 from aprilcam.cli._common import (
     EXIT_OK,
     fan_out,
+    verbosity,
     format_camera_row,
     incomplete_command,
     report_error,
@@ -270,7 +271,12 @@ def cmd_list(
     function's ``(args, *, ...)`` dispatch signature (``cli/__init__.py``
     calls ``func(args)`` uniformly) and is otherwise unused.
     """
-    return fan_out(discovery_factory(), lambda daemon: daemon.status(), _render_daemon_list_row)
+    return fan_out(
+        discovery_factory(),
+        lambda daemon: daemon.status(),
+        _render_daemon_list_row,
+        verbose=verbosity(args),
+    )
 
 
 def add_subparser(subparsers: "argparse._SubParsersAction") -> None:

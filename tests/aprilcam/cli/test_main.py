@@ -167,3 +167,57 @@ def test_handle_broken_pipe_is_a_no_op_when_stdout_has_no_real_fd(monkeypatch) -
     monkeypatch.setattr(sys, "stdout", _NoFilenoStdout())
 
     assert cli_module._handle_broken_pipe() == _SIGPIPE_EXIT_CODE
+
+
+# ---------------------------------------------------------------------------
+# global -v count -- sprint 048 ticket 002
+# ---------------------------------------------------------------------------
+
+
+def _parsed_verbose(monkeypatch, argv) -> int:
+    """Run ``main(argv)`` with ``camera list`` stubbed; return the merged
+    verbosity count the command saw."""
+    import aprilcam.cli.camera as camera_cli
+
+    seen = {}
+
+    def _fake(args, **_kw):
+        seen["verbose"] = args.verbose
+        return 0
+
+    monkeypatch.setattr(camera_cli, "cmd_list", _fake)
+    assert main(argv) == 0
+    return seen["verbose"]
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (["camera", "list"], 0),
+        (["-v", "camera", "list"], 1),
+        (["camera", "list", "-v"], 1),
+        (["-vv", "camera", "list"], 2),
+        (["camera", "list", "-vv"], 2),
+        (["-v", "camera", "list", "-v"], 2),
+    ],
+)
+def test_verbose_count_accepted_before_or_after_subcommand(monkeypatch, argv, expected) -> None:
+    assert _parsed_verbose(monkeypatch, argv) == expected
+
+
+def test_calibrate_takes_the_global_verbose_flag() -> None:
+    args = cli_module._build_parser().parse_args(["camera", "calibrate", "cam", "-v"])
+    assert args.sub_verbose == 1
+
+
+@pytest.mark.parametrize("count, level", [(2, "INFO"), (3, "DEBUG")])
+def test_verbose_count_sets_root_logger_level(monkeypatch, count, level) -> None:
+    import logging
+
+    root = logging.getLogger()
+    previous = root.level
+    try:
+        _parsed_verbose(monkeypatch, ["camera", "list", "-" + "v" * count])
+        assert root.level == getattr(logging, level)
+    finally:
+        root.setLevel(previous)
