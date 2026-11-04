@@ -1,8 +1,10 @@
 ---
 id: '003'
 title: 'mDNS: never advertise loopback (daemon deferral and client filter)'
-status: open
-use-cases: ["SUC-003", "SUC-004"]
+status: done
+use-cases:
+- SUC-003
+- SUC-004
 depends-on: []
 github-issue: ''
 issue: daemon-advertises-loopback-over-mdns-when-started-before-network.md
@@ -47,19 +49,19 @@ Client, `src/aprilcam/client/discovery.py` `_browse_zeroconf`:
 
 ## Acceptance Criteria
 
-- [ ] With address lookup returning `None`, `start()` registers nothing and
+- [x] With address lookup returning `None`, `start()` registers nothing and
       does not raise; after the lookup returns an address, exactly one
       registration happens with that address.
-- [ ] A later address change causes unregister + re-register with the new
+- [x] A later address change causes unregister + re-register with the new
       address; an unchanged address does not re-register.
-- [ ] No registration ever carries a `127.x` address (including when the
+- [x] No registration ever carries a `127.x` address (including when the
       real lookup would have returned loopback).
-- [ ] Advertised address logged (caplog).
-- [ ] `stop()` ends the retry thread, including while still deferred, and
+- [x] Advertised address logged (caplog).
+- [x] `stop()` ends the retry thread, including while still deferred, and
       unregisters if registered.
-- [ ] Client: loopback-only record dropped; mixed record uses the
+- [x] Client: loopback-only record dropped; mixed record uses the
       non-loopback address; IPv6 `::1` treated as loopback.
-- [ ] No real network or real sleeping in the new tests.
+- [x] No real network or real sleeping in the new tests.
 
 ## Testing
 

@@ -200,7 +200,7 @@ def test_stop_swallows_an_unregister_failure_and_logs_a_warning(caplog):
 # ---------------------------------------------------------------------------
 
 
-def test_primary_routable_ipv4_falls_back_to_loopback_when_the_probe_socket_fails(monkeypatch):
+def test_primary_routable_ipv4_returns_none_when_the_probe_socket_fails(monkeypatch):
     class _RaisingSocket:
         def __init__(self, *args, **kwargs):
             pass
@@ -213,10 +213,10 @@ def test_primary_routable_ipv4_falls_back_to_loopback_when_the_probe_socket_fail
 
     monkeypatch.setattr(socket, "socket", _RaisingSocket)
 
-    assert _primary_routable_ipv4() == "127.0.0.1"
+    assert _primary_routable_ipv4() is None
 
 
-def test_primary_routable_ipv4_returns_a_real_non_loopback_address_or_falls_back():
+def test_primary_routable_ipv4_returns_a_real_non_loopback_address_or_none():
     """Not mocked -- exercises the real UDP-socket trick end to end.
     Any dev/CI machine with at least one configured network interface
     (no real connectivity required -- no packet is ever sent) resolves
@@ -224,4 +224,108 @@ def test_primary_routable_ipv4_returns_a_real_non_loopback_address_or_falls_back
     back to 127.0.0.1, which this assertion also accepts rather than
     asserting one specific outcome."""
     addr = _primary_routable_ipv4()
-    assert addr == "127.0.0.1" or not addr.startswith("127.")
+    assert addr is None or not addr.startswith("127.")
+
+
+# ---------------------------------------------------------------------------
+# Deferral, retry, re-registration (sprint 049 ticket 003)
+# ---------------------------------------------------------------------------
+
+
+def _addr_of(info: ServiceInfo) -> str:
+    return socket.inet_ntoa(info.addresses[0])
+
+
+class _ScriptedWait:
+    """Fake ``wait``: each call runs the next scripted step (which may
+    change what the fake lookup returns), then returns False (keep
+    going). Once the script is exhausted it returns True (stop)."""
+
+    def __init__(self, steps) -> None:
+        self._steps = list(steps)
+
+    def __call__(self, _seconds: float) -> bool:
+        if not self._steps:
+            return True
+        self._steps.pop(0)()
+        return False
+
+
+def _run_thread_to_end(advertiser: MdnsAdvertiser) -> None:
+    advertiser._thread.join(timeout=5.0)
+    assert not advertiser._thread.is_alive()
+
+
+def test_deferred_then_registers_exactly_once_when_an_address_appears(caplog):
+    fake = _FakeZeroconf()
+    state = {"addr": None}
+    wait = _ScriptedWait([lambda: None, lambda: state.update(addr="192.168.1.50"), lambda: None])
+    advertiser = MdnsAdvertiser(
+        zeroconf_factory=lambda: fake, address_lookup=lambda: state["addr"], wait=wait
+    )
+    with caplog.at_level(logging.INFO):
+        advertiser.start(5280, hostname="h")
+        _run_thread_to_end(advertiser)
+
+    assert [_addr_of(i) for i in fake.registered] == ["192.168.1.50"]
+    assert fake.unregistered == []
+    assert any("no routable IPv4 yet; deferring" in r.message for r in caplog.records)
+    assert any("192.168.1.50:5280" in r.message for r in caplog.records)
+    advertiser.stop()
+
+
+def test_deferred_start_registers_nothing_and_does_not_raise():
+    fake = _FakeZeroconf()
+    advertiser = MdnsAdvertiser(
+        zeroconf_factory=lambda: fake, address_lookup=lambda: None, wait=_ScriptedWait([])
+    )
+    advertiser.start(5280)
+    _run_thread_to_end(advertiser)
+    assert fake.registered == []
+    advertiser.stop()
+
+
+def test_address_change_unregisters_then_reregisters_and_unchanged_does_not():
+    fake = _FakeZeroconf()
+    state = {"addr": "10.0.0.5"}
+    wait = _ScriptedWait(
+        [lambda: None, lambda: state.update(addr="10.0.0.9"), lambda: None]
+    )
+    advertiser = MdnsAdvertiser(
+        zeroconf_factory=lambda: fake, address_lookup=lambda: state["addr"], wait=wait
+    )
+    advertiser.start(5280)
+    _run_thread_to_end(advertiser)
+
+    assert [_addr_of(i) for i in fake.registered] == ["10.0.0.5", "10.0.0.9"]
+    assert [_addr_of(i) for i in fake.unregistered] == ["10.0.0.5"]
+    advertiser.stop()
+    assert [_addr_of(i) for i in fake.unregistered] == ["10.0.0.5", "10.0.0.9"]
+    assert fake.closed
+
+
+def test_loopback_from_the_lookup_is_never_registered():
+    fake = _FakeZeroconf()
+    for bad in ("127.0.0.1", "127.0.1.1"):
+        advertiser = MdnsAdvertiser(
+            zeroconf_factory=lambda: fake, address_lookup=lambda b=bad: b, wait=_ScriptedWait([lambda: None])
+        )
+        advertiser.start(5280)
+        _run_thread_to_end(advertiser)
+        advertiser.stop()
+    assert fake.registered == []
+
+
+def test_stop_while_still_deferred_ends_the_retry_thread():
+    fake = _FakeZeroconf()
+    advertiser = MdnsAdvertiser(
+        zeroconf_factory=lambda: fake, address_lookup=lambda: None, retry_interval=3600.0
+    )
+    advertiser.start(5280)
+    thread = advertiser._thread
+    assert thread is not None and thread.is_alive()
+
+    advertiser.stop()
+
+    assert not thread.is_alive()
+    assert fake.registered == [] and not fake.closed

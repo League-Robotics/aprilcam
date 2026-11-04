@@ -397,6 +397,23 @@ def _open_fallback_zeroconfs() -> List[Zeroconf]:
     return zeroconfs
 
 
+def choose_advertised_address(addresses: List[str]) -> Optional[str]:
+    """Return the first non-loopback address in *addresses*, or ``None``.
+
+    A daemon that advertised its own loopback (started before the
+    network was up) must not be dialed: that address would reach the
+    *client's* local daemon. Unparsable entries are skipped. IPv6 ``::1``
+    counts as loopback.
+    """
+    for candidate in addresses:
+        try:
+            if not ipaddress.ip_address(candidate).is_loopback:
+                return candidate
+        except ValueError:
+            continue
+    return None
+
+
 def _browse_zeroconf(timeout: float = _DEFAULT_BROWSE_TIMEOUT) -> Tuple[_BrowseResult, ...]:
     """The real (default) ``browse`` implementation: a bounded
     ``zeroconf.ServiceBrowser`` scan of ``_SERVICE_TYPE`` (ticket
@@ -455,9 +472,13 @@ def _browse_zeroconf(timeout: float = _DEFAULT_BROWSE_TIMEOUT) -> Tuple[_BrowseR
         addresses = info.parsed_addresses()
         if not addresses:
             return
+        chosen = choose_advertised_address(addresses)
+        if chosen is None:
+            logger.info("mdns: dropping %s: only loopback addresses advertised (%s)", name, addresses)
+            return
         raw_host = (info.properties or {}).get(b"host")
         hostname = raw_host.decode() if raw_host else name
-        found[name] = _BrowseResult(address=addresses[0], port=info.port, hostname=hostname)
+        found[name] = _BrowseResult(address=chosen, port=info.port, hostname=hostname)
 
     # The browsers are constructed inside the try/finally (not alongside
     # the Zeroconf()s above) so that if ServiceBrowser's own constructor

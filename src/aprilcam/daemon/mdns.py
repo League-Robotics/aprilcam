@@ -42,12 +42,22 @@ address) and ``zeroconf.Error`` (the base of every exception type the
 ``zeroconf`` package itself documents as raisable from
 ``Zeroconf()``/``register_service``/``unregister_service``/``close``,
 e.g. ``NonUniqueNameException``, ``NotRunningException``).
+
+**Never advertises loopback** (sprint 049, ticket 003). A daemon started
+before the network is up (angst booted on Wi-Fi only; aprilcamd started
+3 s before ``wlo1`` had carrier) used to publish ``127.0.0.1``, and
+remote clients then dialed *their own* loopback. Now
+:func:`_primary_routable_ipv4` returns ``None`` when there is no routable
+address, :meth:`MdnsAdvertiser.start` defers (never blocks) and a
+background thread registers once an address appears and re-registers if
+it later changes.
 """
 
 from __future__ import annotations
 
 import logging
 import socket
+import threading
 from typing import Callable, Optional
 
 from zeroconf import Error as ZeroconfError
@@ -69,24 +79,22 @@ _SERVICE_TYPE = "_aprilcam._tcp.local."
 _PROBE_ADDRESS = ("192.0.2.1", 53)
 
 
-def _primary_routable_ipv4() -> str:
-    """Return this host's primary routable IPv4 address.
+def _primary_routable_ipv4() -> Optional[str]:
+    """Return this host's primary routable IPv4 address, or ``None``.
 
-    **Earned knowledge, kept from v1 verbatim in spirit.** Uses the
-    UDP-socket trick: connect a ``SOCK_DGRAM`` socket to a non-routable
-    TEST-NET-1 address. No packet is ever sent (UDP ``connect()`` only
-    picks a route and a local source address); reading
-    ``getsockname()`` afterward gives the OS's chosen outbound
-    interface address. This deliberately avoids resolving
-    ``socket.gethostname()`` to an address via ``/etc/hosts``, which on
-    Ubuntu commonly maps the hostname to ``127.0.1.1`` -- a loopback
-    alias that would make the daemon's mDNS advertisement point nowhere
-    reachable for a genuine remote client (the exact bug this function
-    exists to avoid; see the sprint 028 ticket 003 description).
+    **Earned knowledge, kept from v1 in spirit.** Uses the UDP-socket
+    trick: connect a ``SOCK_DGRAM`` socket to a non-routable TEST-NET-1
+    address. No packet is ever sent (UDP ``connect()`` only picks a
+    route and a local source address); reading ``getsockname()``
+    afterward gives the OS's chosen outbound interface address. This
+    deliberately avoids resolving ``socket.gethostname()`` via
+    ``/etc/hosts``, which on Ubuntu commonly maps the hostname to
+    ``127.0.1.1``.
 
-    Falls back to ``"127.0.0.1"`` if the trick itself fails (no network
-    interface at all, e.g. a fully offline sandbox) or resolves to a
-    loopback address anyway.
+    Returns ``None`` -- never a loopback address -- if the trick fails
+    (no route yet, e.g. the network is still coming up) or resolves to
+    a loopback address anyway. Callers must treat ``None`` as "not
+    advertisable yet", not substitute ``127.0.0.1``.
     """
     try:
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -96,15 +104,15 @@ def _primary_routable_ipv4() -> str:
         finally:
             probe.close()
     except OSError:
-        return "127.0.0.1"
-    if addr and not addr.startswith("127."):
+        return None
+    if addr and not addr.startswith("127.") and addr != "0.0.0.0":
         return addr
-    return "127.0.0.1"
+    return None
 
 
 class MdnsAdvertiser:
     """Advertises the daemon's control plane on the local network via
-    mDNS/Bonjour once it has a real TCP port to announce.
+    mDNS/Bonjour once it has a real TCP port and a routable address.
 
     Usage (mirrors ``daemon/__main__.py``'s wiring of this into
     ``DaemonLifecycle``'s ``advertise``/``stop_advertise`` hooks)::
@@ -119,92 +127,133 @@ class MdnsAdvertiser:
     zeroconf_factory:
         Zero-argument callable returning a fresh ``Zeroconf`` instance.
         Defaults to the real ``Zeroconf`` class itself. Tests substitute
-        a fake here (mirroring ``client.discovery.Discovery``'s
-        ``lock_holder``/``socket_reachable`` seam) so
-        register/unregister/failure-swallowing behaviour is verifiable
-        without a real multicast stack.
+        a fake here.
+    address_lookup:
+        Zero-argument callable returning the routable IPv4 address or
+        ``None``. Defaults to :func:`_primary_routable_ipv4`.
+    retry_interval:
+        Seconds between background address polls (default 5.0).
+    wait:
+        ``wait(seconds) -> bool`` returning ``True`` when the advertiser
+        is stopping. Defaults to the stop event's ``wait``; tests inject
+        a fake to drive time without sleeping.
     """
 
-    def __init__(self, *, zeroconf_factory: Callable[[], Zeroconf] = Zeroconf) -> None:
+    def __init__(
+        self,
+        *,
+        zeroconf_factory: Callable[[], Zeroconf] = Zeroconf,
+        address_lookup: Callable[[], Optional[str]] = _primary_routable_ipv4,
+        retry_interval: float = 5.0,
+        wait: Optional[Callable[[float], bool]] = None,
+    ) -> None:
         self._zeroconf_factory = zeroconf_factory
+        self._address_lookup = address_lookup
+        self._retry_interval = retry_interval
+        self._stop_event = threading.Event()
+        self._wait = wait if wait is not None else self._stop_event.wait
+        self._lock = threading.RLock()
         self._zeroconf: Optional[Zeroconf] = None
         self._info: Optional[ServiceInfo] = None
+        self._address: Optional[str] = None
+        self._thread: Optional[threading.Thread] = None
+        self._tcp_port = 0
+        self._hostname = ""
+        self._service_name = ""
 
     def start(self, tcp_port: int, *, hostname: Optional[str] = None) -> None:
-        """Register a ``_aprilcam._tcp.local.`` service record
-        advertising *tcp_port*.
+        """Register a ``_aprilcam._tcp.local.`` record advertising
+        *tcp_port*, or defer until a routable address exists.
 
-        Parameters
-        ----------
-        tcp_port:
-            The TCP port the gRPC control plane is listening on
-            (``daemon.rpc.build_server``'s bound port, as reported
-            through ``ControlPlaneListener.start()`` and
-            ``DaemonLifecycle``'s ``advertise`` hook).
-        hostname:
-            Overrides ``socket.gethostname()`` for the TXT ``host``
-            property below. ``None`` (the default) is the real
-            hostname -- what every genuine daemon process wants.
+        Never blocks waiting for a network: if no routable IPv4 address
+        is available, a daemon thread polls at ``retry_interval`` and
+        registers when one appears, then re-registers if it changes.
 
-            **This parameter is not dead code.** It exists specifically
-            for ticket 004's two-local-daemon-alternate-port
-            integration test, which proves the advertise/browse/
-            connect mechanism end to end using two real daemon
-            *processes* on one physical dev machine standing in for
-            two hosts (this sprint's documented hardware-blocked
-            stand-in, see sprint.md's Hardware Constraints). Both
-            processes share one real ``socket.gethostname()`` value.
-            Ticket 004's client-side self-filter decides "is this
-            advertisement my own local daemon's" by comparing a
-            browsed entry's TXT ``host`` property against the
-            *client's own* ``socket.gethostname()`` -- without this
-            override, the second process's advertisement would carry
-            the identical ``host`` value as the first, so the
-            self-filter would incorrectly collapse it into "that's
-            just my own local daemon" and silently discard the very
-            second daemon that test exists to find. Passing a
-            synthetic value here (e.g. ``"test-second-host"``) for the
-            second process's ``MdnsAdvertiser.start()`` call is what
-            makes the two processes distinguishable over mDNS at all.
+        *hostname* overrides ``socket.gethostname()`` for the TXT
+        ``host`` property (used by the two-local-daemon integration
+        test so the client self-filter can tell the processes apart).
+        TXT keys are exactly ``version`` and ``host`` -- do not rename
+        or add to them; the client self-filter keys on ``host``.
 
-        TXT record properties are exactly ``{b"version": ...,
-        b"host": ...}`` -- **do not rename or add to these keys**.
-        Ticket 004's client-side self-filter keys on ``host`` by name;
-        a rename here would silently break that filter without either
-        side raising an error.
-
-        Every zeroconf call below is wrapped: a failure (socket error
-        opening the multicast interface, a name collision, anything
-        ``zeroconf`` itself raises) is logged at WARNING and never
-        propagates -- see the module docstring's "Advertising is never
-        load-bearing".
+        Every zeroconf failure is logged at WARNING and never
+        propagates (see the module docstring).
         """
-        resolved_hostname = hostname if hostname is not None else socket.gethostname()
-        service_name = f"aprilcam-{resolved_hostname}.{_SERVICE_TYPE}"
-        zeroconf: Optional[Zeroconf] = None
+        with self._lock:
+            self._tcp_port = tcp_port
+            self._hostname = hostname if hostname is not None else socket.gethostname()
+            self._service_name = f"aprilcam-{self._hostname}.{_SERVICE_TYPE}"
+            self._stop_event.clear()
+            addr = self._safe_lookup()
+            if addr is None:
+                logger.info(
+                    "mdns: no routable IPv4 yet; deferring advertisement of %s on port %d "
+                    "(retrying every %.1fs)",
+                    self._service_name,
+                    tcp_port,
+                    self._retry_interval,
+                )
+            else:
+                self._register(addr)
+            self._thread = threading.Thread(
+                target=self._run, name="aprilcam-mdns-retry", daemon=True
+            )
+            self._thread.start()
+
+    def _safe_lookup(self) -> Optional[str]:
         try:
-            addr_bytes = socket.inet_aton(_primary_routable_ipv4())
+            addr = self._address_lookup()
+        except OSError:
+            return None
+        # Defence in depth: never let a loopback address through.
+        if not addr or addr.startswith("127."):
+            return None
+        return addr
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            if self._wait(self._retry_interval):
+                return
+            if self._stop_event.is_set():
+                return
+            addr = self._safe_lookup()
+            with self._lock:
+                if self._stop_event.is_set() or addr is None or addr == self._address:
+                    continue
+                if self._info is not None:
+                    logger.info(
+                        "mdns: address changed %s -> %s; re-registering", self._address, addr
+                    )
+                    self._unregister()
+                self._register(addr)
+
+    def _register(self, addr: str) -> None:
+        """Register (or re-register) with *addr*. Caller holds the lock."""
+        zeroconf = self._zeroconf
+        created = False
+        try:
             info = ServiceInfo(
                 type_=_SERVICE_TYPE,
-                name=service_name,
-                port=tcp_port,
+                name=self._service_name,
+                port=self._tcp_port,
                 properties={
                     b"version": aprilcam.__version__.encode(),
-                    b"host": resolved_hostname.encode(),
+                    b"host": self._hostname.encode(),
                 },
-                addresses=[addr_bytes],
+                addresses=[socket.inet_aton(addr)],
             )
-            zeroconf = self._zeroconf_factory()
+            if zeroconf is None:
+                zeroconf = self._zeroconf_factory()
+                created = True
             zeroconf.register_service(info)
         except (OSError, ZeroconfError) as exc:
             logger.warning(
                 "mdns: could not advertise %s on port %d (%s) -- daemon continues "
                 "without mDNS advertisement",
-                service_name,
-                tcp_port,
+                self._service_name,
+                self._tcp_port,
                 exc,
             )
-            if zeroconf is not None:
+            if created and zeroconf is not None:
                 try:
                     zeroconf.close()
                 except (OSError, ZeroconfError):
@@ -212,23 +261,39 @@ class MdnsAdvertiser:
             return
         self._zeroconf = zeroconf
         self._info = info
-        logger.info("mdns: advertising %s on port %d", service_name, tcp_port)
+        self._address = addr
+        logger.info(
+            "mdns: advertising %s at %s:%d", self._service_name, addr, self._tcp_port
+        )
+
+    def _unregister(self) -> None:
+        """Unregister the current record (keeps Zeroconf open). Caller holds the lock."""
+        if self._zeroconf is not None and self._info is not None:
+            try:
+                self._zeroconf.unregister_service(self._info)
+            except (OSError, ZeroconfError) as exc:
+                logger.warning("mdns: error while unregistering advertisement: %s", exc)
+        self._info = None
+        self._address = None
 
     def stop(self) -> None:
-        """Unregister the service record and close the ``Zeroconf``
-        instance. Safe to call even if :meth:`start` was never called
-        or failed partway (a quiet no-op, not an error) -- matches
-        ``DaemonLifecycle.stop()``'s own "safe to call when not
-        running" contract for the hook this method is wired to.
-        """
-        if self._zeroconf is None:
-            return
-        try:
-            if self._info is not None:
-                self._zeroconf.unregister_service(self._info)
-            self._zeroconf.close()
-        except (OSError, ZeroconfError) as exc:
-            logger.warning("mdns: error while stopping advertisement: %s", exc)
-        finally:
-            self._zeroconf = None
-            self._info = None
+        """Stop the retry thread, unregister and close. Safe to call
+        when never started, still deferred, or already stopped."""
+        self._stop_event.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=5.0)
+        self._thread = None
+        with self._lock:
+            if self._zeroconf is None:
+                return
+            try:
+                if self._info is not None:
+                    self._zeroconf.unregister_service(self._info)
+                self._zeroconf.close()
+            except (OSError, ZeroconfError) as exc:
+                logger.warning("mdns: error while stopping advertisement: %s", exc)
+            finally:
+                self._zeroconf = None
+                self._info = None
+                self._address = None

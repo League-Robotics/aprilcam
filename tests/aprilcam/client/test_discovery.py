@@ -47,6 +47,7 @@ from aprilcam.client.discovery import (
     Discovery,
     _BrowseResult,
     _browse_zeroconf,
+    choose_advertised_address,
     resolve_ipv4_preferred,
     short_host_name,
     split_host_port,
@@ -794,3 +795,14 @@ def test_find_all_discovers_two_real_local_daemons_on_alternate_ports_via_real_m
 )
 def test_short_host_name(raw: str, expected: str):
     assert short_host_name(raw) == expected
+
+
+def test_choose_advertised_address_drops_loopback_only():
+    assert choose_advertised_address(["127.0.0.1"]) is None
+    assert choose_advertised_address(["::1", "127.0.1.1"]) is None
+    assert choose_advertised_address([]) is None
+
+
+def test_choose_advertised_address_prefers_non_loopback_in_a_mixed_record():
+    assert choose_advertised_address(["127.0.0.1", "192.168.1.7"]) == "192.168.1.7"
+    assert choose_advertised_address(["::1", "not-an-ip", "10.0.0.2"]) == "10.0.0.2"
