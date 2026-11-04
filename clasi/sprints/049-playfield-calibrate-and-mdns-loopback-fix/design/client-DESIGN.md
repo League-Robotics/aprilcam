@@ -115,3 +115,12 @@ By reference only, per this codebase's proto-boundary and interface-inheritance 
 - **No reconnect, backpressure, or multi-consumer fan-out inside `streams.py`.** `SocketImageStream`/`SocketTagStream` are strictly single-reader, no-retry wrappers; anything wanting automatic reconnect-on-drop or multiplexing one subscription to several local consumers builds it on top.
 - **Orphan-process scanning is Unix-`ps`-only.** No Windows implementation exists or is claimed; the default seam shells out to `ps -eo pid=,args=` and would need a different default on any platform lacking it.
 - **`Discovery.connect()`'s host-resolution precedence has no "file" tier yet** — only explicit argument and `APRILCAM_DAEMON_HOST` env, pending a future daemon-target configuration document.
+
+### Loopback records are dropped (sprint 049)
+
+`_browse_zeroconf` picks the first non-loopback address from
+`ServiceInfo.parsed_addresses()`. A record whose addresses are all loopback
+(`127.0.0.0/8`, `::1`) is dropped with an INFO log: dialing it reaches the
+client's own local daemon and mislabels it under the remote host's name
+(seen on gala listing angst, 2026-11-04). `find_all`'s self-filter and the
+`ip:port` format of `DaemonInfo.host` are unchanged.
