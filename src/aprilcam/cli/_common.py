@@ -392,8 +392,24 @@ def connect_resolved(discovery: Discovery, resolved: ResolvedCamera) -> Daemon:
     return discovery.connect(resolved.host)
 
 
+def connect_optional_camera(
+    discovery_factory: Callable[[], Discovery],
+    daemon_flag: Optional[str],
+    camera: Optional[str],
+) -> Tuple[Daemon, Optional[str]]:
+    """The daemon for a playfield-addressed command and the camera string
+    to send it. A named camera may be a fan-out ``HOST-N`` address
+    (``angst-4``), resolved like the ``camera`` commands do
+    (:func:`connect_for_camera`); with no camera, the ``-d`` daemon, for
+    :func:`resolve_playfield_camera` to pick from.
+    """
+    if camera is None:
+        return discovery_factory().connect(daemon_flag), None
+    return connect_for_camera(discovery_factory(), daemon_flag, camera)
+
+
 def resolve_playfield_camera(
-    daemon: Daemon, *, camera: Optional[str] = None
+    daemon: Daemon, *, camera: Optional[str] = None, hint: str = "--camera"
 ) -> Tuple[Optional[str], Optional[str]]:
     """The camera a ``playfield``-addressed command (``image``, ``view``,
     ``tags``) should target, per ``cli.md``'s "playfield commands resolve
@@ -424,9 +440,9 @@ def resolve_playfield_camera(
     if not linked:
         return None, (
             "no camera is linked to a playfield -- push one with "
-            "'aprilcam camera config <file>', or pass --camera"
+            f"'aprilcam camera config <file>', or pass {hint}"
         )
     return None, (
         f"multiple cameras are linked to a playfield ({', '.join(linked)}) "
-        "-- pass --camera to disambiguate"
+        f"-- pass {hint} to disambiguate"
     )

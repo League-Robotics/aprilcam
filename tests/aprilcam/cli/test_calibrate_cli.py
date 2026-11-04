@@ -409,3 +409,131 @@ def test_camera_lens_alias_parses_like_intrinsics():
     b = parser.parse_args(["camera", "intrinsics", "cam1", "--no-gui"])
     assert a.func is b.func
     assert a.camera == b.camera == ["cam1"] and a.no_gui and b.no_gui
+
+
+# ---------------------------------------------------------------------------
+# ``playfield calibrate [CAMERA]`` and the deprecated ``camera calibrate``
+# (sprint 049, ticket 001)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _LinkedState:
+    name: str
+    playfield: Optional[str] = "field"
+    present: bool = True
+
+
+class _PfDaemon(_FakeDaemon):
+    cameras: tuple = ()
+
+    def list_cameras(self):
+        return self.cameras
+
+
+def _pf_args(**overrides) -> argparse.Namespace:
+    return _args(**{"camera": None, **overrides})
+
+
+def test_playfield_calibrate_help_has_optional_positional_and_no_camera_flag(capsys):
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["playfield", "calibrate", "-h"])
+    out = capsys.readouterr().out
+    assert "[CAMERA]" in out
+    assert "--camera" not in out
+
+
+def test_playfield_calibrate_parses_positional_and_default():
+    parser = _build_parser()
+    assert parser.parse_args(["playfield", "calibrate", "angst-4"]).camera == "angst-4"
+    assert parser.parse_args(["playfield", "calibrate"]).camera is None
+
+
+def test_playfield_calibrate_explicit_camera_is_sent_verbatim(capsys):
+    daemon = _PfDaemon(result=_result())
+    discovery = _FakeDiscovery(daemon=daemon)
+    code = calibrate_cli.cmd_playfield_calibrate(
+        _pf_args(camera="brio", daemon="pi.local"), discovery_factory=lambda: discovery
+    )
+    assert code == 0
+    assert discovery.connected_with == "pi.local"
+    assert daemon.requested_camera == "brio"
+    assert "calibration succeeded for 'brio'" in capsys.readouterr().out
+
+
+def test_playfield_calibrate_omitted_camera_uses_the_one_linked_camera():
+    daemon = _PfDaemon(result=_result())
+    daemon.cameras = (_LinkedState("cam-a"), _LinkedState("cam-b", playfield=None))
+    code = calibrate_cli.cmd_playfield_calibrate(
+        _pf_args(), discovery_factory=lambda: _FakeDiscovery(daemon=daemon)
+    )
+    assert code == 0
+    assert daemon.requested_camera == "cam-a"
+
+
+def test_playfield_calibrate_omitted_camera_zero_linked_says_pass_camera(capsys):
+    daemon = _PfDaemon()
+    daemon.cameras = (_LinkedState("cam-b", playfield=None),)
+    code = calibrate_cli.cmd_playfield_calibrate(
+        _pf_args(), discovery_factory=lambda: _FakeDiscovery(daemon=daemon)
+    )
+    assert code == 1
+    assert daemon.requested_camera is None
+    err = capsys.readouterr().err
+    assert "pass CAMERA" in err and "--camera" not in err
+
+
+def test_playfield_calibrate_omitted_camera_several_linked_lists_candidates(capsys):
+    daemon = _PfDaemon()
+    daemon.cameras = (_LinkedState("cam-a"), _LinkedState("cam-b"))
+    code = calibrate_cli.cmd_playfield_calibrate(
+        _pf_args(), discovery_factory=lambda: _FakeDiscovery(daemon=daemon)
+    )
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "cam-a" in err and "cam-b" in err
+    assert "pass CAMERA to disambiguate" in err
+
+
+def test_playfield_calibrate_refuses_all_before_connecting(capsys):
+    class _Exploding:
+        def connect(self, host=None):
+            raise AssertionError("must not connect")
+
+    code = calibrate_cli.cmd_playfield_calibrate(
+        _pf_args(all=True, camera="x"), discovery_factory=lambda: _Exploding()
+    )
+    assert code == 1
+    assert "'playfield calibrate' is single-target" in capsys.readouterr().err
+
+
+def test_resolver_default_hint_still_says_camera_flag():
+    from aprilcam.cli._common import resolve_playfield_camera
+
+    daemon = _PfDaemon()
+    daemon.cameras = ()
+    _, problem = resolve_playfield_camera(daemon)
+    assert problem is not None and "pass --camera" in problem
+    daemon.cameras = (_LinkedState("a"), _LinkedState("b"))
+    _, problem = resolve_playfield_camera(daemon)
+    assert "pass --camera to disambiguate" in problem
+
+
+def test_camera_calibrate_is_deprecated_but_behaves_the_same(capsys):
+    daemon = _FakeDaemon(result=_result())
+    code = calibrate_cli.cmd_calibrate(
+        _args(), discovery_factory=lambda: _FakeDiscovery(daemon=daemon)
+    )
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "calibration succeeded for 'arducam-ov9782-usb-camera'" in captured.out
+    assert "deprecated" in captured.err
+    assert "aprilcam playfield calibrate" in captured.err
+
+
+def test_camera_calibrate_help_says_deprecated(capsys):
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["camera", "calibrate", "-h"])
+    assert "DEPRECATED" in capsys.readouterr().out

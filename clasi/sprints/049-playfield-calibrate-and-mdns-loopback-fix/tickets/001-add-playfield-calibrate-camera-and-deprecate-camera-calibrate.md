@@ -1,8 +1,10 @@
 ---
 id: '001'
 title: Add playfield calibrate [CAMERA] and deprecate camera calibrate
-status: open
-use-cases: ["SUC-001", "SUC-002"]
+status: done
+use-cases:
+- SUC-001
+- SUC-002
 depends-on: []
 github-issue: ''
 issue: move-calibrate-to-playfield-calibrate.md
@@ -57,22 +59,22 @@ Implementation approach:
 
 ## Acceptance Criteria
 
-- [ ] `aprilcam playfield calibrate --help` shows positional `CAMERA`
+- [x] `aprilcam playfield calibrate --help` shows positional `CAMERA`
       (optional) and no `--camera` option.
-- [ ] `playfield calibrate angst-4` connects to angst's daemon and sends
+- [x] `playfield calibrate angst-4` connects to angst's daemon and sends
       camera `4` (FakeDiscovery routing test).
-- [ ] Slug and persistent number work; `-d` handled as for other commands.
-- [ ] Omitted CAMERA: exactly one linked present camera is used; zero and
+- [x] Slug and persistent number work; `-d` handled as for other commands.
+- [x] Omitted CAMERA: exactly one linked present camera is used; zero and
       several each exit 1 with a message that says "pass CAMERA" (and lists
       candidates for several).
-- [ ] `playfield image`/`view` resolver error text still says `--camera`.
-- [ ] `--all` is refused before connecting.
-- [ ] `camera calibrate X` writes a deprecation line naming `aprilcam
+- [x] `playfield image`/`view` resolver error text still says `--camera`.
+- [x] `--all` is refused before connecting.
+- [x] `camera calibrate X` writes a deprecation line naming `aprilcam
       playfield calibrate` to stderr, then produces the same stdout/exit code
       as before; its `--help` says deprecated.
-- [ ] The uncommitted `_connect` change and its tests are committed with
+- [x] The uncommitted `_connect` change and its tests are committed with
       this ticket; unrelated working-tree files are not.
-- [ ] MCP `calibrate` description reads as a playfield pose operation.
+- [x] MCP `calibrate` description reads as a playfield pose operation.
 
 ## Testing
 

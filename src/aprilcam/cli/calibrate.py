@@ -1,4 +1,5 @@
-"""``aprilcam camera calibrate <camera>`` (ticket 022-003, UC-04, UC-15).
+"""``aprilcam playfield calibrate [CAMERA]`` (sprint 049; ticket 022-003,
+UC-04, UC-15) and its deprecated alias ``aprilcam camera calibrate <camera>``.
 
 A **pure RPC orchestrator**: every vision/geometry decision (multi-frame
 averaged detection, id matching, all-or-nothing acceptance, homography
@@ -39,11 +40,20 @@ import argparse
 import sys
 from typing import Callable
 
-from aprilcam.cli._common import EXIT_ERROR, EXIT_OK, add_all_option, connect_for_camera, report_error, verbosity
+from aprilcam.cli._common import (
+    EXIT_ERROR,
+    EXIT_OK,
+    add_all_option,
+    connect_for_camera,
+    connect_optional_camera,
+    report_error,
+    resolve_playfield_camera,
+    verbosity,
+)
 from aprilcam.client.discovery import Discovery
 from aprilcam.errors import AprilCamError
 
-__all__ = ["add_subparser", "cmd_calibrate"]
+__all__ = ["add_subparser", "add_playfield_subparser", "cmd_calibrate", "cmd_playfield_calibrate"]
 
 
 def cmd_calibrate(
@@ -68,6 +78,47 @@ def cmd_calibrate(
 
     try:
         daemon, args.camera = connect_for_camera(discovery_factory(), args.daemon, args.camera)
+    except AprilCamError as exc:
+        return report_error(exc)
+    print(
+        "deprecated: 'camera calibrate' -- use 'aprilcam playfield "
+        "calibrate' (removed in the next release)",
+        file=sys.stderr,
+    )
+    return _calibrate_and_report(args, daemon)
+
+
+def cmd_playfield_calibrate(
+    args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
+) -> int:
+    """``aprilcam playfield calibrate [CAMERA]``: pose the camera against the
+    playfield's surveyed tags. CAMERA (slug, number or ``HOST-N``) is
+    optional; omitted, the one linked present camera is used. ``--all`` is
+    refused before connecting."""
+    if args.all:
+        print(
+            "error: 'playfield calibrate' is single-target -- calibration "
+            "targets exactly one daemon (UC-15.S-4 fan-out rule). Drop "
+            "--all and name one camera.",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    try:
+        daemon, camera_request = connect_optional_camera(discovery_factory, args.daemon, args.camera)
+        camera, problem = resolve_playfield_camera(daemon, camera=camera_request, hint="CAMERA")
+    except AprilCamError as exc:
+        return report_error(exc)
+    if problem is not None:
+        print(f"error: {problem}", file=sys.stderr)
+        return EXIT_ERROR
+    assert camera is not None
+    args.camera = camera
+    return _calibrate_and_report(args, daemon)
+
+
+def _calibrate_and_report(args: argparse.Namespace, daemon) -> int:
+    """Run the ``Calibrate`` RPC for ``args.camera`` and render the result."""
+    try:
         result = daemon.calibrate(args.camera)
     except AprilCamError as exc:
         return report_error(exc)
@@ -196,8 +247,34 @@ def add_subparser(sub: "argparse._SubParsersAction") -> None:
     while living in its own file.
     """
     p_calibrate = sub.add_parser(
-        "calibrate", help="calibrate a camera against its linked playfield (UC-04, UC-15)"
+        "calibrate",
+        help="DEPRECATED: use 'aprilcam playfield calibrate'",
+        description="DEPRECATED: use 'aprilcam playfield calibrate'. Calibrate a "
+        "camera against its linked playfield; removed in the next release.",
     )
     p_calibrate.add_argument("camera", help="camera name (slug or persistent number)")
     add_all_option(p_calibrate, note=" (refused -- calibration is single-target)")
     p_calibrate.set_defaults(func=cmd_calibrate)
+
+
+def add_playfield_subparser(sub: "argparse._SubParsersAction") -> None:
+    """Wire ``calibrate`` into *sub* -- ``cli/playfield.py``'s ``playfield``
+    subparsers action."""
+    p = sub.add_parser(
+        "calibrate",
+        help="calibrate a camera's pose against the playfield's surveyed tags",
+        description="Solve the camera's pose against the playfield's surveyed "
+        "tags and store it per camera. CAMERA (slug, persistent number, or "
+        "HOST-N such as angst-4) may be omitted when exactly one camera is "
+        "linked to a playfield.",
+    )
+    p.add_argument(
+        "camera",
+        nargs="?",
+        default=None,
+        metavar="CAMERA",
+        help="camera slug, persistent number, or HOST-N (default: the one "
+        "camera linked to a playfield)",
+    )
+    add_all_option(p, note=" (refused -- calibration is single-target)")
+    p.set_defaults(func=cmd_playfield_calibrate)

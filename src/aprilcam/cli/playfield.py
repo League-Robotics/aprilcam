@@ -125,14 +125,17 @@ from aprilcam.cli._common import (
     EXIT_OK,
     EXIT_PLACEHOLDER,
     add_all_option,
+    connect_optional_camera,
     fan_out,
     verbosity,
     incomplete_command,
     report_error,
     resolve_playfield_camera,
 )
+from aprilcam.cli import calibrate as calibrate_cli
 from aprilcam.client.discovery import Discovery
 from aprilcam.config.interfaces import ConfigLoader, Feature
+from aprilcam.daemon.interfaces import Daemon
 from aprilcam.config.loader import ConfigLoader as JsonConfigLoader
 from aprilcam.errors import AprilCamError, NotCalibrated
 from aprilcam.playfield.interfaces import Playfield
@@ -219,6 +222,9 @@ def _unwritable_reason(path: Path) -> Optional[str]:
     return None
 
 
+_connect = connect_optional_camera
+
+
 def cmd_image(
     args: argparse.Namespace, *, discovery_factory: Callable[[], Discovery] = Discovery
 ) -> int:
@@ -253,11 +259,11 @@ def cmd_image(
         return EXIT_ERROR
 
     try:
-        daemon = discovery_factory().connect(args.daemon)
+        daemon, camera_request = _connect(discovery_factory, args.daemon, args.camera)
     except AprilCamError as exc:
         return report_error(exc)
 
-    camera, problem = resolve_playfield_camera(daemon, camera=args.camera)
+    camera, problem = resolve_playfield_camera(daemon, camera=camera_request)
     if problem is not None:
         print(f"error: {problem}", file=sys.stderr)
         return EXIT_ERROR
@@ -350,7 +356,7 @@ def cmd_view(
     camera_request = args.camera if args.camera is not None else args.camera_flag
 
     try:
-        daemon = discovery_factory().connect(args.daemon)
+        daemon, camera_request = _connect(discovery_factory, args.daemon, camera_request)
     except AprilCamError as exc:
         return report_error(exc)
 
@@ -380,8 +386,8 @@ def cmd_view(
         return EXIT_ERROR
     except NotCalibrated as exc:
         print(
-            f"error: {exc} -- calibrate first with 'aprilcam camera "
-            f"calibrate {camera}' (UC-18.S-2).",
+            f"error: {exc} -- calibrate first with 'aprilcam "
+            f"playfield calibrate {camera}' (UC-18.S-2).",
             file=sys.stderr,
         )
         return EXIT_ERROR
@@ -727,6 +733,8 @@ def add_subparser(subparsers: "argparse._SubParsersAction") -> None:
         "sidebar)",
     )
     p_view.set_defaults(func=cmd_view)
+
+    calibrate_cli.add_playfield_subparser(sub)
 
     p_annotations = sub.add_parser(
         "annotations",

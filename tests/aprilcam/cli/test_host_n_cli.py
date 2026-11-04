@@ -18,6 +18,7 @@ from aprilcam.cli import camera as camera_cli
 from aprilcam.cli import flatfield as flatfield_cli
 from aprilcam.cli import intrinsics as intrinsics_cli
 from aprilcam.cli import locate as locate_cli
+from aprilcam.cli import playfield as playfield_cli
 from aprilcam.cli._common import label_host
 from aprilcam.client.interfaces import DaemonInfo, Discovery
 from aprilcam.daemon.interfaces import Daemon
@@ -128,6 +129,7 @@ def _call(fn, args, disc, **kw):
 # (function, rpc name recorded on the daemon)
 CASES = [
     pytest.param(camera_cli.cmd_image, "get_frame", {}, id="image"),
+    pytest.param(playfield_cli.cmd_image, "get_frame", {}, id="playfield-image"),
     pytest.param(camera_cli.cmd_tags, "get_tags", {}, id="tags"),
     pytest.param(camera_cli.cmd_tags, "stream_tags", {"follow": True}, id="tags-follow"),
     pytest.param(camera_cli.cmd_close, "close_camera", {}, id="close"),
@@ -182,6 +184,17 @@ def test_view_resolves_host_n(capsys):
     code = camera_cli.cmd_view(
         _args(), discovery_factory=lambda: disc,
         run_view=lambda cam, daemon: seen.append((cam, daemon)),
+    )
+    assert code == 0
+    assert seen == [("4", disc.donald)]
+
+
+def test_playfield_view_resolves_host_n(capsys):
+    disc = FakeDiscovery()
+    seen = []
+    code = playfield_cli.cmd_view(
+        _args(camera_flag=None, bare=False), discovery_factory=lambda: disc,
+        run_view=lambda cam, daemon, bare: seen.append((cam, daemon)),
     )
     assert code == 0
     assert seen == [("4", disc.donald)]
@@ -246,3 +259,11 @@ def test_intrinsics_cross_daemon_message_is_accurate(capsys):
     err = capsys.readouterr().err
     assert "explicit target" not in err
     assert "one daemon" in err
+
+
+def test_playfield_calibrate_host_n_routes_to_that_daemon():
+    disc = FakeDiscovery()
+    code = _call(calibrate_cli.cmd_playfield_calibrate, _args(), disc)
+    assert code == 1  # FakeDaemon.calibrate raises _Stop
+    assert disc.donald.rpcs == [("calibrate", "4")]
+    assert disc.local.rpcs == []

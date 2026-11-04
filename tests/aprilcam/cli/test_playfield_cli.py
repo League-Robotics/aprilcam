@@ -755,7 +755,7 @@ def test_view_uncalibrated_camera_points_at_camera_calibrate(capsys):
     assert code == 1
     err = capsys.readouterr().err
     assert "not calibrated" in err
-    assert "camera calibrate" in err
+    assert "playfield calibrate" in err
     assert "arducam" in err
 
 
