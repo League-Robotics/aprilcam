@@ -1,7 +1,7 @@
 ---
 id: 049
 title: playfield calibrate and mDNS loopback fix
-status: executing
+status: done
 branch: sprint/049-playfield-calibrate-and-mdns-loopback-fix
 use-cases:
 - SUC-001

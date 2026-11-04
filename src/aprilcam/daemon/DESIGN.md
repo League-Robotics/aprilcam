@@ -213,3 +213,16 @@ existing subscribers keep their subscription and are served the NO SIGNAL
 card (their own demand does not reopen it) until any new request reopens the
 camera. `CameraState.closed` (proto field 15) lets `camera list` show
 `closed` distinct from `absent`.
+
+### mDNS never advertises loopback (sprint 049)
+
+`MdnsAdvertiser` never publishes a loopback address. `_primary_routable_ipv4`
+returns `None` when no routable IPv4 exists (it no longer falls back to
+`127.0.0.1`). `start()` registers immediately when an address exists;
+otherwise it logs once and starts a retry thread that polls an injectable
+address lookup (default every 5 s, injectable wait function so tests need no
+real clock), registers when an address appears, and unregister/re-registers
+when the address later changes. `stop()` stops the thread (bounded join), then
+unregisters. The advertised address(es) are logged at INFO. TXT keys remain
+exactly `version` and `host`. The public surface (`start`, `stop`) and the
+`DaemonLifecycle` hook wiring are unchanged; registration remains non-fatal.

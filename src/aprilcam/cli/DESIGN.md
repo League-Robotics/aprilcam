@@ -42,7 +42,7 @@ presentation.
 | `__init__.py` | 160 | `main()` — the single dispatch seam. Builds the top-level parser, wires every subcommand module's `add_subparser`, resets `SIGPIPE` to default disposition, and is the one place `BrokenPipeError` is caught. |
 | `_common.py` | 257 | Shared plumbing: `EXIT_OK`/`EXIT_ERROR`, `add_daemon_option`/`add_all_option` (the `-d`/`--all` flags), `incomplete_command` (a subparser-tree default), `report_error`, `format_camera_row`/`print_cameras`/`print_probe_report`, `fan_out`, `resolve_playfield_camera`. |
 | `camera.py` | 521 | `camera list\|probe\|image\|tags\|config\|view` — camera-addressed commands. Also wires in `calibrate.py` and `locate.py` as sub-subcommands of its own `camera` subparser tree. |
-| `calibrate.py` | ~210 | `playfield calibrate [--verbose]` — a pure RPC orchestrator around the `Calibrate` RPC; grouped under `camera` but kept in its own file. Prints the matched ids, `lens model:` line, then (sprint 045) `method`, `confidence`, corners used, reprojection error in px and cm, scale agreement, angular spread, camera height/nadir/tilt and the worst leave-one-out marker; caveats (`reduced`/`low`, centre-point fallback reason, helpful markers not seen) go to stderr, `--verbose` adds the per-marker leave-one-out table, and a failed pose attempt prints its measurements before the reason. `--with-intrinsics` was removed in sprint 045. `camera list` shows `calibrated (pose, full)`; `camera lens` aliases `camera intrinsics`; `locate.py` prints the pose-vs-locate comparison note. |
+| `calibrate.py` | ~210 | `playfield calibrate [CAMERA] [--verbose]` (and the deprecated alias `camera calibrate`, sprint 049) — a pure RPC orchestrator around the `Calibrate` RPC; grouped under `camera` but kept in its own file. Prints the matched ids, `lens model:` line, then (sprint 045) `method`, `confidence`, corners used, reprojection error in px and cm, scale agreement, angular spread, camera height/nadir/tilt and the worst leave-one-out marker; caveats (`reduced`/`low`, centre-point fallback reason, helpful markers not seen) go to stderr, `--verbose` adds the per-marker leave-one-out table, and a failed pose attempt prints its measurements before the reason. `--with-intrinsics` was removed in sprint 045. `camera list` shows `calibrated (pose, full)`; `camera lens` aliases `camera intrinsics`; `locate.py` prints the pose-vs-locate comparison note. |
 | `flatfield.py` | ~130 (sprint 037) | `camera flatfield` — a pure RPC orchestrator around `CaptureFlatField`/`GetFlatField`/`ClearFlatField`; grouped under `camera`, same one-file shape as `calibrate.py`. |
 | `locate.py` | 431 | `camera locate` — solves camera ground nadir/height from surveyed AprilTag references. The one file in this package with a client-side geometry dependency (§3). |
 | `daemon.py` | 313 | `daemon start\|stop\|restart\|status\|list` — process lifecycle (local-only) plus remote status/discovery. |
@@ -461,3 +461,19 @@ text to stdout/stderr — there is no machine-readable output mode
 device via `CloseCamera`; refused while in use unless `--force` (exit 1 with
 the `CameraInUse` message). `camera list` shows a deliberately closed camera
 as `closed` (distinct from `absent`). MCP mirrors it as `close_camera`.
+
+### `playfield calibrate [CAMERA]` (sprint 049)
+
+Calibration solves the camera's pose against the playfield's surveyed tags,
+so it is a `playfield` operation. `aprilcam playfield calibrate [CAMERA]`
+takes an optional positional CAMERA (slug, persistent number, or `HOST-N`,
+routed via `playfield._connect` -> `connect_for_camera`). Omitted, the camera
+comes from `resolve_playfield_camera(..., hint="CAMERA")`: one linked present
+camera wins; zero or several is an error telling the user to pass CAMERA
+(`playfield image`/`view` keep the default `--camera` wording). Results are
+still stored per camera (`cameras/<slug>/calibration.json`); the `Calibrate`
+RPC is unchanged. `cli/calibrate.py` still owns result rendering and
+`--verbose`; both commands share its body. `camera calibrate` is a
+deprecated alias for one release: it prints a deprecation line to stderr
+pointing at `playfield calibrate`, then behaves exactly as before; its help
+says deprecated. It is removed in the next release.
