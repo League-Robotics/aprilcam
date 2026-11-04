@@ -329,3 +329,28 @@ def test_stop_while_still_deferred_ends_the_retry_thread():
 
     assert not thread.is_alive()
     assert fake.registered == [] and not fake.closed
+
+
+def test_address_change_closes_the_old_zeroconf_and_uses_a_fresh_one():
+    fakes: List[_FakeZeroconf] = []
+
+    def factory() -> _FakeZeroconf:
+        fakes.append(_FakeZeroconf())
+        return fakes[-1]
+
+    state = {"addr": "10.0.0.5"}
+    advertiser = MdnsAdvertiser(
+        zeroconf_factory=factory,
+        address_lookup=lambda: state["addr"],
+        wait=_ScriptedWait([lambda: state.update(addr="10.0.0.9")]),
+    )
+    advertiser.start(5280)
+    _run_thread_to_end(advertiser)
+
+    assert len(fakes) == 2
+    old, new = fakes
+    assert old.closed and [_addr_of(i) for i in old.unregistered] == ["10.0.0.5"]
+    assert [_addr_of(i) for i in new.registered] == ["10.0.0.9"]
+    assert not new.closed
+    advertiser.stop()
+    assert new.closed

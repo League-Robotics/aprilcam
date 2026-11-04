@@ -224,6 +224,7 @@ class MdnsAdvertiser:
                         "mdns: address changed %s -> %s; re-registering", self._address, addr
                     )
                     self._unregister()
+                    self._close_zeroconf()
                 self._register(addr)
 
     def _register(self, addr: str) -> None:
@@ -275,6 +276,17 @@ class MdnsAdvertiser:
                 logger.warning("mdns: error while unregistering advertisement: %s", exc)
         self._info = None
         self._address = None
+
+    def _close_zeroconf(self) -> None:
+        """Close and drop the Zeroconf instance so the next registration
+        builds a fresh one that re-enumerates interfaces (its sockets are
+        bound at construction). Caller holds the lock."""
+        if self._zeroconf is not None:
+            try:
+                self._zeroconf.close()
+            except (OSError, ZeroconfError) as exc:
+                logger.warning("mdns: error while closing zeroconf: %s", exc)
+        self._zeroconf = None
 
     def stop(self) -> None:
         """Stop the retry thread, unregister and close. Safe to call
