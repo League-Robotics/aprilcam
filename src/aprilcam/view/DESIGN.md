@@ -152,7 +152,7 @@ rather than re-filtering).
   limitation.** `run_raw_view`'s `_convert_raw_frame` never reads
   `frame.tags` at all, even though a raw frame may legitimately carry
   one (an active ring buffer from an unrelated recent `camera tags`/
-  `camera calibrate` call, or detection simply running for another
+  `playfield calibrate` call, or detection simply running for another
   reason). No deskew, no homography, and no drawn overlay is ever
   applied on this path — enforced by omission (the function structurally
   cannot draw what it never reads), not by a runtime switch. This

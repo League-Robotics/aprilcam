@@ -61,7 +61,7 @@ happened, in order:
    cameras with.
 3. **Configure a camera** (`aprilcam camera config <file>`) — link a
    camera to that playfield definition.
-4. **Calibrate** (`aprilcam camera calibrate <camera>`) — maps that
+4. **Calibrate** (`aprilcam playfield calibrate [CAMERA]`) — maps that
    camera's pixels to the playfield's world coordinates. Dimensions
    come from the linked playfield definition; nothing is measured by
    hand.
@@ -247,7 +247,7 @@ world-frame and staleness rules as everywhere else in this guide —
 | | `aprilcam camera probe` | force a deep hardware re-probe |
 | | `aprilcam camera image <camera>` | capture one raw frame |
 | | `aprilcam camera tags <camera> [--follow] [--json]` | current tag detections, or a continuous stream (§4) |
-| | `aprilcam camera calibrate <camera>` | calibrate against the linked playfield (§3) |
+| | `aprilcam playfield calibrate [CAMERA]` | calibrate against the linked playfield (§3); CAMERA is optional (omit it to use the single connected camera) and may be a slug, number, or HOST-N |
 | | `aprilcam camera flatfield <camera>` | build (or `--clear`) a flat-field gain-map lighting correction (§9) |
 | | `aprilcam camera locate <camera> --reference TAG:SLUG:HEIGHT_CM ...` | solve real ground position + height from staged elevated references — **CLI-only, no MCP tool** (§6) |
 | | `aprilcam camera config <file>` | push a camera config document |

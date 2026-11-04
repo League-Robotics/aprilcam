@@ -22,7 +22,7 @@ aprilcam daemon list                      # discover daemons via mDNS
 aprilcam daemon start|stop|restart|status # lifecycle, local by default
 aprilcam camera list                      # cameras on a daemon
 aprilcam camera probe                     # interrogate hardware, derive names
-aprilcam camera calibrate <camera>        # requires a playfield
+aprilcam playfield calibrate <camera>        # requires a playfield
 aprilcam camera intrinsics <camera...>    # ChArUco lens calibration (UC-30)
 aprilcam camera view <camera>             # live raw video
 aprilcam camera image <camera>            # one raw frame
@@ -62,7 +62,7 @@ one. Fan-out is restricted to **read-only commands**:
 | Fan-out allowed | Single daemon only |
 |---|---|
 | `daemon list`, `daemon status` | `daemon start`, `stop`, `restart` |
-| `camera list`, `camera probe` | `camera calibrate` |
+| `camera list`, `camera probe` | `playfield calibrate` |
 | `camera tags`[^tags-spelling] | `camera view`, `playfield view` |
 | `camera image`, `playfield image` | `camera config`, `playfield config` (push) |
 | `playfield annotations` (list) | `playfield annotations --clear` (any annotation write) |
@@ -111,7 +111,7 @@ target daemon wins over a `HOST-N` reading; `-d` naming a different
 daemon than `HOST` is an error, while `APRILCAM_DAEMON_HOST` is only a
 default and is overridden.
 
-Every camera-addressed command (`camera image`, `camera calibrate`, and
+Every camera-addressed command (`camera image`, `playfield calibrate`, and
 every future one, including this sprint's `camera tags`) accepts either
 form a camera can be named: **a decimal number resolves the camera
 currently holding that persistent registry number** — the same number
@@ -285,7 +285,7 @@ calibrate** — so the command **errors out** rather than attempting
 anything. This is a precondition failure, not a calibration failure.
 
 **Main success path.**
-1. `aprilcam camera calibrate arducam-ov9782-usb-camera` (`-d` for
+1. `aprilcam playfield calibrate arducam-ov9782-usb-camera` (`-d` for
    remote).
 2. The CLI triggers calibration **in the daemon** — it does no vision
    work itself — and reports progress.
@@ -331,7 +331,7 @@ ids were matched. `aprilcam camera list` afterwards shows the camera
 calibrated.
 
 **UC-15.S-2 — No playfield linked** · _failure path_
-`hd-usb-camera` has no playfield link. `aprilcam camera calibrate
+`hd-usb-camera` has no playfield link. `aprilcam playfield calibrate
 hd-usb-camera` exits non-zero saying the camera has no playfield and
 therefore nothing to calibrate. No frames are captured and no
 calibration attempt is made.
@@ -342,11 +342,11 @@ fails, naming ArUco 6 as missing, and leaves the prior calibration
 intact.
 
 **UC-15.S-4 — Fan-out refused** · _failure path_
-`aprilcam camera calibrate --all` is refused, explaining that calibration
+`aprilcam playfield calibrate --all` is refused, explaining that calibration
 targets exactly one daemon.
 
 **UC-15.S-5 — Pose calibration report** · _happy path_
-`aprilcam camera calibrate 3` on a camera with a measured lens model and a
+`aprilcam playfield calibrate 3` on a camera with a measured lens model and a
 sized definition prints `method: pose`, `confidence: full`, the corner
 count, the reprojection error, both scales, the camera height, position and
 tilt and the worst leave-one-out marker. With `--verbose` the per-marker
@@ -510,7 +510,7 @@ actually working" view. This is what `aprilcam view` does in v1.
 
 **Failure modes.**
 - Camera not calibrated → explicit error saying calibration is required
-  and pointing at `camera calibrate`. **Never** silently fall back to the
+  and pointing at `playfield calibrate`. **Never** silently fall back to the
   raw view: a raw frame that looks plausible but is not deskewed is
   exactly how someone ends up trusting wrong coordinates.
 - No playfield → error.
@@ -1442,7 +1442,7 @@ writes, with or without `--force`.
 3. The developer moves the board. A camera turns green when the lens is good enough; the window does not close by itself.
 4. The developer presses Enter (or passes `--install` up front): good cameras are finished and installed; Esc aborts.
 
-**Postconditions.** Each installed camera has `intrinsics.json`; `camera list` shows `lens=<source>` and `lens-pending` until the next `camera calibrate` applies it. Exit status 0 only if every camera was installed.
+**Postconditions.** Each installed camera has `intrinsics.json`; `camera list` shows `lens=<source>` and `lens-pending` until the next `playfield calibrate` applies it. Exit status 0 only if every camera was installed.
 
 **Failure modes.**
 - Unknown camera, unparseable board spec, or a session already running on the camera → error naming it; nothing started.

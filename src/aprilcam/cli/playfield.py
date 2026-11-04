@@ -54,7 +54,7 @@ straight through as ``run_view(camera, daemon, bare=args.bare)``. Two
 exceptions get a UC-18-specific message rather than the generic
 ``report_error`` text: ``view.viewer.NoDisplayAvailable`` (pointing at
 ``playfield image``, mirroring UC-16.S-3) and ``errors.NotCalibrated``
-(pointing at ``camera calibrate``, UC-18.S-2 -- **never** caught to
+(pointing at ``playfield calibrate``, UC-18.S-2 -- **never** caught to
 substitute a raw frame; ``run_playfield_view`` itself never falls back,
 this only adds the pointer to the message). ``--all`` is refused up
 front, before any connection is attempted, matching ``camera view``'s
@@ -335,7 +335,7 @@ def cmd_view(
     raised from the stream subscription itself
     (``daemon.stream_images(camera, deskewed=True)``), never caught by
     ``run_playfield_view`` to substitute a raw frame -- is caught here
-    only to add the ``camera calibrate`` pointer (UC-18.S-2).
+    only to add the ``playfield calibrate`` pointer (UC-18.S-2).
     """
     if args.all:
         print(

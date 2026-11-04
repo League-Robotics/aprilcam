@@ -94,7 +94,7 @@ def test_enter_installs_good_only_never_forces():
     c.request("enter")
     c.step()
     assert d.finished == [("a", True, False)]
-    assert "run aprilcam camera calibrate a to apply" in "\n".join(c.snapshot().notice_lines)
+    assert "run aprilcam playfield calibrate a to apply" in "\n".join(c.snapshot().notice_lines)
     assert not c.finished  # no auto-quit
     assert c.owned == {"b"}
 

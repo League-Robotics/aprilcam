@@ -307,7 +307,7 @@ def resolve_hardware_camera_identity(
             f"<slug>/calibration.json present) against {playfield!r} on this "
             f"machine's real system state -- attached cameras right now: "
             f"{sorted(by_slug)}. Link and calibrate one with 'aprilcam camera "
-            f"config <file>' and 'aprilcam camera calibrate <camera>' before "
+            f"config <file>' and 'aprilcam playfield calibrate <camera>' before "
             f"running these tests."
         )
 
@@ -419,7 +419,7 @@ def resolve_all_hardware_camera_identities(
             f"<slug>/calibration.json present) against {playfield!r} on this "
             f"machine's real system state -- attached cameras right now: "
             f"{sorted(by_slug)}. Link and calibrate at least one with "
-            f"'aprilcam camera config <file>' and 'aprilcam camera calibrate "
+            f"'aprilcam camera config <file>' and 'aprilcam playfield calibrate "
             f"<camera>' before running these tests.",
             allow_module_level=True,
         )

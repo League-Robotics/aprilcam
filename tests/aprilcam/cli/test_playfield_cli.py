@@ -739,7 +739,7 @@ def test_view_first_frame_timeout_names_the_camera_instead_of_a_backtrace(capsys
 
 def test_view_uncalibrated_camera_points_at_camera_calibrate(capsys):
     """UC-18.S-2: names calibration as the missing step and points at
-    ``camera calibrate`` -- ``run_playfield_view`` itself never falls
+    ``playfield calibrate`` -- ``run_playfield_view`` itself never falls
     back to a raw frame (its own tests in ``test_viewer.py`` prove
     that); this only asserts the CLI boundary adds the pointer."""
     daemon = _FakeDaemon(cameras=(_camera("arducam", playfield="main-playfield"),))

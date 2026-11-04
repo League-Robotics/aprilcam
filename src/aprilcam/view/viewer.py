@@ -101,7 +101,7 @@ the call this propagates from moved, from ``get_frame`` to
 **"Raw means raw" is enforced by omission, not by a switch.**
 :func:`_convert_raw_frame` never reads ``ImageFrame.tags`` at all, even
 though a raw frame may carry one (an active ring buffer from a recent
-``camera tags``/``camera calibrate`` call on the same camera, or
+``camera tags``/``playfield calibrate`` call on the same camera, or
 detection simply running for an unrelated reason) -- UC-16's "raw means
 raw" contract, taken literally as a *display-time* rule: nothing on
 this path ever turns embedded tag data into a drawn boundary or hat.
@@ -976,7 +976,7 @@ def _make_playfield_converter(renderer: RendererBase) -> Callable[[ImageFrame], 
             status_parts.append(_PLACEHOLDER_STATUS)
         if frame.calibration_stale:
             status_parts.append(
-                "calibration stale -- re-run 'aprilcam camera calibrate' (UC-18)"
+                "calibration stale -- re-run 'aprilcam playfield calibrate' (UC-18)"
             )
         if frame.frame_dark:
             status_parts.append("frame dark -- image may be hard to see")
@@ -1008,7 +1008,7 @@ def _convert_bare_playfield_frame(frame: ImageFrame) -> DisplayFrame:
         status_parts.append(_PLACEHOLDER_STATUS)
     if frame.calibration_stale:
         status_parts.append(
-            "calibration stale -- re-run 'aprilcam camera calibrate' (UC-18)"
+            "calibration stale -- re-run 'aprilcam playfield calibrate' (UC-18)"
         )
     if frame.frame_dark:
         status_parts.append("frame dark -- image may be hard to see")

@@ -1,9 +1,11 @@
 ---
 id: '002'
 title: Repoint all camera calibrate pointers to playfield calibrate
-status: open
-use-cases: ["SUC-002"]
-depends-on: ["001"]
+status: done
+use-cases:
+- SUC-002
+depends-on:
+- '001'
 github-issue: ''
 issue: move-calibrate-to-playfield-calibrate.md
 completes_issue: true
@@ -42,14 +44,14 @@ Do not edit generated `src/aprilcam.egg-info`.
 
 ## Acceptance Criteria
 
-- [ ] `grep -rn "camera calibrate"` over `src`, `tests`, `README.md`,
+- [x] `grep -rn "camera calibrate"` over `src`, `tests`, `README.md`,
       `deploy`, `docs/design` (excluding `src/aprilcam.egg-info`) matches
       only the deprecated alias (its code, help, deprecation message, its
       test) and deliberate "formerly `camera calibrate`" notes.
-- [ ] The NotCalibrated hint reads `... calibrate first with 'aprilcam
+- [x] The NotCalibrated hint reads `... calibrate first with 'aprilcam
       playfield calibrate <camera>'`.
-- [ ] Tests asserting old hint text updated and passing.
-- [ ] AGENT_GUIDE documents `playfield calibrate [CAMERA]`.
+- [x] Tests asserting old hint text updated and passing.
+- [x] AGENT_GUIDE documents `playfield calibrate [CAMERA]`.
 
 ## Testing
 

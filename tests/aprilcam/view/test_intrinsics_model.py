@@ -89,7 +89,7 @@ def test_text_lines_carry_view_model_fields():
 
 def test_finish_text():
     ok = finish_text_lines(IntrinsicsFinishResult(installed=True, reason=None, status=good()))
-    assert "INSTALLED" in ok[0] and "run aprilcam camera calibrate a to apply" in ok[1]
+    assert "INSTALLED" in ok[0] and "run aprilcam playfield calibrate a to apply" in ok[1]
     no = finish_text_lines(
         IntrinsicsFinishResult(installed=False, reason="not good enough", status=keep()))
     assert "NOT installed" in no[0] and "not good enough" in no[1]

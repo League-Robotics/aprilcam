@@ -44,7 +44,7 @@ what is **reused** from v1, what is **rewritten**, and what is **new**.
 >    addressing.
 > 3. ✅ **022 — Calibration, deskew, live view.** Playfield definitions,
 >    homography, world coordinates, deskew to a fixed bounding box,
->    `camera calibrate`, `playfield image`, `camera view`/`playfield
+>    `playfield calibrate`, `playfield image`, `camera view`/`playfield
 >    view`.
 > 4. ✅ **023 — Config service + calibration trust.** Boot-time config
 >    load (config now survives restart), real hardware settings via

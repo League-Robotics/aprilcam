@@ -79,7 +79,7 @@ def add_verbose_option(parser: argparse.ArgumentParser) -> None:
     """``-v``/``--verbose`` -- a repeatable verbosity count, on the root
     parser. ``-v`` reveals detail commands normally hide (unusable
     cameras in ``camera list``, daemon addresses in fan-out labels,
-    ``camera calibrate``'s per-marker table); ``-vv`` also logs at INFO
+    ``playfield calibrate``'s per-marker table); ``-vv`` also logs at INFO
     and ``-vvv`` at DEBUG (see :func:`configure_logging`).
 
     Subparsers get a ``sub_verbose`` copy of the flag via
@@ -213,7 +213,7 @@ def format_camera_row(state: CameraState) -> str:
     estimated|legacy|absent`` word appended after the flat-field word
     (before the trailing flags; the row prefix is unchanged), plus a
     ``lens-pending`` flag when the lens store holds a model the current
-    calibration does not yet embed -- run ``camera calibrate`` to apply.
+    calibration does not yet embed -- run ``playfield calibrate`` to apply.
     """
     number = f"[{state.number}]" if state.number is not None else "[-]"
     presence = "closed" if state.closed and state.present else ("present" if state.present else "absent")

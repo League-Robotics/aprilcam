@@ -312,7 +312,7 @@ def finish_text_lines(result: IntrinsicsFinishResult) -> list[str]:
     if result.installed:
         return [
             f"[{s.camera}] lens model INSTALLED{tail}",
-            f"  run aprilcam camera calibrate {s.camera} to apply",
+            f"  run aprilcam playfield calibrate {s.camera} to apply",
         ]
     lines = [f"[{s.camera}] lens model NOT installed{tail}"]
     if result.reason:

@@ -152,10 +152,10 @@ daemons found.
 ### Field calibration
 
 ```
-aprilcam [-d HOST] camera calibrate <camera> [--verbose]
+aprilcam [-d HOST] playfield calibrate [CAMERA] [--verbose]
 ```
 
-Calibrates a camera against its linked playfield, inside the daemon. When the
+Calibrates a camera against its linked playfield, inside the daemon. `CAMERA` may be a slug, number or `HOST-N`; omit it to use the single connected camera. (`camera calibrate` still works as a deprecated alias.) When the
 camera has a measured lens model (below) and the playfield definition gives
 marker sizes, it solves the camera's pose from the four corners of every
 marker, derives the pixel-to-field mapping from it, and prints the method,
@@ -181,7 +181,7 @@ and installs it without a daemon restart. The board spec
 `5x7:37:28:DICT_5X5_100`. A fullscreen window shows progress (Enter installs
 good cameras, Esc aborts); `--no-gui` gives a text mode that works over SSH.
 `aprilcam camera list` shows `lens=<source>` per camera (and `lens-pending`
-until the next `camera calibrate` applies a newly installed lens). The GUI shows each camera's live image with a labelled coverage grid, the detected board outline and green/amber cell tints. With no
+until the next `playfield calibrate` applies a newly installed lens). The GUI shows each camera's live image with a labelled coverage grid, the detected board outline and green/amber cell tints. With no
 board available, calibration uses the centre-point path without a lens model
 (the single-view estimator was removed in sprint 045). MCP tools:
 `start_intrinsics`, `get_intrinsics_status`, `finish_intrinsics`,

@@ -235,7 +235,7 @@ camera. The unknown-target error shape also gained a type
 
 **Verdict:** COVERED (notes)
 
-**Entry:** `aprilcam camera calibrate <camera> [-d HOST]`
+**Entry:** `aprilcam playfield calibrate <camera> [-d HOST]`
 
 **Trace.**
 1. `Discovery.connect(host)` → `Daemon`

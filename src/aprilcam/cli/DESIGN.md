@@ -42,7 +42,7 @@ presentation.
 | `__init__.py` | 160 | `main()` — the single dispatch seam. Builds the top-level parser, wires every subcommand module's `add_subparser`, resets `SIGPIPE` to default disposition, and is the one place `BrokenPipeError` is caught. |
 | `_common.py` | 257 | Shared plumbing: `EXIT_OK`/`EXIT_ERROR`, `add_daemon_option`/`add_all_option` (the `-d`/`--all` flags), `incomplete_command` (a subparser-tree default), `report_error`, `format_camera_row`/`print_cameras`/`print_probe_report`, `fan_out`, `resolve_playfield_camera`. |
 | `camera.py` | 521 | `camera list\|probe\|image\|tags\|config\|view` — camera-addressed commands. Also wires in `calibrate.py` and `locate.py` as sub-subcommands of its own `camera` subparser tree. |
-| `calibrate.py` | ~210 | `camera calibrate [--verbose]` — a pure RPC orchestrator around the `Calibrate` RPC; grouped under `camera` but kept in its own file. Prints the matched ids, `lens model:` line, then (sprint 045) `method`, `confidence`, corners used, reprojection error in px and cm, scale agreement, angular spread, camera height/nadir/tilt and the worst leave-one-out marker; caveats (`reduced`/`low`, centre-point fallback reason, helpful markers not seen) go to stderr, `--verbose` adds the per-marker leave-one-out table, and a failed pose attempt prints its measurements before the reason. `--with-intrinsics` was removed in sprint 045. `camera list` shows `calibrated (pose, full)`; `camera lens` aliases `camera intrinsics`; `locate.py` prints the pose-vs-locate comparison note. |
+| `calibrate.py` | ~210 | `playfield calibrate [--verbose]` — a pure RPC orchestrator around the `Calibrate` RPC; grouped under `camera` but kept in its own file. Prints the matched ids, `lens model:` line, then (sprint 045) `method`, `confidence`, corners used, reprojection error in px and cm, scale agreement, angular spread, camera height/nadir/tilt and the worst leave-one-out marker; caveats (`reduced`/`low`, centre-point fallback reason, helpful markers not seen) go to stderr, `--verbose` adds the per-marker leave-one-out table, and a failed pose attempt prints its measurements before the reason. `--with-intrinsics` was removed in sprint 045. `camera list` shows `calibrated (pose, full)`; `camera lens` aliases `camera intrinsics`; `locate.py` prints the pose-vs-locate comparison note. |
 | `flatfield.py` | ~130 (sprint 037) | `camera flatfield` — a pure RPC orchestrator around `CaptureFlatField`/`GetFlatField`/`ClearFlatField`; grouped under `camera`, same one-file shape as `calibrate.py`. |
 | `locate.py` | 431 | `camera locate` — solves camera ground nadir/height from surveyed AprilTag references. The one file in this package with a client-side geometry dependency (§3). |
 | `daemon.py` | 313 | `daemon start\|stop\|restart\|status\|list` — process lifecycle (local-only) plus remote status/discovery. |
@@ -150,7 +150,7 @@ shape `playfield.py` uses at the top level.
   with nothing to target, so it takes no `-d`/`--all` flags at all.
 - **Fan-out (`--all`) is restricted to read-only commands**
   (`docs/design/use-cases/cli.md` §"Fan-out"). Every write-shaped
-  command (`camera calibrate`, `camera flatfield` (sprint 037), `camera
+  command (`playfield calibrate`, `camera flatfield` (sprint 037), `camera
   locate`, `camera view`, `playfield view`, `camera config` push,
   `playfield annotations --clear`, `tags mount register`/`clear`)
   refuses `--all` up front, before any connection is attempted, with a
@@ -216,7 +216,7 @@ shape `playfield.py` uses at the top level.
   matching `errors.py`'s own stated rule that adapters dispatch on
   exception type, not message content.
 - **Success/failure can be data, not an exception**, where a use case
-  calls for it: `camera calibrate`'s `CalibrationResult` with
+  calls for it: `playfield calibrate`'s `CalibrationResult` with
   `succeeded=False` is a normal RPC return value (missing ids or a
   named degenerate-geometry reason), distinct from a precondition or
   transport failure that *does* raise (`NoPlayfieldLinked`, unknown
@@ -353,7 +353,7 @@ with the deferred spelling and the reasoning recorded directly in
 
 ### `camera intrinsics` (sprint 044)
 
-`aprilcam [-d HOST] camera intrinsics <camera...> [--board SPEC] [--install] [--no-gui]` (`cli/intrinsics.py`). The board spec resolves request (`--board`) > env `APRILCAM_CHARUCO_BOARD` > default `5x7:37:28:DICT_5X5_100`. With a display it opens the fullscreen Tk GUI (`view/intrinsics_gui.py`, driven by the pure `view/intrinsics_model.py`); `--no-gui` (and any session with no display, e.g. over SSH) uses a text-mode status loop. The GUI never auto-quits on green; Enter installs the good cameras, Esc aborts. Exit code 0 only when every camera ended installed. `--install` installs good cameras on finish without the prompt. `camera list` rows gain `lens=<source>` and `lens-pending`; `camera calibrate` prints the lens model it carried forward.
+`aprilcam [-d HOST] camera intrinsics <camera...> [--board SPEC] [--install] [--no-gui]` (`cli/intrinsics.py`). The board spec resolves request (`--board`) > env `APRILCAM_CHARUCO_BOARD` > default `5x7:37:28:DICT_5X5_100`. With a display it opens the fullscreen Tk GUI (`view/intrinsics_gui.py`, driven by the pure `view/intrinsics_model.py`); `--no-gui` (and any session with no display, e.g. over SSH) uses a text-mode status loop. The GUI never auto-quits on green; Enter installs the good cameras, Esc aborts. Exit code 0 only when every camera ended installed. `--install` installs good cameras on finish without the prompt. `camera list` rows gain `lens=<source>` and `lens-pending`; `playfield calibrate` prints the lens model it carried forward.
 
 ## 5. Interfaces
 

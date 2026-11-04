@@ -3215,7 +3215,7 @@ def test_calibrate_end_to_end_succeeds_and_persists_calibration_json(directories
 
 def test_calibrate_by_persistent_number_reaches_the_same_camera_as_by_slug(directories, registry):
     """Regression (team-lead verification, ticket 022-003 hotfix):
-    ``camera calibrate 3`` failed with a misleading ``NoPlayfieldLinked``
+    ``playfield calibrate 3`` failed with a misleading ``NoPlayfieldLinked``
     against a camera that *was* linked (per ``camera list``), because
     ``calibrate``/``get_calibration`` looked ``_camera_configs``/
     ``_calibrations`` up by the raw token -- both slug-keyed only, so a

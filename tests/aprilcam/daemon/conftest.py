@@ -14,7 +14,7 @@ Demonstrated, not inferred (see
 ``clasi/issues/hardware-tests-depend-on-ambient-camera-exposure-left-by-other-processes.md``
 and sprint 031's own sprint.md Problem 7): the identical test file went
 from 7 failed/3 passed (``missing_ids (1, 4)``) to 7 passed/3 skipped with
-**no code change** -- only a live ``aprilcam camera calibrate`` run in
+**no code change** -- only a live ``aprilcam playfield calibrate`` run in
 between that happened to leave the device at ``exposure: 12``. The failure
 messages that resulted blamed the physical field/camera aim, which
 actively misled: it sent people to inspect hardware that was working.

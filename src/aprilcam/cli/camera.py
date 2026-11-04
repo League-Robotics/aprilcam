@@ -587,7 +587,7 @@ def cmd_view(
     warped (UC-16 "raw means raw"). ``--all`` is refused up front,
     before any connection is attempted -- viewing is single-target,
     matching ``cli.md``'s fan-out rule (a live video window has no
-    sensible multi-daemon meaning) and the refusal ``camera calibrate
+    sensible multi-daemon meaning) and the refusal ``playfield calibrate
     --all`` gets in ticket 003. A headless host (no display) fails with
     a message pointing at ``camera image`` instead of a GUI-toolkit
     backtrace (UC-16.S-3).
